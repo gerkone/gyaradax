@@ -1,0 +1,13 @@
+*__pycache__*
+.idea/
+*wandb*
+.wandb/
+*outputs*
+.outputs/
+.vscode/
+*.out
+*.log
+tmp/
+upload_changed_py.sh
+cache/
+gkw_ref/
