@@ -22,6 +22,11 @@ jax.config.update("jax_enable_x64", True)
 LIN_DIR = "/restricteddata/ukaea/gyrokinetics/raw/iteration_13_Lin"
 
 
+@jax.jit
+def _step_jitted(prev_df, geom, params, state):
+    return gksolve_with_state(prev_df, geom, params, state)
+
+
 def _build_zero_df(geom):
     shape = (
         len(geom["intvp"]),
@@ -188,7 +193,7 @@ def test_gksolve_zero_input_invariance():
     params = GKParams(dt=0.01, naverage=40)
     state = default_state()
 
-    next_df, (phi, fluxes), next_state = gksolve_with_state(prev_df, geom, params, state)
+    next_df, (phi, fluxes), next_state = _step_jitted(prev_df, geom, params, state)
 
     pflux, eflux, vflux = fluxes
     assert jnp.allclose(next_df, 0.0)
@@ -218,8 +223,8 @@ def test_gksolve_is_deterministic_and_finite():
     params = GKParams(dt=0.01, naverage=40)
     state = default_state()
 
-    out1 = gksolve_with_state(prev_df, geom, params, state)
-    out2 = gksolve_with_state(prev_df, geom, params, state)
+    out1 = _step_jitted(prev_df, geom, params, state)
+    out2 = _step_jitted(prev_df, geom, params, state)
 
     next_df1, (phi1, fluxes1), state1 = out1
     next_df2, (phi2, fluxes2), state2 = out2
@@ -242,7 +247,7 @@ def test_gksolve_normalizes_only_at_naverage_boundaries():
     df = init_df_cosine2(geom, normalize_per_toroidal_mode=True)
 
     for _ in range(3):
-        df, _, state = gksolve_with_state(df, geom, params, state)
+        df, _, state = _step_jitted(df, geom, params, state)
 
     phi3, _ = get_integrals(df, geom)
     ds = float(np.asarray(geom["ints"])[0])
@@ -255,7 +260,7 @@ def test_gksolve_normalizes_only_at_naverage_boundaries():
     np.testing.assert_allclose(float(np.asarray(state.accumulated_norm_factor)), 1.0, rtol=0.0, atol=0.0)
     assert np.max(np.abs(amp3[non_zonal] - 1.0)) > 1.0e-8
 
-    df, _, state = gksolve_with_state(df, geom, params, state)
+    df, _, state = _step_jitted(df, geom, params, state)
     phi4, _ = get_integrals(df, geom)
     amp4 = np.sqrt(ds * np.sum(np.abs(np.asarray(phi4)) ** 2, axis=(0, 1)))
 

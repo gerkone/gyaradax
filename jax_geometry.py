@@ -3,6 +3,7 @@ import jax.numpy as jnp
 import numpy as np
 import os
 import re
+from typing import Dict, Any
 
 # Ensure fp64
 jax.config.update("jax_enable_x64", True)
@@ -133,6 +134,82 @@ def is_number(string):
     pattern = r"^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$"
     return bool(re.fullmatch(pattern, string.strip()))
 
+
+def _strip_inline_comment(line: str) -> str:
+    """Strip Fortran '!' comments while respecting quoted strings."""
+    out = []
+    quote = None
+    for ch in line:
+        if quote is None and ch in ("'", '"'):
+            quote = ch
+            out.append(ch)
+            continue
+        if quote is not None and ch == quote:
+            quote = None
+            out.append(ch)
+            continue
+        if quote is None and ch == "!":
+            break
+        out.append(ch)
+    return "".join(out).strip()
+
+
+def _split_top_level_commas(text: str):
+    """Split comma-separated assignments, ignoring commas inside quotes."""
+    chunks = []
+    buf = []
+    quote = None
+    for ch in text:
+        if quote is None and ch in ("'", '"'):
+            quote = ch
+            buf.append(ch)
+            continue
+        if quote is not None and ch == quote:
+            quote = None
+            buf.append(ch)
+            continue
+        if quote is None and ch == ",":
+            chunk = "".join(buf).strip()
+            if chunk:
+                chunks.append(chunk)
+            buf = []
+            continue
+        buf.append(ch)
+    chunk = "".join(buf).strip()
+    if chunk:
+        chunks.append(chunk)
+    return chunks
+
+
+def _parse_namelist_value(value: str):
+    """Parse Fortran-namelist-like scalar values into Python scalars."""
+    v = value.strip().rstrip(",")
+    if not v:
+        return ""
+
+    if (v.startswith("'") and v.endswith("'")) or (v.startswith('"') and v.endswith('"')):
+        return v[1:-1]
+
+    lv = v.lower()
+    if lv in (".true.", "true", "t"):
+        return True
+    if lv in (".false.", "false", "f"):
+        return False
+
+    # Handle Fortran double-exponent notation 1.0d+00.
+    num = v.replace("D", "e").replace("d", "e")
+    if re.fullmatch(r"[+-]?\d+", num):
+        try:
+            return int(num)
+        except ValueError:
+            pass
+    if re.fullmatch(r"[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?", num):
+        try:
+            return float(num)
+        except ValueError:
+            pass
+    return v
+
 def load_geom_dat_file(file_path):
     """Load geometric parameters from a .dat file."""
     data = {}
@@ -173,38 +250,86 @@ def load_geom_dat_file(file_path):
 
 def parse_input_dat(file_path):
     """Parse GKW input.dat configuration file."""
-    parsed_data = {}
+    parsed_data: Dict[str, Dict[str, Any]] = {}
     if not os.path.exists(file_path):
         return parsed_data
-        
-    with open(file_path, "r") as file:
-        content = file.read()
-    
-    sections = re.split(r"&\w+", content)
-    section_headers = re.findall(r"&(\w+)", content)
-    
-    sections = [
-        section.strip()
-        for section in sections
-        if len(section) and section[0] != "!" and section.strip()
-    ]
-    
-    for header, section in zip(section_headers, sections):
-        section_dict = {}
-        params = re.findall(r"(\w+)\s*=\s*([-\d\.e\w\.]+)", section)
-        for param, value in params:
-            try:
-                if "." in value or "e" in value:
-                    section_dict[param] = float(value)
-                else:
-                    section_dict[param] = int(value)
-            except ValueError:
-                section_dict[param] = value.strip()
-        while header in parsed_data:
-            header = f"{header}0"
-        parsed_data[header] = section_dict
+
+    current_section = None
+    with open(file_path, "r", encoding="utf-8") as file:
+        for raw_line in file:
+            line = _strip_inline_comment(raw_line)
+            if not line:
+                continue
+
+            if line.startswith("&"):
+                section = line[1:].strip().lower()
+                while section in parsed_data:
+                    section = f"{section}0"
+                parsed_data[section] = {}
+                current_section = section
+                continue
+
+            if line.startswith("/"):
+                current_section = None
+                continue
+
+            if current_section is None:
+                continue
+
+            for assignment in _split_top_level_commas(line):
+                if "=" not in assignment:
+                    continue
+                key, value = assignment.split("=", 1)
+                key = key.strip().lower()
+                parsed_data[current_section][key] = _parse_namelist_value(value)
 
     return parsed_data
+
+
+def load_runtime_params(input_dat_path: str) -> Dict[str, Any]:
+    """
+    Load runtime controls for solver parity from `input.dat`.
+
+    Returned keys are typed scalars and can be fed into GKParams creation.
+    """
+    inp = parse_input_dat(input_dat_path)
+    control = inp.get("control", {})
+
+    def _flt(name, default):
+        val = control.get(name, default)
+        return float(val) if val is not None else float(default)
+
+    def _int(name, default):
+        val = control.get(name, default)
+        return int(val) if val is not None else int(default)
+
+    def _bool(name, default):
+        val = control.get(name, default)
+        if isinstance(val, bool):
+            return val
+        if isinstance(val, str):
+            lv = val.strip().lower()
+            if lv in (".true.", "true", "t"):
+                return True
+            if lv in (".false.", "false", "f"):
+                return False
+        return bool(default)
+
+    method_val = control.get("method", "EXP")
+    method = str(method_val).strip().strip("'").strip('"').upper()
+
+    return {
+        "dtim": _flt("dtim", 0.01),
+        "naverage": _int("naverage", 40),
+        "disp_par": _flt("disp_par", 1.0),
+        "disp_vp": _flt("disp_vp", 0.2),
+        "disp_x": _flt("disp_x", 0.1),
+        "disp_y": _flt("disp_y", 0.1),
+        "non_linear": _bool("non_linear", False),
+        "nlapar": _bool("nlapar", False),
+        "method": method,
+        "meth": _int("meth", 0),
+    }
 
 def load_geometry(directory):
     """Load geometry and physics parameters into JAX arrays."""
@@ -212,6 +337,16 @@ def load_geometry(directory):
     input_data = parse_input_dat(os.path.join(directory, "input.dat"))
 
     geometry = {}
+
+    # Scalar geometry controls useful for parity diagnostics.
+    if "kthnorm" in geom:
+        geometry["kthnorm"] = jnp.array(float(np.asarray(geom["kthnorm"]).reshape(-1)[0]), dtype=jnp.float64)
+    if "shat" in geom:
+        geometry["shat"] = jnp.array(float(np.asarray(geom["shat"]).reshape(-1)[0]), dtype=jnp.float64)
+    if "q" in geom:
+        geometry["q"] = jnp.array(float(np.asarray(geom["q"]).reshape(-1)[0]), dtype=jnp.float64)
+    if "eps" in geom:
+        geometry["eps"] = jnp.array(float(np.asarray(geom["eps"]).reshape(-1)[0]), dtype=jnp.float64)
     
     # Grids
     kxrh = np.loadtxt(os.path.join(directory, "kxrh"))
@@ -222,7 +357,8 @@ def load_geometry(directory):
     krho = np.loadtxt(os.path.join(directory, "krho"))
     if krho.ndim > 1:
         krho = krho.T[0]
-    geometry["krho"] = jnp.array(krho / geom["kthnorm"], dtype=jnp.float64)
+    kthnorm = float(np.asarray(geom["kthnorm"]).reshape(-1)[0]) if "kthnorm" in geom else 1.0
+    geometry["krho"] = jnp.array(krho / kthnorm, dtype=jnp.float64)
     
     geometry["parseval"] = jnp.array([1.0] + [float(len(geometry["krho"]))] * (len(geometry["krho"]) - 1), dtype=jnp.float64)
 

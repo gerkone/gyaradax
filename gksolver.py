@@ -1,9 +1,11 @@
 import jax
 import jax.numpy as jnp
+import math
 from dataclasses import dataclass
-from typing import Dict, Tuple
+from typing import Dict, Tuple, Any
 
 from jax_integrals import get_integrals, j0
+from jax_geometry import load_runtime_params
 
 # Ensure fp64 everywhere.
 jax.config.update("jax_enable_x64", True)
@@ -68,7 +70,7 @@ _VPAR_D4 = jnp.asarray([-1.0, 4.0, -6.0, 4.0, -1.0], dtype=jnp.float64) / 12.0
 @jax.tree_util.register_pytree_node_class
 @dataclass(frozen=True)
 class GKParams:
-    """Runtime controls for the linear electrostatic solver."""
+    """Runtime controls for the electrostatic solver."""
 
     dt: float = 0.01
     naverage: int = 40
@@ -79,6 +81,8 @@ class GKParams:
     idisp: int = 2
     drive_scale: float = 1.0
     norm_eps: float = 1.0e-14
+    non_linear: bool = False
+    enable_term_iii: bool = True
 
     def tree_flatten(self):
         leaves = (
@@ -91,6 +95,8 @@ class GKParams:
             self.idisp,
             self.drive_scale,
             self.norm_eps,
+            self.non_linear,
+            self.enable_term_iii,
         )
         return leaves, None
 
@@ -140,6 +146,28 @@ def default_state() -> GKState:
         window_start_amp=jnp.array(1.0, dtype=jnp.float64),
         last_growth_rate=jnp.array(0.0, dtype=jnp.float64),
     )
+
+
+def gkparams_from_runtime(runtime: Dict[str, Any], **overrides) -> GKParams:
+    """Build GKParams from a runtime-controls dictionary with optional overrides."""
+    params = GKParams(
+        dt=float(runtime.get("dtim", 0.01)),
+        naverage=int(runtime.get("naverage", 40)),
+        disp_par=float(runtime.get("disp_par", 1.0)),
+        disp_vp=float(runtime.get("disp_vp", 0.2)),
+        disp_x=float(runtime.get("disp_x", 0.1)),
+        disp_y=float(runtime.get("disp_y", 0.1)),
+        non_linear=bool(runtime.get("non_linear", False)),
+    )
+    if overrides:
+        return GKParams(**{**params.__dict__, **overrides})
+    return params
+
+
+def gkparams_from_input_dat(input_dat_path: str, **overrides) -> GKParams:
+    """Load runtime controls from `input.dat` and convert them to GKParams."""
+    runtime = load_runtime_params(input_dat_path)
+    return gkparams_from_runtime(runtime, **overrides)
 
 
 def _kx_ky_grids(geometry: Dict[str, Array]) -> Tuple[Array, Array]:
@@ -217,10 +245,233 @@ def _apply_vpar_stencil(field: Array, coeffs: Array) -> Array:
     return out
 
 
+def _prime_factors_smallereq_than(number: int, max_prime: int) -> bool:
+    """Mirror GKW helper used to choose FFT sizes with small prime factors."""
+    i = 2
+    n = int(number)
+    while True:
+        if n % i == 0:
+            n //= i
+        elif i == max_prime:
+            return n == 1
+        else:
+            i += 1
+
+
+def _extended_firstdim_fft_size(nmod: int) -> Tuple[int, int]:
+    """
+    Port of non_linear_terms::get_extended_firstdim_fft_size.
+
+    Returns:
+      mphi   : real-space binormal grid size.
+      mphiw3 : reduced k-space size for real FFT storage (mphi/2 + 1).
+    """
+    posspace_size = 3 * nmod - 2
+    if posspace_size % 2 != 0:
+        posspace_size += 1
+    while not _prime_factors_smallereq_than(posspace_size, 7):
+        posspace_size += 2
+    for i in range(1, 9):
+        cand = posspace_size + 2 * i
+        if _prime_factors_smallereq_than(cand, 2):
+            posspace_size = cand
+            break
+    kgrid_size = int(math.floor(posspace_size / 2.0) + 1)
+    return posspace_size, kgrid_size
+
+
+def _extended_seconddim_fft_size(nx: int) -> int:
+    """Port of non_linear_terms::get_extended_seconddim_fft_size."""
+    dum = int(math.ceil(1.5 * float(nx + 1)) + 1)
+    while not _prime_factors_smallereq_than(dum, 7):
+        dum += 1
+    for i in range(1, 9):
+        cand = dum + i
+        if _prime_factors_smallereq_than(cand, 2):
+            dum = cand
+            break
+    return dum
+
+
+def _build_jind(nkx: int, mrad: int, ixzero: int) -> Array:
+    """
+    Build Fortran-equivalent kx-to-FFT index mapping (0-based).
+
+    Fortran logic:
+      if ix>=ixzero: jind = ix-ixzero+1
+      else         : jind = mrad + ix-ixzero+1
+    """
+    ix = jnp.arange(nkx, dtype=jnp.int32)
+    return jnp.where(ix >= ixzero, ix - ixzero, mrad + ix - ixzero)
+
+
+def _pack_half_spectrum(spec_kxky: Array, jind: Array, mrad: int, mphiw3: int) -> Array:
+    """
+    Pack physical spectral modes [kx, ky_nonneg] into dealiased FFT storage.
+    """
+    out_shape = spec_kxky.shape[:-2] + (mrad, mphiw3)
+    out = jnp.zeros(out_shape, dtype=jnp.complex128)
+    nky = spec_kxky.shape[-1]
+    return out.at[..., jind, :nky].set(spec_kxky)
+
+
+def _unpack_half_spectrum(spec_half: Array, jind: Array, nky: int) -> Array:
+    """Unpack dealiased FFT storage back to physical [kx, ky_nonneg] modes."""
+    return spec_half[..., jind, :nky]
+
+
+def _nonlinear_term_iii(
+    df: Array,
+    phi: Array,
+    geometry: Dict[str, Array],
+    pre: Dict[str, Array],
+    *,
+    efun_sign: float = 1.0,
+    fft_prefactor: complex = 1.0 + 0.0j,
+    exclude_zero_mode: bool = True,
+) -> Array:
+    """
+    ES spectral Term III for adiabatic-electron runs.
+
+    Implemented from `non_linear_terms.F90::add_non_linear_terms_spectral` with
+    electromagnetic/shear branches disabled for this scope.
+    """
+    mrad = pre["nl_mrad"]
+    mphi = pre["nl_mphi"]
+    mphiw3 = pre["nl_mphiw3"]
+    fft_scale = pre["nl_fft_scale"]
+    jind = pre["nl_jind"]
+    kx2d = pre["nl_kx2d"]
+    ky2d = pre["nl_ky2d"]
+    bessel = pre["bessel"]
+    dum_s = pre["nl_dum_s"]
+    ixzero = pre["ixzero"]
+    iyzero = pre["iyzero"]
+    nky = df.shape[-1]
+
+    # Vectorize over parallel grid index s to control peak memory.
+    df_by_s = jnp.moveaxis(df, 2, 0)
+    bessel_by_s = jnp.moveaxis(bessel, 2, 0)
+
+    def _per_s(df_s: Array, phi_s: Array, bessel_s: Array, dum: Array) -> Array:
+        # Gyro-averaged potential gradients in k-space.
+        gyro_phi = bessel_s * phi_s[None, None, :, :]
+        grad_phi_y_k = 1j * ky2d[None, None, :, :] * gyro_phi
+        grad_phi_x_k = 1j * kx2d[None, None, :, :] * gyro_phi
+
+        # Distribution gradients in k-space.
+        grad_f_x_k = 1j * kx2d[None, None, :, :] * df_s
+        grad_f_y_k = 1j * ky2d[None, None, :, :] * df_s
+
+        # Transform to dealiased real space.
+        ar = jnp.fft.irfft2(
+            _pack_half_spectrum(grad_phi_y_k, jind, mrad, mphiw3),
+            s=(mrad, mphi),
+            axes=(-2, -1),
+            norm="backward",
+        )
+        br = jnp.fft.irfft2(
+            _pack_half_spectrum(grad_phi_x_k, jind, mrad, mphiw3),
+            s=(mrad, mphi),
+            axes=(-2, -1),
+            norm="backward",
+        )
+        cr = jnp.fft.irfft2(
+            _pack_half_spectrum(grad_f_x_k, jind, mrad, mphiw3),
+            s=(mrad, mphi),
+            axes=(-2, -1),
+            norm="backward",
+        )
+        dr = jnp.fft.irfft2(
+            _pack_half_spectrum(grad_f_y_k, jind, mrad, mphiw3),
+            s=(mrad, mphi),
+            axes=(-2, -1),
+            norm="backward",
+        )
+
+        # Real-space Poisson bracket: V_E dot grad(f).
+        nl_real = (efun_sign * dum) * (ar * cr - br * dr)
+
+        # Back to spectral space. GKW's FFTW path uses unnormalized inverse and
+        # then explicit `1/(mrad*mphi)` scaling after the forward transform.
+        # With JAX default normalization, this is equivalent to multiplying by
+        # `(mrad*mphi)` at this point.
+        nl_half = (
+            jnp.asarray(fft_prefactor, dtype=jnp.complex128)
+            * jnp.asarray(fft_scale, dtype=jnp.complex128)
+            * jnp.fft.rfft2(
+            nl_real,
+            s=(mrad, mphi),
+            axes=(-2, -1),
+            norm="backward",
+            )
+        )
+        return _unpack_half_spectrum(nl_half, jind, nky)
+
+    nl_by_s = jax.vmap(_per_s, in_axes=(0, 0, 0, 0))(df_by_s, phi, bessel_by_s, dum_s)
+    nl = jnp.moveaxis(nl_by_s, 0, 2)
+    # Match spectral copy-back behavior: suppress explicit (0,0) mode forcing.
+    if exclude_zero_mode:
+        return nl.at[:, :, :, ixzero, iyzero].set(0.0 + 0.0j)
+    return nl
+
+
+def term_iii_rhs(
+    df: Array,
+    geometry: Dict[str, Array],
+    params: GKParams | None = None,
+    *,
+    efun_sign: float = 1.0,
+    fft_prefactor: complex = 1.0 + 0.0j,
+    exclude_zero_mode: bool = True,
+) -> Array:
+    """
+    Public helper for isolated ES Term III diagnostics and ablation tests.
+    """
+    if params is None:
+        params = GKParams()
+    pre = _linear_precompute(geometry, params)
+    phi, _ = get_integrals(df, geometry)
+    return _nonlinear_term_iii(
+        df,
+        phi,
+        geometry,
+        pre,
+        efun_sign=efun_sign,
+        fft_prefactor=fft_prefactor,
+        exclude_zero_mode=exclude_zero_mode,
+    )
+
+
+def term_iii_fft_pack_roundtrip(spec_kxky: Array, geometry: Dict[str, Array]) -> Array:
+    """
+    Diagnostic helper: pack -> irfft2 -> rfft2 -> unpack on Term-III grids.
+    """
+    nkx = spec_kxky.shape[-2]
+    nky = spec_kxky.shape[-1]
+    kx = jnp.asarray(geometry["kxrh"], dtype=jnp.float64)
+    if kx.ndim > 1:
+        kx = kx[0]
+    ixzero = int(
+        jnp.asarray(
+            geometry.get("ixzero", jnp.argmin(jnp.abs(kx)))
+        ).item()
+    )
+    mphi, mphiw3 = _extended_firstdim_fft_size(nky)
+    mrad = _extended_seconddim_fft_size(nkx)
+    jind = _build_jind(nkx, mrad, ixzero)
+    packed = _pack_half_spectrum(spec_kxky, jind, mrad, mphiw3)
+    real = jnp.fft.irfft2(packed, s=(mrad, mphi), axes=(-2, -1), norm="backward")
+    repacked = jnp.fft.rfft2(real, s=(mrad, mphi), axes=(-2, -1), norm="backward")
+    return _unpack_half_spectrum(repacked, jind, nky)
+
+
 def _linear_precompute(geometry: Dict[str, Array], params: GKParams) -> Dict[str, Array]:
     """Precompute geometry-only factors for active linear electrostatic terms."""
     kx, ky = _kx_ky_grids(geometry)
     ns = len(geometry["ints"])
+    nkx = int(kx.shape[0])
+    nky = int(ky.shape[0])
 
     vpgr = jnp.asarray(geometry["vpgr"], dtype=jnp.float64)
     mugr = jnp.asarray(geometry["mugr"], dtype=jnp.float64)
@@ -358,6 +609,23 @@ def _linear_precompute(geometry: Dict[str, Array], params: GKParams) -> Dict[str
     sgr_dist = jnp.asarray(geometry.get("sgr_dist", 1.0), dtype=jnp.float64)
     sgr_dist = jnp.where(jnp.abs(sgr_dist) < 1.0e-15, 1.0, sgr_dist)
 
+    ixzero = jnp.asarray(
+        geometry.get("ixzero", jnp.argmin(jnp.abs(jnp.asarray(kx, dtype=jnp.float64)))),
+        dtype=jnp.int32,
+    )
+    iyzero = jnp.asarray(
+        geometry.get("iyzero", jnp.argmin(jnp.abs(jnp.asarray(ky, dtype=jnp.float64)))),
+        dtype=jnp.int32,
+    )
+
+    # Nonlinear spectral/dealias geometry (Term III).
+    mphi, mphiw3 = _extended_firstdim_fft_size(nky)
+    mrad = _extended_seconddim_fft_size(nkx)
+    jind = _build_jind(nkx, mrad, ixzero)
+    kx2d = jnp.broadcast_to(jnp.reshape(kx, (nkx, 1)), (nkx, nky))
+    ky2d = jnp.broadcast_to(jnp.reshape(ky, (1, nky)), (nkx, nky))
+    nl_dum_s = -jnp.asarray(efun, dtype=jnp.float64)
+
     return {
         "kx_b": kx_b,
         "ky_b": ky_b,
@@ -380,6 +648,16 @@ def _linear_precompute(geometry: Dict[str, Array], params: GKParams) -> Dict[str
         "s_d4_ineg": s_d4_ineg,
         "dvp": dvp,
         "sgr_dist": sgr_dist,
+        "ixzero": ixzero,
+        "iyzero": iyzero,
+        "nl_mphi": mphi,
+        "nl_mphiw3": mphiw3,
+        "nl_mrad": mrad,
+        "nl_fft_scale": jnp.asarray(float(mrad * mphi), dtype=jnp.float64),
+        "nl_jind": jind,
+        "nl_kx2d": kx2d,
+        "nl_ky2d": ky2d,
+        "nl_dum_s": nl_dum_s,
     }
 
 
@@ -388,12 +666,14 @@ def _linear_rhs(
     geometry: Dict[str, Array],
     params: GKParams,
     pre: Dict[str, Array],
+    phi: Array | None = None,
 ) -> Array:
     """
     Active linear electrostatic spectral terms (adiabatic-electron setup):
     I, II, IV, V, VII, VIII + parallel/vpar/perp dissipation.
     """
-    phi, _ = get_integrals(df, geometry)
+    if phi is None:
+        phi, _ = get_integrals(df, geometry)
     phi_b = jnp.reshape(phi, (1, 1, phi.shape[0], phi.shape[1], phi.shape[2]))
 
     # Term I: vpar_grd_df with open parallel boundaries and kx-chain connectivity.
@@ -556,20 +836,42 @@ def gksolve_with_state(
     state: GKState,
 ) -> Tuple[Array, Tuple[Array, Tuple[Array, Array, Array]], GKState]:
     """
-    One small-step (dt) linear electrostatic update with explicit RK4.
+    One small-step (dt) electrostatic update with explicit RK4.
     """
     dt = jnp.array(params.dt, dtype=jnp.float64)
     pre = _linear_precompute(geometry, params)
 
-    k1 = _linear_rhs(prev_df, geometry, params, pre)
-    k2 = _linear_rhs(prev_df + 0.5 * dt * k1, geometry, params, pre)
-    k3 = _linear_rhs(prev_df + 0.5 * dt * k2, geometry, params, pre)
-    k4 = _linear_rhs(prev_df + dt * k3, geometry, params, pre)
+    def _rhs(df: Array) -> Array:
+        phi_local, _ = get_integrals(df, geometry)
+        rhs_linear = _linear_rhs(df, geometry, params, pre, phi=phi_local)
+
+        def _with_nl(_: None) -> Array:
+            rhs_nl = _nonlinear_term_iii(df, phi_local, geometry, pre)
+            return rhs_linear + rhs_nl
+
+        def _without_nl(_: None) -> Array:
+            return rhs_linear
+
+        term_iii_on = jnp.logical_and(
+            jnp.asarray(params.non_linear, dtype=jnp.bool_),
+            jnp.asarray(params.enable_term_iii, dtype=jnp.bool_),
+        )
+        return jax.lax.cond(term_iii_on, _with_nl, _without_nl, operand=None)
+
+    k1 = _rhs(prev_df)
+    k2 = _rhs(prev_df + 0.5 * dt * k1)
+    k3 = _rhs(prev_df + 0.5 * dt * k2)
+    k4 = _rhs(prev_df + dt * k3)
 
     next_df_raw = prev_df + (dt / 6.0) * (k1 + 2.0 * k2 + 2.0 * k3 + k4)
 
     new_step = state.step + jnp.array(1, dtype=jnp.int32)
     is_window_end = jnp.equal(jnp.mod(new_step, params.naverage), 0)
+    # In GKW nonlinear runs normalization is disabled by default.
+    do_normalize = jnp.logical_and(
+        is_window_end,
+        jnp.logical_not(jnp.asarray(params.non_linear, dtype=jnp.bool_)),
+    )
 
     def _apply_norm(_: None):
         return _normalize_per_ky(next_df_raw, geometry, params)
@@ -582,14 +884,14 @@ def gksolve_with_state(
         )
 
     next_df, norm_factor, dominant_amp = jax.lax.cond(
-        is_window_end,
+        do_normalize,
         _apply_norm,
         _skip_norm,
         operand=None,
     )
 
     phi, fluxes = get_integrals(next_df, geometry)
-    next_state = _advance_state(state, params, is_window_end, dominant_amp, norm_factor)
+    next_state = _advance_state(state, params, do_normalize, dominant_amp, norm_factor)
     return next_df, (phi, fluxes), next_state
 
 

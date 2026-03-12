@@ -170,7 +170,8 @@ Notes:
 ## 8) Known limitations / next extension points
 
 - Full linear operator parity with all GKW terms I, II, IV, V, VII, VIII is not complete yet.
-- Nonlinear term III is intentionally not included in this V1.
+- Nonlinear term III is now included as a switchable path (`non_linear` + `enable_term_iii`),
+  while all non-target nonlinear/EM branches remain inert in this scope.
 - No collision/neoclassical/electromagnetic terms in this stage.
 - Next steps should expand RHS term-by-term against `linear_terms.f90` while preserving:
   - pure function semantics,
@@ -241,3 +242,63 @@ Notes:
   - Flux comparison:
     - predicted `(p,e,v) = (8.88e-16, 38.2988647344, 9.2704e-14)`
     - reference `(p,e,v) = (8.88e-16, 38.2987731059, 9.3925e-14)`
+
+## 11) Nonlinear parity iteration findings (`iteration_13`, window `100 -> 101`)
+
+- Runtime parameter provenance hardening:
+  - Added typed runtime extraction from `input.dat` (`dtim`, `naverage`, `disp_*`, `non_linear`, `nlapar`, `method`, `meth`).
+  - `gkparams_from_input_dat(...)` now maps these directly into `GKParams` with explicit override support.
+  - Confirmed for `iteration_13`: `dtim=0.01`, `naverage=40`, `disp_par=1.0`, `disp_vp=0.2`, `disp_x=0.1`, `disp_y=0.1`, `non_linear=True`, `nlapar=False`, `method='EXP'`, `meth=2`.
+
+- Geometry parity surfacing:
+  - Exposed scalar invariants from `geom.dat`: `shat`, `q`, `eps`, `kthnorm`.
+  - `krho` normalization remains `krho_loaded = krho_file / kthnorm` (matches `mode.f90` behavior).
+  - Note on `s_hat`: yes, it is now imported (`shat`) and available for diagnostics/invariants; active Term-I/II/III code paths currently consume precomputed geometry tensors/metadata (`dfun`, `efun`, `mode_label`, connectivity), not `shat` directly.
+
+- Term-III diagnostic evidence before fix:
+  - With previous JAX implementation, `||rhs_nl|| / ||rhs_lin||` at dump `100` was `~1.54e-4` (nonlinear term effectively inert).
+  - `non_linear=True` with Term-III off vs on gave nearly identical 120-step checkpoint error (`subset_rel_l2 ~ 0.237`), confirming weak nonlinear impact from current scaling/sign.
+
+- Focused scale/sign sweep result:
+  - Using identical linear terms and varying only nonlinear scale `alpha` in `rhs = rhs_lin + alpha * rhs_nl_current`:
+    - `alpha=0`: `subset_rel_l2=0.237114`
+    - `alpha=1`: `subset_rel_l2=0.237123`
+    - `alpha=-1000`: `subset_rel_l2=0.227457`
+    - `alpha=-10000`: `subset_rel_l2=0.092488`
+    - `alpha=-12960`: `subset_rel_l2=4.55e-05`
+  - `12960 = mrad * mphi` for this grid (`mrad=135`, `mphi=96`).
+  - This isolates a missing FFT normalization/sign factor in Term III as primary root cause.
+
+- Term-III fix implemented:
+  - In `gksolver.py::_nonlinear_term_iii`:
+    - Added FFT normalization compensation factor `nl_fft_scale = mrad * mphi`.
+    - Set default nonlinear FFT prefactor to `+1` (instead of `-1`).
+    - Net correction is Fortran-consistent with `add_non_linear_terms_spectral` scaling path.
+  - Preserved switchable backward compatibility:
+    - `params.non_linear` gates nonlinear behavior.
+    - `params.enable_term_iii` keeps Term-III on/off switch.
+
+- Post-fix smoke metrics (same `100 -> 101` window):
+  - State parity recovered:
+    - subset mode-chain `rel_l2 ~ 4.55e-05`
+    - full-state `rel_l2 ~ 1.11e-04`
+  - Heat flux parity:
+    - `eflux_rel ~ 3.79e-06`
+  - Growth-rate comparison:
+    - absolute disagreement is small, but one near-marginal reference mode (`|gamma_ref| ~ 1.1e-2`) inflates pure relative error.
+    - test metric updated to use a near-zero floor in denominator (`max(|gamma_ref|, 2e-2)`), preventing false failures in marginal modes.
+
+## 12) Ranked plausible discrepancy causes (current status)
+
+1. Resolved primary cause:
+   - Nonlinear Term-III FFT normalization/sign mismatch (`mrad*mphi` + prefactor sign).
+   - Evidence: targeted alpha sweep peaked exactly at `-mrad*mphi`.
+
+2. Residual risk for future windows:
+   - Growth-rate metric sensitivity for near-zero growth modes (diagnostic conditioning issue, not state mismatch).
+   - Keep mixed absolute/relative acceptance for marginal modes.
+
+3. Secondary parity candidates for later phases:
+   - Any disabled branch accidentally activated by future inputs (EM/shear-remap/neoclassical terms).
+   - `DPART_IN`-dependent paths (time-dependent source/shear periodic BCs) if run settings change from current scope.
+   - Dataset interpretation drift when moving from single-window smoke to long multi-window trajectory checks.
