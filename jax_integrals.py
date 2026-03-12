@@ -9,8 +9,6 @@ jax.config.update("jax_enable_x64", True)
 
 def j0(x):
     # jax.scipy.special.bessel_jn has a bug/feature where x=0 results in nan
-    # We use jnp.where to mask it. 
-    # Also, for very small x, j0(x) is approximately 1.0 - x^2/4.
     safe_x = jnp.where(jnp.abs(x) < 1e-10, 1.0, x)
     res = bessel_jn(safe_x, v=0)[0]
     return jnp.where(jnp.abs(x) < 1e-10, 1.0, res)
@@ -25,12 +23,13 @@ def geom_tensors(geometry: Dict[str, jnp.ndarray]) -> Dict[str, jnp.ndarray]:
     geom_["vpgr"] = rearrange(geometry["vpgr"], "par -> 1 par 1 1 1 1")
     geom_["mugr"] = rearrange(geometry["mugr"], "mu -> 1 1 mu 1 1 1")
     geom_["bn"] = rearrange(geometry["bn"], "s -> 1 1 1 s 1 1")
+    geom_["ffun"] = rearrange(geometry["ffun"], "s -> 1 1 1 s 1 1")
     geom_["efun"] = rearrange(geometry["efun"], "s -> 1 1 1 s 1 1")
     geom_["rfun"] = rearrange(geometry["rfun"], "s -> 1 1 1 s 1 1")
     geom_["bt_frac"] = rearrange(geometry["bt_frac"], "s -> 1 1 1 s 1 1")
     geom_["parseval"] = rearrange(geometry["parseval"], "y -> 1 1 1 1 1 y")
     
-    for k in ["mas", "tmp", "d2X", "signz", "signB"]:
+    for k in ["mas", "tmp", "de", "d2X", "signz", "signB"]:
         val = geometry[k]
         if val.ndim > 0: val = val[0]
         geom_[k] = jnp.reshape(val, (1, 1, 1, 1, 1, 1))
@@ -69,11 +68,12 @@ def geom_tensors(geometry: Dict[str, jnp.ndarray]) -> Dict[str, jnp.ndarray]:
 
 def calculate_phi(geom: Dict[str, jnp.ndarray], df: jnp.ndarray) -> jnp.ndarray:
     """Computes electrostatic potential integral from the distribution function."""
-    de = 1.0 
+    de = geom["de"]
     signz, tmp, bn = geom["signz"], geom["tmp"], geom["bn"]
     ints, intvp, intmu = geom["ints"], geom["intvp"], geom["intmu"]
     bessel, gamma = geom["bessel"], geom["gamma"]
     
+    # Matching GKW wrap_field_integrals logic
     poisson_int = signz * de * intmu * intvp * bessel * bn
     poisson_int = jnp.where(jnp.abs(intvp) < 1e-9, 0.0, poisson_int)
     
@@ -122,7 +122,7 @@ def calculate_fluxes(geom: Dict[str, jnp.ndarray], df: jnp.ndarray, phi: jnp.nda
     vpgr, mugr, krho = geom["vpgr"], geom["mugr"], geom["krho"]
     bessel = geom["bessel"]
     
-    phi_expanded = rearrange(phi, "s x y -> 1 1 s x y")
+    phi_expanded = rearrange(phi, "s x y -> 1 1 1 s x y")
     phi_gyro = bessel * phi_expanded
     
     dum = parseval * ints * (efun * krho) * df

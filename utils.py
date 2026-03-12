@@ -1,7 +1,11 @@
 import os
 import numpy as np
+import jax
 import jax.numpy as jnp
 from typing import Tuple, List
+
+# Ensure fp64
+jax.config.update("jax_enable_x64", True)
 
 def load_gkw_k_dump(file_path: str, resolution: Tuple[int, ...]) -> jnp.ndarray:
     if not os.path.exists(file_path):

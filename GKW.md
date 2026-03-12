@@ -1,123 +1,243 @@
-# GKW Technical Specification & Reimplementation Guide
+# GKW -> JAX Port Notes (Linear V1, Adiabatic Electrons)
 
-## 1. Physical Model: Gyrokinetic Framework
+## 1) Scope and locked decisions
 
-### 1.1 Ordering and Normalization
-GKW solves the gyrokinetic equations up to first order in the Larmor radius over the major radius ($\rho_* = \rho_i / R \ll 1$).
-- **Length Scale:** Major radius $R$.
-- **Velocity Scale:** Thermal velocity $v_{th} = \sqrt{2T/m}$ (Note: GKW manual says $v_{th}$ is used for normalization, but check if factor of 2 is included).
-- **Time Scale:** $R / v_{th}$.
-- **Potential Scale:** $T/e$.
-- **Gradients:**
-  - Parallel: $R \nabla_\parallel \approx 1$.
-  - Perpendicular: $R \nabla_\perp \approx 1/\rho_*$.
-- **Field Ordering:**
-  - $\phi \approx (T/e) \rho_*$
-  - $A_\parallel \approx (T / e v_{th}) \rho_*$
+- Physics scope: electrostatic, adiabatic-electron case only.
+- Solver-space ordering: `(vpar, mu, s, kx, ky)` (authoritative naming: `kx`, not `x`).
+- Target grid: `(32, 8, 16, 85, 32)`.
+- Time step: `dt = 0.01`.
+- Precision: fp64 only (`jax_enable_x64=True`, `complex128/float64` arrays).
+- Integration scope for V1: linear-only update path.
+- Baseline data:
+  - Primary linear diagnostics baseline: `/restricteddata/ukaea/gyrokinetics/raw/iteration_13_Lin`.
+  - Secondary/debug baseline with 5D dumps: `/restricteddata/ukaea/gyrokinetics/raw/iteration_13`.
 
-### 1.2 Lagrangian and Equations of Motion
-The gyro-center Lagrangian in a rotating frame is:
-$$\Gamma = \left(\frac{e}{c}\mathbf{A} + \frac{e}{c}\langle A_\parallel \rangle \mathbf{b} + m v_\parallel \mathbf{b}\right) \cdot d\mathbf{X} + \mu d\theta - \left(\frac{m}{2}v_\parallel^2 + \mu B + e \langle \phi \rangle\right) dt$$
-The resulting equations of motion are:
-$$\frac{d\mathbf{X}}{dt} = v_\parallel \mathbf{b} + \mathbf{v}_D + \mathbf{v}_E + \mathbf{v}_{\delta B_\perp}$$
-$$m v_\parallel \frac{dv_\parallel}{dt} = \frac{d\mathbf{X}}{dt} \cdot [Z e \mathbf{E} - \mu \nabla B + m \Omega^2 R \nabla R]$$
-$$\frac{d\mu}{dt} = 0$$
+## 2) Relevant GKW sources for this stage
 
----
+### Time integration and update loop
 
-## 2. Complete Equation Set (δf approximation)
+- `gkw_ref/src/gkw.f90`
+  - Main loop over large time steps.
+  - Calls `advance_large_step_explicit` for `method='EXP'`.
+  - Calls `normalise_after_timestep()`.
 
-The evolution of the perturbed distribution function $g = f + \frac{2 Z}{T} w v_\parallel \langle A_\parallel \rangle F_M$ is given by:
-$$\frac{\partial g}{\partial t} = \text{I} + \text{II} + \text{III} + \text{IV} + \text{V} + \text{VI} + \text{VII} + \text{VIII}$$
+- `gkw_ref/src/exp_integration.F90`
+  - `advance_large_step_explicit`: loops small steps (`naverage`), updates `time`, updates fields/cons.
+  - `rk2`, `rk4`, `rk3`, `rkc_2` explicit schemes.
+  - `calculate_rhs`: canonical RHS assembly order.
 
-### 2.1 Operators
-- **I: Parallel Streaming**
-  $-v_\parallel \mathbf{b} \cdot \nabla f \rightarrow -w v_\parallel \mathcal{F} \frac{\partial f}{\partial s}$
-- **II: Magnetic Drift**
-  $-\frac{\rho_*}{Z} [T_G E_D \mathcal{D}^\alpha + \dots] \frac{\partial f}{\partial x_\alpha}$
-- **III: Nonlinear Term**
-  $-\rho_*^2 \frac{\partial \chi}{\partial x_\beta} \mathcal{E}^{\beta \alpha} \frac{\partial g}{\partial x_\alpha}$
-- **IV: Mirror Force**
-  $+w (\mu B \mathcal{G} + \dots) \frac{\partial f}{\partial v_\parallel}$
-- **V: Electric Drive**
-  $- \mathbf{v}_\chi \cdot \nabla F_M$
-- **VI: Background Drift**
-  $- \mathbf{v}_D \cdot \nabla F_M$
-- **VII: Parallel Electric Field**
-  $-\frac{Z}{T} w v_\parallel \mathcal{F} \frac{\partial \langle \phi \rangle}{\partial s} F_M$
-- **VIII: Magnetic Drift of Potential**
-  $-\frac{\rho_*}{T} [\dots] \frac{\partial \langle \phi \rangle}{\partial x_\alpha} F_M$
+### Linear operators / field coupling
 
-### 2.2 Energy Terms
-- $E_D = v_\parallel^2 + \mu B$
-- $E_T = \frac{T}{T_G} [v_\parallel^2 + 2\mu B + \mathcal{E}_\Omega] - 1.5$
+- `gkw_ref/src/linear_terms.f90`
+  - `calc_linear_terms`: builds linear matrices and field-coupling matrices.
+  - Field split:
+    - `poisson_int`
+    - `poisson_dia`
+    - `poisson_zf` (adiabatic + zonal correction)
 
----
+- `gkw_ref/src/fields.F90`
+  - `calculate_fields`: applies field solve and zonal adiabatic correction.
+  - `calculate_cons`: collision-conservation fields (inactive in this configuration).
 
-## 3. Numerical Implementation Details
+### Configuration / species model
 
-### 3.1 Coordinates and Grids
-- **Coordinates:** $(\psi, \zeta, s)$ where $s$ is the parallel coordinate, $\psi$ is radial, and $\zeta$ is binormal.
-- **Spectral Representation:** Fourier modes are used for $\zeta$ and sometimes $\psi$ (local limit).
-- **Resolution:** $(v_\parallel, \mu, s, x, k_y) = (32, 8, 16, 85, 32)$.
+- `gkw_ref/src/control.f90`
+  - `method`, `meth`, `dtim`, `naverage`, dissipation controls.
+  - `zonal_adiabatic`, normalization controls.
 
-### 3.2 Finite Difference Stencils (Parallel $s$)
-- **4th Order Centered:** $v \frac{\partial g}{\partial s} \rightarrow v_i \frac{g_{i-2} - 8g_{i-1} + 8g_{i+1} - g_{i+2}}{12 \Delta s}$
-- **Upwind Dissipation:** $-D |v_i| \frac{-g_{i-2} + 4g_{i-1} - 6g_i + 4g_{i+1} - g_{i+2}}{12 \Delta s}$
-- **Staggered Order Reduction (at boundaries):**
-  - Boundary: 2nd order one-sided.
-  - Adjacent: 3rd order.
-- **Arakawa Scheme:** Conserves $\int f^2 dV$ and $\int H f dV$ by differencing the Poisson bracket $\{H, f\}$ directly.
+- `gkw_ref/src/components.f90`
+  - `adiabatic_electrons`, species setup, quasi-neutrality checks.
 
-### 3.3 Time Stepping: RK4
-Standard explicit Runge-Kutta 4th order.
-- Each stage includes a field solve (`calculate_fields`).
-- Time step $dt = 0.01$.
+### Growth-rate diagnostics
 
----
+- `gkw_ref/src/diagnos_growth_freq.f90`
+  - `calc_amplitudes`, `diagnostic_growth_rate`, mode-label mapping.
+  - Writes:
+    - `growth.dat` (kx=0 slice vs ky),
+    - `growth_rates_all_modes` (flattened global mode labels),
+    - `frequencies.dat`,
+    - `frequencies_all_modes`.
 
-## 4. Field Solve & Adiabatic Response
+## 3) Manual references used
 
-### 4.1 Quasi-neutrality Solver
-1.  **Integrate Ions:** $I = \sum_i Z_i \int \mathcal{J}_0 f_i d^3v$.
-2.  **Zonal flow ($k_y = 0$):**
-    - Correct for adiabatic electron response using $matz$ and $maty$ matrices.
-    - $matz$: maps density to a buffer.
-    - $FluxSurfaceAverage$: $\langle \dots \rangle_s = \int \dots ds$.
-    - $maty$: maps averaged buffer back to density correction.
-3.  **Poisson Diagonal:** $\phi = - I / poisson\_dia$.
-    - $poisson\_dia$ includes the polarization term $(\Gamma_0 - 1)$.
+- `gkw_ref/manual/practise.tex`
+  - Complete set of equations and adiabatic Poisson form (`Poisson-adiabatic`).
 
----
+- `gkw_ref/manual/implementation.tex`
+  - Explicit integration overview.
+  - Mapping from equation terms to code routines.
+  - Poisson splitting details and matrix interpretation.
 
-## 5. Normalization and Geometry Tensors
+- `gkw_ref/manual/diagnostics.tex`
+  - Growth/frequency output definitions and file conventions.
 
-### 5.1 Unit System
-- $t_N = t \cdot (v_{th}/R)$
-- $v_N = v / v_{th}$
-- $\phi_N = \phi \cdot (e/T \rho_*)$
-- $B_N = B / B_{ref}$
+- `gkw_ref/manual/buildandrun.tex`
+  - Input options for adiabatic electrons, `dtim`, and output behavior.
 
-### 5.2 Geometry Factors
-Loaded from `geom.dat`:
-- $D_{eps}, D_{zeta}, D_s$: Curvature and grad-B drift components.
-- $g^{\alpha \beta}$: Metric tensor components.
-- $bn$: Magnetic field strength $B/B_{ref}$.
-- $ints$: Parallel grid spacing $\Delta s$.
+## 4) Data observations for baselines
 
----
+### iteration_13 (nonlinear run with 5D dumps)
 
-## 6. JAX Solver Strategy
+- `input.dat` key controls:
+  - `non_linear = .true.`
+  - `method='EXP'`, `meth=2`, `dtim=0.01`, `naverage=40`
+  - `adiabatic_electrons = .true.`
+  - `zonal_adiabatic = .true.`
 
-### 6.1 Modular RHS
-```python
-def gksolve_rhs(df, geom, fm):
-    phi, fluxes = get_integrals(df, geom)
-    rhs = L_streaming(df, geom) + L_drift(df, geom) + L_drive(phi, geom, fm)
-    return rhs, (phi, fluxes)
-```
+- Contains K-like distribution dumps (`K*` + numeric files), plus diagnostics.
 
-### 6.2 Key Verification Points
-- **Growth Rates:** Compare linear growth $\gamma = \dot{|\phi|} / |\phi|$ with `growth_rates_all_modes`.
-- **Fluxes:** Compare $Q = \int v^2 (\mathbf{v}_E \cdot \nabla f) d^3v$ with `fluxes.dat`.
-- **Conservation:** Check invariance of $\int f d^3v$ (particle conservation).
+### iteration_13_Lin (linear diagnostics baseline)
+
+- `input.dat` key controls:
+  - `non_linear = .false.`
+  - `method='EXP'`, `meth=2`, `dtim=0.01`, `naverage=40`
+  - `adiabatic_electrons = .true.`
+  - `zonal_adiabatic = .true.`
+  - `normalize_per_toroidal_mode = .true.`
+
+- No 5D `K*` or numeric per-step distribution dumps.
+- Diagnostics available:
+  - `Poten*` (periodic field dumps),
+  - `growth.dat`,
+  - `growth_rates_all_modes`,
+  - `frequencies.dat`,
+  - `frequencies_all_modes`,
+  - `time.dat` (legacy 3-column format),
+  - `mode_label`.
+
+### Exact mapping confirmed in data
+
+- For both `iteration_13` and `iteration_13_Lin`:
+  - `growth.dat` is exactly the kx=0 slice of `growth_rates_all_modes` using `mode_label`.
+  - `frequencies.dat` is exactly the kx=0 slice of `frequencies_all_modes` using `mode_label`.
+
+This is the diagnostic identity used for growth/frequency validation tests in V1.
+
+## 5) JAX implementation status for this stage
+
+### Existing (verified before solver work)
+
+- `jax_integrals.py`
+  - `get_integrals(df, geometry) -> (phi, (pflux, eflux, vflux))`
+  - fp64-enabled and jit-compatible.
+
+- `jax_geometry.py`
+  - Loads geometry/data into JAX arrays used by integrals and solver.
+
+### Added for linear V1
+
+- `gksolver.py`
+  - `gksolve(prev_df, geometry, params, state)`
+    - Required interface: returns `next_df, (phi, fluxes)`.
+  - `gksolve_with_state(...)`
+    - Same physics step, additionally returns explicit diagnostic state.
+  - `GKParams`, `GKState`, `default_state`.
+  - Utility functions:
+    - `kx0_mode_columns`
+    - `project_all_modes_to_kx0`
+
+## 6) Linear V1 update model implemented
+
+- Time integrator:
+  - One explicit RK4 small step per call (`dt=0.01` default).
+
+- RHS structure (linear-only V1):
+  - Spectral damping term in `(kx, ky)` using configured dissipation coefficients.
+  - Electrostatic drive coupling through `phi` from `get_integrals`.
+  - Uses geometry tensors (`vpgr`, `mugr`, `bn`, `rln`, `rlt`) for velocity-space drive weighting.
+
+- Post-step normalization:
+  - Always applied.
+  - Per-`ky` mode normalization based on `phi` amplitude.
+  - Explicit state keeps cumulative normalization factor and window growth tracker.
+
+Notes:
+- This V1 is intentionally linear and reduced-order relative to full GKW matrix assembly.
+- It is designed as a pure, differentiable, jit-compatible stepping core for incremental extension.
+
+## 7) Tests added (TDD stage artifact)
+
+- `test_gksolver_linear.py` includes:
+  - API contract + shape/dtype checks (`(32, 8, 16, 85, 32)` and scalar flux outputs).
+  - JIT-compatibility checks for stateful stepping function.
+  - Zero-input invariance.
+  - Determinism and finiteness checks.
+  - Exact growth/frequency diagnostic mapping checks:
+    - `growth_rates_all_modes` -> `growth.dat` via `mode_label` at `kx=0`.
+    - `frequencies_all_modes` -> `frequencies.dat` via same mapping.
+  - `_Lin` dataset diagnostics-only assertion (no `K*`/numeric 5D dumps) plus `Poten*` cadence check.
+
+## 8) Known limitations / next extension points
+
+- Full linear operator parity with all GKW terms I, II, IV, V, VII, VIII is not complete yet.
+- Nonlinear term III is intentionally not included in this V1.
+- No collision/neoclassical/electromagnetic terms in this stage.
+- Next steps should expand RHS term-by-term against `linear_terms.f90` while preserving:
+  - pure function semantics,
+  - jit compatibility,
+  - fp64 strictness,
+  - no output-forcing/normalization sweeps.
+
+## 9) Phase 1 completion notes (init + geometry parity)
+
+- `jax_geometry.py` now loads additional geometry/state needed for active linear ES terms:
+  - `gfun <- geom.dat:G`
+  - `dfun <- (D_eps, D_zeta, D_s)`
+  - `hfun <- (H_eps, H_zeta, H_s)` and `ifun <- (I_eps, I_zeta, I_s)` (for upcoming drift parity)
+  - `sgrid` and `sgr_dist`
+  - `mode_label` (loaded from `mode_label`)
+  - `kxmax`, `kymax`
+
+- Spectral parallel-connectivity metadata is now derived directly from `mode_label`:
+  - `ixplus[kx,ky]`, `ixminus[kx,ky]` with `-1` denoting open boundary.
+  - `ixzero`, `iyzero` from nearest-zero entries of `kxrh`, `krho`.
+  - `pos_par_grid_class[s,kx,ky]` in `{ -2, -1, 0, 1, 2 }`, matching GKW open-boundary stencil classes for term-I / term-VII differencing.
+
+- Initialization helper added in `gksolver.py`:
+  - `init_df_cosine2(...)` is a JAX port of `init_fdis` branch `finit='cosine2'` for this run scope.
+  - Implements zonal suppression for mode-box (`ky=0` seeded to zero when `nky>1`).
+  - Optional startup normalization reproduces GKW per-toroidal-mode behavior:
+    - uses `phi`-based mode amplitude `sqrt(ds * sum_{s,kx}|phi|^2)`,
+    - tiny amplitudes guarded to factor 1,
+    - applies one global startup rescaling of `df` per `ky`.
+
+- Phase-1 tests added to `test_gksolver_linear.py`:
+  - geometry/connectivity key and shape checks;
+  - `init_df_cosine2` contract + zonal suppression check;
+  - startup normalization check (`|phi|` mode amplitude equals 1 for non-zonal modes).
+
+## 10) Phase 2 completion notes (active linear ES terms)
+
+- `gksolver.py` now implements the active linear electrostatic spectral terms used by the
+  `_Lin` setup, with state ordering `(vpar, mu, s, kx, ky)`:
+  - Term I: `vpar_grd_df` with open parallel boundaries and `mode_label`-driven `kx` connectivity.
+  - Parallel dissipation (`disp_par`) with `idisp` branch handling (`idisp=2` active for this run).
+  - Term IV: `dfdvp_trap`.
+  - `dfdvp_dissipation` (`disp_vp`) with zero-outside-`vpar` boundaries.
+  - Term II: `vdgradf` from drift dot wavevector.
+  - `hyper_disp_perp` spectral branch from `disp_x`, `disp_y`, `kxmax`, `kymax`.
+  - Term V: `ve_grad_fm` electrostatic branch.
+  - Term VIII: `vd_grad_phi_fm` electrostatic branch.
+  - Term VII: `vpar_grd_phi` electrostatic branch.
+
+- Stencil parity details:
+  - Uses fourth-order differential coefficients from `linear_terms.f90::differential_scheme`.
+  - Open-boundary `s` stencils use precomputed shift maps:
+    - `s_shift`, `kx_shift`, `valid_shift` (shape `[9, ns, nkx, nky]`).
+  - `vpar` stencils use zero-outside-grid behavior consistent with `elem_is_on_vpar_grid`.
+
+- Geometry/runtime data additions in `jax_geometry.py`:
+  - `vpgr_rms`, `mugr_rms`, `dvp`.
+  - Precomputed parallel shift maps (`s_shift`, `kx_shift`, `valid_shift`).
+
+- Normalization cadence fix:
+  - `gksolve_with_state` now applies per-`ky` normalization only at large-step boundaries
+    (`step % naverage == 0`), matching GKW’s `normalise_after_timestep` cadence.
+  - No normalization on intermediate small steps.
+
+- Validation snapshot (`iteration_13_Lin`, `DM2 -> 80 small steps -> FDS`):
+  - `rel_l2(df_pred, FDS) = 8.9098e-06`
+  - `rel_l2(phi_pred, phi_FDS) = 7.6035e-06`
+  - Flux comparison:
+    - predicted `(p,e,v) = (8.88e-16, 38.2988647344, 9.2704e-14)`
+    - reference `(p,e,v) = (8.88e-16, 38.2987731059, 9.3925e-14)`
