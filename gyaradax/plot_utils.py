@@ -1,13 +1,11 @@
 """Qualitative visualization functions for n-dimensional gyrokinetics data in JAX."""
 
-import io
-from typing import Dict, List, Optional, Sequence, Union
+from typing import List, Optional, Union
 
 import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
 import jax.numpy as jnp
-from PIL import Image as PILImage
 
 # Standard labels for gyrokinetics dimensions in this JAX port: (vpar, mu, s, kx, ky)
 GK_LABELS = {
@@ -117,9 +115,9 @@ def plot_nd(
 
                 spacer = np.full((xx.shape[0], max(1, xx.shape[1] // 15)), np.nan)
                 display_img = np.concatenate([xx, spacer, yy], axis=1)
-                im = ax.matshow(display_img, cmap=c_map, vmin=vmin, vmax=vmax)
+                ax.matshow(display_img, cmap=c_map, vmin=vmin, vmax=vmax)
             else:
-                im = ax.matshow(xx, cmap=c_map)
+                ax.matshow(xx, cmap=c_map)
 
             # Y-label on the first plot of each row
             if j == i + 1 or (ndim == 2 and j == 1):
