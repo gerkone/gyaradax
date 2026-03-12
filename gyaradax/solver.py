@@ -1,6 +1,7 @@
 import jax
 import jax.numpy as jnp
 import math
+import os
 from dataclasses import dataclass
 from typing import Dict, Tuple, Any
 
@@ -81,25 +82,14 @@ _VPAR_D4 = jnp.asarray([-1.0, 4.0, -6.0, 4.0, -1.0], dtype=jnp.float64) / 12.0
 @dataclass(frozen=True)
 class GKParams:
     """
-    Runtime controls and numerical hyperparameters for the electrostatic solver.
+    Runtime controls and physical parameters for the electrostatic solver.
 
-    This dataclass mirrors the GKW 'control' namelist and manages switches for 
-    time-stepping, dissipation coefficients (Term IV/VIII), and nonlinear activation.
-    
-    Attributes:
-        dt: Small time step for the RK4 integrator.
-        naverage: Number of small steps before diagnostic output and normalization.
-        disp_par: Coefficient for parallel dissipation (stabilizes Term I).
-        disp_vp: Coefficient for velocity space dissipation (Term IV smoothing).
-        disp_x: Radial hyper-dissipation coefficient.
-        disp_y: Binormal hyper-dissipation coefficient.
-        idisp: Dissipation scheme identifier (e.g., idisp=2 for speed-based).
-        drive_scale: Multiplier for the electrostatic drive (Term V/VIII).
-        norm_eps: Numerical floor for amplitude-based normalization.
-        non_linear: Enable nonlinear ExB advection (Term III).
-        enable_term_iii: Switch for the pseudospectral Term III implementation.
+    This dataclass mirrors the GKW 'control', 'gridsize', and 'species' namelists,
+    handling numerical hyperparameters and physical constants required for the 
+    gyrokinetic Vlasov-Poisson system.
     """
 
+    # runtime controls
     dt: float = 0.01
     naverage: int = 40
     disp_par: float = 1.0
@@ -111,6 +101,32 @@ class GKParams:
     norm_eps: float = 1.0e-14
     non_linear: bool = False
     enable_term_iii: bool = True
+
+    # physical parameters (typically from the kinetic species)
+    rlt: float = 1.0
+    rln: float = 1.0
+    mas: float = 1.0
+    tmp: float = 1.0
+    de: float = 1.0
+    signz: float = 1.0
+    vthrat: float = 1.0
+
+    # geometry scalars
+    shat: float = 0.0
+    q: float = 1.0
+    eps: float = 0.0
+    kthnorm: float = 1.0
+    Rref: float = 1.0
+    d2X: float = 1.0
+    signB: float = 1.0
+
+    # grid metadata and scaling
+    dvp: float = 1.0
+    sgr_dist: float = 1.0
+    kxmax: float = 1.0
+    kymax: float = 1.0
+    dgrid: float = 1.0
+    tgrid: float = 1.0
 
     def tree_flatten(self):
         leaves = (
@@ -125,6 +141,26 @@ class GKParams:
             self.norm_eps,
             self.non_linear,
             self.enable_term_iii,
+            self.rlt,
+            self.rln,
+            self.mas,
+            self.tmp,
+            self.de,
+            self.signz,
+            self.vthrat,
+            self.shat,
+            self.q,
+            self.eps,
+            self.kthnorm,
+            self.Rref,
+            self.d2X,
+            self.signB,
+            self.dvp,
+            self.sgr_dist,
+            self.kxmax,
+            self.kymax,
+            self.dgrid,
+            self.tgrid,
         )
         return leaves, None
 
@@ -199,33 +235,48 @@ def gkparams_from_runtime(runtime: Dict[str, Any], **overrides) -> GKParams:
     Returns:
         Configured GKParams instance.
     """
-    params = GKParams(
-        dt=float(runtime.get("dtim", 0.01)),
-        naverage=int(runtime.get("naverage", 40)),
-        disp_par=float(runtime.get("disp_par", 1.0)),
-        disp_vp=float(runtime.get("disp_vp", 0.2)),
-        disp_x=float(runtime.get("disp_x", 0.1)),
-        disp_y=float(runtime.get("disp_y", 0.1)),
-        non_linear=bool(runtime.get("non_linear", False)),
-    )
+    # this helper is legacy and might not fill all physical params
+    # users should prefer gkparams_from_config or filling manually
+    params_dict = {
+        "dt": float(runtime.get("dtim", 0.01)),
+        "naverage": int(runtime.get("naverage", 40)),
+        "disp_par": float(runtime.get("disp_par", 1.0)),
+        "disp_vp": float(runtime.get("disp_vp", 0.2)),
+        "disp_x": float(runtime.get("disp_x", 0.1)),
+        "disp_y": float(runtime.get("disp_y", 0.1)),
+        "non_linear": bool(runtime.get("non_linear", False)),
+    }
+    # try to fill physical params if available in runtime dict
+    for k in [
+        "rlt", "rln", "mas", "tmp", "de", "signz", "vthrat",
+        "shat", "q", "eps", "kthnorm", "Rref", "d2X", "signB",
+        "dvp", "sgr_dist", "kxmax", "kymax"
+    ]:
+        if k in runtime:
+            params_dict[k] = float(runtime[k])
+
     if overrides:
-        return GKParams(**{**params.__dict__, **overrides})
-    return params
+        params_dict.update(overrides)
+    return GKParams(**params_dict)
 
 
 def gkparams_from_input_dat(input_dat_path: str, **overrides) -> GKParams:
     """
-    Load runtime controls directly from a GKW 'input.dat' file.
+    Load all runtime, physics, and geometry scalars from a GKW run directory.
     
     Args:
-        input_dat_path: Path to the GKW input.dat configuration.
+        input_dat_path: Path to the GKW input.dat file.
         overrides: Manual parameter overrides.
         
     Returns:
         Configured GKParams instance.
     """
-    runtime = load_runtime_params(input_dat_path)
-    return gkparams_from_runtime(runtime, **overrides)
+    from gyaradax.geometry import load_scalars
+    
+    # get the directory containing input.dat to load geom.dat as well
+    directory = os.path.dirname(input_dat_path)
+    scalars = load_scalars(directory)
+    return gkparams_from_runtime(scalars, **overrides)
 
 
 def load_config(config_path: str) -> Any:
@@ -248,26 +299,45 @@ def gkparams_from_config(config: Any, **overrides) -> GKParams:
     Build GKParams from an OmegaConf configuration object.
     
     Args:
-        config: Configuration object with a 'solver' section (dt, naverage, etc.).
+        config: Configuration object with 'solver' and optionally 'physics' sections.
         overrides: Manual parameter overrides.
         
     Returns:
         Configured GKParams instance.
     """
     solver_cfg = config.solver
-    params = GKParams(
-        dt=float(getattr(solver_cfg, "dt", 0.01)),
-        naverage=int(getattr(solver_cfg, "naverage", 40)),
-        disp_par=float(getattr(solver_cfg, "disp_par", 1.0)),
-        disp_vp=float(getattr(solver_cfg, "disp_vp", 0.2)),
-        disp_x=float(getattr(solver_cfg, "disp_x", 0.1)),
-        disp_y=float(getattr(solver_cfg, "disp_y", 0.1)),
-        non_linear=bool(getattr(solver_cfg, "non_linear", False)),
-        enable_term_iii=bool(getattr(solver_cfg, "enable_term_iii", True)),
-    )
+    physics_cfg = getattr(config, "physics", {})
+    geometry_cfg = getattr(config, "geometry", {})
+    
+    params_dict = {
+        "dt": float(getattr(solver_cfg, "dt", 0.01)),
+        "naverage": int(getattr(solver_cfg, "naverage", 40)),
+        "disp_par": float(getattr(solver_cfg, "disp_par", 1.0)),
+        "disp_vp": float(getattr(solver_cfg, "disp_vp", 0.2)),
+        "disp_x": float(getattr(solver_cfg, "disp_x", 0.1)),
+        "disp_y": float(getattr(solver_cfg, "disp_y", 0.1)),
+        "non_linear": bool(getattr(solver_cfg, "non_linear", False)),
+        "enable_term_iii": bool(getattr(solver_cfg, "enable_term_iii", True)),
+    }
+    
+    # fill physics scalars
+    for k in ["rlt", "rln", "mas", "tmp", "de", "signz", "vthrat", "dgrid", "tgrid"]:
+        if hasattr(physics_cfg, k):
+            params_dict[k] = float(getattr(physics_cfg, k))
+            
+    # fill geometry scalars
+    for k in ["shat", "q", "eps", "kthnorm", "Rref", "d2X", "signB"]:
+        if hasattr(geometry_cfg, k):
+            params_dict[k] = float(getattr(geometry_cfg, k))
+            
+    # fill scaling/grid scalars
+    for k in ["dvp", "sgr_dist", "kxmax", "kymax"]:
+        if hasattr(geometry_cfg, k):
+            params_dict[k] = float(getattr(geometry_cfg, k))
+
     if overrides:
-        return GKParams(**{**params.__dict__, **overrides})
-    return params
+        params_dict.update(overrides)
+    return GKParams(**params_dict)
 
 
 def _kx_ky_grids(geometry: Dict[str, Array]) -> Tuple[Array, Array]:
@@ -327,7 +397,7 @@ def _normalize_per_ky(
     Returns:
         Tuple of (normalized_df, average_inv_factor, max_amplitude).
     """
-    phi, _ = get_integrals(df, geometry)
+    phi, _ = get_integrals(df, geometry, params=params)
     amp_per_ky = _mode_amplitude(phi, geometry, params.norm_eps)
     # prevent division by zero for stable or zero modes
     safe_amp = jnp.where(amp_per_ky < params.norm_eps, 1.0, amp_per_ky)
@@ -648,7 +718,7 @@ def term_iii_rhs(
     if params is None:
         params = GKParams()
     pre = _linear_precompute(geometry, params)
-    phi, _ = get_integrals(df, geometry)
+    phi, _ = get_integrals(df, geometry, params=params)
     return _nonlinear_term_iii(
         df,
         phi,
@@ -716,34 +786,18 @@ def _linear_precompute(
     )
     efun = jnp.asarray(geometry.get("efun", jnp.ones_like(bn)), dtype=jnp.float64)
 
-    # species constants for the kinetic species
-    mas = jnp.asarray(geometry["mas"], dtype=jnp.float64)
-    tmp = jnp.asarray(geometry["tmp"], dtype=jnp.float64)
-    de = jnp.asarray(geometry["de"], dtype=jnp.float64)
-    signz = jnp.asarray(geometry["signz"], dtype=jnp.float64)
-    vthrat = jnp.asarray(geometry["vthrat"], dtype=jnp.float64)
-    rln = jnp.asarray(geometry["rln"], dtype=jnp.float64)
-    rlt = jnp.asarray(geometry["rlt"], dtype=jnp.float64)
+    # species constants from params (adiabatic electron setup)
+    mas0 = params.mas
+    tmp0 = params.tmp
+    de0 = params.de
+    signz0 = params.signz
+    vthrat0 = params.vthrat
+    rln0 = params.rln
+    rlt0 = params.rlt
 
-    # single species extraction (adiabatic electron setup)
-    mas0 = mas[0] if mas.ndim > 0 else mas
-    tmp0 = tmp[0] if tmp.ndim > 0 else tmp
-    de0 = de[0] if de.ndim > 0 else de
-    signz0 = signz[0] if signz.ndim > 0 else signz
-    vthrat0 = vthrat[0] if vthrat.ndim > 0 else vthrat
-    rln0 = rln[0] if rln.ndim > 0 else rln
-    rlt0 = rlt[0] if rlt.ndim > 0 else rlt
-
-    # scaling factors
-    dgrid0 = jnp.array(1.0, dtype=jnp.float64)
-    if "dgrid" in geometry:
-        dgrid = jnp.asarray(geometry["dgrid"], dtype=jnp.float64)
-        dgrid0 = dgrid[0] if dgrid.ndim > 0 else dgrid
-
-    tgrid0 = jnp.array(1.0, dtype=jnp.float64)
-    if "tgrid" in geometry:
-        tgrid = jnp.asarray(geometry["tgrid"], dtype=jnp.float64)
-        tgrid0 = tgrid[0] if tgrid.ndim > 0 else tgrid
+    # resolution-dependent scaling factors
+    dgrid0 = params.dgrid
+    tgrid0 = params.tgrid
 
     # broadcasting into 5D [vpar, mu, s, kx, ky]
     vp2 = jnp.reshape(vpgr**2, (vpgr.shape[0], 1, 1, 1, 1))
@@ -778,12 +832,12 @@ def _linear_precompute(
     bessel = j0(bessel_arg)
 
     # maxwellian background distribution
-    temp_ratio = tmp0 / jnp.maximum(tgrid0, 1.0e-15)
+    temp_ratio = tmp0 / tgrid0
     fmaxwl = (
         de0
-        / jnp.maximum(dgrid0, 1.0e-15)
-        * jnp.exp(-(vp2 + 2.0 * bn_b * mu) / jnp.maximum(temp_ratio, 1.0e-15))
-        / (jnp.sqrt(jnp.maximum(temp_ratio, 1.0e-15) * jnp.pi) ** 3)
+        / dgrid0
+        * jnp.exp(-(vp2 + 2.0 * bn_b * mu) / temp_ratio)
+        / (jnp.sqrt(temp_ratio * jnp.pi) ** 3)
     )
 
     # drift advection (Term II and VIII)
@@ -792,7 +846,7 @@ def _linear_precompute(
     drift_y = ed * jnp.reshape(dfun[:, 1], (1, 1, ns, 1, 1)) / signz_safe
 
     # linear drive coefficients (Term V)
-    et = (vp2 + 2.0 * bn_b * mu) / jnp.maximum(temp_ratio, 1.0e-15) - 1.5
+    et = (vp2 + 2.0 * bn_b * mu) / temp_ratio - 1.5
     dmaxwel = rln0 + rlt0 * et
     ekapka = efun_b * ky_b
     dmaxwel_fm_ek = dmaxwel * fmaxwl * ekapka
@@ -802,12 +856,13 @@ def _linear_precompute(
     utrap = vthrat0 * mu * bn_b * gfun_b
 
     # speed-dependent dissipation magnitudes
-    vpgr_rms = jnp.asarray(
-        geometry.get("vpgr_rms", jnp.sqrt(jnp.mean(vpgr**2))), dtype=jnp.float64
-    )
-    mugr_rms = jnp.asarray(
-        geometry.get("mugr_rms", jnp.sqrt(jnp.mean(mugr**2))), dtype=jnp.float64
-    )
+    vpgr_rms = params.dvp # approx
+    mugr_rms = 1.0 # default
+    if "vpgr_rms" in geometry:
+        vpgr_rms = jnp.asarray(geometry["vpgr_rms"], dtype=jnp.float64)
+    if "mugr_rms" in geometry:
+        mugr_rms = jnp.asarray(geometry["mugr_rms"], dtype=jnp.float64)
+        
     idisp = jnp.asarray(params.idisp, dtype=jnp.int32)
     use_abs_vel = jnp.logical_or(jnp.equal(idisp, 1), jnp.equal(idisp, -1))
 
@@ -823,11 +878,11 @@ def _linear_precompute(
     )
 
     # Term VII coupling factor
-    term7_fac = -signz0 * ffun_b * vthrat0 * vp * fmaxwl / jnp.maximum(tmp0, 1.0e-15)
+    term7_fac = -signz0 * ffun_b * vthrat0 * vp * fmaxwl / tmp0
 
     # spectral perpendicular hyper-dissipation
-    kxmax = jnp.asarray(geometry["kxmax"], dtype=jnp.float64)
-    kymax = jnp.asarray(geometry["kymax"], dtype=jnp.float64)
+    kxmax = params.kxmax
+    kymax = params.kymax
     kxmax = jnp.where(jnp.abs(kxmax) < 1.0e-15, 1.0, kxmax)
     kymax = jnp.where(jnp.abs(kymax) < 1.0e-15, 1.0, kymax)
 
@@ -844,10 +899,8 @@ def _linear_precompute(
     s_d4_ipos = _parallel_coefficients(pos_par, _D4_IPW_POS)
     s_d4_ineg = _parallel_coefficients(pos_par, _D4_IPW_NEG)
 
-    dvp = jnp.asarray(geometry.get("dvp", jnp.mean(jnp.diff(vpgr))), dtype=jnp.float64)
-    dvp = jnp.where(jnp.abs(dvp) < 1.0e-15, 1.0, dvp)
-    sgr_dist = jnp.asarray(geometry.get("sgr_dist", 1.0), dtype=jnp.float64)
-    sgr_dist = jnp.where(jnp.abs(sgr_dist) < 1.0e-15, 1.0, sgr_dist)
+    dvp = params.dvp
+    sgr_dist = params.sgr_dist
 
     ixzero = jnp.asarray(
         geometry.get("ixzero", jnp.argmin(jnp.abs(jnp.asarray(kx, dtype=jnp.float64)))),
@@ -932,7 +985,7 @@ def _linear_rhs(
         Linear RHS contribution array.
     """
     if phi is None:
-        phi, _ = get_integrals(df, geometry)
+        phi, _ = get_integrals(df, geometry, params=params)
     phi_b = jnp.reshape(phi, (1, 1, phi.shape[0], phi.shape[1], phi.shape[2]))
 
     # Term I: Parallel advection with upwinded stencils
@@ -1154,7 +1207,7 @@ def gksolve_with_state(
 
     def _rhs(df: Array) -> Array:
         # electrostatic Poisson solve
-        phi_local, _ = get_integrals(df, geometry)
+        phi_local, _ = get_integrals(df, geometry, params=params)
         rhs_linear = _linear_rhs(df, geometry, params, pre, phi=phi_local)
 
         def _with_nl(_: None) -> Array:
@@ -1209,7 +1262,7 @@ def gksolve_with_state(
     )
 
     # final field calculation for output
-    phi, fluxes = get_integrals(next_df, geometry)
+    phi, fluxes = get_integrals(next_df, geometry, params=params)
     next_state = _advance_state(state, params, do_normalize, dominant_amp, norm_factor)
     return next_df, (phi, fluxes), next_state
 

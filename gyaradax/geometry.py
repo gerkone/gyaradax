@@ -337,6 +337,84 @@ def load_runtime_params(input_dat_path: str) -> Dict[str, Any]:
     }
 
 
+def load_scalars(directory: str) -> Dict[str, Any]:
+    """
+    Extract only the scalar configuration and physics parameters from GKW files.
+    
+    This is a lightweight alternative to load_geometry, returning only the 
+    scalars needed for GKParams and YAML configuration.
+    """
+    geom = load_geom_dat_file(os.path.join(directory, "geom.dat"))
+    input_data = parse_input_dat(os.path.join(directory, "input.dat"))
+    
+    # 1. extract runtime/solver params
+    runtime = load_runtime_params(os.path.join(directory, "input.dat"))
+    
+    # 2. extract geometry scalars
+    scalars = {
+        "shat": float(np.asarray(geom.get("shat", 0.0)).reshape(-1)[0]),
+        "q": float(np.asarray(geom.get("q", 1.0)).reshape(-1)[0]),
+        "eps": float(np.asarray(geom.get("eps", 0.0)).reshape(-1)[0]),
+        "kthnorm": float(np.asarray(geom.get("kthnorm", 1.0)).reshape(-1)[0]),
+        "Rref": float(np.abs(np.asarray(geom.get("Rref", 1.0)).reshape(-1)[0])),
+        "d2X": 1.0, # default
+        "signB": 1.0, # default
+    }
+    
+    # 3. extract species info (first species)
+    num_sp = input_data.get("gridsize", {}).get("number_of_species", 1)
+    species_keys = [k for k in input_data.keys() if k.startswith("species")][:num_sp]
+    if species_keys:
+        sp = input_data[species_keys[0]]
+        scalars.update({
+            "mas": float(sp.get("mass", 1.0)),
+            "tmp": float(sp.get("temp", 1.0)),
+            "de": float(sp.get("dens", 1.0)),
+            "signz": float(sp.get("z", 1.0)),
+            "rlt": float(sp.get("rlt", 0.0)),
+            "rln": float(sp.get("rln", 0.0)),
+        })
+        scalars["vthrat"] = float(np.sqrt(scalars["tmp"] / scalars["mas"]))
+    else:
+        scalars.update({
+            "mas": 1.0, "tmp": 1.0, "de": 1.0, "signz": 1.0, "rlt": 1.0, "rln": 1.0, "vthrat": 1.0
+        })
+
+    # 4. extract grid/scaling info
+    kxrh = np.loadtxt(os.path.join(directory, "kxrh"))
+    if kxrh.ndim > 1: kxrh = kxrh[0]
+    scalars["kxmax"] = float(np.max(np.abs(kxrh)))
+    
+    krho = np.loadtxt(os.path.join(directory, "krho"))
+    if krho.ndim > 1: krho = krho.T[0]
+    scalars["kymax"] = float(np.max(np.abs(krho / scalars["kthnorm"])))
+    
+    vpgr = np.loadtxt(os.path.join(directory, "vpgr.dat"))
+    if vpgr.ndim > 1: vpgr = vpgr[0]
+    scalars["dvp"] = float(np.mean(np.diff(vpgr))) if len(vpgr) > 1 else 1.0
+    
+    sgrid = np.loadtxt(os.path.join(directory, "sgrid"))
+    scalars["sgr_dist"] = float(np.abs(sgrid[1] - sgrid[0])) if len(sgrid) > 1 else 1.0
+
+    scalars["dgrid"] = 1.0
+    if os.path.exists(os.path.join(directory, "dgrid.dat")):
+        dg = np.loadtxt(os.path.join(directory, "dgrid.dat"))
+        scalars["dgrid"] = float(np.asarray(dg).reshape(-1)[0])
+    elif "dgrid" in geom:
+        scalars["dgrid"] = float(np.asarray(geom["dgrid"]).reshape(-1)[0])
+
+    scalars["tgrid"] = 1.0
+    if os.path.exists(os.path.join(directory, "tgrid.dat")):
+        tg = np.loadtxt(os.path.join(directory, "tgrid.dat"))
+        scalars["tgrid"] = float(np.asarray(tg).reshape(-1)[0])
+    elif "tgrid" in geom:
+        scalars["tgrid"] = float(np.asarray(geom["tgrid"]).reshape(-1)[0])
+    
+    # merge with runtime
+    scalars.update(runtime)
+    return scalars
+
+
 def load_geometry(directory):
     """Load geometry and physics parameters into JAX arrays."""
     geom = load_geom_dat_file(os.path.join(directory, "geom.dat"))

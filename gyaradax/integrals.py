@@ -2,7 +2,7 @@ import jax
 import jax.numpy as jnp
 from jax.scipy.special import i0, bessel_jn
 from einops import rearrange
-from typing import Dict, Tuple
+from typing import Dict, Tuple, Any
 
 # Ensure fp64
 jax.config.update("jax_enable_x64", True)
@@ -15,7 +15,9 @@ def j0(x):
     return jnp.where(jnp.abs(x) < 1e-10, 1.0, res)
 
 
-def geom_tensors(geometry: Dict[str, jnp.ndarray]) -> Dict[str, jnp.ndarray]:
+def geom_tensors(
+    geometry: Dict[str, jnp.ndarray], params: Any = None
+) -> Dict[str, jnp.ndarray]:
     """Expand geometry constants for broadcasting and compute Bessel terms."""
     geom_ = {}
     geom_["krho"] = rearrange(geometry["krho"], "y -> 1 1 1 1 1 y")
@@ -32,15 +34,21 @@ def geom_tensors(geometry: Dict[str, jnp.ndarray]) -> Dict[str, jnp.ndarray]:
     geom_["parseval"] = rearrange(geometry["parseval"], "y -> 1 1 1 1 1 y")
 
     for k in ["mas", "tmp", "de", "d2X", "signz", "signB"]:
-        val = geometry[k]
-        if val.ndim > 0:
-            val = val[0]
-        geom_[k] = jnp.reshape(val, (1, 1, 1, 1, 1, 1))
+        if params is not None and hasattr(params, k):
+            val = getattr(params, k)
+        else:
+            val = geometry[k]
+            if val.ndim > 0:
+                val = val[0]
+        geom_[k] = jnp.reshape(jnp.asarray(val, dtype=jnp.float64), (1, 1, 1, 1, 1, 1))
 
-    vthrat = geometry["vthrat"]
-    if vthrat.ndim > 0:
-        vthrat = vthrat[0]
-    vthrat = jnp.reshape(vthrat, (1, 1, 1, 1, 1, 1))
+    if params is not None and hasattr(params, "vthrat"):
+        vthrat = params.vthrat
+    else:
+        vthrat = geometry["vthrat"]
+        if vthrat.ndim > 0:
+            vthrat = vthrat[0]
+    vthrat = jnp.reshape(jnp.asarray(vthrat, dtype=jnp.float64), (1, 1, 1, 1, 1, 1))
 
     kxrh = rearrange(geometry["kxrh"], "x -> 1 1 1 1 x 1")
     little_g = rearrange(geometry["little_g"], "s three -> three 1 1 1 s 1 1")
@@ -147,10 +155,10 @@ def calculate_fluxes(
 
 
 def get_integrals(
-    df: jnp.ndarray, geometry: Dict[str, jnp.ndarray]
+    df: jnp.ndarray, geometry: Dict[str, jnp.ndarray], params: Any = None
 ) -> Tuple[jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]]:
     """Main interface for flux integrals."""
-    geom = geom_tensors(geometry)
+    geom = geom_tensors(geometry, params=params)
     phi = calculate_phi(geom, df)
     fluxes = calculate_fluxes(geom, df, phi)
     return phi, fluxes
