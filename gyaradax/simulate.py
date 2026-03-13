@@ -194,17 +194,17 @@ def simulate(
         t_block_end = time.time()
 
         block_time = t_block_end - t_block_start
-        steps_per_sec = steps_to_run / max(block_time, 1e-6)
+        steps_sec = steps_to_run / max(block_time, 1e-6)
 
-        perf = {"block_time": block_time, "steps_per_sec": steps_per_sec}
+        perf = {"block_time": block_time, "steps_per_sec": steps_sec}
         performance_metrics.append(perf)
 
         if verbose:
             flux = float(fluxes[1])
             growth = float(jnp.mean(state.last_growth_rate))
             print(
-                f"[{int(state.step):8d}/{total_steps}] | t: {float(state.time):1f} | "
-                f"eflux: {flux:4f} | growth:{growth:4f} | {steps_per_sec:4f} steps/s"
+                f"[{int(state.step):8d}/{total_steps}] | t: {float(state.time):.1f} | "
+                f"eflux: {flux:.4f} | growth: {growth:.4f} | {steps_sec:.4f} steps/s"
             )
 
     save_dumps_fn(output_dir, df, phi, fluxes, state, geometry, save_dumps=save_last)
