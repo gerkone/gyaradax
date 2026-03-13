@@ -1,7 +1,7 @@
 # `gyaradax`: Gyrokinetics in JAX
 
 <p align="center">
-  <img src="figs/gyaradax.png" width="500" alt="gyaradax Logo">
+  <img src="figs/gyaradax_small.png" width="500" alt="gyaradax Logo">
 </p>
 
 `gyaradax` is a high-performance JAX code for local flux-tube gyrokinetic simulations. It is based on the [GKW code](https://bitbucket.org/gkw/gkw). It provides a differentiable simulation core for the electrostatic, adiabatic-electron Vlasov-Poisson system.
