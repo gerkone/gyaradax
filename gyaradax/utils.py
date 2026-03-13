@@ -69,52 +69,79 @@ def poten_files(directory):
     return poten_files, np.array(timestep_slices) - 1
 
 
-def save_checkpoint(
-    path: str,
+def save_dumps(
+    output_dir: str,
     df: jnp.ndarray,
     phi: jnp.ndarray,
     fluxes: Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray],
     state: Any,
     geometry: Dict[str, jnp.ndarray],
-    **extra_data,
+    save_dumps: bool = True,
 ):
     """
-    Save a full simulation snapshot to a JAX-friendly .npz file.
-
-    Target variables include distribution functions, potential, fluxes,
-    and diagnostic metadata.
+    Handle simulation output. Saves heavy 5D distribution snapshots if requested
+    and appends diagnostic history to persistent files.
     """
-    # ensure directory exists
-    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    os.makedirs(output_dir, exist_ok=True)
 
-    # compute spectra for diagnostic convenience
-    # phi is [ns, nkx, nky]
+    # 1. Append diagnostics to history
+    # Compute spectra
     phi_sq = jnp.abs(phi) ** 2
-    # kx spectrum: sum over s and ky
     kx_spec = jnp.sum(phi_sq, axis=(0, 2))
-    # ky spectrum: sum over s and kx
     ky_spec = jnp.sum(phi_sq, axis=(0, 1))
 
-    checkpoint = {
-        "df": np.array(df),
-        "phi": np.array(phi),
-        "pflux": np.array(fluxes[0]),
-        "eflux": np.array(fluxes[1]),
-        "vflux": np.array(fluxes[2]),
-        "time": np.array(state.time),
-        "step": np.array(state.step),
-        "accumulated_norm_factor": np.array(state.accumulated_norm_factor),
-        "window_start_amp": np.array(state.window_start_amp),
-        "last_growth_rate": np.array(state.last_growth_rate),
+    diags = {
+        "fluxes": np.array([fluxes[0], fluxes[1], fluxes[2]]),
         "kx_spec": np.array(kx_spec),
         "ky_spec": np.array(ky_spec),
+        "time": np.array(state.time),
+        "growth": np.array(state.last_growth_rate),
+        "step": np.array(state.step),
     }
 
-    # add any extra diagnostics provided by the user
-    for k, v in extra_data.items():
-        checkpoint[k] = np.array(v)
+    # Internal helper to append data to an npz file
+    def _append_to_npz(filename, new_data):
+        path = os.path.join(output_dir, filename)
+        if os.path.exists(path):
+            with np.load(path) as data:
+                # Load existing data and append new step
+                updated = {
+                    k: np.append(data[k], [new_data[k]], axis=0) for k in data.files
+                }
+        else:
+            # Create new file with first entry
+            updated = {k: np.array([v]) for k, v in new_data.items()}
+        np.savez(path, **updated)
 
-    np.savez(path, **checkpoint)
+    # Note: We group these to avoid too many small files
+    # but the user requested "fluxes.npz, kyspec.npz, kxspec.npz, growth.npz"
+    _append_to_npz("fluxes.npz", {"fluxes": diags["fluxes"]})
+    _append_to_npz("kyspec.npz", {"ky_spec": diags["ky_spec"]})
+    _append_to_npz("kxspec.npz", {"kx_spec": diags["kx_spec"]})
+    _append_to_npz(
+        "growth.npz",
+        {"growth": diags["growth"], "time": diags["time"], "step": diags["step"]},
+    )
+
+    # 2. Save heavy snapshot if flag is set
+    if save_dumps:
+        ckpt_name = f"step_{int(state.step):06d}.npz"
+        path = os.path.join(output_dir, ckpt_name)
+        checkpoint = {
+            "df": np.array(df),
+            "phi": np.array(phi),
+            "pflux": np.array(fluxes[0]),
+            "eflux": np.array(fluxes[1]),
+            "vflux": np.array(fluxes[2]),
+            "time": np.array(state.time),
+            "step": np.array(state.step),
+            "accumulated_norm_factor": np.array(state.accumulated_norm_factor),
+            "window_start_amp": np.array(state.window_start_amp),
+            "last_growth_rate": np.array(state.last_growth_rate),
+            "kx_spec": diags["kx_spec"],
+            "ky_spec": diags["ky_spec"],
+        }
+        np.savez(path, **checkpoint)
 
 
 def load_checkpoint(path: str) -> Dict[str, Any]:

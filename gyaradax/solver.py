@@ -19,6 +19,39 @@ class GKParams:
     This dataclass mirrors the GKW 'control', 'gridsize', and 'species' namelists,
     handling numerical hyperparameters and physical constants required for the
     gyrokinetic Vlasov-Poisson system.
+
+    Attributes:
+        dt: Small time step for RK4 integration.
+        naverage: Number of steps between mode normalization and growth rate calculation.
+        disp_par: Parallel dissipation coefficient.
+        disp_vp: Parallel velocity space dissipation coefficient.
+        disp_x: Radial (kx) hyper-dissipation coefficient.
+        disp_y: Binormal (ky) hyper-dissipation coefficient.
+        idisp: Dissipation method selector.
+        drive_scale: Scaling factor for equilibrium drive terms.
+        norm_eps: Numerical floor for mode amplitude normalization.
+        non_linear: Toggle for nonlinear term inclusion.
+        enable_term_iii: Specifically enable/disable ExB advection.
+        rlt: Inverse temperature gradient scale length (R/LT).
+        rln: Inverse density gradient scale length (R/LN).
+        mas: Atomic mass of the kinetic species.
+        tmp: Temperature of the kinetic species.
+        de: Density of the kinetic species.
+        signz: Charge sign of the species.
+        vthrat: Thermal velocity ratio.
+        shat: Magnetic shear parameter.
+        q: Safety factor.
+        eps: Local aspect ratio.
+        kthnorm: Wavevector normalization factor.
+        Rref: Reference major radius.
+        d2X: Geometry-dependent scaling factor.
+        signB: Direction of the magnetic field.
+        dvp: Parallel velocity grid spacing.
+        sgr_dist: Field-line grid spacing.
+        kxmax: Maximum radial wavevector.
+        kymax: Maximum binormal wavevector.
+        dgrid: Global density scaling.
+        tgrid: Global temperature scaling.
     """
 
     # runtime controls
@@ -75,15 +108,14 @@ class GKState:
     Explicit diagnostic state used for large-step growth tracking and normalization.
 
     This state tracks metadata across 'naverage' intervals to calculate growth rates
-    and maintain normalization history. It is separate from the physical distribution
-    function to keep the gksolve interface functional.
+    and maintain normalization history.
 
     Attributes:
         time: Current simulation time.
-        step: Cumulative step count.
-        accumulated_norm_factor: Product of all normalization rescalings applied.
-        window_start_amp: Mode amplitude at the beginning of the current naverage window.
-        last_growth_rate: Calculated exponential growth rate from the previous window.
+        step: Cumulative small-step count.
+        accumulated_norm_factor: Product of all normalization rescalings applied per mode.
+        window_start_amp: Mode amplitudes at the beginning of the current diagnostic window.
+        last_growth_rate: Calculated exponential growth rate from the previous window per mode.
     """
 
     time: jnp.ndarray
@@ -100,19 +132,22 @@ class GKState:
         return cls(*leaves)
 
 
-def default_state() -> GKState:
+def default_state(nky: int = 1) -> GKState:
     """
     Construct a default diagnostic state initialized at simulation startup.
 
+    Args:
+        nky: Number of binormal modes to track.
+
     Returns:
-        GKState object with time and steps zeroed, and unit normalization factors.
+        GKState object with zeroed time/steps and unit initialization for amplitudes.
     """
     return GKState(
         time=jnp.array(0.0, dtype=jnp.float64),
         step=jnp.array(0, dtype=jnp.int32),
-        accumulated_norm_factor=jnp.array(1.0, dtype=jnp.float64),
-        window_start_amp=jnp.array(1.0, dtype=jnp.float64),
-        last_growth_rate=jnp.array(0.0, dtype=jnp.float64),
+        accumulated_norm_factor=jnp.ones(nky, dtype=jnp.float64),
+        window_start_amp=jnp.ones(nky, dtype=jnp.float64),
+        last_growth_rate=jnp.zeros(nky, dtype=jnp.float64),
     )
 
 
@@ -121,14 +156,12 @@ def gkparams_from_runtime(runtime: Dict[str, Any], **overrides) -> GKParams:
     Build GKParams from a GKW-compatible runtime-controls dictionary.
 
     Args:
-        runtime: Dictionary of parameters (dtim, naverage, etc.) typically parsed from input.dat.
+        runtime: Dictionary of parameters typically parsed from GKW input files.
         overrides: Keyword arguments to override specific params manually.
 
     Returns:
         Configured GKParams instance.
     """
-    # this helper is legacy and might not fill all physical params
-    # users should prefer gkparams_from_config or filling manually
     params_dict = {
         "dt": float(runtime.get("dtim", 0.01)),
         "naverage": int(runtime.get("naverage", 40)),
@@ -138,7 +171,7 @@ def gkparams_from_runtime(runtime: Dict[str, Any], **overrides) -> GKParams:
         "disp_y": float(runtime.get("disp_y", 0.1)),
         "non_linear": bool(runtime.get("non_linear", False)),
     }
-    # try to fill physical params if available in runtime dict
+    # fill physical and geometry params if available
     for k in [
         "rlt",
         "rln",
@@ -158,6 +191,8 @@ def gkparams_from_runtime(runtime: Dict[str, Any], **overrides) -> GKParams:
         "sgr_dist",
         "kxmax",
         "kymax",
+        "dgrid",
+        "tgrid",
     ]:
         if k in runtime:
             params_dict[k] = float(runtime[k])
@@ -180,7 +215,6 @@ def gkparams_from_input_dat(input_dat_path: str, **overrides) -> GKParams:
     """
     from gyaradax.geometry import load_scalars
 
-    # get the directory containing input.dat to load geom.dat as well
     directory = os.path.dirname(input_dat_path)
     scalars = load_scalars(directory)
     return gkparams_from_runtime(scalars, **overrides)
@@ -206,7 +240,7 @@ def gkparams_from_config(config: Any, **overrides) -> GKParams:
     Build GKParams from an OmegaConf configuration object.
 
     Args:
-        config: Configuration object with 'solver' and optionally 'physics' sections.
+        config: Configuration object with 'solver', 'physics', and 'geometry' sections.
         overrides: Manual parameter overrides.
 
     Returns:
@@ -223,6 +257,7 @@ def gkparams_from_config(config: Any, **overrides) -> GKParams:
         "disp_vp": float(getattr(solver_cfg, "disp_vp", 0.2)),
         "disp_x": float(getattr(solver_cfg, "disp_x", 0.1)),
         "disp_y": float(getattr(solver_cfg, "disp_y", 0.1)),
+        "idisp": int(getattr(solver_cfg, "idisp", 2)),
         "non_linear": bool(getattr(solver_cfg, "non_linear", False)),
         "enable_term_iii": bool(getattr(solver_cfg, "enable_term_iii", True)),
     }
@@ -304,7 +339,7 @@ def normalize_per_ky(
         params: Parameters for the normalization floor.
 
     Returns:
-        Tuple of (normalized_df, average_inv_factor, max_amplitude).
+        Tuple of (normalized_df, per_mode_inv_factor, per_mode_amplitude).
     """
     phi, _ = get_integrals(df, geometry, params=params, include_fluxes=False)
     amp_per_ky = mode_amplitude(phi, geometry, params.norm_eps)
@@ -312,9 +347,8 @@ def normalize_per_ky(
     safe_amp = jnp.where(amp_per_ky < params.norm_eps, 1.0, amp_per_ky)
     inv = 1.0 / safe_amp
     # apply normalization factor across velocity and space dimensions
-    normalized_df = df * jnp.reshape(inv, (1, 1, 1, 1, inv.shape[0]))
-    dominant_amp = jnp.max(safe_amp)
-    return normalized_df, jnp.mean(inv), dominant_amp
+    normalized_df = df * jnp.reshape(inv, (1, 1, 1, 1, -1))
+    return normalized_df, inv, safe_amp
 
 
 def prime_factors_smallereq_than(number: int, max_prime: int) -> bool:
@@ -751,13 +785,13 @@ def advance_state(
     state: GKState,
     params: GKParams,
     is_window_end: jnp.ndarray,
-    dominant_amp: jnp.ndarray,
-    norm_fac: jnp.ndarray,
+    per_mode_amp: jnp.ndarray,
+    per_mode_norm_fac: jnp.ndarray,
 ) -> GKState:
     """
     Internal metadata update for simulation diagnostics.
 
-    Calculates exponential growth rates (gamma = log(A2/A1)/dt) and tracks the
+    Calculates exponential growth rates (gamma = log(A2/A1)/dt) per mode and tracks the
     accumulated normalization factor across integration windows.
     """
     new_step = state.step + jnp.array(1, dtype=jnp.int32)
@@ -766,26 +800,26 @@ def advance_state(
     # growth rate calculation at normalization boundaries
     valid_growth = jnp.logical_and(
         state.window_start_amp > params.norm_eps,
-        dominant_amp > params.norm_eps,
+        per_mode_amp > params.norm_eps,
     )
     growth_dt = jnp.array(params.dt * params.naverage, dtype=jnp.float64)
 
     growth_rate = jnp.where(
         jnp.logical_and(is_window_end, valid_growth),
-        jnp.log(dominant_amp / state.window_start_amp) / growth_dt,
+        jnp.log(per_mode_amp / state.window_start_amp) / growth_dt,
         state.last_growth_rate,
     )
     # reset baseline for the next diagnostic window
     new_window_start_amp = jnp.where(
         is_window_end,
-        jnp.array(1.0, dtype=jnp.float64),
+        jnp.ones_like(state.window_start_amp),
         state.window_start_amp,
     )
 
     return GKState(
         time=new_time,
         step=new_step,
-        accumulated_norm_factor=state.accumulated_norm_factor * norm_fac,
+        accumulated_norm_factor=state.accumulated_norm_factor * per_mode_norm_fac,
         window_start_amp=new_window_start_amp,
         last_growth_rate=growth_rate,
     )
@@ -851,12 +885,12 @@ def gkstep_single(
     def _skip_norm(_: None):
         return (
             next_df_raw,
-            jnp.array(1.0, dtype=jnp.float64),
+            jnp.ones_like(state.accumulated_norm_factor),
             state.window_start_amp,
         )
 
     # conditional mode normalization
-    next_df, norm_factor, dominant_amp = jax.lax.cond(
+    next_df, norm_factor, current_amp = jax.lax.cond(
         do_normalize,
         _apply_norm,
         _skip_norm,
@@ -865,7 +899,7 @@ def gkstep_single(
 
     # final field calculation for output
     phi, fluxes = get_integrals(next_df, geometry, params=params)
-    next_state = advance_state(state, params, do_normalize, dominant_amp, norm_factor)
+    next_state = advance_state(state, params, is_window_end, current_amp, norm_factor)
     return next_df, (phi, fluxes), next_state
 
 
@@ -876,7 +910,9 @@ def gksolve(
     state: GKState,
     n_steps: int = 1,
 ) -> Tuple[
-    jnp.ndarray, Tuple[jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]], GKState
+    jnp.ndarray,
+    Tuple[jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]],
+    GKState,
 ]:
     """
     Gyrokinetics solver forward.
@@ -908,165 +944,3 @@ def gksolve(
     phi, fluxes = get_integrals(final_df, geometry, params=params)
 
     return final_df, (phi, fluxes), final_state
-
-
-def simulate(
-    config_path: str,
-    output_dir: str = "outputs",
-    checkpoint_interval: Optional[int] = None,
-    resume_from: Optional[str] = None,
-    resume_k_file: Optional[str] = None,
-    verbose: bool = True,
-    **params_overrides,
-) -> Tuple[jnp.ndarray, GKState]:
-    """
-    High-level entry point to run a simulation from a YAML config.
-    Supports resuming from .npz checkpoints or specific GKW K* files.
-    """
-    from gyaradax.geometry import load_geometry
-    from gyaradax.utils import (
-        save_checkpoint,
-        load_checkpoint,
-        load_gkw_k_dump,
-        read_gkw_dump_time,
-    )
-
-    # 1. Load config and params
-    cfg = load_config(config_path)
-
-    # Extract simulation-level overrides before building GKParams
-    total_steps = int(
-        params_overrides.pop("n_steps", getattr(cfg.solver, "n_steps", 400))
-    )
-    interval = checkpoint_interval or int(
-        params_overrides.pop(
-            "checkpoint_interval", getattr(cfg.solver, "dump_interval", 40)
-        )
-    )
-
-    params = gkparams_from_config(cfg, **params_overrides)
-    data_dir = cfg.run.data_dir
-    geometry = load_geometry(data_dir)
-
-    # Use naverage as default interval if not specified
-    interval = interval or params.naverage
-
-    # 2. Determine initial condition
-    state = default_state()
-    if resume_from:
-        if verbose:
-            print(f"Resuming from checkpoint: {resume_from}")
-        ckpt = load_checkpoint(resume_from)
-        df = ckpt["df"]
-        state = GKState(
-            time=ckpt["time"],
-            step=ckpt["step"],
-            accumulated_norm_factor=ckpt["accumulated_norm_factor"],
-            window_start_amp=ckpt["window_start_amp"],
-            last_growth_rate=ckpt["last_growth_rate"],
-        )
-    elif resume_k_file:
-        if verbose:
-            print(f"Resuming from K-file: {resume_k_file}")
-        res = (
-            len(geometry["intvp"]),
-            len(geometry["intmu"]),
-            len(geometry["ints"]),
-            len(geometry["kxrh"]),
-            len(geometry["krho"]),
-        )
-        df = load_gkw_k_dump(resume_k_file, res)
-        # Attempt to load time from .dat file
-        dat_path = resume_k_file + ".dat"
-        if os.path.exists(dat_path):
-            t_start = read_gkw_dump_time(dat_path)
-            state = GKState(
-                time=jnp.array(t_start, dtype=jnp.float64),
-                step=jnp.array(0, dtype=jnp.int32),
-                accumulated_norm_factor=jnp.array(1.0, dtype=jnp.float64),
-                window_start_amp=jnp.array(1.0, dtype=jnp.float64),
-                last_growth_rate=jnp.array(0.0, dtype=jnp.float64),
-            )
-            if verbose:
-                print(f"Loaded start time from {dat_path}: {t_start:.4f}")
-    else:
-        if verbose:
-            print("WARNING: Initializing new simulation from experimental init_f.")
-            print("         This profile may not correctly reproduce GKW seed parity.")
-        df = init_f(geometry, norm_eps=params.norm_eps)
-    os.makedirs(output_dir, exist_ok=True)
-
-    # Initial field calculation
-    phi, fluxes = get_integrals(df, geometry, params=params)
-    curr_df, curr_state = df, state
-
-    # History of diagnostics
-    all_diagnostics = []
-
-    # 4. Simulation loop
-    if verbose:
-        print(f"Starting simulation: total_steps={total_steps}, interval={interval}")
-        print(
-            f"Initial state: step={int(curr_state.step)}, time={float(curr_state.time):.4f}"
-        )
-
-    from gyaradax.diag import get_diagnostics
-
-    start_step = int(curr_state.step)
-    for _ in range(start_step, total_steps, interval):
-        # Save snapshot checkpoint
-        ckpt_name = f"step_{int(curr_state.step):06d}.npz"
-        save_checkpoint(
-            os.path.join(output_dir, ckpt_name),
-            curr_df,
-            phi,
-            fluxes,
-            curr_state,
-            geometry,
-        )
-
-        # Run chunk
-        steps_to_run = min(interval, total_steps - int(curr_state.step))
-        if steps_to_run <= 0:
-            break
-
-        curr_df, (phi, fluxes), curr_state = gksolve(
-            curr_df, geometry, params, curr_state, n_steps=steps_to_run
-        )
-
-        # Compute and accumulate diagnostics only at the block boundary
-        d = get_diagnostics(phi, fluxes, curr_state)
-        all_diagnostics.append(d)
-
-        if verbose:
-            eflux = float(fluxes[1])
-            growth = float(curr_state.last_growth_rate)
-            print(
-                f"Step {int(curr_state.step):06d} | Time {float(curr_state.time):.4f} | Heat Flux {eflux:.4e} | Growth {growth:.4e}"
-            )
-
-    # Final save snapshot
-    ckpt_name = f"step_{int(curr_state.step):06d}.npz"
-    save_checkpoint(
-        os.path.join(output_dir, ckpt_name), curr_df, phi, fluxes, curr_state, geometry
-    )
-
-    # Save consolidated history
-    if all_diagnostics:
-        history_merged = {}
-        for key in all_diagnostics[0].keys():
-            history_merged[key] = jnp.stack([d[key] for d in all_diagnostics])
-
-        np.savez(
-            os.path.join(output_dir, "history.npz"),
-            **{k: np.array(v) for k, v in history_merged.items()},
-        )
-        if verbose:
-            print(
-                f"Saved simulation history to {os.path.join(output_dir, 'history.npz')}"
-            )
-
-    if verbose:
-        print("Simulation complete.")
-
-    return curr_df, curr_state

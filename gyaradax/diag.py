@@ -94,7 +94,12 @@ def get_diagnostics(
 ) -> Dict[str, jnp.ndarray]:
     """
     Calculate high-level diagnostics from current field and state.
-    Returns a dictionary of scalars and 1D spectra.
+    Returns a dictionary containing:
+        - fluxes: pflux, eflux, vflux (scalars)
+        - kx_spec: 1D spectrum over kx (summed over s, ky)
+        - ky_spec: 1D spectrum over ky (summed over s, kx)
+        - ky_growth: 1D growth rate per ky mode (from state)
+        - time, step: Scalars from state
     """
     phi_sq = jnp.abs(phi) ** 2
     # kx spectrum: sum over s and ky
@@ -108,7 +113,7 @@ def get_diagnostics(
         "vflux": fluxes[2],
         "kx_spec": kx_spec,
         "ky_spec": ky_spec,
+        "ky_growth": state.last_growth_rate,
         "time": state.time,
         "step": state.step,
-        "growth": state.last_growth_rate,
     }

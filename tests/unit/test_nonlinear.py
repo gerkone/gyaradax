@@ -64,14 +64,15 @@ def test_iteration_parity(
     end_df_ref = load_gkw_k_dump(f"{nonlin_dir}/{end_name}", nonlin_shape)
 
     params = gkparams_from_input_dat(f"{nonlin_dir}/input.dat", non_linear=True)
+    nky = len(nonlin_geom["krho"])
     state = GKState(
         time=jnp.array(
             _read_dump_time(f"{nonlin_dir}/{start_name}.dat"), dtype=jnp.float64
         ),
         step=jnp.array(0, dtype=jnp.int32),
-        accumulated_norm_factor=jnp.array(1.0, dtype=jnp.float64),
-        window_start_amp=jnp.array(1.0, dtype=jnp.float64),
-        last_growth_rate=jnp.array(0.0, dtype=jnp.float64),
+        accumulated_norm_factor=jnp.ones(nky, dtype=jnp.float64),
+        window_start_amp=jnp.ones(nky, dtype=jnp.float64),
+        last_growth_rate=jnp.zeros(nky, dtype=jnp.float64),
     )
 
     pred_df, _, _ = jax.jit(gksolve, static_argnums=(4,))(
@@ -98,7 +99,7 @@ def test_nonlinear_scaling(nonlin_geom, nonlin_shape):
 
     params_nl = GKParams(dt=0.01, non_linear=True, enable_term_iii=True)
     params_lin = GKParams(dt=0.01, non_linear=False)
-    state = default_state()
+    state = default_state(nky=len(nonlin_geom["krho"]))
 
     def get_nl_part(amp):
         df = amp * df_rand

@@ -1,7 +1,7 @@
 import os
 import shutil
 import numpy as np
-from gyaradax.solver import simulate
+from gyaradax import simulate
 
 
 def test_simulate_logic():
@@ -33,9 +33,7 @@ def test_simulate_logic():
         print(f"Resume parity relative difference: {diff:.2e}")
         assert np.allclose(df1_np, df2_np, rtol=1e-5, atol=1e-8)
     else:
-        print(
-            "Skipping parity check due to NaNs in baseline run (as expected per disclaimer)."
-        )
+        print("Skipping parity check due to NaNs in baseline run.")
 
     print("\n--- Test 3: Resume from K-file ---")
     # Using a known dump from iteration_13

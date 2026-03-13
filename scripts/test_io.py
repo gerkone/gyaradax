@@ -1,6 +1,7 @@
 import os
+import shutil
 import jax.numpy as jnp
-from gyaradax.utils import save_checkpoint, load_checkpoint
+from gyaradax.utils import save_dumps, load_checkpoint
 from gyaradax.solver import GKState
 
 
@@ -21,10 +22,14 @@ def test_io_roundtrip():
         last_growth_rate=jnp.array(0.05, dtype=jnp.float64),
     )
 
-    test_path = "test_checkpoint.npz"
+    test_dir = "test_io_out"
+    if os.path.exists(test_dir):
+        shutil.rmtree(test_dir)
+
     try:
-        save_checkpoint(test_path, df, phi, fluxes, state, geometry={})
-        loaded = load_checkpoint(test_path)
+        save_dumps(test_dir, df, phi, fluxes, state, geometry={}, save_dumps=True)
+        ckpt_path = os.path.join(test_dir, f"step_{int(state.step):06d}.npz")
+        loaded = load_checkpoint(ckpt_path)
 
         # assertions
         assert jnp.allclose(df, loaded["df"]), "DF mismatch"
@@ -34,10 +39,14 @@ def test_io_roundtrip():
         assert "kx_spec" in loaded, "KX spectrum missing"
         assert "ky_spec" in loaded, "KY spectrum missing"
 
+        # check persistent files
+        assert os.path.exists(os.path.join(test_dir, "fluxes.npz"))
+        assert os.path.exists(os.path.join(test_dir, "growth.npz"))
+
         print("I/O Roundtrip test passed.")
     finally:
-        if os.path.exists(test_path):
-            os.remove(test_path)
+        if os.path.exists(test_dir):
+            shutil.rmtree(test_dir)
 
 
 if __name__ == "__main__":

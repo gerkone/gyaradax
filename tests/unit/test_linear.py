@@ -65,7 +65,7 @@ def test_init_f_contract(lin_geom, lin_shape, normalize):
 def test_gksolve_contract(lin_geom, lin_shape):
     prev_df = jnp.zeros(lin_shape, dtype=jnp.complex128)
     params = GKParams(dt=0.01, naverage=40)
-    state = default_state()
+    state = default_state(nky=len(lin_geom["krho"]))
 
     next_df, (phi, fluxes), _ = gksolve(prev_df, lin_geom, params, state, n_steps=1)
     pflux, eflux, vflux = fluxes
@@ -75,13 +75,12 @@ def test_gksolve_contract(lin_geom, lin_shape):
     assert all(
         isinstance(f, jnp.ndarray) and f.shape == () for f in [pflux, eflux, vflux]
     )
-    
 
 
 def test_gksolve_zero_input_invariance(lin_geom, lin_shape):
     prev_df = jnp.zeros(lin_shape, dtype=jnp.complex128)
     params = GKParams(dt=0.01, naverage=40)
-    state = default_state()
+    state = default_state(nky=len(lin_geom["krho"]))
 
     next_df, (phi, fluxes), next_state = _step_jitted(prev_df, lin_geom, params, state)
 
