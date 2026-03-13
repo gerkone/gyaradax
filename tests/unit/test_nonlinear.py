@@ -9,14 +9,14 @@ from gyaradax.solver import (
     GKState,
     default_state,
     gkparams_from_input_dat,
-    gksolve_with_state,
+    gksolve,
 )
 from gyaradax.utils import load_gkw_k_dump
 
 
 @jax.jit
 def _step_jitted(prev_df, geom, params, state):
-    return gksolve_with_state(prev_df, geom, params, state)
+    return gksolve(prev_df, geom, params, state, n_steps=1)
 
 
 def _read_dump_time(dat_path: str) -> float:
@@ -74,15 +74,9 @@ def test_iteration_parity(
         last_growth_rate=jnp.array(0.0, dtype=jnp.float64),
     )
 
-    def _scan_step(carry, _):
-        df, st = carry
-        next_df, _, next_st = gksolve_with_state(df, nonlin_geom, params, st)
-        return (next_df, next_st), None
-
-    run_traj = jax.jit(
-        lambda d0, s0: jax.lax.scan(_scan_step, (d0, s0), None, length=steps)[0]
+    pred_df, _, _ = jax.jit(gksolve, static_argnums=(4,))(
+        start_df, nonlin_geom, params, state, steps
     )
-    pred_df, _ = run_traj(start_df, state)
 
     # validate subset of modes for parity
     mode_label = np.asarray(nonlin_geom["mode_label"], dtype=np.int32)

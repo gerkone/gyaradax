@@ -1,0 +1,41 @@
+run:
+  name: iteration_13_Lin
+  data_dir: /restricteddata/ukaea/gyrokinetics/raw/iteration_13_Lin
+solver:
+  dt: 0.01
+  naverage: 40
+  disp_par: 1.0
+  disp_vp: 0.2
+  disp_x: 0.1
+  disp_y: 0.1
+  idisp: 2
+  non_linear: false
+  enable_term_iii: true
+physics:
+  rlt: 10.173595669502436
+  rln: 2.6087803694867335
+  mas: 1.0
+  tmp: 1.0
+  de: 1.0
+  signz: 1.0
+  vthrat: 1.0
+  dgrid: 1.0
+  tgrid: 1.0
+geometry:
+  shat: 3.07514
+  q: 4.56844
+  eps: 0.19
+  kthnorm: 3.16004
+  Rref: 100.0
+  d2X: 1.0
+  signB: 1.0
+  dvp: 0.1875
+  sgr_dist: 0.0625
+  kxmax: 8.87631
+  kymax: 0.4430323666789028
+grid:
+  nvpar: 32
+  nmu: 8
+  ns: 16
+  nkx: 85
+  nky: 32

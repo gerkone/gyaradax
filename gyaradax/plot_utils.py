@@ -1,19 +1,24 @@
-"""Qualitative visualization functions for n-dimensional gyrokinetics data in JAX."""
+"""Publication-quality visualization functions for gyrokinetics data."""
 
-from typing import List, Optional, Union
-
-import matplotlib
+from typing import List, Optional, Union, Tuple
 import matplotlib.pyplot as plt
 import numpy as np
 import jax.numpy as jnp
 
-# Standard labels for gyrokinetics dimensions in this JAX port: (vpar, mu, s, kx, ky)
-GK_LABELS = {
-    6: [r"t", r"v_{\parallel}", r"\mu", r"s", r"k_x", r"k_y"],
-    5: [r"v_{\parallel}", r"\mu", r"s", r"k_x", r"k_y"],
-    4: [r"v_{\parallel}", r"s", r"k_x", r"k_y"],
-    3: [r"s", r"k_x", r"k_y"],
-}
+# Standard styling for scientific plots
+plt.rcParams.update(
+    {
+        "font.size": 12,
+        "axes.labelsize": 14,
+        "axes.titlesize": 14,
+        "xtick.labelsize": 12,
+        "ytick.labelsize": 12,
+        "legend.fontsize": 12,
+        "figure.titlesize": 16,
+        "lines.linewidth": 2,
+        "grid.alpha": 0.3,
+    }
+)
 
 
 def force_aspect(ax: plt.Axes, aspect: float = 1.0):
@@ -25,119 +30,125 @@ def force_aspect(ax: plt.Axes, aspect: float = 1.0):
     ax.set_aspect(abs((extent[1] - extent[0]) / (extent[3] - extent[2])) / aspect)
 
 
+def plot_flux_trace(
+    time: np.ndarray,
+    fluxes: Union[np.ndarray, Tuple[np.ndarray, ...]],
+    labels: List[str] = ["Particle", "Heat", "Momentum"],
+    ref_time: Optional[np.ndarray] = None,
+    ref_fluxes: Optional[Union[np.ndarray, Tuple[np.ndarray, ...]]] = None,
+    title: str = "Flux Evolution",
+) -> plt.Figure:
+    """Plot flux traces over time with optional reference comparison."""
+    if isinstance(fluxes, tuple):
+        fluxes = np.stack(fluxes)
+    if ref_fluxes is not None and isinstance(ref_fluxes, tuple):
+        ref_fluxes = np.stack(ref_fluxes)
+
+    n_flux = fluxes.shape[0]
+    fig, axes = plt.subplots(n_flux, 1, figsize=(10, 3 * n_flux), sharex=True)
+    if n_flux == 1:
+        axes = [axes]
+
+    for i in range(n_flux):
+        ax = axes[i]
+        ax.plot(time, fluxes[i], label="Gyaradax", color="tab:blue")
+        if ref_fluxes is not None and ref_time is not None:
+            ax.plot(ref_time, ref_fluxes[i], "k--", label="Reference", alpha=0.7)
+
+        ax.set_ylabel(labels[i])
+        ax.grid(True)
+        if i == 0:
+            ax.legend()
+
+    axes[-1].set_xlabel("Time $[v_{th}/R]$")
+    fig.suptitle(title)
+    fig.tight_layout()
+    return fig
+
+
+def plot_spectra(
+    kx: np.ndarray,
+    ky: np.ndarray,
+    phi: jnp.ndarray,
+    title: str = "Potential Spectra",
+) -> plt.Figure:
+    """Plot kx and ky spectra summed/averaged over other dimensions."""
+    phi_sq = np.abs(np.array(phi)) ** 2
+    # phi is [ns, nkx, nky]
+    kx_spec = np.sum(phi_sq, axis=(0, 2))
+    ky_spec = np.sum(phi_sq, axis=(0, 1))
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
+
+    ax1.semilogy(ky, ky_spec, "o-", color="tab:red")
+    ax1.set_xlabel(r"$k_y \rho_{ref}$")
+    ax1.set_ylabel(r"$\sum_{s, k_x} |\phi|^2$")
+    ax1.set_title("$k_y$ Spectrum")
+    ax1.grid(True)
+
+    ax2.semilogy(kx, kx_spec, "o-", color="tab:green")
+    ax2.set_xlabel(r"$k_x \rho_{ref}$")
+    ax2.set_ylabel(r"$\sum_{s, k_y} |\phi|^2$")
+    ax2.set_title("$k_x$ Spectrum")
+    ax2.grid(True)
+
+    fig.suptitle(title)
+    fig.tight_layout()
+    return fig
+
+
+def plot_mode_growth(
+    time: np.ndarray,
+    phi_hist: np.ndarray,
+    ky_indices: List[int],
+    ky_values: np.ndarray,
+    ds: float = 1.0,
+    title: str = "Mode Growth Analysis",
+) -> plt.Figure:
+    """Plot log-amplitude of specific ky modes over time."""
+    # phi_hist: [ntime, ns, nkx, nky]
+    fig, ax = plt.subplots(figsize=(10, 6))
+
+    for idx in ky_indices:
+        # L2 amplitude over (s, kx) for this ky
+        amp = np.sqrt(ds * np.sum(np.abs(phi_hist[..., idx]) ** 2, axis=(1, 2)))
+        ax.plot(
+            time,
+            np.log(np.maximum(amp, 1e-20)),
+            label=f"$k_y \rho = {ky_values[idx]:.3f}$",
+        )
+
+    ax.set_xlabel("Time $[v_{th}/R]$")
+    ax.set_ylabel("$\log(\mathrm{Amplitude})$")
+    ax.set_title(title)
+    ax.legend(bbox_to_anchor=(1.05, 1), loc="upper left")
+    ax.grid(True)
+    fig.tight_layout()
+    return fig
+
+
 def plot_nd(
     x: Union[np.ndarray, jnp.ndarray],
-    y: Optional[Union[np.ndarray, jnp.ndarray]] = None,
     labels: Optional[List[str]] = None,
     cmap: str = "RdBu_r",
-    aggregate: str = "mean",
-    aspect: float = 1.0,
-    mark_bad: bool = False,
     title: Optional[str] = None,
-    **kwargs,
 ):
-    """
-    Generic n-dimensional plotting function for JAX/NumPy.
-    Creates a grid of 2D slices for all combinations of dimensions.
-    If 'y' is provided, shows side-by-side comparison.
-    """
-    if hasattr(x, "device_buffer"):  # Check for JAX array
-        x = np.array(x)
-    if y is not None and hasattr(y, "device_buffer"):
-        y = np.array(y)
-
-    # Handle complex data by taking magnitude
-    if np.iscomplexobj(x):
-        x = np.abs(x)
-    if y is not None and np.iscomplexobj(y):
-        y = np.abs(y)
-
+    """Generic n-dimensional slice visualizer."""
+    x = np.abs(np.array(x))
     ndim = x.ndim
-    if ndim == 0:
-        return None
-
     if labels is None:
-        labels = GK_LABELS.get(ndim, [f"d_{i}" for i in range(ndim)])
+        labels = [f"d_{i}" for i in range(ndim)]
 
-    # Get all pairs of dimensions
-    comb_list = []
+    fig, axes = plt.subplots(1, ndim, figsize=(3 * ndim, 3))
+    if ndim == 1:
+        axes = [axes]
+
     for i in range(ndim):
-        for j in range(i + 1, ndim):
-            comb_list.append([i, j])
-
-    fig, axes = plt.subplots(
-        ndim,
-        ndim,
-        figsize=(ndim * (3.5 if y is not None else 2), ndim * 1.8),
-        squeeze=False,
-    )
+        other_dims = tuple(o for o in range(ndim) if o != i)
+        axes[i].plot(x.mean(axis=other_dims))
+        axes[i].set_title(f"Mean vs {labels[i]}")
 
     if title:
-        fig.suptitle(title, fontsize=16)
-
-    c_map = matplotlib.colormaps[cmap].copy()
-    c_map.set_bad("gray")
-
-    for i in range(ndim):
-        for j in range(ndim):
-            ax = axes[i, j]
-            if [i, j] not in comb_list:
-                ax.remove()
-                continue
-
-            other_dims = tuple(o for o in range(ndim) if o != i and o != j)
-
-            def get_2d_slice(data):
-                # mean/std/slice over the 'other' spatial dims
-                if aggregate == "mean":
-                    res = data.mean(axis=other_dims)
-                elif aggregate == "std":
-                    res = data.std(axis=other_dims)
-                elif aggregate == "slice":
-                    slices = [slice(None)] * ndim
-                    for o in other_dims:
-                        slices[o] = data.shape[o] // 2
-                    res = data[tuple(slices)]
-                else:
-                    res = data.mean(axis=other_dims)
-
-                if mark_bad:
-                    s = data.std(axis=other_dims)
-                    res = np.where(s == 0, np.nan, res)
-                return res
-
-            xx = get_2d_slice(x)
-
-            if y is not None:
-                yy = get_2d_slice(y)
-                vmin = min(np.nanmin(xx), np.nanmin(yy))
-                vmax = max(np.nanmax(xx), np.nanmax(yy))
-
-                spacer = np.full((xx.shape[0], max(1, xx.shape[1] // 15)), np.nan)
-                display_img = np.concatenate([xx, spacer, yy], axis=1)
-                ax.matshow(display_img, cmap=c_map, vmin=vmin, vmax=vmax)
-            else:
-                ax.matshow(xx, cmap=c_map)
-
-            # Y-label on the first plot of each row
-            if j == i + 1 or (ndim == 2 and j == 1):
-                ax.set_ylabel(rf"${labels[i]}$", fontsize=14, labelpad=2)
-            # X-label on the bottom plots
-            if i == j - 1 or (ndim == 2 and i == 0):
-                ax.set_xlabel(rf"${labels[j]}$", fontsize=14, labelpad=2)
-
-            ax.set_xticks([])
-            ax.set_yticks([])
-
-            force_aspect(ax, aspect=aspect * (2.1 if y is not None else 1.0))
-
-    plt.subplots_adjust(
-        left=0.05,
-        right=0.95,
-        bottom=0.05,
-        top=0.90 if title else 0.95,
-        wspace=0.1,
-        hspace=0.1,
-    )
-
+        fig.suptitle(title)
+    fig.tight_layout()
     return fig

@@ -127,19 +127,18 @@ This is the diagnostic identity used for growth/frequency validation tests in V1
 ### Added for linear V1
 
 - `gksolver.py`
-  - `gksolve(prev_df, geometry, params, state)`
-    - Required interface: returns `next_df, (phi, fluxes)`.
-  - `gksolve_with_state(...)`
-    - Same physics step, additionally returns explicit diagnostic state.
+  - `gksolve(df, geometry, params, state, n_steps=1)`
+    - Required interface: returns `final_df, (phi, fluxes), final_state`.
   - `GKParams`, `GKState`, `default_state`.
-  - Utility functions:
+  - Diagnostic functions moved to `diag.py`:
     - `kx0_mode_columns`
     - `project_all_modes_to_kx0`
 
 ## 6) Linear V1 update model implemented
 
 - Time integrator:
-  - One explicit RK4 small step per call (`dt=0.01` default).
+  - One explicit RK4 small step per internal call (`dt=0.01` default).
+  - High-level `gksolve` uses `jax.lax.scan` for multi-step execution.
 
 - RHS structure (linear-only V1):
   - Spectral damping term in `(kx, ky)` using configured dissipation coefficients.
@@ -147,7 +146,7 @@ This is the diagnostic identity used for growth/frequency validation tests in V1
   - Uses geometry tensors (`vpgr`, `mugr`, `bn`, `rln`, `rlt`) for velocity-space drive weighting.
 
 - Post-step normalization:
-  - Always applied.
+  - Applied at large-step boundaries (`naverage`).
   - Per-`ky` mode normalization based on `phi` amplitude.
   - Explicit state keeps cumulative normalization factor and window growth tracker.
 
@@ -195,7 +194,7 @@ Notes:
   - `pos_par_grid_class[s,kx,ky]` in `{ -2, -1, 0, 1, 2 }`, matching GKW open-boundary stencil classes for term-I / term-VII differencing.
 
 - Initialization helper added in `gksolver.py`:
-  - `init_df_cosine2(...)` is a JAX port of `init_fdis` branch `finit='cosine2'` for this run scope.
+  - `init_f(...)` is a JAX port of `init_fdis` branch `finit='cosine2'` for this run scope.
   - Implements zonal suppression for mode-box (`ky=0` seeded to zero when `nky>1`).
   - Optional startup normalization reproduces GKW per-toroidal-mode behavior:
     - uses `phi`-based mode amplitude `sqrt(ds * sum_{s,kx}|phi|^2)`,
@@ -204,7 +203,7 @@ Notes:
 
 - Phase-1 tests added to `test_gksolver_linear.py`:
   - geometry/connectivity key and shape checks;
-  - `init_df_cosine2` contract + zonal suppression check;
+  - `init_f` contract + zonal suppression check;
   - startup normalization check (`|phi|` mode amplitude equals 1 for non-zonal modes).
 
 ## 10) Phase 2 completion notes (active linear ES terms)
@@ -232,7 +231,7 @@ Notes:
   - Precomputed parallel shift maps (`s_shift`, `kx_shift`, `valid_shift`).
 
 - Normalization cadence fix:
-  - `gksolve_with_state` now applies per-`ky` normalization only at large-step boundaries
+  - `gksolve` (via `_step`) now applies per-`ky` normalization only at large-step boundaries
     (`step % naverage == 0`), matching GKW’s `normalise_after_timestep` cadence.
   - No normalization on intermediate small steps.
 

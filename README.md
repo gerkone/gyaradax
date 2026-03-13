@@ -1,66 +1,65 @@
-# Gyaradax: JAX-Native Gyrokinetics Solver
+# Gyaradax: JAX-accelerated Gyrokinetics
 
-Gyaradax is a high-performance, differentiable, and JAX-native port of the GKW gyrokinetics code. It is designed for researchers who require a modular, easily extensible, and GPU-accelerated environment for plasma turbulence simulations.
+Gyaradax is a high-performance, JAX-idiomatic scientific library for local flux-tube gyrokinetic simulations. It is designed for strict numerical precision (fp64) and functional composition.
 
 ## Key Features
+- **JAX-Native:** Fully compatible with `jit`, `vmap`, and `grad`.
+- **High Precision:** Enforced `fp64` (double precision) across all calculations.
+- **Efficient I/O:** Snapshot checkpointing using compressed `.npz` files.
+- **Flexible Initialization:** Supports starting from analytical profiles or resuming from GKW reference data.
+- **Automated Workflows:** High-level `simulate` function for running full trajectories from YAML configurations.
 
-- **JAX-Native:** Entirely written in JAX for automatic differentiation, JIT compilation, and seamless GPU/TPU acceleration.
-- **GKW Parity:** Rigorously verified against GKW reference trajectories (e.g., `iteration_13`) for both linear and nonlinear regimes.
-- **Adiabatic Electron Model:** Optimized for electrostatic adiabatic-electron physics with support for nonlinear E x B advection (Term III).
-- **Stateful API:** Purely functional core interface (`gksolve`) compatible with JAX transformations like `scan`, `vmap`, and `grad`.
-- **High-Precision:** Built from the ground up for `float64` precision to meet scientific computing standards.
-
-## Project Structure
-
-- `gyaradax/`: Core library package.
-  - `solver.py`: Core time integration and RHS assembly (RK4, stencils).
-  - `integrals.py`: JAX implementation of phase-space flux integrals and potentials.
-  - `geometry.py`: GKW input/geometry parsing and connectivity mapping.
-  - `utils.py`: Data loading and I/O utilities for GKW dumps.
-- `tests/unit/`: Comprehensive test suite verifying physics, shapes, and parity.
-- `docs/`: Detailed technical documentation.
-
-## Getting Started
-
-### Installation
-
-Ensure you have a modern JAX environment set up (CUDA recommended for large grids).
-
+## Installation
 ```bash
-# Example environment setup
-pip install jax[cuda] einops numpy
-export PYTHONPATH=$PYTHONPATH:.
+pip install -r requirements.txt
 ```
 
-### Basic Usage
+## Running a Simulation
+
+The easiest way to run a simulation is using a YAML configuration file:
 
 ```python
-import jax
-from gyaradax import gksolve, load_geometry, default_state, GKParams
+from gyaradax import simulate
 
-# Load geometry from a GKW run directory
-geom = load_geometry("path/to/gkw_run")
-
-# Initialize parameters and state
-params = GKParams(dt=0.01, naverage=40, non_linear=True)
-state = default_state()
-
-# Your distribution function (vpar, mu, s, kx, ky)
-df = jax.numpy.zeros((32, 8, 16, 85, 32), dtype=jax.numpy.complex128)
-
-# Single step update
-next_df, (phi, fluxes) = gksolve(df, geom, params, state)
+df, final_state = simulate(
+    "configs/iteration_13.yaml",
+    output_dir="outputs",
+    checkpoint_interval=40,
+    n_steps=400,
+    verbose=True
+)
 ```
 
-## Documentation
+### Resuming Simulations
+Gyaradax supports resuming from both internal checkpoints and GKW reference files:
 
-- [Physics & Numerical Implementation](docs/PHYSICS.md): Details on the implemented gyrokinetic equations and finite-difference schemes.
-- [Parity Notes](GKW.md): Historical notes on the porting process and GKW verification snapshots.
+```python
+# Resume from an .npz checkpoint
+simulate("configs/iteration_13.yaml", resume_from="outputs/step_000040.npz")
 
-## Testing
+# Resume from a GKW K-file (e.g., dump '100')
+simulate("configs/iteration_13.yaml", resume_k_file="/path/to/gkw/run/100")
+```
 
-Run the full suite using pytest:
+## Configuration
+
+Configurations are managed via YAML files. You can generate a configuration from a GKW directory using the provided script:
 
 ```bash
-pytest tests/unit
+python scripts/gkw_to_yaml.py /path/to/gkw_run config.yaml
 ```
+
+### Configuration Schema
+- `solver`: Time-step (`dt`), total steps (`n_steps`), and dissipation controls.
+- `physics`: Species-level gradients (`rlt`, `rln`) and masses.
+- `geometry`: Local magnetic field and metric tensor coefficients.
+- `grid`: Resolution for all 5 dimensions.
+
+## Diagnostics & Plotting
+
+The `gyaradax.plot_utils` module provides publication-quality visualization tools:
+- `plot_flux_trace`: Temporal evolution of heat and particle fluxes.
+- `plot_spectra`: Spectral density analysis in $k_x$ and $k_y$.
+- `plot_mode_growth`: Detailed growth rate analysis for specific modes.
+
+Refer to `notebooks/linear_v1_inspection.ipynb` for interactive examples.

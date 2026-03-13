@@ -10,20 +10,13 @@ The solver evolves the perturbed distribution function $f$ in a 5D phase space $
 
 The following terms from the GKW formulation are currently implemented in `gyaradax/solver.py`:
 
-1.  **Term I (Parallel Advection):** $v_\parallel 
-abla_\parallel f$ using fourth-order upwinded finite differences.
-2.  **Term II (Drift Advection):** $\mathbf{v}_d \cdot 
-abla_\perp f$ representing curvature and $
-abla B$ drifts.
-3.  **Term III (Nonlinear E x B Advection):** $\mathbf{v}_E \cdot 
-abla_\perp f$ evaluated via a pseudospectral method with dealiasing.
+1.  **Term I (Parallel Advection):** $v_\parallel \nabla_\parallel f$ using fourth-order upwinded finite differences.
+2.  **Term II (Drift Advection):** $\mathbf{v}_d \cdot \nabla_\perp f$ representing curvature and $\nabla B$ drifts.
+3.  **Term III (Nonlinear E x B Advection):** $\mathbf{v}_E \cdot \nabla_\perp f$ evaluated via a pseudospectral method with dealiasing.
 4.  **Term IV (Trapping/Mirror):** Parallel velocity space advection due to magnetic field gradients.
-5.  **Term V (Equilibrium Drive):** $\mathbf{v}_E \cdot 
-abla F_M$ representing background density and temperature gradients.
-6.  **Term VII (Parallel Field Drive):** $v_\parallel 
-abla_\parallel \phi$ coupling.
-7.  **Term VIII (Drift Field Drive):** $\mathbf{v}_d \cdot 
-abla \phi$ coupling.
+5.  **Term V (Equilibrium Drive):** $\mathbf{v}_E \cdot \nabla F_M$ representing background density and temperature gradients.
+6.  **Term VII (Parallel Field Drive):** $v_\parallel \nabla_\parallel \phi$ coupling.
+7.  **Term VIII (Drift Field Drive):** $\mathbf{v}_d \cdot \nabla \phi$ coupling.
 
 ### Dissipation
 

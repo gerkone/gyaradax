@@ -7,9 +7,9 @@ from gyaradax.geometry import parse_input_dat, load_scalars
 def gkw_to_yaml(gkw_dir, output_yaml):
     """
     Convert a GKW run directory into a complete Gyaradax YAML configuration.
-    
-    This extracts runtime controls, species gradients, geometry scalars, and 
-    grid scaling information, allowing the solver to be initialized 
+
+    This extracts runtime controls, species gradients, geometry scalars, and
+    grid scaling information, allowing the solver to be initialized
     without the original GKW files.
     """
     if not os.path.exists(gkw_dir):
@@ -18,12 +18,12 @@ def gkw_to_yaml(gkw_dir, output_yaml):
 
     # 1. extract all scalars using the library helper
     scalars = load_scalars(gkw_dir)
-    
+
     # 2. extract grid resolution for metadata
     input_dat_path = os.path.join(gkw_dir, "input.dat")
     raw_input = parse_input_dat(input_dat_path)
     gridsize = raw_input.get("gridsize", {})
-    
+
     # 3. build structured config matching GKParams.from_config expectations
     config = {
         "run": {
@@ -33,6 +33,8 @@ def gkw_to_yaml(gkw_dir, output_yaml):
         "solver": {
             "dt": scalars.get("dtim", 0.01),
             "naverage": scalars.get("naverage", 40),
+            "n_steps": scalars.get("ntime", 400),
+            "dump_interval": scalars.get("ndump_ts", 40),
             "disp_par": scalars.get("disp_par", 1.0),
             "disp_vp": scalars.get("disp_vp", 0.2),
             "disp_x": scalars.get("disp_x", 0.1),
@@ -73,7 +75,7 @@ def gkw_to_yaml(gkw_dir, output_yaml):
             "nky": int(gridsize.get("nmod", 0)),
         },
     }
-    
+
     conf = OmegaConf.create(config)
     OmegaConf.save(conf, output_yaml)
     print(f"successfully converted {gkw_dir} to {output_yaml}")
@@ -83,10 +85,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="convert GKW run directory to a complete YAML config."
     )
-    parser.add_argument(
-        "gkw_dir", type=str, help="path to GKW run directory"
-    )
+    parser.add_argument("gkw_dir", type=str, help="path to GKW run directory")
     parser.add_argument("output", type=str, help="path to output YAML file")
     args = parser.parse_args()
-    
+
     gkw_to_yaml(args.gkw_dir, args.output)

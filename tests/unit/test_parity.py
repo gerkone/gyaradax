@@ -3,7 +3,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from gyaradax.solver import (
+from gyaradax.diag import (
     term_iii_fft_pack_roundtrip,
     term_iii_rhs,
 )

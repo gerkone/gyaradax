@@ -7,17 +7,16 @@ from gyaradax.solver import (
     GKParams,
     default_state,
     gksolve,
-    gksolve_with_state,
-    init_df_cosine2,
-    project_all_modes_to_kx0,
+    init_f,
 )
+from gyaradax.diag import project_all_modes_to_kx0
 from gyaradax.geometry import parse_input_dat
 from gyaradax.utils import poten_files
 
 
 @jax.jit
 def _step_jitted(prev_df, geom, params, state):
-    return gksolve_with_state(prev_df, geom, params, state)
+    return gksolve(prev_df, geom, params, state, n_steps=1)
 
 
 def test_geometry_has_connectivity_and_active_linear_keys(lin_geom):
@@ -53,8 +52,8 @@ def test_geometry_has_connectivity_and_active_linear_keys(lin_geom):
 
 
 @pytest.mark.parametrize("normalize", [True, False])
-def test_init_df_cosine2_contract(lin_geom, lin_shape, normalize):
-    df = init_df_cosine2(
+def test_init_f_contract(lin_geom, lin_shape, normalize):
+    df = init_f(
         lin_geom,
         amp_init_real=1.0e-4,
         normalize_per_toroidal_mode=normalize,
@@ -68,12 +67,15 @@ def test_gksolve_contract(lin_geom, lin_shape):
     params = GKParams(dt=0.01, naverage=40)
     state = default_state()
 
-    next_df, (phi, fluxes) = gksolve(prev_df, lin_geom, params, state)
+    next_df, (phi, fluxes), _ = gksolve(prev_df, lin_geom, params, state, n_steps=1)
     pflux, eflux, vflux = fluxes
 
     assert next_df.shape == lin_shape
     assert phi.shape == (lin_shape[2], lin_shape[3], lin_shape[4])
-    assert all(isinstance(f, jnp.ndarray) and f.shape == () for f in fluxes)
+    assert all(
+        isinstance(f, jnp.ndarray) and f.shape == () for f in [pflux, eflux, vflux]
+    )
+    
 
 
 def test_gksolve_zero_input_invariance(lin_geom, lin_shape):

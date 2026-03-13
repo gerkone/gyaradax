@@ -4,9 +4,6 @@ from jax.scipy.special import i0, bessel_jn
 from einops import rearrange
 from typing import Dict, Tuple, Any
 
-# Ensure fp64
-jax.config.update("jax_enable_x64", True)
-
 
 def j0(x):
     # jax.scipy.special.bessel_jn has a bug/feature where x=0 results in nan
@@ -155,10 +152,22 @@ def calculate_fluxes(
 
 
 def get_integrals(
-    df: jnp.ndarray, geometry: Dict[str, jnp.ndarray], params: Any = None
+    df: jnp.ndarray,
+    geometry: Dict[str, jnp.ndarray],
+    params: Any = None,
+    include_fluxes: bool = True,
 ) -> Tuple[jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]]:
-    """Main interface for flux integrals."""
+    """Main interface for field and flux integrals."""
     geom = geom_tensors(geometry, params=params)
     phi = calculate_phi(geom, df)
-    fluxes = calculate_fluxes(geom, df, phi)
+
+    def _with_fluxes():
+        return calculate_fluxes(geom, df, phi)
+
+    def _no_fluxes():
+        # return dummy scalar zeros to maintain signature
+        z = jnp.array(0.0, dtype=jnp.float64)
+        return (z, z, z)
+
+    fluxes = jax.lax.cond(include_fluxes, _with_fluxes, _no_fluxes)
     return phi, fluxes
