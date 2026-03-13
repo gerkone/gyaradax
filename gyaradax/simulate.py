@@ -94,6 +94,7 @@ def _init_condition(
             # We need initial amplitude for growth tracking
             phi0, _ = get_integrals(df, geometry, params=params, include_fluxes=False)
             from gyaradax.solver import mode_amplitude
+
             amp0 = mode_amplitude(phi0, geometry, params.norm_eps)
             state = GKState(
                 time=jnp.array(t_start, dtype=jnp.float64),
@@ -111,6 +112,7 @@ def _init_condition(
         df = init_f(geometry, norm_eps=params.norm_eps)
         phi0, _ = get_integrals(df, geometry, params=params, include_fluxes=False)
         from gyaradax.solver import mode_amplitude
+
         amp0 = mode_amplitude(phi0, geometry, params.norm_eps)
         state = state.at[...].set(state._replace(window_start_amp=amp0))
         # dataclasses are frozen, use _replace if possible or recreate
@@ -119,7 +121,7 @@ def _init_condition(
             step=state.step,
             accumulated_norm_factor=state.accumulated_norm_factor,
             window_start_amp=amp0,
-            last_growth_rate=state.last_growth_rate
+            last_growth_rate=state.last_growth_rate,
         )
     return df, state
 
@@ -201,8 +203,8 @@ def simulate(
             flux = float(fluxes[1])
             growth = float(jnp.mean(state.last_growth_rate))
             print(
-                f"{int(state.step):8d} | {float(state.time):1f} | "
-                f"{flux:4f} | {growth:4f} | {steps_per_sec:4f} steps/s"
+                f"[{int(state.step):8d}/{total_steps}] | t: {float(state.time):1f} | "
+                f"eflux: {flux:4f} | growth:{growth:4f} | {steps_per_sec:4f} steps/s"
             )
 
     save_dumps_fn(output_dir, df, phi, fluxes, state, geometry, save_dumps=save_last)

@@ -557,9 +557,9 @@ def advance_state(
         jnp.ones_like(state.window_start_amp),
         jnp.where(
             jnp.equal(steps_in_window, 1),
-            state.window_start_amp, # should already be set at previous window end or init
-            state.window_start_amp
-        )
+            state.window_start_amp,  # should already be set at previous window end or init
+            state.window_start_amp,
+        ),
     )
 
     return GKState(
@@ -630,7 +630,9 @@ def gkstep_single(
 
     def _skip_norm(_: None):
         # current amplitude for growth rate tracking
-        phi_curr, _ = get_integrals(next_df_raw, geometry, params=params, include_fluxes=False)
+        phi_curr, _ = get_integrals(
+            next_df_raw, geometry, params=params, include_fluxes=False
+        )
         amp_curr = mode_amplitude(phi_curr, geometry, params.norm_eps)
         return (
             next_df_raw,

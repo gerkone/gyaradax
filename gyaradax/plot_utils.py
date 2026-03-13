@@ -115,7 +115,7 @@ def plot_mode_growth(
         ax.plot(
             time,
             np.log(np.maximum(amp, 1e-20)),
-            label=fr"$k_y \rho = {ky_values[idx]:.3f}$",
+            label=rf"$k_y \rho = {ky_values[idx]:.3f}$",
         )
 
     ax.set_xlabel("Time $[v_{th}/R]$")

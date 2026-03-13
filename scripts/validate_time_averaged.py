@@ -3,6 +3,7 @@ import time
 import numpy as np
 from gyaradax import load_config, simulate
 
+
 def validate_time_averaged(config_paths):
     for config_path in config_paths:
         print(f"\n{'=' * 88}")
@@ -67,7 +68,7 @@ def validate_time_averaged(config_paths):
 
             ref_eflux_avg = np.mean(ref_eflux_samples)
 
-            err_eflux = np.sqrt((sim_eflux_avg - ref_eflux_avg)**2)
+            err_eflux = np.sqrt((sim_eflux_avg - ref_eflux_avg) ** 2)
 
             print(f"\nValidation Results for {cfg.run.name}:")
             print(f"\tTime-averaged Heat Flux (last {avg_count} steps):")

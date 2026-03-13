@@ -132,7 +132,7 @@ def save_dumps(
     # but the user requested "fluxes.npz, kyspec.npz, kxspec.npz, growth.npz"
     # We now include step and time in every file for self-description and safe appending.
     common = {"step": diags["step"], "time": diags["time"]}
-    
+
     _append_to_npz("fluxes.npz", {"fluxes": diags["fluxes"], **common})
     _append_to_npz("kyspec.npz", {"ky_spec": diags["ky_spec"], **common})
     _append_to_npz("kxspec.npz", {"kx_spec": diags["kx_spec"], **common})
