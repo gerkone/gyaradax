@@ -1,7 +1,7 @@
 # `gyaradax`: Gyrokinetics in JAX
 
 <p align="center">
-  <img src="`gyaradax`.png" width="500" alt="`gyaradax` Logo">
+  <img src="figs/gyaradax.png" width="500" alt="gyaradax Logo">
 </p>
 
 `gyaradax` is a high-performance JAX code for local flux-tube gyrokinetic simulations. It is based on the [GKW code](https://bitbucket.org/gkw/gkw). It provides a differentiable simulation core for the electrostatic, adiabatic-electron Vlasov-Poisson system.
@@ -23,14 +23,14 @@ This was made possible with significant usage of agentic workflows (gemini, code
 ### Configuration from GKW
 If you have an existing GKW run, you can extract its parameters and geometry into yaml:
 ```bash
-python scripts/gkw_to_yaml.py /path/to/gkw_run configs/my_sim.yaml
+PYTHONPATH=. python scripts/gkw_to_yaml.py /path/to/gkw_run configs/my_sim.yaml
 ```
 
 ### Run a Simulation
 ```python
 from gyaradax import simulate
 
-df, final_state = simulate(
+df, final_state, perf = simulate(
     "configs/my_sim.yaml",
     output_dir="outputs",
     n_steps=400,
@@ -42,25 +42,25 @@ df, final_state = simulate(
 `gyaradax` supports resuming from internal `.npz` snapshots or GKW binary `K` files:
 ```python
 # resume from internal checkpoint
-simulate("configs/my_sim.yaml", resume_from="outputs/step_000040.npz")
+df, state, perf = simulate("configs/my_sim.yaml", resume_from="outputs/step_000040.npz")
 
 # resume from GKW dump K01
-simulate("configs/my_sim.yaml", resume_k_file="/path/to/gkw/run/K01")
+df, state, perf = simulate("configs/my_sim.yaml", resume_k_file="/path/to/gkw/run/K01")
 ```
 
 ## Testing & Validation
 Run the unit and integration test suite:
 ```bash
-pytest tests/
+PYTHONPATH=. pytest tests/
 ```
 
 `gyaradax` maintains strict numerical parity with GKW (relative error $< 10^{-5}$). You can run the physics validation script to verify this on your local machine:
 ```bash
-python scripts/validate_physics.py --config configs/iteration_13.yaml --ref_dir gkw_ref/data/iteration_13
+PYTHONPATH=. python scripts/validate_physics.py --config configs/iteration_13.yaml --ref_dir gkw_ref/data/iteration_13
 ```
 
-## Development
-`gyaradax` follows functional programming principles. The core solver is a pure function, making it compatible with all JAX transformations.
-
-- **Adding Physics:** Implement new RHS terms in `solver.py` and register them in the `GKParams` container.
-- **New Diagnostics:** Add diagnostic logic to `diag.py` and ensure they are JIT-compatible.
+## TODO
+- [ ] empirical validation against gkw dumps
+- [ ] proper validation on [the gkw paper](docs/gkw.pdf)
+- [ ] vmappable simulation loop (blocked because of IO)
+- [ ] identify bottlenecks and cheap speedups

@@ -6,8 +6,10 @@ including configuration loading, state initialization, and periodic dumping.
 """
 
 import os
-from typing import Any, Dict, Optional, Tuple
+import time
+from typing import Any, Dict, Optional, Tuple, Union, List
 
+import numpy as np
 import jax.numpy as jnp
 
 from gyaradax.diag import get_diagnostics
@@ -49,7 +51,7 @@ def _setup_simulation(
 
     interval = interval or params.naverage
 
-    return cfg, params, geometry, total_steps, interval, save_dumps_flag
+    return params, geometry, total_steps, interval, save_dumps_flag
 
 
 def _init_condition(
@@ -116,15 +118,15 @@ def simulate(
     resume_from: Optional[str] = None,
     resume_k_file: Optional[str] = None,
     verbose: bool = True,
-    save_dumps: bool = True,
+    save_dumps: bool = False,
+    save_last: bool = True,
     **kwargs,
-) -> Tuple[jnp.ndarray, GKState]:
+) -> Tuple[jnp.ndarray, GKState, List[Dict[str, float]]]:
     """
-    High-level entry point to run a simulation from a YAML config.
+    Entry point to run a simulation from a YAML config.
 
-    This function handles the orchestration of the simulation loop, including
-    loading geometry, setting initial conditions, executing the time-stepping
-    via gksolve, and periodically dumping snapshots and diagnostics.
+    This function handles the simulation loop, including loading geometry, initial
+    conditions, time-stepping via gksolve, and dumping snapshots and diagnostics.
 
     Args:
         config_path: Path to the YAML configuration file.
@@ -137,9 +139,9 @@ def simulate(
         **kwargs: Manual overrides for any GKParams or simulation controls.
 
     Returns:
-        Tuple of (final_df, final_state).
+        Tuple of (final_df, final_state, performance_metrics).
     """
-    cfg, params, geometry, total_steps, interval, save_dumps_flag = _setup_simulation(
+    params, geometry, total_steps, interval, save_dumps_flag = _setup_simulation(
         config_path, checkpoint_interval, save_dumps, kwargs
     )
 
@@ -153,6 +155,8 @@ def simulate(
         print(f"Initial state: step={int(state.step)}, time={float(state.time):.4f}")
 
     start_step = int(state.step)
+    performance_metrics = []
+
     for _ in range(start_step, total_steps, interval):
         save_dumps_fn(
             output_dir,
@@ -163,28 +167,41 @@ def simulate(
             geometry,
             save_dumps=save_dumps_flag,
         )
-
+        # NOTE: needs recompile if odd number of steps
         steps_to_run = min(interval, total_steps - int(state.step))
         if steps_to_run <= 0:
             break
 
+        t_block_start = time.time()
         df, (phi, fluxes), state = gksolve(
             df, geometry, params, state, n_steps=steps_to_run
         )
+        t_block_end = time.time()
+
+        block_time = t_block_end - t_block_start
+        steps_per_sec = steps_to_run / max(block_time, 1e-6)
+
+        perf = {"block_time": block_time, "steps_per_sec": steps_per_sec}
+        performance_metrics.append(perf)
 
         if verbose:
             flux = float(fluxes[1])
             growth = float(jnp.mean(state.last_growth_rate))
             print(
                 f"[step {int(state.step):06d}/{total_steps}| "
-                f"time {float(state.time):.4f} | elux {flux:.4f} | growth {growth:.4f}"
+                f"time {float(state.time):.4f} | "
+                f"elux {flux:.4f} | growth {growth:.4f} | {steps_per_sec:.1f} steps/s"
             )
 
-    save_dumps_fn(
-        output_dir, df, phi, fluxes, state, geometry, save_dumps=save_dumps_flag
-    )
+    save_dumps_fn(output_dir, df, phi, fluxes, state, geometry, save_dumps=save_last)
+    # performance metrics
+    if performance_metrics:
+        perf_path = os.path.join(output_dir, "performance.npz")
+        keys = performance_metrics[0].keys()
+        perf_data = {k: np.array([p[k] for p in performance_metrics]) for k in keys}
+        np.savez(perf_path, **perf_data)
 
     if verbose:
         print("DONE.")
 
-    return df, state
+    return df, state, performance_metrics

@@ -1,0 +1,43 @@
+run:
+  name: iteration_148
+  data_dir: /restricteddata/ukaea/gyrokinetics/raw/iteration_148
+solver:
+  dt: 0.01
+  naverage: 40
+  n_steps: 400
+  dump_interval: 40
+  disp_par: 1.0
+  disp_vp: 0.2
+  disp_x: 0.1
+  disp_y: 0.1
+  idisp: 2
+  non_linear: true
+  enable_term_iii: true
+physics:
+  rlt: 6.113249729089787
+  rln: 1.6656395947262106
+  mas: 1.0
+  tmp: 1.0
+  de: 1.0
+  signz: 1.0
+  vthrat: 1.0
+  dgrid: 1.0
+  tgrid: 1.0
+geometry:
+  shat: 0.72192
+  q: 8.68136
+  eps: 0.19
+  kthnorm: 6.0011
+  Rref: 100.0
+  d2X: 1.0
+  signB: 1.0
+  dvp: 0.1875
+  sgr_dist: 0.0625
+  kxmax: 2.08515
+  kymax: 0.2332905633967106
+grid:
+  nvpar: 32
+  nmu: 8
+  ns: 16
+  nkx: 85
+  nky: 32
