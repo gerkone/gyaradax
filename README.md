@@ -63,4 +63,5 @@ PYTHONPATH=. python scripts/validate_physics.py --config configs/iteration_13.ya
 - [ ] empirical validation against gkw dumps
 - [ ] proper validation on [the gkw paper](docs/gkw.pdf)
 - [ ] vmappable simulation loop (blocked because of IO)
+- [x] fix growth rate computation
 - [ ] identify bottlenecks and cheap speedups

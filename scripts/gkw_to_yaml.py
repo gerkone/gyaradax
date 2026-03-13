@@ -34,7 +34,7 @@ def gkw_to_yaml(gkw_dir, output_yaml):
             "dt": scalars.get("dtim", 0.01),
             "naverage": scalars.get("naverage", 40),
             "n_steps": scalars.get("ntime", 400),
-            "dump_interval": scalars.get("ndump_ts", 40),
+            "dump_interval": scalars.get("ndump_ts", 3),
             "disp_par": scalars.get("disp_par", 1.0),
             "disp_vp": scalars.get("disp_vp", 0.2),
             "disp_x": scalars.get("disp_x", 0.1),

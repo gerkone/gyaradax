@@ -1,3 +1,8 @@
+import jax
+
+# enforce 64-bit precision for all JAX calculations
+jax.config.update("jax_enable_x64", True)
+
 from gyaradax.params import (
     GKParams,
     default_state,
@@ -13,11 +18,6 @@ from gyaradax.simulate import simulate
 from gyaradax.geometry import load_geometry
 from gyaradax.integrals import get_integrals
 from gyaradax.utils import load_gkw_k_dump
-
-import jax
-
-# enforce 64-bit precision for all JAX calculations
-jax.config.update("jax_enable_x64", True)
 
 __all__ = [
     "GKParams",

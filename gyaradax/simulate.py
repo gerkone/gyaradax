@@ -7,15 +7,17 @@ including configuration loading, state initialization, and periodic dumping.
 
 import os
 import time
-from typing import Any, Dict, Optional, Tuple, Union, List
+from typing import Any, Dict, Optional, Tuple, List
 
 import numpy as np
+import jax
 import jax.numpy as jnp
 
-from gyaradax.diag import get_diagnostics
+jax.config.update("jax_enable_x64", True)
+
 from gyaradax.geometry import load_geometry
 from gyaradax.integrals import get_integrals
-from gyaradax.params import GKParams, gkparams_from_config, load_config
+from gyaradax.params import gkparams_from_config, load_config
 from gyaradax.solver import gksolve, init_f
 from gyaradax.params import GKState, default_state
 from gyaradax.utils import (
@@ -32,9 +34,7 @@ def _setup_simulation(
     save_dumps_flag: bool,
     kwargs: Dict[str, Any],
 ) -> Tuple[Any, Any, Dict[str, jnp.ndarray], int, int, bool]:
-    """
-    Load configuration and determine simulation-level hyperparameters.
-    """
+    """Load configuration and determine simulation-level hyperparameters."""
     cfg = load_config(config_path)
 
     total_steps = int(kwargs.pop("n_steps", getattr(cfg.solver, "n_steps", 120)))
@@ -42,15 +42,12 @@ def _setup_simulation(
     params = gkparams_from_config(cfg, **kwargs)
     data_dir = cfg.run.data_dir
     geometry = load_geometry(data_dir)
-
-    interval = getattr(cfg.solver, "dump_interval", params.naverage)
-    interval = checkpoint_interval or int(kwargs.pop("checkpoint_interval", interval))
-    save_dumps_flag = kwargs.pop(
-        "save_dumps", getattr(cfg.solver, "save_dumps", save_dumps_flag)
-    )
-
-    interval = interval or params.naverage
-
+    # priority to kwargs
+    # TODO include naverage? would match gkw fluxes, but slower
+    interval = getattr(cfg.solver, "dump_interval", 3) * params.naverage
+    if checkpoint_interval:
+        interval = checkpoint_interval
+    save_dumps_flag = getattr(cfg.solver, "save_dumps", save_dumps_flag)
     return params, geometry, total_steps, interval, save_dumps_flag
 
 
@@ -94,11 +91,15 @@ def _init_condition(
         dat_path = resume_k_file + ".dat"
         if os.path.exists(dat_path):
             t_start = read_gkw_dump_time(dat_path)
+            # We need initial amplitude for growth tracking
+            phi0, _ = get_integrals(df, geometry, params=params, include_fluxes=False)
+            from gyaradax.solver import mode_amplitude
+            amp0 = mode_amplitude(phi0, geometry, params.norm_eps)
             state = GKState(
                 time=jnp.array(t_start, dtype=jnp.float64),
                 step=jnp.array(0, dtype=jnp.int32),
                 accumulated_norm_factor=jnp.ones(nky, dtype=jnp.float64),
-                window_start_amp=jnp.ones(nky, dtype=jnp.float64),
+                window_start_amp=amp0,
                 last_growth_rate=jnp.zeros(nky, dtype=jnp.float64),
             )
             if verbose:
@@ -108,6 +109,18 @@ def _init_condition(
             print("WARNING: Initializing new simulation from experimental init_f.")
             print("         This profile may not correctly reproduce GKW seed parity.")
         df = init_f(geometry, norm_eps=params.norm_eps)
+        phi0, _ = get_integrals(df, geometry, params=params, include_fluxes=False)
+        from gyaradax.solver import mode_amplitude
+        amp0 = mode_amplitude(phi0, geometry, params.norm_eps)
+        state = state.at[...].set(state._replace(window_start_amp=amp0))
+        # dataclasses are frozen, use _replace if possible or recreate
+        state = GKState(
+            time=state.time,
+            step=state.step,
+            accumulated_norm_factor=state.accumulated_norm_factor,
+            window_start_amp=amp0,
+            last_growth_rate=state.last_growth_rate
+        )
     return df, state
 
 
@@ -188,9 +201,8 @@ def simulate(
             flux = float(fluxes[1])
             growth = float(jnp.mean(state.last_growth_rate))
             print(
-                f"[step {int(state.step):06d}/{total_steps}| "
-                f"time {float(state.time):.4f} | "
-                f"elux {flux:.4f} | growth {growth:.4f} | {steps_per_sec:.1f} steps/s"
+                f"{int(state.step):8d} | {float(state.time):1f} | "
+                f"{flux:4f} | {growth:4f} | {steps_per_sec:4f} steps/s"
             )
 
     save_dumps_fn(output_dir, df, phi, fluxes, state, geometry, save_dumps=save_last)
@@ -202,6 +214,6 @@ def simulate(
         np.savez(perf_path, **perf_data)
 
     if verbose:
-        print("DONE.")
+        print("DONE\n")
 
     return df, state, performance_metrics

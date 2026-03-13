@@ -102,12 +102,27 @@ def save_dumps(
     # Internal helper to append data to an npz file
     def _append_to_npz(filename, new_data):
         path = os.path.join(output_dir, filename)
+        current_step = int(state.step)
         if os.path.exists(path):
-            with np.load(path) as data:
-                # Load existing data and append new step
-                updated = {
-                    k: np.append(data[k], [new_data[k]], axis=0) for k in data.files
-                }
+            try:
+                with np.load(path) as data:
+                    # Use 'step' to truncate entries strictly before the current one.
+                    # This prevents overlapping history when resuming simulations.
+                    if "step" in data.files:
+                        mask = data["step"] < current_step
+                        updated = {
+                            k: np.append(data[k][mask], [new_data[k]], axis=0)
+                            for k in data.files
+                        }
+                    else:
+                        # Fallback for legacy files without 'step'
+                        updated = {
+                            k: np.append(data[k], [new_data[k]], axis=0)
+                            for k in data.files
+                        }
+            except (IOError, ValueError):
+                # If file is corrupted or incompatible, start fresh
+                updated = {k: np.array([v]) for k, v in new_data.items()}
         else:
             # Create new file with first entry
             updated = {k: np.array([v]) for k, v in new_data.items()}
@@ -115,13 +130,13 @@ def save_dumps(
 
     # Note: We group these to avoid too many small files
     # but the user requested "fluxes.npz, kyspec.npz, kxspec.npz, growth.npz"
-    _append_to_npz("fluxes.npz", {"fluxes": diags["fluxes"]})
-    _append_to_npz("kyspec.npz", {"ky_spec": diags["ky_spec"]})
-    _append_to_npz("kxspec.npz", {"kx_spec": diags["kx_spec"]})
-    _append_to_npz(
-        "growth.npz",
-        {"growth": diags["growth"], "time": diags["time"], "step": diags["step"]},
-    )
+    # We now include step and time in every file for self-description and safe appending.
+    common = {"step": diags["step"], "time": diags["time"]}
+    
+    _append_to_npz("fluxes.npz", {"fluxes": diags["fluxes"], **common})
+    _append_to_npz("kyspec.npz", {"ky_spec": diags["ky_spec"], **common})
+    _append_to_npz("kxspec.npz", {"kx_spec": diags["kx_spec"], **common})
+    _append_to_npz("growth.npz", {"growth": diags["growth"], **common})
 
     # 2. Save heavy snapshot if flag is set
     if save_dumps:

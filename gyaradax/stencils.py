@@ -5,7 +5,11 @@ These stencils correspond to the fourth-order upwinded and central schemes
 used in the GKW linear and nonlinear terms.
 """
 
+import jax
 import jax.numpy as jnp
+
+# enforce 64-bit precision
+jax.config.update("jax_enable_x64", True)
 
 
 def _center_5pt(stencil5):

@@ -33,6 +33,10 @@ Operates in standard GKW normalization (scaled by R_ref, v_th,ref). In linear mo
 
 import jax
 import jax.numpy as jnp
+
+# enforce 64-bit precision
+jax.config.update("jax_enable_x64", True)
+
 import math
 from typing import Dict, Tuple, Optional
 
@@ -532,23 +536,30 @@ def advance_state(
     new_step = state.step + jnp.array(1, dtype=jnp.int32)
     new_time = state.time + jnp.array(params.dt, dtype=jnp.float64)
 
-    # growth rate calculation at normalization boundaries
+    # growth rate calculation
     valid_growth = jnp.logical_and(
         state.window_start_amp > params.norm_eps,
         per_mode_amp > params.norm_eps,
     )
-    growth_dt = jnp.array(params.dt * params.naverage, dtype=jnp.float64)
+    # steps since start of window
+    steps_in_window = jnp.mod(new_step - 1, params.naverage) + 1
+    growth_dt = jnp.array(params.dt * steps_in_window, dtype=jnp.float64)
 
     growth_rate = jnp.where(
-        jnp.logical_and(is_window_end, valid_growth),
+        valid_growth,
         jnp.log(per_mode_amp / state.window_start_amp) / growth_dt,
         state.last_growth_rate,
     )
+
     # reset baseline for the next diagnostic window
     new_window_start_amp = jnp.where(
         is_window_end,
         jnp.ones_like(state.window_start_amp),
-        state.window_start_amp,
+        jnp.where(
+            jnp.equal(steps_in_window, 1),
+            state.window_start_amp, # should already be set at previous window end or init
+            state.window_start_amp
+        )
     )
 
     return GKState(
@@ -618,10 +629,13 @@ def gkstep_single(
         return normalize_per_ky(next_df_raw, geometry, params)
 
     def _skip_norm(_: None):
+        # current amplitude for growth rate tracking
+        phi_curr, _ = get_integrals(next_df_raw, geometry, params=params, include_fluxes=False)
+        amp_curr = mode_amplitude(phi_curr, geometry, params.norm_eps)
         return (
             next_df_raw,
             jnp.ones_like(state.accumulated_norm_factor),
-            state.window_start_amp,
+            amp_curr,
         )
 
     # conditional mode normalization
