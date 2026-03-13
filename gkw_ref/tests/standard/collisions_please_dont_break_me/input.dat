@@ -1,0 +1,198 @@
+!
+&CONTROL
+ fac_dtim_est=1.0
+ silent = .false.
+ order_of_the_scheme = 'fourth_order'
+ parallel_boundary_conditions = "open"
+ READ_FILE  = .false.
+ NON_LINEAR = .false.
+ zonal_adiabatic = .false.,
+ METHOD = 'EXP',
+ METH   = 2,
+ DTIM   = 0.0012 
+ NTIME  = 5,
+ NAVERAGE = 1000,
+ nlapar = .true.,
+ nlbpar = .true., 
+ collisions = .true.
+ disp_par = 0.8
+ disp_vp  = 0.2
+ lverbose = .true.
+ gamatol=0.01
+ io_format = 'ascii'
+ io_testdata = .true.
+ io_legacy = .true.
+ /
+ &GRIDSIZE
+ n_procs_s=3
+ n_procs_mu=2
+ n_procs_vpar=2
+ n_procs_sp=3
+ NX = 1,   
+ N_s_grid = 45, 
+ N_mu_grid = 4, 
+ nperiod  = 2, 
+ N_vpar_grid = 16, 
+ NMOD = 1,
+ number_of_species = 3 
+ /
+ &MODE
+ CHIN    = 0.,
+ KTHRHO  = 0.824264, 
+ mode_box = .false.,
+ krhomax = 1.0,
+ ikxspace = 7, 
+ /
+ &GEOM 
+ SHAT = 1.522048,
+ Q    = 1.4,
+ EPS  = 0.173240,
+ geom_type='circ'
+ /
+&SPCGENERAL
+ finit="cosine2"
+ beta = 0.003,
+ adiabatic_electrons = .false.
+ /
+ &SPECIES
+ MASS  = 1.0, 
+ Z     = 1.0, 
+ TEMP  = 1.0, 
+ dens  = 1.0,
+ rlt   = 0.2,
+ rln   = 3.25,
+ uprim = 1.159886,
+ / 
+&SPECIES
+ MASS  = 2.72e-4,
+ Z     = -1.0, 
+ TEMP  = 1.009574,
+ dens  = 1.0,
+ rlt   = 9.150731,
+ rln   = 3.25,
+ uprim = 0.200000,
+/
+ &SPECIES
+ MASS = 5.
+ z = 5.0
+ dens = 0.
+ temp = 1.
+ rlt = 1.
+ rln = 1.
+ uprim = 1.
+ /
+ &ROTATION
+ VCOR = 0.2,
+ cf_trap=.true.
+ cf_drift=.true.
+ cf_upphi=.false.
+ cf_upsrc=.false.
+ cf_qncheck=.false.
+ / 
+&COLLISIONS
+ pitch_angle = .true.           !Switches for the collision terms, this one is pitch angle scattering   (default = T)
+ en_scatter = .false.           !Energy scattering term                                                (default = T)
+ friction_coll = .false.        !Collisional friction term                                             (default = T)
+ mom_conservation = .false.     !Use the correction to conserve momentum                               (default = T)
+ mass_conserve = .false.,       !Forces zero flux boundary on velocity space so no out flow of mass    (default = F)
+ freq_override=.true.           !Manually specify ii collision frequency to override ref values above. (default = F)
+ coll_freq=0.0005               !Ion-ion collision frequency used if freq_override=.true.              (default=0.0)mass_conserve=.false.
+/
+&DIAGNOSTIC
+ lmpi_broken_io=.true.,
+ nflush_ts = 2,
+ lphi_diagnostics = .true.
+ lisl_follow=.true.,
+ xy_estep = .true.,
+ xy_slice_ipar = 2,
+ lwrite_output1 = .true.,
+ lfinal_output  = .true.,
+ screen_output = .true.,
+ ! ! test diagnos_fluxes
+ lcalc_fluxes    = .true.,
+ lfluxes_spectra=.true.,
+ lfluxes_em_spectra=.true.,
+ xy_fluxes = .true.,
+ xy_fluxes_bi = .true.,
+ xy_fluxes_p = .true., 
+ xy_fluxes_v = .true.,
+ xy_fluxes_fsa = .true.,
+ xy_fluxes_em = .true.,
+ xy_fluxes_k = .true.,
+ xy_fluxes_bpar = .true.,
+ ! ! test diagnos_fluxes_vspace
+ lfluxes_detail=.true.,
+ lfluxes_vspace=.true.,
+ lfluxes_vspace_phi=.true.,
+ lfluxes_vspace_em=.true.,
+ lfluxes_vspace_bpar=.true.,
+ ! test diagnos_fields
+ xy_phi = .true.,
+ xy_apar = .true.,
+ xy_bpar = .true.,
+ xs_phi = .true.,
+ nmodepoints = 1,
+ imod_field  = 1,
+ lparallel_phi=.true.,
+ lparallel_apar=.true.,
+ lparallel_bpar=.true.,
+ phi3d = .true.,
+ spc3d = .true.,
+ apa3d = .true.,
+ apc3d = .true.,
+ bpa3d = .true.,
+ bpc3d = .true.,
+ zonal_scale_3d = 0.8,
+ field_fsa_kyzero = .true.,
+! test diagnos_moments
+ xy_dens = .true.,
+ xy_temp = .true.,
+ xy_current = .true.,
+ xy_current2 = .true.,
+ den3d = .true.,
+ ene3d = .true.,
+ !test diagnos_mode_struct
+ lparallel_output = .true.,
+ lrotate_parallel = .true.,
+ ! test diagnos_growth_freq
+ lcalc_freq      = .true.,
+ lamplitudes     = .true.,
+ lgrowth_rates   = .true.,
+ lfrequencies    = .true.,
+ ! from module diagnos_rad:
+ lrad_moment = .true.
+ lrad_field = .true.
+ lrad_entropy = .true.
+ lrad_tint = .true.
+ lrad_kpar = .true.
+ ! test diagnos_kinenergy_trappas
+ lcalc_kinenergy_trappas = .true.
+ ! test diagnos_stresses
+ lcalc_stresses  = .true.,
+ ! test diagnos_energetics
+ lcalc_energetics  = .true.,
+ ! test diagnos_velspace
+ psi_velspace    = 0,0,0,
+ zeta_velspace   = 0,0,0,
+ npointsvel      = 0,
+ lfinvel = .true.,
+ ! test diagnos_jdote
+ lcalc_jdote = .true.,
+ lcalc_jdote_fs = .true.,
+ ! from module diagnos_corr:
+ lcalc_corr   = .true.,
+ imod_corr    = 1,1
+ ! from module diagnos_nonlin_transfer:
+ lnonlin_transfer = .true.,
+ lnonlin_transfer_fsa = .true.,
+ nonlin_transfer_interval = 1
+ ! from module diagnos_zfshear:
+ lcalc_zfshear = .true.
+ ! from module diagnos_cross_phase:
+ cross_phases = 'dens', 'phi', 'T', 'phi', 'dens', 'T', 58*''
+ cross_phase_timetrace = .true.
+ ! from module diagnos_matrix
+ loutput_matrix = .false.
+ ! from module diagnos_timetrace
+ lcomplex_timetrace = .true.
+ /

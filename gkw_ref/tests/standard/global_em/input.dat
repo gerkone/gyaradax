@@ -1,0 +1,201 @@
+
+&CONTROL
+ restart_file_version = 1
+ silent = .false.
+ order_of_the_scheme = 'fourth_order'
+ parallel_boundary_conditions = 'zero'
+ radial_boundary_conditions = 'Dirichlet'
+ READ_FILE  = .false.
+ NON_LINEAR = .true.
+ zonal_adiabatic = .true.
+ METHOD = 'EXP'
+ METH   = 2
+ DTIM   = 0.001
+ NTIME  =  4 
+ NAVERAGE = 10  
+ nlapar = .false.
+ collisions = .false.
+ disp_par = 1.0
+ disp_vp  = 1.0
+ disp_x   = 2.1975
+ spectral_radius = .false. 
+ flux_tube = .false.
+ min_gr    = -0.5
+ shift_metric = .false.
+ nl_dtim_est = .false.
+ io_format = 'ascii'
+ io_testdata = .true.
+ io_legacy = .true.
+/
+&GRIDSIZE
+ n_procs_x = 2 
+ n_procs_mu = 2
+ n_procs_vpar = 2 
+ n_procs_s  = 2
+ n_procs_sp = 2 
+ NX = 16 
+ N_s_grid = 12 
+ N_mu_grid = 4 
+ n_vpar_grid = 4
+ NMOD = 8
+ nperiod = 1
+ number_of_species = 2 ! Number of species. Note: do not count the adiabatic species
+ psil = 0.01 
+ psih = 0.3616
+ vpmax = 4. 
+ mumax = 8.
+/
+&MODE
+ mode_box = .true.
+ krhomax = 1.0
+ ikxspace = 1
+ n_spacing = 5 
+/
+&GEOM
+ geom_type = 'circ'
+ SHAT = 0.78
+ Q    = 1.4
+ EPS  = 0.19
+ prof_type = 'parabolic'
+ qprof_coef(1) = 0.854 
+ qprof_coef(2) = 18.389 
+/
+&SPCGENERAL
+ amp_init = 0.01
+ beta = 0.000
+ adiabatic_electrons = .false.
+ rhostar = 0.01
+/
+&SPECIES
+ MASS  =  1.0
+ Z     =  1.0
+ temp  =  1.0
+ uprim = 1.0
+ dens_prof_type = 'cosh2'
+ dens_prof_coef = 1.00, 2.2, 0.180777, 0.2893, 0.0145
+ temp_prof_type = 'cosh2'
+ temp_prof_coef = 1.00, 7.1, 0.180777, 0.2893, 0.0145
+/
+&SPECIES
+ MASS  =  2.72e-4
+ Z     = -1.0
+ temp  = 1.0
+ uprim = 1.0
+ dens_prof_type = 'cosh2'
+ dens_prof_coef = 1.00, 2.2, 0.180777, 0.2893, 0.0145 
+ temp_prof_type = 'cosh2' 
+ temp_prof_coef = 1.00, 7.1, 0.180777, 0.2893, 0.0145
+/
+&ROTATION
+ VCOR = 0.2
+/
+&KROOK 
+ krook_option = 1
+ nlkrook = .true. 
+ gammak  = 0.1
+ nlbound = .true. 
+ gammab  = 1.3 
+ bwidth  = 2. 
+/
+&GYROAVERAGE
+ GYRO_AVERAGE_ELECTRONS  = F,
+ parallel_mod=T
+/
+&DIAGNOSTIC
+ lmpi_broken_io=.true.,
+ nflush_ts = 2,
+ lphi_diagnostics = .true.
+ lisl_follow=.true.,
+ xy_estep = .true.,
+ xy_slice_ipar = 12,
+ lwrite_output1 = .true.,
+ lfinal_output  = .true.,
+ screen_output = .true.,
+ ! ! test diagnos_fluxes
+ lcalc_fluxes    = .true.,
+ lfluxes_spectra=.true.,
+ lfluxes_em_spectra=.true.,
+ xy_fluxes = .true.,
+ xy_fluxes_bi = .true.,
+ xy_fluxes_p = .true., 
+ xy_fluxes_v = .true.,
+ xy_fluxes_fsa = .true.,
+ xy_fluxes_em = .true.,
+ xy_fluxes_k = .true.,
+ xy_fluxes_bpar = .true.,
+ ! test diagnos_fluxes_vspace
+ lfluxes_detail=.true.,
+ lfluxes_vspace=.true.,
+ lfluxes_vspace_phi=.true.,
+ lfluxes_vspace_em=.true.,
+ lfluxes_vspace_bpar=.true.,
+ ! test diagnos_fields
+ xy_phi = .true.,
+ xy_apar = .true.,
+ xy_bpar = .true.,
+ xs_phi = .true.,
+ imod_field  = 1,3,-1,0,7,
+ lparallel_phi=.true.,
+ lparallel_apar=.true.,
+ phi3d = .true.,
+ spc3d = .true.,
+ apa3d = .true.,
+ apc3d = .true.,
+ bpa3d = .true.,
+ bpc3d = .true.,
+ zonal_scale_3d = 0.8,
+ field_fsa_kyzero = .true.,
+! test diagnos_moments
+ kykxs_moments = .true.
+ kykxs_j0_moments = .true.
+ xy_dens = .true.,
+ xy_temp = .true.,
+ xy_current = .true.,
+ xy_current2 = .true.,
+ den3d = .true.,
+ ene3d = .true.,
+ !test diagnos_mode_struct
+ lparallel_output = .true.,
+ lrotate_parallel = .true.,
+ ! test diagnos_growth_freq
+ lcalc_freq      = .true.,
+ lamplitudes     = .true.,
+ lgrowth_rates   = .true.,
+ lfrequencies    = .true.,
+ ! from module diagnos_rad:
+ lrad_moment = .true.
+ lrad_field = .true.
+ lrad_entropy = .true.
+ lrad_tint = .true.
+ lrad_kpar = .true.
+ ! test diagnos_kinenergy_trappas
+ lcalc_kinenergy_trappas = .true.
+ ! test diagnos_stresses
+ lcalc_stresses  = .false.,
+ ! test diagnos_energetics
+ lcalc_energetics  = .true.,
+ ! test diagnos_velspace
+ psi_velspace    = 0,0,0,
+ zeta_velspace   = 0,0,0,
+ npointsvel      = 0, ! switch on as soon as it works for global
+ lfinvel = .true.,
+ ! test diagnos_jdote
+ !lcalc_jdote = .true.
+ !lcalc_jdote_fs = .true.
+ ! from module diagnos_corr:
+ lcalc_corr   = .true.,
+ imod_corr    = 1,1,
+ ! from module diagnos_nonlin_transfer:
+ lnonlin_transfer = .true.,
+ lnonlin_transfer_fsa = .true.,
+ nonlin_transfer_interval = 1
+ ! from module diagnos_zfshear:
+ lcalc_zfshear = .true.
+ ! from module diagnos_cross_phase:
+ cross_phases = 'dens', 'phi', 'T', 'phi', 'dens', 'T', 58*''
+ cross_phase_timetrace = .true.
+ ! from module diagnos_matrix
+ loutput_matrix = .false.
+ ! from module diagnos_timetrace
+ lcomplex_timetrace = .true.
+/

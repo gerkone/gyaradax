@@ -1,0 +1,104 @@
+! GKW Input file written by write_gkwinput2.m
+&CONTROL
+ silent= .false.,
+ order_of_the_scheme= 'fourth_order',
+ parallel_boundary_conditions= 'open',
+ read_file= .true.,
+ non_linear= .false.,
+ zonal_adiabatic= .false.,
+ method= 'EXP',
+ meth= 2,
+ dtim=   0.00050000,
+ ntime= 10,
+ naverage= 10,
+ nlapar= .false.,
+ collisions= .true.,
+ disp_par=   0.50000000,
+ disp_vp=   0.50000000,
+ lverbose= .true.,
+ max_sec= 10000,
+ io_testdata = .true.,
+ io_format = 'ascii',
+ io_legacy = .true.
+ /
+&GRIDSIZE
+ nx= 5,
+ n_s_grid= 12,
+ n_mu_grid= 8,
+ nperiod= 1,
+ n_vpar_grid= 16,
+ nmod= 1,
+ number_of_species= 2,
+ n_procs_vpar= 2,
+ n_procs_mu= 4,
+ n_procs_s= 1,
+ n_procs_sp = 2, 
+ /
+&MODE
+ chin= 0,
+ kthrho=   0.42430000,
+ mode_box= .true.,
+ krhomax=   0.42430000,
+ ikxspace= 1,
+ /
+&GEOM
+ geom_type= 'circ',
+ shat=   0.80000000,
+ q=   1.32482620,
+ eps=   0.12241887,
+ /
+&SPCGENERAL
+ adiabatic_electrons= .false.,
+ rhostar=   0.00110659,
+ /
+&SPECIES
+ mass= 1,
+ z= 1,
+ temp= 1,
+ dens= 1,
+ rlt=   3.67254838,
+ rln=   1.93,
+ uprim= 0,
+ / 
+&SPECIES 
+ mass=   0.00027200,
+ z= -1,
+ temp=   1.80638810,
+ dens=   1.0,
+ rlt=   6.90118420,
+ rln=   1.93,
+ uprim= 0,
+ /
+&ROTATION
+ vcor= 0,
+ shear_rate= 0,
+ cf_trap= .false.,
+ cf_drift= .false.,
+ /
+&LINEAR_TERM_SWITCHES
+ lneo_equil= .false.,
+ lneo_trap= .false.,
+ lneo_rad= .false.,
+ /
+&DIAGNOSTIC
+ lphi_diagnostics= .true.,
+ xs_phi= .false.,
+ /
+&COLLISIONS
+ pitch_angle= .true.,
+ en_scatter= .false.,
+ friction_coll= .false.,
+ nref=   2.91232000,
+ tref=   0.50568040,
+ rref=   1.68089931,
+ lorentz= .false.,
+ /
+&FINITE_RHO_PARALLEL
+ ltrapdf_rhostar= .true.,
+ lvdgrad_phi_fm_rhostar= .true.,
+ lve_grad_fm_rhostar= .true.,
+ lvdgradf_rhostar= .true.,
+ s_average= .true.,
+ lnonlinear_rhostar= .false.,
+ lflux_rhostar= .true.,
+ /

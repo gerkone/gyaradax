@@ -1,0 +1,88 @@
+! 
+!
+&CONTROL 
+ fac_dtim_est=1.0
+ silent = .false.
+ order_of_the_scheme = 'fourth_order'
+ parallel_boundary_conditions = "open"
+ READ_FILE  = .false.
+ NON_LINEAR = .false.
+ zonal_adiabatic = .true.
+ METHOD = 'EXP'
+ METH   = 2
+ DTIM   = 0.012
+ NTIME  = 10
+ NAVERAGE = 8,
+ nlapar = .false.
+ collisions = .false.
+ disp_par = 0.1
+ disp_vp  = 0.1
+ lverbose = .true.
+ io_format = 'ascii'
+ io_testdata = .true.
+/
+&GRIDSIZE
+ n_procs_s = 2
+ n_procs_vpar = 2
+ n_procs_mu = 2
+ n_procs_sp = 2
+ NX = 1
+ N_s_grid = 50
+ N_mu_grid = 8
+ N_vpar_grid = 16
+ NMOD = 1
+ nperiod = 3
+ number_of_species = 2
+/
+&diagnostic
+ lcalc_freq = .false.
+ lfinal_output = .true.
+ nflush_ts = 2
+/
+&MODE
+ CHIN    = 0.
+ KTHRHO  = 0.5
+ mode_box = .false.
+ krhomax = 1.0
+ ikxspace = 7
+/
+&GEOM
+ SHAT = 1.070
+ Q    = 1.570
+ EPS  = 0.177
+/
+&SPCGENERAL
+ finit="cosine"
+ beta = 0.234
+ adiabatic_electrons = .true.
+/
+&SPECIES
+ MASS  = 1.4352
+ Z     = 1.0
+ TEMP  = 1.8769
+ dens  = 0.75
+ rlt   = 8.5443
+ rln   = 3.5543
+ uprim = 0.0
+/
+&SPECIES
+ MASS  = 2.72e-4
+ Z     = -1.0
+ TEMP  = 5.4534 ! Having a high electron temp makes things more likely to break
+ dens  = 1.0
+ rlt   = 7.9
+ rln   = 3.5543
+ uprim = 0.0
+/
+&SPECIES
+ MASS  = 3.5892
+ Z     = 1.0
+ TEMP  = 2.3456
+ dens  = 0.25
+ rlt   = 6.2345
+ rln   = 3.5543
+ uprim = 0.0
+/
+&ROTATION
+ VCOR = 0.1234
+/

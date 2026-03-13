@@ -1,0 +1,105 @@
+!
+ &CONTROL
+ spectral_radius = .true.
+ DISP_X = 0.3,
+ disp_par=0.5,
+ disp_vp=0.2,
+ silent = .false.
+ order_of_the_scheme = 'fourth_order'
+ radial_boundary_conditions = 'periodic'
+ parallel_boundary_conditions = "open"
+ READ_FILE  = .false.
+ NON_LINEAR = .true.
+ zonal_adiabatic = .false.,
+ METHOD = 'EXP',
+ METH   = 2,
+ DTIM   = 0.0003,
+ NTIME  = 5,
+ NAVERAGE = 10,
+ nlapar = .true.,
+ collisions = .false.
+ normalized = .false.,
+ max_sec = 14400
+ neoclassics = .false.,
+ restart_file_version = 2,
+ io_format = 'ascii'
+ io_testdata = .true.
+/
+ &DIAGNOSTIC
+ lfinal_output=.false.
+ lisl_follow = .false.,
+ lphi_diagnostics = .false.,
+/
+ &LINEAR_TERM_SWITCHES
+ lampere = .false.
+ lpoisson_zf = .false.
+ /
+ &GRIDSIZE
+ NX = 41,
+ N_s_grid = 10,
+ N_mu_grid = 2,
+ n_vpar_grid = 8,
+ NMOD = 5,
+ nperiod = 1,
+ number_of_species = 2,
+ N_procs_s = 2,
+ N_procs_mu = 2,
+ N_procs_sp = 2,
+ N_procs_vpar = 2,
+ /
+ &MODE
+ CHIN    = 0.,
+ KTHRHO  = 1.0,
+ mode_box = .true.,
+ krhomax = 1.4,
+ ikxspace = 7,
+ /
+ &GEOM
+ SHAT = 0.5,
+ Q    = 1.0,
+ EPS  = 0.1,
+ /
+ &SPCGENERAL
+ beta_ref = 0.0001,
+ finit = 'zero',
+ tearingmode=.true.,
+ wstar = 10,
+ isl_rot_freq = 0.002,
+ adiabatic_electrons = .false.
+ ls = 10
+ tear_zero_epar=.true.
+ isl_mode=2
+ /
+ &SPECIES
+ MASS = 1.0,
+ Z    = 1.0,
+ TEMP = 1.0,
+ DENS = 1.0,
+ rlt = 1.0,
+ rln = 1.0,
+ uprim = 0.1,
+ /
+ &SPECIES
+ MASS = 2.72e-4,
+ Z    = -1.0,
+ TEMP =  1.0,
+ dens = 1.0,
+ rlt = 1.0,
+ rln = 1.0,
+ uprim = 0.2,
+ /
+ &ROTATION
+ VCOR = 0.4
+ /
+ &COLLISIONS
+ rref = 1		
+ tref = 1		
+ nref = 1		
+ pitch_angle = .false.          
+ en_scatter = .false.            
+ friction_coll = .false.        
+ mom_conservation = .true.     
+ mass_conserve = .true.,       
+ freq_override=.true.         
+ coll_freq=8.515E-3 
+ /

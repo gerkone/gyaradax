@@ -1,0 +1,115 @@
+
+&CONTROL
+ fac_dtim_est=0.95
+ silent = .false.
+ order_of_the_scheme = 'second_order'
+ parallel_boundary_conditions = 'zero'
+ READ_FILE  = .false.
+ NON_LINEAR = .false.
+ zonal_adiabatic = .false.,
+ METHOD = 'EXP',
+ METH   = 2, 
+ DTIM   = 0.005 
+ NTIME  = 5,
+ NAVERAGE = 10,
+ nlapar = .false., 
+ collisions = .false.
+ disp_par = 0.2
+ disp_vp  = 0.2
+ !disp_x = 0.01 ! CANNOT USE - DRIVES UNSTABLE: need to fix
+ ! the issue occurs whenever shear_profile=linear, even if shear_rate = 0
+ ! suggests the call to shift_bcs in exp_integration is broken
+ disp_y = 0.0
+ max_sec = 1000
+ !lverbose= .true.
+ normalized= .false.
+ normalize_per_toroidal_mode = .false.
+ spectral_radius=.false.
+ max_gr = 1e9
+ io_format = 'ascii'
+ io_testdata = .true.
+/
+ &GRIDSIZE
+ n_procs_s = 1
+ n_procs_vpar= 2
+ n_procs_mu =2
+ n_procs_x = 2  
+ NX = 40,   !Must be an odd number
+ N_s_grid = 1, 
+ N_mu_grid = 4,
+ nperiod = 1, 
+ N_vpar_grid = 4, 
+ NMOD = 4,
+ lx = 20
+ mumax=3.5
+ number_of_species = 1 ! Number of species. Note: do not count the adiabatic species  
+ /
+ &MODE
+ CHIN    = 0., 
+ KTHRHO  = 0.5,
+ mode_box = .true., 
+ krhomax = 0.8,
+ ikxspace = 5, 
+ /
+ &GEOM 
+! geom_type='slab'
+ SHAT = 0.0,
+ Q    = 1., 
+ EPS  = 0.16
+ /
+ &SPCGENERAL
+ !amp_init=1e-5
+ !finit="line" ! causes a tiny problem with parallel_x (time.dat only), irrespective of shear options
+ ! but useful for testing the shear implmentition (with the 2D diagnstics below)
+ finit='noise'
+ beta = 0.005,
+ adiabatic_electrons = .true.
+ /
+ &SPECIES 
+ MASS  = 1.0352, 
+ Z     = 1.0, 
+ TEMP  = 1.0769, 
+ dens  = 1.0,
+ rlt   = 9.5443,
+ rln   = 3.5543, 
+ uprim = 0.1,
+ / 
+ &SPECIES 
+ MASS  = 2.72e-4, 
+ Z     = -1.0, 
+ TEMP  = 1.0534  
+ dens  = 1.0,
+ rlt   = 8.9,
+ rln   = 3.5543, 
+ uprim = 0.2,
+ / 
+ &ROTATION
+ VCOR = 0.00
+ shear_rate=0.1
+ !shear_profile = 'ky_shift'  ! MAY NEED TO BE ADDED IN SUB TIMESTEPS
+ shear_profile = 'linear'  ! WARNING THIS DOES NO SHEAR FOR NONSPECTRAL: ADD WARNING
+ !shear_profile = 'wavevector_remap'
+ / 
+&DIAGNOSTIC
+ lfinal_output = .false.
+ lphi_diagnostics = .false.
+ lcalc_freq =.true.
+ !lphi_diagnostics=.true.
+ !xy_phi=.true.
+ !xy_dens=.true.
+/
+&LINEAR_TERM_SWITCHES
+ LVPAR_GRAD_DF   = T,
+ LVDGRADF        = T,
+ LTRAPDF = T,
+ LVE_GRAD_FM     = T,
+ LVD_GRAD_PHI_FM = T,
+ LVPGRPHI        = T,
+ LPOISSON        = T,
+ LAMPERE = T,
+ LG2F_CORRECTION = T,
+ LPOISSON_ZF     = T,
+ LNEOCLASSICAL   = T,
+ LBPAR   = T
+ /
+

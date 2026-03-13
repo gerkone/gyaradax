@@ -1,0 +1,90 @@
+!
+ &CONTROL
+ spectral_radius = .false.
+ shift_metric = .true. 
+ order_of_the_scheme = 'fourth_order'
+ READ_FILE  = .false.
+ NON_LINEAR = .false.
+ zonal_adiabatic = .false.,
+ METHOD = 'EXP',
+ METH   = 2,
+ DTIM   = 0.02 
+ NTIME  = 10,
+ NAVERAGE = 50,
+ nlapar = .false.,
+ nlbpar = .false., 
+ collisions = .false.
+ disp_par = 0.8
+ disp_vp  = 0.2
+ disp_x   = 0.1375
+ lverbose = .true.
+ gamatol=0.001
+ io_format = 'ascii'
+ io_testdata = .true.
+ silent = .false.
+/
+ &GRIDSIZE
+ n_procs_s=2
+ n_procs_mu=2
+ n_procs_vpar=2
+ n_procs_sp=1
+ n_procs_x=2
+ NX = 32,   
+ N_s_grid = 8, 
+ N_mu_grid = 8, 
+ nperiod  = 1, 
+ N_vpar_grid = 16, 
+ NMOD = 1,
+ number_of_species = 1 
+ lx = 22.
+ mumax=3.5
+ /
+ &MODE
+ CHIN    = 0.,
+ KTHRHO  = 0.824264, 
+ mode_box = .true.,
+ krhomax = 0.42,
+ ikxspace = 1, 
+ /
+ &GEOM 
+ SHAT = 1.0
+ Q    = 1.0,
+ EPS  = 0.166
+ geom_type='circ'
+ /
+&SPCGENERAL
+ finit="noise"
+ beta = 0.003,
+ adiabatic_electrons = .true.
+ /
+ &SPECIES
+ MASS  = 1.0, 
+ Z     = 1.0, 
+ TEMP  = 1.25, 
+ dens  = 1.0,
+ rlt   = 9.0,
+ rln   = 3.,
+ uprim = 1.,
+ / 
+&SPECIES
+ MASS  = 2.72e-4,
+ Z     = -1.0, 
+ TEMP  = 1.2
+ dens  = 1.0,
+ rlt   = 7.,
+ rln   = 3.,
+ uprim = 0.00000,
+ /
+ &ROTATION
+ VCOR = 0.2,
+ / 
+&DIAGNOSTIC
+ lfinal_output = .false.
+! test diagnos_growth_freq
+ lcalc_freq      = .true.,
+ lamplitudes     = .true.,
+ lgrowth_rates   = .true.,
+ lfrequencies    = .true.,
+ /
+&COLLISIONS
+/

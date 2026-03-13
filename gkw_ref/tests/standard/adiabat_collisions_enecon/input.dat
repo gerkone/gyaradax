@@ -1,0 +1,103 @@
+!
+
+ &CONTROL
+ 
+ 
+ fac_dtim_est=1.0
+ silent = .false.,
+ order_of_the_scheme = 'fourth_order'
+ parallel_boundary_conditions = "open"
+ READ_FILE  = .false.
+ NON_LINEAR = .false.
+ zonal_adiabatic = .false.,
+ METHOD = 'EXP',
+ METH   = 2, 
+ DTIM   = 0.012
+ NTIME  = 25,
+ NAVERAGE = 50,
+ nlapar = .false., 
+ collisions = .true.
+ disp_par = 1.0
+ disp_vp  = 0.0
+ lverbose = .true.
+ lflapv = .true.
+ io_format = 'ascii'
+ io_testdata = .true.
+/
+ &GRIDSIZE
+ n_procs_s = 2
+ n_procs_vpar = 2
+ n_procs_mu = 2
+ n_procs_sp = 2
+ NX = 1,   
+ N_s_grid = 50, 
+ N_mu_grid = 4, 
+ N_vpar_grid = 16, 
+ NMOD = 1,
+ nperiod = 3,
+ number_of_species = 2 ! Number of species. Note: do not count the adiabatic species  
+ /
+ &MODE
+ CHIN    = 0., 
+ KTHRHO  = 0.5,
+ mode_box = .false., 
+ krhomax = 1.0,
+ ikxspace = 7, 
+ /
+ &GEOM 
+ SHAT = 1.07,
+ Q    = 1.57, 
+ EPS  = 0.177
+ /
+ &SPCGENERAL
+ finit="cosine"
+ beta = 0.234,
+ adiabatic_electrons = .true.
+ /
+ &SPECIES 
+ MASS  = 1.4352, 
+ Z     = 1.0, 
+ TEMP  = 1.8769, 
+ dens  = 0.75,
+ rlt   = 8.5443,
+ rln   = 3.5543, 
+ uprim = 0.0,
+ / 
+ &SPECIES 
+ MASS  = 2.72e-4, 
+ Z     = -1.0, 
+ TEMP  = 5.4534 	!Having a high electron temp makes things more likely to break
+ dens  = 1.0,
+ rlt   = 7.9,
+ rln   = 3.5543, 
+ uprim = 0.0,
+ / 
+ &SPECIES 
+ MASS  = 3.5892, 
+ Z     = 1.0, 
+ TEMP  = 2.3456, 
+ dens  = 0.25,
+ rlt   = 6.2345,
+ rln   = 3.5543, 
+ uprim = 0.0,
+ /
+ &ROTATION
+ VCOR = 0.1234
+ /
+ &COLLISIONS
+ rref = 1			!reference major radius used in collision operator
+ tref = 1			!reference temperature in units of kev used for the collision operator
+ nref = 1			!reference density in units 10^19 m^-3 used for the collision operator
+ pitch_angle = .true.           !These three terms swith on various terms in the collision operator, this one is pitch angle scattering
+ en_scatter =  .true.           !Energy scattering term
+ friction_coll = .true.
+ mom_conservation = .true.
+ ene_conservation = .true.
+ mass_conserve = .true.
+ freq_override = .true.
+ coll_freq = 0.0001
+ /
+&DIAGNOSTIC
+ lcalc_freq = .false.
+ lfinal_output = .false.
+/

@@ -1,0 +1,83 @@
+!Waltz linear test case
+ &CONTROL
+ fac_dtim_est=1.0
+ silent = .false.,
+ order_of_the_scheme = 'fourth_order'
+ parallel_boundary_conditions = "open"
+ read_file  = .false.
+ NON_LINEAR = .false.
+ zonal_adiabatic = .true.,
+ METHOD = 'EXP',
+ METH   = 2, 
+ DTIM   = 0.001 
+ NTIME = 20
+ NAVERAGE = 20
+ nlapar = .true.
+ nlbpar = .true.
+ collisions = .false.
+ disp_par = 1.0
+ disp_vp  = 0.05
+ lverbose = .true.
+ gamatol = 1.e-7
+ io_format = 'ascii'
+ io_testdata = .true.
+/
+ &GRIDSIZE
+ n_procs_s = 2
+ n_procs_vpar = 2
+ n_procs_mu = 2
+ n_procs_sp = 2
+ NX = 1
+ N_s_grid = 112
+ N_mu_grid = 8,
+ nperiod = 4
+ N_vpar_grid = 32, 
+ NMOD = 1
+ number_of_species = 2 ! Number of species. Note: do not count the adiabatic species  
+ /
+ &MODE
+ CHIN    = 0., 
+ KTHRHO  = 0.42426,
+ mode_box = .false.
+ krhomax = 1.485,
+ ikxspace = 1, 
+ /
+ &GEOM 
+ SHAT = 1.0,
+ Q    = 2., 
+ EPS  = 0.166
+ /
+ &SPCGENERAL
+ beta = 0.010000e+00
+ adiabatic_electrons = .false.
+ amp_init = 0.5e-2
+ !finit='noise'
+ /
+ &SPECIES 
+ MASS  = 1., 
+ Z     = 1., 
+ TEMP  = 1., 
+ dens  = 1.,
+ rlt   = 9.,
+ rln   = 3., 
+ uprim = 0.2,
+ / 
+ &SPECIES 
+ MASS  = 2.72e-4, 
+ Z     = -1.0, 
+ TEMP  = 1.2 	
+ dens  = 1.0,
+ rlt   = 9.,
+ rln   = 3., 
+ uprim = 0.15,
+ / 
+ &ROTATION
+ VCOR = 0.1
+ / 
+&DIAGNOSTIC
+ lcalc_freq=.true.
+ lfinal_output = .true.
+ lphi_diagnostics = .true.
+/
+
+

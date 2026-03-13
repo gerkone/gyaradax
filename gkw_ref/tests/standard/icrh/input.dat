@@ -1,0 +1,120 @@
+!
+&CONTROL
+ fac_dtim_est=-1.5
+ silent = .false.
+ order_of_the_scheme = 'fourth_order'
+ parallel_boundary_conditions = 'zero'
+ READ_FILE  = .false.
+ NON_LINEAR = .false.
+ zonal_adiabatic = .false.,
+ METHOD = 'EXP',
+ METH   = 2,
+ DTIM   = 0.0012 
+ NTIME  = 5,
+ NAVERAGE = 5,
+ nlapar = .true.,
+ collisions = .true.
+ disp_par = 0.8
+ disp_vp  = 0.2
+ !lverbose = .true.
+ gamatol=1e-6,
+ io_format = 'ascii'
+ io_testdata = .true.
+/
+ &GRIDSIZE
+ NX = 1,   
+ N_s_grid = 180, 
+ N_mu_grid = 4, 
+ nperiod  = 3, 
+ N_vpar_grid = 4, 
+ NMOD = 1,
+ number_of_species = 5
+ n_procs_sp = 5
+ n_procs_s = 3 
+ /
+&MODE
+ CHIN    = 0.,
+ KTHRHO  = 0.3, 
+ mode_box = .false.,
+ krhomax = 1.0,
+ ikxspace = 7, 
+ /
+&GEOM
+ shat=   1.01800000,
+ q=   2.22360000,
+ eps=   0.15,
+ geom_type='circ'
+  /
+&SPCGENERAL
+ finit="hybrid"
+ !beta = 0.003,
+ adiabatic_electrons = .false.
+            ! fmin, Tperp/Tpar, d("),  Z_min
+ icrh_params=0.0,  5.47,        16.0  , 1.0
+ /
+&SPECIES
+ MASS  = 1.0, 
+ Z     = 1.0, 
+ TEMP  = 1.0, 
+ dens  = 0.90,
+ rlt   = 5.13,
+ rln   = 1.5,
+ uprim = 0.0,
+ / 
+&SPECIES
+ MASS  = 2.72e-4,
+ Z     = -1.0, 
+ TEMP  = 0.59,
+ dens  = 1.0,
+ rlt   = 5.26,
+ rln   = 1.5,
+ uprim = 0.00000,
+/
+&SPECIES   ! hydrogen ICRH minority
+ MASS  = 1.0,
+ Z     = 2.0, 
+ TEMP  = 1.00,
+ dens  = 0.05,
+ rlt   = 5.13,
+ rln   = 1.5,
+ uprim = 0.00000,
+ background='ICRH'
+/
+&SPECIES     ! D + V
+ MASS = 32.  ! Molby Z = 42
+ z = 32.0
+ dens = 0.00
+ temp = 1.
+ rlt = 5.13
+ rln = 1.00
+ uprim = 0.0
+ /
+&SPECIES     ! V
+ MASS = 8.  ! Molby Z = 42
+ z = 18.0
+ dens = 0.00
+ temp = 1.
+ rlt = 5.13
+ rln = 1.0
+ uprim = 0.0
+ /
+&COLLISIONS
+ rref= 0.66,
+ tref= 3.1,
+ nref= 14.0,
+ zeff= 1.0,
+ pitch_angle= .true.,
+ en_scatter= .false.,
+ friction_coll= .false.,
+ mom_conservation= .false.,
+ ene_conservation= .false.,
+ freq_override= .false.,
+ coll_freq=   0.00100000, 
+/
+&ROTATION
+ VCOR = 0.4,
+ cf_trap=.true.
+ cf_drift=.true.
+ cf_upphi=.true.
+ cf_upsrc=.true.
+/ 

@@ -1,0 +1,110 @@
+!
+&CONTROL
+ silent = .false.
+ order_of_the_scheme = 'fourth_order'
+ radial_boundary_conditions = 'Dirichlet'
+ parallel_boundary_conditions = "open"
+ READ_FILE  = .false.
+ NON_LINEAR = .false.
+ zonal_adiabatic = .true.
+ METHOD = 'EXP'
+ METH   = 2
+ DTIM   = 0.002
+ NTIME  = 5 
+ NAVERAGE = 4  
+ nlapar = .true.
+ collisions = .true.
+ disp_par = 0.5
+ disp_vp  = 0.5
+ disp_x   = 1.66519
+ spectral_radius = .false. 
+ flux_tube = .false.
+ min_gr    = -0.5
+ shift_metric = .false.
+ nl_dtim_est = .false.
+ normalized = .true. 
+ io_format = 'ascii'
+ io_testdata = .true.
+/
+&GRIDSIZE
+ n_procs_vpar = 2 
+ n_procs_mu = 2 
+ n_procs_s = 2 
+ n_procs_x  = 2 
+ NX = 32 
+ N_s_grid = 4 
+ N_mu_grid = 4 
+ n_vpar_grid = 12 
+ NMOD = 1
+ nperiod = 1
+ number_of_species = 2 ! Number of species. Note: do not count the adiabatic spe
+ psih = 0.3
+/
+&MODE
+ mode_box = .true.
+ krhomax = 0.1616
+ ikxspace = 1
+ n_spacing = 1 
+/
+&GEOM
+ geom_type = 'circ'
+ SHAT = 0.78
+ Q    = 1.4
+ EPS  = 0.19
+ prof_type = 'wesson'
+ qprof_coef(1) = 11.1 
+ qprof_coef(2) = 1.0
+ qprof_coef(3) = 3.5 
+/
+&SPCGENERAL
+ beta = 0.001
+ adiabatic_electrons = .false.
+ rhostar = 0.002815
+ tm_drive = .true.
+ tearingmode = .false.
+ wstar = 0.E0
+/
+&SPECIES
+ MASS  =  1.0
+ Z     =  1.0
+ temp  =  1.0
+ dens_prof_type = 'orb3'
+ dens_prof_coef = 1.0, 0, 0.1838, 0.147, 0.0147
+ temp_prof_type = 'orb3'
+ temp_prof_coef = 1.0, 0, 0.1838, 0.147, 0.0147
+/
+&SPECIES
+ MASS  =  2.72e-4
+ Z     = -1.0
+ temp  = 1.0
+ dens_prof_type = 'orb3'
+ dens_prof_coef = 1.0, 0, 0.1838, 0.147, 0.0147 
+ temp_prof_type = 'orb3' 
+ temp_prof_coef = 1.0, 0, 0.1838, 0.147, 0.0147
+/
+&ROTATION
+ VCOR = 0.0
+/
+&DIAGNOSTIC 
+ lradial_profile = .true.
+/
+!&KROOK 
+! nlkrook = .true.
+! gammak = 0.032
+! nlbound = .false. 
+! gammab = 0.3 
+! bwidth = 6
+!/
+&COLLISIONS
+ pitch_angle = .true.
+ en_scatter = .false.
+ friction_coll = .false.
+ nref = 50.0
+ tref = 1.0
+ rref = 1.0
+/
+&GYROAVERAGE
+ GYRO_AVERAGE_ELECTRONS  = .false.,
+ ORB_POLARIZE    = .true.,
+/
+

@@ -1,0 +1,162 @@
+ &CONTROL
+ order_of_the_scheme = 'fourth_order'
+ non_linear = .false.
+ zonal_adiabatic = .true.
+ method = 'EXP',
+ meth   = 2
+ dtim   = 1.0e-2
+ ntime  = 5
+ naverage = 40
+ nlapar = .true.,
+ nlbpar = .false.,
+ neoclassics=.false.
+ collisions = .false.
+ disp_par = 1.0
+ disp_vp  = 1.0
+ disp_x   = 0.82
+ max_seconds = 3000.
+ gamatol     = 1.0e-8
+ read_file  = .true.
+ fac_dtim_est = 0.4
+ dt_min = 0.
+ min_gr = -1.
+ max_gr = 200.0
+ auto_restart=.false.
+ spectral_radius = .false.
+ flux_tube = .false.
+ shift_metric = .true.
+ radial_boundary_conditions = 'Dirichlet'
+ nl_dtim_est = .false.
+ io_format = 'ascii'
+ io_testdata = .true.
+/
+ &GRIDSIZE
+ nx = 80
+ n_s_grid = 10
+ nperiod = 1
+ n_mu_grid   = 4
+ n_vpar_grid = 10
+ nmod = 1
+ number_of_species = 2
+ n_trapped  = 2
+ psil = 0.03
+ psih = 0.358
+ n_procs_sp   = 2
+ n_procs_mu   = 1
+ n_procs_x    = 2
+ n_procs_vpar = 2
+ n_procs_s    = 2
+ vpmax = 4.2
+ mumax = 9.0
+ /
+ &MODE
+ chin    = 0.,
+ mode_box = .true.
+ krhomax = 1.0,
+ ikxspace = 7
+ n_spacing = 10 
+ /
+ &GEOM
+ shat = 0.78
+ q    = 1.4
+ eps  = 0.179
+ prof_type = 'file'
+ gradp_type = 'beta_prime'
+ geom_type = 'miller'
+/
+ &SPCGENERAL
+ beta_ref=1e-3,
+ beta_type='file',
+ betaprime_type = 'file',         !Allowed are 'ref' (value of betaprime_ref used), 'sp' (value calculated from the species 
+                                !params AND beta) or 'eq' (value from the eqm, 0 if no eqm available) (default = 'ref')
+ adiabatic_electrons = .false.
+ amp_init = 5e-4
+ finit = "noise"
+ rhostar = 5.0E-3
+ /
+ &SPECIES
+ mass  = 1.0
+ z     = 1.0
+ temp  = 1.0
+ dens  = 1.0
+ rlt   =10.0
+ rln   = 3.5
+ uprim = 0.0
+ background = 'maxwell'
+ dens_prof_type = 'file'
+ temp_prof_type = 'file'
+ / 
+ &SPECIES 
+ mass  = 5.6875e-4                !yes, these are the electrons (with example ions as deuterium)
+ z     = -1.0
+ temp  = 1.0
+ dens  = 1.0
+ rlt   =10.0
+ rln   = 3.5
+ uprim = 0.0
+ dens_prof_type = 'file'
+ temp_prof_type = 'file'
+ /
+ &DIAGNOSTIC
+ nflush_ts = 2
+ lfluxes_spectra=t
+ lfluxes_em_spectra=f
+ lfluxes_detail=t
+ lparallel_output =t
+ lrotate_parallel=t
+ lparallel_phi=t
+ lparallel_apar=f
+ lmpi_broken_io=t
+ lisl_follow=f
+ phi3d = .false.
+ spc3d = .false.
+ apa3d = .false.
+ apc3d = .false.
+ bpa3d = .false.
+ bpc3d = .false.
+ den3d = .false.
+ ene3d = .false.
+ zonal_scale_3d = 1.0
+ lphi_diagnostics = .true.
+ xy_phi = .true.
+ xy_apar = .false.
+ xy_bpar = .false.
+ xy_dens = .true.
+ xy_temp = .true.
+ xy_current = .true.
+ xy_fluxes = .false.
+ xy_fluxes_em = .false.
+ xy_fluxes_bpar = f
+ xy_vort = .false.
+ xy_estep = .false.
+ xy_slice_ipar = 2
+ xy_bin = .true.
+ lwrite_output1  = .true.
+ lcalc_fluxes    = .true.
+ lcalc_stresses  = .false.
+ lcalc_energetics  = .false.
+ lcalc_freq      = .true.
+ lfinal_output   = .true.
+ screen_output = .true.
+ lamplitudes     = t
+ lgrowth_rates   = t
+ lfrequencies    = t
+ psi_velspace    = 0.,0.,0.,
+ zeta_velspace   = 0.,0.,0.,
+ npointsvel      = 0
+ lfinvel         = .false.
+ lradial_profile = .true.
+ lrad_field      = .true.
+ lrad_moment     = .true.
+ lrad_tint       = .true.
+ /
+ &KROOK
+ nlkrook = T
+ gammak  = 0.02
+ nlbound = F
+ bwidth  =  0.0,
+ gammab  =  0.0,
+ krook_option = 1
+ /
+
+!Some compilers require a newline character after the last namelist /

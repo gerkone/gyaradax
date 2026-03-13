@@ -1,0 +1,91 @@
+!
+&CONTROL
+ fac_dtim_est=-4.0
+ silent = .false.
+ order_of_the_scheme = 'fourth_order'
+ parallel_boundary_conditions = "open"
+ READ_FILE=.false.
+ NON_LINEAR = .false.
+ zonal_adiabatic = .true.,
+ METHOD = 'EXP',
+ METH   = 2, 
+ DTIM=1e-3
+ NTIME = 20
+ NAVERAGE=10
+ gamatol=0.00001
+ disp_par = 1.0
+ disp_vp  = 1.0
+ lverbose = .true.
+ max_sec = 126000
+ nl_dtim_est=.false.
+ io_format = 'ascii'
+ io_testdata = .true.
+/
+ &DIAGNOSTIC
+ NFLUSH_TS=10
+ lcalc_freq = .false.
+ /
+ &GRIDSIZE
+ n_procs_s=2
+ n_procs_sp=3
+ n_procs_vpar=2
+ n_procs_mu=2
+ NX = 1
+ N_s_grid=96
+ N_mu_grid=16,
+ NPERIOD=2
+ N_vpar_grid = 32, 
+ NMOD=1
+ number_of_species = 3   
+ /
+ &MODE
+ CHIN    = 0., 
+ KTHRHO  = 0.42,
+ mode_box = .false.
+ krhomax=1.41
+ ikxspace = 6, 
+ /
+ &GEOM 
+ SHAT = 1.0
+ Q    = 2.0, 
+ EPS  = 0.16,
+ /
+ &SPCGENERAL
+ finit="cosine"
+ beta = 3e-4,
+ adiabatic_electrons = .false.
+ /
+ &SPECIES 
+ MASS  = 1, 
+ Z     = 1.0, 
+ TEMP  = 1.0, 
+ dens  = 0.994,
+ rlt   = 9.0,
+ rln   = 3.0, 
+ uprim = 0.2,
+ / 
+ &SPECIES 
+ MASS  = 2.77e-4, 		!sqrt(mi/me)=60
+ Z     = -1.0, 
+ TEMP  = 1.0,
+ dens  = 1.0,
+ rlt   = 9.0,
+ rln   = 3.0, 
+ uprim = 0.2,
+ /
+ &SPECIES
+ MASS  = 6.0
+ Z = 6.0
+ TEMP = 1.0
+ dens = 0.001
+ rlt = 9.0
+ rln = 3.0
+ uprim = 0.2
+ / 
+ &ROTATION
+ VCOR = 9.000000e-01
+ cf_drift=.true.
+ coriolis=.false.
+ !shear_rate=0.0
+ !shear_profile='wavevector_remap'
+ / 

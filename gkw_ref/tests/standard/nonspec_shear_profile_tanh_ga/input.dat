@@ -1,0 +1,88 @@
+
+&CONTROL
+ fac_dtim_est=0.95
+ silent = .false.
+ order_of_the_scheme = 'second_order'
+ parallel_boundary_conditions = 'open'
+ radial_boundary_conditions = 'Dirichlet'
+ READ_FILE  = .false.
+ NON_LINEAR = .false.
+ zonal_adiabatic = .false.,
+ METHOD = 'EXP',
+ METH   = 2, 
+ DTIM   = 0.005 
+ NTIME  = 10,
+ NAVERAGE = 10,
+ nlapar = .true., 
+ collisions = .false.
+ disp_par = 0.2
+ disp_vp  = 0.2
+ disp_x = 1.0 
+ disp_y = 0.0
+ max_sec = 1000
+ !lverbose= .true.
+ normalized= .false.
+ normalize_per_toroidal_mode = .false.
+ spectral_radius=.false.
+ max_gr = 1e9
+ io_format = 'ascii'
+ io_testdata = .true.
+/
+ &GRIDSIZE
+ n_procs_s = 1
+ n_procs_vpar= 2
+ n_procs_mu =2
+ n_procs_x = 2  
+ NX = 40,   !Must be an odd number
+ N_s_grid = 8, 
+ N_mu_grid = 4,
+ nperiod = 1, 
+ N_vpar_grid = 8, 
+ NMOD = 4,
+ lx = 20
+ mumax=3.5
+ number_of_species = 2 ! Number of species. Note: do not count the adiabatic species  
+ /
+ &MODE
+ mode_box = .true., 
+ krhomax = 0.8,
+ ikxspace = 5, 
+ /
+ &GEOM 
+ geom_type='circ'
+ SHAT = 0.78,
+ Q    = 1.4, 
+ EPS  = 0.19
+ /
+ &SPCGENERAL
+ amp_init=1e-5
+ finit='cosine5'
+ beta = 0.008,
+ adiabatic_electrons = .false.
+ /
+ &SPECIES 
+ MASS  = 1.0352, 
+ Z     = 1.0, 
+ TEMP  = 1.0769, 
+ dens  = 1.0,
+ rlt   = 9.5443,
+ rln   = 3.5543, 
+ uprim = 0.0,
+ / 
+ &SPECIES 
+ MASS  = 2.72e-4, 
+ Z     = -1.0, 
+ TEMP  = 1.0534  
+ dens  = 1.0,
+ rlt   = 8.9,
+ rln   = 3.5543, 
+ uprim = 0.0,
+ / 
+ &ROTATION
+ VCOR = 0.00
+ shear_rate=0.3
+ shear_profile = 'tanh_ga' 
+ / 
+&DIAGNOSTIC
+ lcalc_freq =.true.
+/

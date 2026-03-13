@@ -1,0 +1,76 @@
+!nmp=24,1
+&CONTROL
+ 
+ 
+ silent = .true.,
+ order_of_the_scheme = 'fourth_order'
+ fac_dtim_est=5.0
+ READ_FILE  = .false.
+ NON_LINEAR = .false.
+ zonal_adiabatic = .false.,
+ METHOD = 'EXP',
+ METH   = 2,
+ DTIM   = 0.012 
+ NTIME  = 70,
+ NAVERAGE = 100,
+ nlapar = .false., 
+ collisions = .false.
+ disp_par = 0.1
+ disp_vp  = 0.1
+ lverbose = .true.
+ /
+ &GRIDSIZE
+ n_procs_s=3
+ n_procs_mu=2
+ n_procs_vpar=2
+ n_procs_sp=2
+ NX = 1,   
+ N_s_grid = 21, 
+ N_mu_grid = 4, 
+ nperiod  = 2, 
+ N_vpar_grid = 16, 
+ NMOD = 1,
+ number_of_species = 2 
+ /
+ &MODE
+ CHIN    = 0.,
+ KTHRHO  = 0.424264, 
+ mode_box = .false.,
+ krhomax = 1.0,
+ ikxspace = 7, 
+ /
+ &GEOM 
+ SHAT = 0.522048,
+ Q    = 1.4,
+ EPS  = 0.173240,
+ /
+&SPCGENERAL
+ finit="cosine"
+ beta = 0.0000,
+ adiabatic_electrons = .false.
+ /
+ &SPECIES
+ MASS  = 1.0, 
+ Z     = 1.0, 
+ TEMP  = 1.0, 
+ dens  = 1.0,
+ rlt   = 0.,
+ rln   = 1.05,
+ uprim = 1.159886,
+ / 
+&SPECIES
+ MASS  = 2.72e-4,
+ Z     = -1.0, 
+ TEMP  = 1.009574,
+ dens  = 1.0,
+ rlt   = 9.150731,
+ rln   = 1.05,
+ uprim = 0.000000,
+ /
+ &ROTATION
+ VCOR = 0.0,
+ / 
+&DIAGNOSTIC
+ lcalc_freq = .false.
+ lfinal_output = .false.
+/

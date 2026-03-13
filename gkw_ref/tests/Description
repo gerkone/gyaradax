@@ -1,0 +1,107 @@
+# GKW Testcases
+
+## General information
+
+The tests provided here are a set of short GKW runs used to check that the
+solution and diagnostics of the GKW code match a set of reference files
+generated from previous runs.  If the code passes the tests, it does
+not guarantee physical correctness, but guarantees that the result has not
+changed since a known "good" version (this is known as "regression testing"
+and is a critical tool to allow changes to a production code to be made
+with confidence).
+
+Each test is defined by a folder, (for example "standard/geom"). For
+more information please read the usage message of the test script, i.e.
+
+gkw_run_tests --help
+
+The standard test set exercises most functional GKW switches and most 
+commonly used diagnostics (although not all possible combination thereof!). 
+
+The extra tests are not maintained at present and will probably fail.
+
+*** When a new feature is added to the code, it should be enabled in at least
+one standard test, or it cannot be guaranteed to remain functional as the code
+is updated.  Only features covered by the standard test cases should be
+considered stable features.***
+
+All standard tests should pass at each commit to develop and master branches:
+*** ALL developers are expected to test before pushing changes to develop. ***
+Nightly tests are also run automatically, so errors should get noticed soon.
+
+## How do you run the tests?  
+
+The testing procedure is (after loading the appropriate modules)
+
+1) set the environment variable GKW_HOME to where your GKW code is
+  (e.g. export GKW_HOME="~/gkw" )
+
+2) go to the gkw directory (the one containing src, tests etc.)
+
+3) run "make" 
+
+4) run "scripts/gkw_run_tests".  If the folder scripts/ is in your $PATH
+   environment variable, then you should be able to do "gkw_run_tests" from any
+   directory.  For more details and options, see also "gkw_run_tests --help"
+
+    To run only the parallel tests, do gkw_run_tests -p
+    (about 5-10 minutes if you have 8 or more cores)
+    If the parallel tests pass, so will the serial tests (almost always).
+      
+    To run only the serial tests, do gkw_run_tests -s
+    (can be 30 minutes on a single processor)
+
+    To run the tests with the hybrid scheme, first compile with OpenMP, then
+    export OMP_NUM_THREADS=2, gkw_run_tests -p
+
+## How do you create a new test ?   
+
+This is intuitive if you understand how the test script works.
+
+  1) Create a minimal short GKW run, with a good version of the code, with the
+     switches you want to test. (or, to avoid too many tests it may be
+      better to modify an existing test to activate a new feature).  To test the
+      code fully, it is best if floating point input paramters are not
+      set to zero or one.  One can choose inputs to avoid output data which
+      is numerically zero, (e.g. momentum flux or particle flux, or one can
+      set io_testdata=T to round these to zero in the output.
+
+  2) Create a new test folder, add the file input.dat at the top level
+
+  3) Add the output files you want to be tested to a subfolder reference
+
+  4) Add empty folders named as number of processors the test should run on
+     (for git to keep the folder, one can add an empty file, e.g. .keepfolder)
+
+  5) Test the test, in serial and parallel
+
+## Which switches are covered by the testcases?
+
+For an up-to-date overview of the switches which are covered by the
+standard testcases, please run
+
+$GKW_HOME/scripts/gkw_testcase_matrix
+
+The adiabatic electrons linear test cases exercise each of the following code
+switches and options once
+
+	Method exp 1,2,3
+	second and fourth order schemes for both implicit and explicit
+	apar = true and false (electrostatic or not)
+	parallelization over species and mu grid
+	zero parallel boundary and zero derivative
+
+Not every permutation is covered.  Adiabatic_exp_2 is used as a as a
+default starting point and only one option is varied for each of the
+cases. 
+
+So the baseline default options are 
+	adiabatic electrons
+	2 ion species with different masses temperatures and gradients
+	small rotation
+	small beta
+	explicit solver method 2 - (4th order runge-kutta)
+	fourth order
+	zonal_adiabatic = false
+	physical parameters are the same for each case.
+See input_adiabatic_exp_2.dat for full details

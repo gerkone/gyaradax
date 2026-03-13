@@ -1,0 +1,91 @@
+ 0.0502720277036249  0.0502720277036249  0.0502720277036249  0.0502720277036249  0.0502720277036249
+-1.0000000000000000  2.0192307692307700 -0.0192307692307692  0.4099475631896930 -0.3084367380189120
+-1.1592014973171000  2.3406953311210600 -0.1814938338039660  0.4752118290709880 -0.3541567341099110
+-1.1855774052985000  2.0651753656497000  0.1204020396488070  0.4192753109789400 -0.2896242516946250
+!-- Do not edit the lines above --!
+
+! It appears that for meth=2, fac_dtim_est >~2, this input is unstable
+&CONTROL
+ fac_dtim_est=40.0
+ silent = .true.,
+ order_of_the_scheme = 'fourth_order'
+ parallel_boundary_conditions = 'zero'
+ READ_FILE  = .false.
+ NON_LINEAR = .false.
+ zonal_adiabatic = .false.,
+ METHOD = 'EXP',
+ METH   = -4,
+ DTIM   = 0.0036 
+ NTIME  = 50,
+ NAVERAGE = 50,
+ nlapar = .false., 
+ collisions = .true.
+ disp_par =  0.1
+ disp_vp  =  0.1
+ lverbose = .true.
+ ltrapping_arakawa = .false.
+/
+&DIAGNOSTIC
+ lcalc_freq = .false.
+ lfinal_output = .true.
+ lvflux = .false.
+/
+ &GRIDSIZE
+ n_procs_s = 2
+ n_procs_vpar = 1
+ n_procs_mu = 1
+ NX = 1,   
+ N_s_grid = 70,
+ N_mu_grid = 16,
+ nperiod  = 4, 
+ N_vpar_grid = 16, 
+ NMOD = 1,
+ number_of_species = 2 
+ /
+ &MODE
+ CHIN    = 0.,
+ KTHRHO  = 0.424264, 
+ mode_box = .false.,
+ krhomax = 1.0,
+ ikxspace = 7, 
+ /
+ &GEOM 
+ SHAT = 1.0,
+ Q    = 2.0,
+ EPS  = 0.16666,
+ /
+&SPCGENERAL
+ finit="cosine"
+ beta = 0.0000,
+ adiabatic_electrons = .false.
+ /
+ &SPECIES
+ MASS  = 1.0, 
+ Z     = 1.0, 
+ TEMP  = 1.0, 
+ dens  = 1.0,
+ rlt   = 9.0,
+ rln   = 3.0,
+ uprim = 0.0,
+ / 
+&SPECIES
+ MASS  = 2.72e-4,
+ Z     = -1.0, 
+ TEMP  = 1.0,
+ dens  = 1.0,
+ rlt   = 9.0,
+ rln   = 3.0,
+ uprim = 0.000000,
+ /
+ &ROTATION
+ VCOR = 0.0,
+/ 
+&COLLISIONS
+ pitch_angle = .true.           !Switches for the collision terms, this one is pitch angle scattering   (default = T)
+ en_scatter = .false.           !Energy scattering term                                                (default = T)
+ friction_coll = .false.        !Collisional friction term                                             (default = T)
+ mom_conservation = .false      !Use the correction to conserve momentum                               (default = T)
+ mass_conserve = .false.,       !Forces zero flux boundary on velocity space so no out flow of mass    (default = F)
+ freq_override=.true.           !Manually specify ii collision frequency to override ref values above. (default = F)
+ coll_freq=0.2              !Ion-ion collision frequency used if freq_override=.true.              (default=0.0)mass_conserve=.false.
+/ 

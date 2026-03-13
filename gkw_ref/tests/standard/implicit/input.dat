@@ -1,0 +1,84 @@
+
+
+&CONTROL
+ fac_dtim_est=1.0
+ silent = .false.
+ order_of_the_scheme = 'fourth_order'
+ parallel_boundary_conditions = "open"
+ READ_FILE  = .false.
+ NON_LINEAR = .false.
+ zonal_adiabatic = .true.,
+ METHOD = 'IMP',
+ METH   = 2,
+ DTIM   = 0.1
+ NTIME  = 40,
+ NAVERAGE = 10,
+ nlapar = .true., 
+ nlbpar = .false. 
+ collisions = .false.
+ disp_par = 1.00 
+ disp_vp  = 0.03
+ restart_file_version = 1
+ ltrapping_arakawa = .false.
+ vp_trap = 1 
+ io_format = 'ascii'
+ io_testdata = .true.
+/
+ &GRIDSIZE
+ NX = 7,   
+ n_trapped = 8 
+ N_s_grid = 16, 
+ N_mu_grid = 8, 
+ N_vpar_grid = 32, 
+ NMOD = 1,
+ number_of_species = 2 
+ nperiod = 1
+ n_procs_mu = 4 
+ n_procs_sp = 2
+ /
+ &MODE
+ CHIN    = 0.,
+ KTHRHO  = 0.424264, 
+ mode_box = .true.,
+ krhomax = 0.424,
+ ikxspace = 1, 
+ /
+ &GEOM 
+ geom_type = 'circ'
+ SHAT = 1.0 
+ Q    = 2.0 
+ EPS  = 0.1666,
+ /
+&SPCGENERAL
+ beta = 0.004,
+ adiabatic_electrons = .false.
+ /
+ &SPECIES
+ MASS  = 1.0, 
+ Z     = 1.0, 
+ TEMP  = 1.0, 
+ DENS  = 1.0,
+ rlt   = 9.,
+ rln   = 3.,
+ uprim = 0.0,
+ / 
+&SPECIES
+ MASS  = 2.72e-4,
+ Z     = -1.0, 
+ TEMP  = 1.,
+ dens  = 1.0,
+ rlt   = 9.,
+ rln   = 3.,
+ uprim = 0.000000,
+ /
+ &ROTATION
+ VCOR = 0.00,
+ / 
+&diagnostic
+ xy_slice_ipar = 8
+/
+&COLLISIONS 
+nref = 10. 
+tref = 1. 
+rref = 1. 
+/

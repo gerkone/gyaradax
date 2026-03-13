@@ -1,0 +1,93 @@
+! Note that neoclassics has not been used for quite a while here and
+! this part of the code has not been tested in the last years. Before
+! serious use, it must be checked and tested anew.
+! Please update the reference data of this testcase accordingly.
+&CONTROL
+ silent = .false.,
+ order_of_the_scheme = 'fourth_order'
+ fac_dtim_est=5.0
+ read_file  = .true.
+ non_linear = .false.
+ zonal_adiabatic = .false.,
+ method = 'EXP',
+ meth   = 2,
+ dtim   = 2e-3
+ ntime  = 10,
+ naverage = 40,
+ nlapar = .true.,
+ nlbpar = .true.,
+ neoclassics = .true.,
+ collisions = .true.,
+ disp_par = 0.1
+ disp_vp  = 0.1
+ lverbose = .false.,
+ max_seconds = -1
+ normalized = .true.
+ ltrapping_arakawa = .false.
+ lverbose = .true.
+ io_format = 'ascii'
+ io_testdata = .true.
+ io_legacy = .false.
+ /
+ &GRIDSIZE
+ nx = 1,
+ n_s_grid = 16,
+ n_mu_grid = 16,
+ n_vpar_grid = 64,
+ nmod = 1,
+ nperiod = 1,
+ number_of_species = 2,
+ N_procs_s = 2
+ n_procs_vpar=2
+ n_procs_mu=2
+ !n_procs_sp=2 !still broken 
+ /
+ &MODE
+ chin    = 0.,
+ kthrho  = 0.5, 0.5,
+ mode_box = .true.
+ krhomax = 0.0,
+ ikxspace = 1
+ /
+ &GEOM
+ geom_type = 'circ'
+ shat = 1.0,
+ q    = 2,
+ eps  = 0.16
+ /
+ &SPCGENERAL
+ beta = 0.003,
+ adiabatic_electrons = .false.
+ /
+ &SPECIES
+ mass = 1.0,
+ z    = 1.0,
+ temp = 1.0,
+ dens = 1.0,
+ rlt = 9.0,
+ rln = 0.0,
+ uprim = 0.0,
+ /
+ &SPECIES
+ mass = 2.72e-4,
+ z    = -1.0,
+ temp =  1.0,
+ dens = 1.0
+ rlt = 9.0,
+ rln = 0.0,
+ uprim = 0.0,
+ /
+ &ROTATION
+ vcor = 0.3
+ cf_trap = .true.
+ cf_drift = .true.
+ /
+ &COLLISIONS
+ nref = 3,
+ rref = 1.0
+ en_scatter = .true.,
+ friction_coll = .true.,
+ mom_conservation = .true.,
+ freq_override = .false.,
+ selfcollcon = .false.
+/

@@ -1,0 +1,184 @@
+!Also need to give this case a uprim
+!Also need to give this case collisions
+!Also need to give this case shear
+!Also need to give this case general geom
+!Also need to give this case tearning_modes
+!Also need to add a restart test.
+!Also need to add a neoclassics test
+&CONTROL
+ fac_dtim_est=1.0
+ silent = .false.,
+ order_of_the_scheme = 'fourth_order'
+ parallel_boundary_conditions = "open"
+ read_file  = .true.
+ non_linear = .true.
+ zonal_adiabatic = .true.,
+ METHOD = 'EXP',
+ METH   = 2, 
+ DTIM   = 0.005 
+ NTIME  = 5,  !Longer runs can give problem with the timestep estimator
+ NAVERAGE = 75,
+ nlapar = .true., 
+ !nlbpar = .true.
+ collisions = .false.
+ disp_par = 1.0
+ disp_vp  = 0.0
+ lverbose = .true.
+ io_format = 'ascii'
+ io_testdata = .true.
+ io_legacy = .true.
+ /
+ &GRIDSIZE
+ n_procs_s = 2
+ n_procs_vpar = 2
+ n_procs_mu = 2
+ n_procs_sp = 2
+ NX = 17,   !Must be an odd number
+ N_s_grid = 6, 
+ N_mu_grid = 4,
+ nperiod = 1, 
+ N_vpar_grid = 8, 
+ NMOD = 7,
+ number_of_species = 2 ! Number of species. Note: do not count the adiabatic species  
+ /
+ &MODE
+ CHIN    = 0., 
+ KTHRHO  = 0.5,
+ mode_box = .true., 
+ krhomax = 1.4,
+ ikxspace = 7, 
+ /
+ &GEOM 
+ SHAT = 1.07,
+ Q    = 1.57, 
+ EPS  = 0.177
+ /
+ &SPCGENERAL
+ finit="cosine"
+ beta = 0.234,
+ adiabatic_electrons = .true.
+ amp_init = 0.5e-2
+ /
+ &SPECIES 
+ MASS  = 1.4352, 
+ Z     = 1.0, 
+ TEMP  = 1.8769, 
+ dens  = 0.75,
+ rlt   = 8.5443,
+ rln   = 3.5543, 
+ uprim = 0.0,
+ / 
+ &SPECIES 
+ MASS  = 2.72e-4, 
+ Z     = -1.0, 
+ TEMP  = 5.4534 	!Having a high electron temp makes things more likely to break
+ dens  = 1.0,
+ rlt   = 7.9,
+ rln   = 3.5543, 
+ uprim = 0.0,
+ / 
+ &SPECIES 
+ MASS  = 3.5892, 
+ Z     = 1.0, 
+ TEMP  = 2.3456, 
+ dens  = 0.25,
+ rlt   = 6.2345,
+ rln   = 3.5543, 
+ uprim = 0.0,
+ /
+ &ROTATION
+ VCOR = 0.1234
+ / 
+&DIAGNOSTIC
+ lmpi_broken_io=.true.,
+ nflush_ts = 2,
+ lphi_diagnostics = .true.
+ lisl_follow=.true.,
+ xy_estep = .true.,
+ xy_slice_ipar = 4,
+ lwrite_output1 = .true.,
+ lfinal_output  = .true.,
+ screen_output = .true.,
+ ! test diagnos_fluxes
+ lcalc_fluxes    = .true.,
+ lfluxes_spectra=.true.,
+ lfluxes_em_spectra=.true.,
+ xy_fluxes = .true.,
+ xy_fluxes_bi = .true.,
+ xy_fluxes_p = .true., 
+ xy_fluxes_v = .true.,
+ xy_fluxes_fsa = .true.,
+ xy_fluxes_em = .true.,
+ xy_fluxes_k = .true.,
+ xy_fluxes_bpar = .true.,
+ ! test diagnos_fluxes_vspace
+ lfluxes_detail=.true.,
+ lfluxes_vspace=.true.,
+ lfluxes_vspace_phi=.true.,
+ lfluxes_vspace_em=.true.,
+ lfluxes_vspace_bpar=.true.,
+ ! test diagnos_fields
+ xy_phi = .true.,
+ xy_apar = .true.,
+ xy_bpar = .true.,
+ xs_phi = .true.,
+ nmodepoints = 1,
+ imod_field  = 1,
+ lparallel_phi=.true.,
+ lparallel_apar=.true.,
+ phi3d = .true.,
+ spc3d = .true.,
+ apa3d = .true.,
+ apc3d = .true.,
+ bpa3d = .true.,
+ bpc3d = .true.,
+ zonal_scale_3d = 0.8,
+ field_fsa_kyzero = .true.,
+! test diagnos_moments
+ xy_dens = .true.,
+ xy_temp = .true.,
+ xy_current = .true.,
+ xy_current2 = .true.,
+ den3d = .true.,
+ ene3d = .true.,
+ !test diagnos_mode_struct
+ lparallel_output = .true.,
+ lrotate_parallel = .true.,
+ parallel_output_timestamps = 1.0, 2.0, 3.0
+ ! test diagnos_growth_freq
+ lcalc_freq      = .true.,
+ lamplitudes     = .true.,
+ lgrowth_rates   = .true.,
+ lfrequencies    = .true.,
+ ! from module diagnos_rad:
+ lrad_moment = .true.
+ lrad_field = .true.
+ lrad_entropy = .true.
+ lrad_tint = .true.
+ ! test diagnos_kinenergy_trappas
+ lcalc_kinenergy_trappas = .true.
+ ! test diagnos_stresses
+ lcalc_stresses  = .true.,
+ ! test diagnos_energetics
+ lcalc_energetics  = .true.,
+ ! test diagnos_velspace
+ psi_velspace    = 0,0,0,
+ zeta_velspace   = 0,0,0,
+ npointsvel      = 1,
+ ! test diagnos_jdote
+ lcalc_jdote = .true.,
+ lcalc_jdote_fs = .true.,
+ ! from module diagnos_corr:
+ lcalc_corr   = .true.,
+ imod_corr    = 5,10,
+ ! from module diagnos_nonlin_transfer:
+ lnonlin_transfer = .true.,
+ lnonlin_transfer_fsa = .true.,
+ nonlin_transfer_interval = 1
+ ! from module diagnos_zfshear:
+ lcalc_zfshear = .true.
+ ! from module diagnos_cross_phase:
+ cross_phases = 'dens', 'phi', 'T', 'phi', 'dens', 'T', 'dens_tr', 'phi', 'dens_ps', 'phi', 'Tperp', 'phi', 'Tpar', 'phi'
+ ! from module diagnos_timetrace
+ lcomplex_timetrace = .true.
+/
