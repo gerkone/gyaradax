@@ -1,7 +1,8 @@
 import jax
 import jax.numpy as jnp
 
-from gyaradax.solver import GKParams, default_state, gkstep_single
+from gyaradax.params import GKParams, default_state
+from gyaradax.solver import gkstep_single
 
 
 def test_gkstep_gradient_validity(lin_geom, lin_shape):

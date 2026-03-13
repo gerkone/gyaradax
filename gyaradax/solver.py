@@ -1,297 +1,48 @@
+"""
+Gyrokinetic Vlasov-Poisson solver for the local flux-tube limit.
+
+Targets the electrostatic, adiabatic-electron configuration of GKW.
+
+Implemented Equations:
+The solver evolves the perturbed distribution function `f` in a 5D phase space (vpar, mu, s, kx, ky).
+
+Active RHS Terms from the GKW formulation implemented here:
+1. Term I (Parallel Advection): v_par nabla_par f using fourth-order upwinded finite differences.
+2. Term II (Drift Advection): v_d . nabla_perp f representing curvature and nabla B drifts.
+3. Term III (Nonlinear ExB Advection): v_E . nabla_perp f evaluated via a pseudospectral method with dealiasing.
+4. Term IV (Trapping/Mirror): Parallel velocity space advection due to magnetic field gradients.
+5. Term V (Equilibrium Drive): v_E . nabla F_M representing background density and temperature gradients.
+6. Term VII (Parallel Field Drive): v_par nabla_par phi coupling.
+7. Term VIII (Drift Field Drive): v_d . nabla phi coupling.
+
+Dissipation:
+- Parallel Dissipation: Fourth-order damping on the streaming term.
+- Velocity Space Dissipation: Smoothing in vpar to prevent grid-scale oscillations.
+- Perpendicular Hyper-dissipation: Fourth-order spectral damping in (kx, ky).
+
+Numerical Schemes:
+- Time Integration: Explicit Runge-Kutta 4 (RK4) scheme for the small-step update. The large-step cadence (naverage) is handled via stateful metadata to maintain normalization and growth-rate tracking.
+- Spatial Differencing:
+  - Parallel (s): Fourth-order central and upwinded stencils with complex connectivity across parallel boundaries.
+  - Parallel Velocity (vpar): Centered fourth-order stencils with zero-padding at the boundaries.
+  - Perpendicular (kx, ky): Pseudospectral evaluation using dealiased FFT grids (3/2 rule).
+
+Normalization:
+Operates in standard GKW normalization (scaled by R_ref, v_th,ref). In linear modes, per-toroidal-mode normalization is applied at large-step boundaries to maintain unit potential amplitude.
+"""
+
 import jax
 import jax.numpy as jnp
-import numpy as np
 import math
-import os
-from dataclasses import dataclass
-from typing import Dict, Tuple, Any, Optional
+from typing import Dict, Tuple, Optional
 
 from gyaradax.integrals import get_integrals, j0
 from gyaradax import stencils
-
-
-@jax.tree_util.register_pytree_node_class
-@dataclass(frozen=True)
-class GKParams:
-    """
-    Runtime controls and physical parameters for the electrostatic solver.
-
-    This dataclass mirrors the GKW 'control', 'gridsize', and 'species' namelists,
-    handling numerical hyperparameters and physical constants required for the
-    gyrokinetic Vlasov-Poisson system.
-
-    Attributes:
-        dt: Small time step for RK4 integration.
-        naverage: Number of steps between mode normalization and growth rate calculation.
-        disp_par: Parallel dissipation coefficient.
-        disp_vp: Parallel velocity space dissipation coefficient.
-        disp_x: Radial (kx) hyper-dissipation coefficient.
-        disp_y: Binormal (ky) hyper-dissipation coefficient.
-        idisp: Dissipation method selector.
-        drive_scale: Scaling factor for equilibrium drive terms.
-        norm_eps: Numerical floor for mode amplitude normalization.
-        non_linear: Toggle for nonlinear term inclusion.
-        enable_term_iii: Specifically enable/disable ExB advection.
-        rlt: Inverse temperature gradient scale length (R/LT).
-        rln: Inverse density gradient scale length (R/LN).
-        mas: Atomic mass of the kinetic species.
-        tmp: Temperature of the kinetic species.
-        de: Density of the kinetic species.
-        signz: Charge sign of the species.
-        vthrat: Thermal velocity ratio.
-        shat: Magnetic shear parameter.
-        q: Safety factor.
-        eps: Local aspect ratio.
-        kthnorm: Wavevector normalization factor.
-        Rref: Reference major radius.
-        d2X: Geometry-dependent scaling factor.
-        signB: Direction of the magnetic field.
-        dvp: Parallel velocity grid spacing.
-        sgr_dist: Field-line grid spacing.
-        kxmax: Maximum radial wavevector.
-        kymax: Maximum binormal wavevector.
-        dgrid: Global density scaling.
-        tgrid: Global temperature scaling.
-    """
-
-    # runtime controls
-    dt: float = 0.01
-    naverage: int = 40
-    disp_par: float = 1.0
-    disp_vp: float = 0.2
-    disp_x: float = 0.1
-    disp_y: float = 0.1
-    idisp: int = 2
-    drive_scale: float = 1.0
-    norm_eps: float = 1.0e-14
-    non_linear: bool = False
-    enable_term_iii: bool = True
-
-    # physical parameters (typically from the kinetic species)
-    rlt: float = 1.0
-    rln: float = 1.0
-    mas: float = 1.0
-    tmp: float = 1.0
-    de: float = 1.0
-    signz: float = 1.0
-    vthrat: float = 1.0
-
-    # geometry scalars
-    shat: float = 0.0
-    q: float = 1.0
-    eps: float = 0.0
-    kthnorm: float = 1.0
-    Rref: float = 1.0
-    d2X: float = 1.0
-    signB: float = 1.0
-
-    # grid metadata and scaling
-    dvp: float = 1.0
-    sgr_dist: float = 1.0
-    kxmax: float = 1.0
-    kymax: float = 1.0
-    dgrid: float = 1.0
-    tgrid: float = 1.0
-
-    def tree_flatten(self):
-        return tuple(vars(self).values()), None
-
-    @classmethod
-    def tree_unflatten(cls, aux_data, leaves):
-        return cls(*leaves)
-
-
-@jax.tree_util.register_pytree_node_class
-@dataclass(frozen=True)
-class GKState:
-    """
-    Explicit diagnostic state used for large-step growth tracking and normalization.
-
-    This state tracks metadata across 'naverage' intervals to calculate growth rates
-    and maintain normalization history.
-
-    Attributes:
-        time: Current simulation time.
-        step: Cumulative small-step count.
-        accumulated_norm_factor: Product of all normalization rescalings applied per mode.
-        window_start_amp: Mode amplitudes at the beginning of the current diagnostic window.
-        last_growth_rate: Calculated exponential growth rate from the previous window per mode.
-    """
-
-    time: jnp.ndarray
-    step: jnp.ndarray
-    accumulated_norm_factor: jnp.ndarray
-    window_start_amp: jnp.ndarray
-    last_growth_rate: jnp.ndarray
-
-    def tree_flatten(self):
-        return tuple(vars(self).values()), None
-
-    @classmethod
-    def tree_unflatten(cls, aux_data, leaves):
-        return cls(*leaves)
-
-
-def default_state(nky: int = 1) -> GKState:
-    """
-    Construct a default diagnostic state initialized at simulation startup.
-
-    Args:
-        nky: Number of binormal modes to track.
-
-    Returns:
-        GKState object with zeroed time/steps and unit initialization for amplitudes.
-    """
-    return GKState(
-        time=jnp.array(0.0, dtype=jnp.float64),
-        step=jnp.array(0, dtype=jnp.int32),
-        accumulated_norm_factor=jnp.ones(nky, dtype=jnp.float64),
-        window_start_amp=jnp.ones(nky, dtype=jnp.float64),
-        last_growth_rate=jnp.zeros(nky, dtype=jnp.float64),
-    )
-
-
-def gkparams_from_runtime(runtime: Dict[str, Any], **overrides) -> GKParams:
-    """
-    Build GKParams from a GKW-compatible runtime-controls dictionary.
-
-    Args:
-        runtime: Dictionary of parameters typically parsed from GKW input files.
-        overrides: Keyword arguments to override specific params manually.
-
-    Returns:
-        Configured GKParams instance.
-    """
-    params_dict = {
-        "dt": float(runtime.get("dtim", 0.01)),
-        "naverage": int(runtime.get("naverage", 40)),
-        "disp_par": float(runtime.get("disp_par", 1.0)),
-        "disp_vp": float(runtime.get("disp_vp", 0.2)),
-        "disp_x": float(runtime.get("disp_x", 0.1)),
-        "disp_y": float(runtime.get("disp_y", 0.1)),
-        "non_linear": bool(runtime.get("non_linear", False)),
-    }
-    # fill physical and geometry params if available
-    for k in [
-        "rlt",
-        "rln",
-        "mas",
-        "tmp",
-        "de",
-        "signz",
-        "vthrat",
-        "shat",
-        "q",
-        "eps",
-        "kthnorm",
-        "Rref",
-        "d2X",
-        "signB",
-        "dvp",
-        "sgr_dist",
-        "kxmax",
-        "kymax",
-        "dgrid",
-        "tgrid",
-    ]:
-        if k in runtime:
-            params_dict[k] = float(runtime[k])
-
-    if overrides:
-        params_dict.update(overrides)
-    return GKParams(**params_dict)
-
-
-def gkparams_from_input_dat(input_dat_path: str, **overrides) -> GKParams:
-    """
-    Load all runtime, physics, and geometry scalars from a GKW run directory.
-
-    Args:
-        input_dat_path: Path to the GKW input.dat file.
-        overrides: Manual parameter overrides.
-
-    Returns:
-        Configured GKParams instance.
-    """
-    from gyaradax.geometry import load_scalars
-
-    directory = os.path.dirname(input_dat_path)
-    scalars = load_scalars(directory)
-    return gkparams_from_runtime(scalars, **overrides)
-
-
-def load_config(config_path: str) -> Any:
-    """
-    Load a structured YAML configuration using OmegaConf.
-
-    Args:
-        config_path: Path to the .yaml configuration file.
-
-    Returns:
-        OmegaConf DictConfig object containing solver and grid settings.
-    """
-    from omegaconf import OmegaConf
-
-    return OmegaConf.load(config_path)
-
-
-def gkparams_from_config(config: Any, **overrides) -> GKParams:
-    """
-    Build GKParams from an OmegaConf configuration object.
-
-    Args:
-        config: Configuration object with 'solver', 'physics', and 'geometry' sections.
-        overrides: Manual parameter overrides.
-
-    Returns:
-        Configured GKParams instance.
-    """
-    solver_cfg = config.solver
-    physics_cfg = getattr(config, "physics", {})
-    geometry_cfg = getattr(config, "geometry", {})
-
-    params_dict = {
-        "dt": float(getattr(solver_cfg, "dt", 0.01)),
-        "naverage": int(getattr(solver_cfg, "naverage", 40)),
-        "disp_par": float(getattr(solver_cfg, "disp_par", 1.0)),
-        "disp_vp": float(getattr(solver_cfg, "disp_vp", 0.2)),
-        "disp_x": float(getattr(solver_cfg, "disp_x", 0.1)),
-        "disp_y": float(getattr(solver_cfg, "disp_y", 0.1)),
-        "idisp": int(getattr(solver_cfg, "idisp", 2)),
-        "non_linear": bool(getattr(solver_cfg, "non_linear", False)),
-        "enable_term_iii": bool(getattr(solver_cfg, "enable_term_iii", True)),
-    }
-
-    # fill physics scalars
-    for k in ["rlt", "rln", "mas", "tmp", "de", "signz", "vthrat", "dgrid", "tgrid"]:
-        if hasattr(physics_cfg, k):
-            params_dict[k] = float(getattr(physics_cfg, k))
-
-    # fill geometry scalars
-    for k in ["shat", "q", "eps", "kthnorm", "Rref", "d2X", "signB"]:
-        if hasattr(geometry_cfg, k):
-            params_dict[k] = float(getattr(geometry_cfg, k))
-
-    # fill scaling/grid scalars
-    for k in ["dvp", "sgr_dist", "kxmax", "kymax"]:
-        if hasattr(geometry_cfg, k):
-            params_dict[k] = float(getattr(geometry_cfg, k))
-
-    if overrides:
-        params_dict.update(overrides)
-    return GKParams(**params_dict)
+from gyaradax.params import GKParams, GKState
 
 
 def kx_ky_grids(geometry: Dict[str, jnp.ndarray]) -> Tuple[jnp.ndarray, jnp.ndarray]:
-    """
-    Extract and normalize the spectral wavevector grids from geometry metadata.
-
-    Args:
-        geometry: Dictionary containing kxrh and krho grid metadata.
-
-    Returns:
-        Tuple of (kx, ky) grids as 1D JAX arrays.
-    """
+    """Extract and normalize the spectral wavevector grids from geometry metadata."""
     kx = jnp.asarray(geometry["kxrh"], dtype=jnp.float64)
     ky = jnp.asarray(geometry["krho"], dtype=jnp.float64)
     if kx.ndim == 2:
@@ -309,14 +60,6 @@ def mode_amplitude(
 
     The amplitude is defined as the square root of the flux-surface integrated potential:
     amp = sqrt( ds * sum_{s,kx} |phi(s, kx, ky)|^2 ).
-
-    Args:
-        phi: Complex electrostatic potential [ns, nkx, nky].
-        geometry: Geometry dictionary for integration weights (ints).
-        eps: Numerical floor to prevent zero amplitudes.
-
-    Returns:
-        Array of amplitudes for each ky mode.
     """
     ints = jnp.asarray(geometry["ints"], dtype=jnp.float64)
     ds = ints[0]
@@ -332,14 +75,6 @@ def normalize_per_ky(
 
     This is the standard GKW normalization for linear simulations, preventing
     exponential overflow and allowing consistent growth rate diagnostics.
-
-    Args:
-        df: 5D distribution function [vpar, mu, s, kx, ky].
-        geometry: Geometry dictionary for potential calculation.
-        params: Parameters for the normalization floor.
-
-    Returns:
-        Tuple of (normalized_df, per_mode_inv_factor, per_mode_amplitude).
     """
     phi, _ = get_integrals(df, geometry, params=params, include_fluxes=False)
     amp_per_ky = mode_amplitude(phi, geometry, params.norm_eps)

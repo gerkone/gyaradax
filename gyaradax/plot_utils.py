@@ -115,11 +115,11 @@ def plot_mode_growth(
         ax.plot(
             time,
             np.log(np.maximum(amp, 1e-20)),
-            label=f"$k_y \rho = {ky_values[idx]:.3f}$",
+            label=fr"$k_y \rho = {ky_values[idx]:.3f}$",
         )
 
     ax.set_xlabel("Time $[v_{th}/R]$")
-    ax.set_ylabel("$\log(\mathrm{Amplitude})$")
+    ax.set_ylabel(r"$\log(\mathrm{Amplitude})$")
     ax.set_title(title)
     ax.legend(bbox_to_anchor=(1.05, 1), loc="upper left")
     ax.grid(True)

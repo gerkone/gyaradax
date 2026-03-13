@@ -3,10 +3,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from gyaradax.diag import (
-    term_iii_fft_pack_roundtrip,
-    term_iii_rhs,
-)
+from gyaradax.diag import term_iii_fft_pack_roundtrip, term_iii_rhs
 from gyaradax.geometry import load_runtime_params
 
 

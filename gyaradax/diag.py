@@ -9,8 +9,8 @@ from gyaradax.solver import (
     build_jind,
     pack_half_spectrum,
     unpack_half_spectrum,
-    GKParams,
 )
+from gyaradax.params import GKParams
 
 
 def kx0_mode_columns(

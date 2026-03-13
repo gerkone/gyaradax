@@ -2,7 +2,7 @@ import os
 import shutil
 import jax.numpy as jnp
 from gyaradax.utils import save_dumps, load_checkpoint
-from gyaradax.solver import GKState
+from gyaradax.params import GKState
 
 
 def test_io_roundtrip():

@@ -13,14 +13,14 @@ import jax.numpy as jnp
 from gyaradax.diag import get_diagnostics
 from gyaradax.geometry import load_geometry
 from gyaradax.integrals import get_integrals
-from gyaradax.solver import GKParams, gkparams_from_config, load_config
+from gyaradax.params import GKParams, gkparams_from_config, load_config
 from gyaradax.solver import gksolve, init_f
-from gyaradax.solver import GKState, default_state
+from gyaradax.params import GKState, default_state
 from gyaradax.utils import (
     load_checkpoint,
     load_gkw_k_dump,
     read_gkw_dump_time,
-    save_dumps,
+    save_dumps as save_dumps_fn,
 )
 
 
@@ -154,7 +154,7 @@ def simulate(
 
     start_step = int(state.step)
     for _ in range(start_step, total_steps, interval):
-        save_dumps(
+        save_dumps_fn(
             output_dir,
             df,
             phi,
@@ -180,7 +180,9 @@ def simulate(
                 f"time {float(state.time):.4f} | elux {flux:.4f} | growth {growth:.4f}"
             )
 
-    save_dumps(output_dir, df, phi, fluxes, state, geometry, save_dumps=save_dumps_flag)
+    save_dumps_fn(
+        output_dir, df, phi, fluxes, state, geometry, save_dumps=save_dumps_flag
+    )
 
     if verbose:
         print("DONE.")
