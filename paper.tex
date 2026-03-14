@@ -5,7 +5,6 @@
 \usepackage{subcaption}
 \usepackage{booktabs}
 \usepackage{hyperref}
-\usepackage{xcolor}
 
 \newcommand{\theHalgorithm}{\arabic{algorithm}}
 
@@ -16,12 +15,13 @@
 \usepackage{mathtools}
 \usepackage{amsthm}
 
+\usepackage{cleveref}
+
 \usepackage{bm}
 \usepackage{tabularx}
 \usepackage{booktabs}
 \usepackage{longtable}
 \usepackage{hyperref}
-\usepackage{enumitem}
 
 \usepackage[capitalize,noabbrev]{cleveref}
 
@@ -38,14 +38,14 @@
 
 \usepackage[textsize=tiny]{todonotes}
 
-\icmltitlerunning{gyaradax: Local Gyrokinetics JAX Code}
+\icmltitlerunning{\texttt{gyaradax}: Local Gyrokinetics JAX Code}
 
 \begin{document}
 
 \twocolumn[
 \icmltitle{
-\raisebox{-1.75pt}{\includegraphics[width=1.1em]{figures/gyarados_logo.png}}\hspace{0.2em}%
-gyaradax: Local Gyrokinetics JAX Code
+\raisebox{-2.0pt}{\includegraphics[width=1.1em]{figures/gyarados_logo.png}}\hspace{0.2em}%
+\texttt{gyaradax}: Local Gyrokinetics JAX Code
 }
   \icmlsetsymbol{equal}{*}
   \begin{icmlauthorlist}
@@ -54,6 +54,7 @@ gyaradax: Local Gyrokinetics JAX Code
   \end{icmlauthorlist}
 
   \icmlaffiliation{jku}{Institute for Machine Learning, JKU Linz}
+  % \icmlaffiliation{emmi}{EMMI AI GmbH, Linz}
 
   \icmlcorrespondingauthor{Gianluca Galletti}{g.galletti@ml.jku.at}
 
@@ -61,30 +62,65 @@ gyaradax: Local Gyrokinetics JAX Code
     \href{https://github.com/gerkone/gyaradax}{%
         \raisebox{-0.3em}{\includegraphics[width=1.15em]{figures/github.png}}
         \texttt{gerkone/gyaradax}%
-        \vspace{0.2em}
+        \vspace{0.em}
     }
 \end{center}
 
   \icmlkeywords{Gyrokinetics, Differentiable Solvers, JAX}
 ]
 
+
 \printAffiliationsAndNotice{}
 
 \begin{abstract}
 Gyrokinetic simulations are essential for understanding and controlling turbulence in fusion plasmas, yet they are oftentimes implemented in legacy codebases, in many cases CPU-bound, that are both hard to mantain and extend, and especially difficult to integrate with modern optimization and ML workflows. \texttt{gyaradax} is a minimal local flux-tube gyrokinetic code written in JAX. We closely base our implementation on the GKW FORTRAN code \cite{PEETERS_GKW_2009}, but with native GPU acceleration and automatic differentiation capabilities.
 This port has been made possible by the recent leaps in coding agents, which contributed substantially to the F90 $\to$ JAX translation part.
+% 
 We achieve numerical parity with GKW, with a substential speedup.
+% 
 \texttt{gyaradax} enables research at the intersection of machine learning and computational plasma physics. Finally, we include some simple differentiable programming demonstrations, including an inverse problem, sensitivity analysis and Solver-in-the-Loop style training.
 \end{abstract}
 
+\textbf{Keywords:} Gyrokinetics, Differentiable Solvers, JAX
+
+% \section{TODO}
+% \begin{itemize}
+%     \item empirical validation against gkw dumps
+%     \item proper validation on gkw
+%     \item identify bottlenecks and cheap speedups
+%     \item ML experiments
+%     \item do we do kinetic or not?
+%     \item do we do collisions?
+%     \item do we do electromagnetic? currently electrostatic
+% \end{itemize}
+
 \section{Introduction}
-Plasma turbulence is one of the most challenging multiscale problems in computational physics. For decades, the community has relied on highly optimized but rigid codebases like GENE \cite{GENE}, GKW \cite{PEETERS_GKW_2009}, and CGYRO \cite{CGYRO}. While these tools are the established workhorses of the field, they were largely developed in an era before the surge of machine learning and differentiable programming. Consequently, they are often CPU-bound, rely on complex MPI-based parallelization, and are notoriously difficult to integrate into modern optimization and ML-augmented workflows. In this work, we present \texttt{gyaradax}, a modern and minimal gyrokinetics code written in JAX, continuing the streak of successful scientific codes built in the language.
+% \begin{itemize}
+%     \item motivation: there are many gyrokinetics code, but they were mostly developed many years before ML surged. we propose a modern and minimal gyrokinetics code written in JAX, continuing the streak of successful scientific codes in the language.
+%     \item vibecoding: we want to make the point that vibecoding and agents coupled with expert human interaction cat bootstrap reimplementations in a fraction of the time. 
+%     \item other jax ports (jax-sph, look for some more)
+%     \item gyrokinetics codes (GENE, GKW, CGYRO, ...). describe them very shortly, state what's the issue with all of them
+%     \item wrap up the intro
+% \end{itemize}
 
-The development of \texttt{gyaradax} underscores a shift in scientific software engineering, which we refer to as \textit{vibecoding}. By coupling expert human interaction with modern coding agents, we demonstrate that complex reimplementations of numerical kernels can be bootstrapped in a fraction of the time traditionally required. This collaborative process allowed us to port the core GKW logic to JAX without sacrificing mathematical rigor, enabling a high-performance framework that is native to modern accelerator hardware.
+Plasma turbulence is one of the most challenging multiscale problems in computational physics. The community has for decades relied on highly optimized codebases like GKW \cite{PEETERS_GKW_2009}, GENE \cite{jenko2000electron}, and CGYRO \cite{CANDY201673}. While these tools are the widely accepted, they were developed in an era before the surge of machine learning.
+Consequently, they are often CPU-bound, rely on complex MPI parallelization, and are especially difficult to integrate into modern optimization and ML workflows. In this work, we present \texttt{gyaradax}, a slim JAX code for local flux-tube gyrokinetics.
 
-We follow the path of recent successful JAX ports across scientific domains, such as JAX-SPH \cite{JAX_SPH} for Lagrangian fluid dynamics, JAXFLUIDS \cite{JAXFLUIDS} for Eulerian CFD, and TORAX \cite{TORAX} for fast tokamak transport simulation. By bringing gyrokinetics into the JAX ecosystem, we unlock the power of hardware-accelerated automatic differentiation for plasma turbulence research.
+We developed \texttt{gyaradax} with heavy usage of coding agents \cite{??} and \textit{vibecoding}. This comes from the recent shift in software engineering, and our success with this code shows scientific software is no different.
+%
+By coupling (aspiring) expert humans with coding agents, we demonstrate that complex reimplementations of numerical kernels can be bootstrapped in a fraction of the time, freeing time and resources for more fundamental research. We consider worth mentioning, that the entirety of this project was developed within \textit{two weeeks}, and we would most likely not have attempted it, if it were not for coding agents.
 
-While existing codes like GENE and CGYRO provide unparalleled physics coverage, their legacy architectures pose a significant barrier to ML-physics integration. \texttt{gyaradax} prioritizes a minimal, clean, and differentiable codebase, facilitating research at the intersection of machine learning and computational plasma physics. In the following sections, we describe the mathematical framework, our numerical implementation, and provide demonstrations of differentiable programming tasks including inverse problems and sensitivity analysis.
+We pick JAX following the path of recent successful codes across scientific domains, for example JAXFLUIDS \cite{Bezgin2023} for Eulerian CFD, JAX-SPH \cite{toshev2024jax} for Lagrangian fluids, and TORAX \cite{citrin2024toraxfastdifferentiabletokamak} for fast Tokamak transport simulation.
+%
+
+\texttt{gyaradax} is a first step in bridging the gap between legacy gyrokinetics and the JAX ecosystem, enabling hardware-accelerated automatic differentiation for plasma turbulence research \cite{galletti20255dneuralsurrogatesnonlinear, paischer2025gyroswin}.
+%
+By prioritizing a minimal and fully differentiable codebase, we bypass the architectural constraints of solvers like GKW, in the context of differentiable programming and learned surrogate models.
+
+In this whitepaper, first we present our mathematical framework (\cref{sec:gyrokinetics}) and \texttt{gyaradax} implementation and optimization (\cref{sec:gyaradax}). To stress the how relevant were agents in this project, we include some notes on the development process (\cref{sec:vibecoding}).
+%
+Finally, in the last sections we show numerical validation of the solver on test cases from GKW, and some differentiable programming experiments.
+
 
 \section{Gyrokinetics}
 \label{sec:gyrokinetics}
@@ -111,6 +147,44 @@ While existing codes like GENE and CGYRO provide unparalleled physics coverage, 
 \colorbox{red!10}{\textit{Nonlinear Advection (Term III).}} The \textit{Nonlinear Term} $E \times B$ (III) advection of the gyro-averaged distribution function by the fluctuating electric field. $E \times B$ is responsible for the saturated turbulent state, and the energy transfer across different spatial scales which pushes back on mode growth.
    
 \colorbox{gray!10}{\textit{Numerical Dissipation.}} Finally, a dissipation is added to ensure numerical stability. A 4th-order upwinded \textit{Dissipation} in parallel and velocity space, and hyper-viscosity in the spatials.
+
+%%%%%%%
+
+\section{Implementation}
+\label{sec:gyaradax}
+\begin{itemize}
+    \item stencils and other performance improvements
+    \item details on our setup for vibecoding
+\end{itemize}
+
+\subsection{Speed}
+\subsection{Vibecoding}
+\label{sec:vibecoding}
+
+\section{Validation}
+\begin{itemize}
+    \item validation against empirical gkw results
+    \item test cases frok gkw repo
+    \item verification of gradients against FD
+\end{itemize}
+
+\subsection{Test Cases}
+\subsection{Empirical}
+\subsection{Gradient Verification}
+
+\section{Experiments}
+\begin{itemize}
+    \item performance improvements against gyroswin and cgyro?
+    \item maybe: train gyroswin with solver in the loop
+\end{itemize}
+\subsection{Performance}
+\subsection{Solver-in-the-Loop + Gyroswin}
+
+\section{Conclusion and Future Work}
+\begin{itemize}
+    \item conclusion ...
+    \item full thing as future work
+\end{itemize}
 
 \bibliography{references}
 \bibliographystyle{icml2026}
@@ -208,5 +282,6 @@ While \texttt{gyaradax} aligns with the local flux-tube physics of the GKW frame
     \item \textbf{Multi-Accelerator Distribution:} While JAX provides native sharding, GKW features highly optimized MPI-based domain decomposition. Distributing the 6D grid across multiple GPUs using \texttt{jax.sharding} is a planned enhancement for \texttt{gyaradax}.
     \item \textbf{Mixed Precision:} Exploration of using FP32 for nonlinear advection while maintaining FP64 for linear drives, as often employed in advanced GKW configurations, is targeted for future performance optimization.
 \end{itemize}
+
 
 \end{document}
