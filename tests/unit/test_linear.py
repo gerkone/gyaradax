@@ -3,8 +3,8 @@ import jax
 import jax.numpy as jnp
 import pytest
 
-from gyaradax.solver import gksolve, init_f
-from gyaradax.params import GKParams, default_state
+from gyaradax.solver import gksolve, init_f, default_state
+from gyaradax.params import GKParams
 from gyaradax.diag import project_all_modes_to_kx0
 from gyaradax.geometry import parse_input_dat
 from gyaradax.utils import poten_files

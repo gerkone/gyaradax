@@ -5,6 +5,58 @@ import numpy as np
 
 from gyaradax.diag import term_iii_fft_pack_roundtrip, term_iii_rhs
 from gyaradax.geometry import load_runtime_params
+from gyaradax.solver import init_f, gksolve, default_state
+from gyaradax.params import gkparams_from_input_dat
+from gyaradax.utils import load_gkw_k_dump
+
+
+def _rel_l2(pred: np.ndarray, ref: np.ndarray, eps: float = 1.0e-30) -> float:
+    return float(np.linalg.norm(pred - ref) / (np.linalg.norm(ref) + eps))
+
+
+def test_init_f_trajectory_parity(nonlin_dir, nonlin_geom, nonlin_shape):
+    """
+    Verify that init_f exactly matches GKW's internal initial conditions.
+    Since GKW does not output t=0 data (K00), we prove parity by initializing
+    from scratch in JAX and integrating forward to match the K01 dump.
+    """
+    # GKW uses a default amp_init of 1e-4 if not specified
+    from gyaradax.geometry import parse_input_dat
+
+    inp = parse_input_dat(f"{nonlin_dir}/input.dat")
+    amp_init = inp.get("spcgeneral", {}).get("amp_init")
+    if amp_init is None:
+        amp_init = inp.get("components", {}).get("amp_init", 1.0e-4)
+    amp_init = float(amp_init)
+
+    finit = inp.get("spcgeneral", {}).get("finit")
+    if finit is None:
+        finit = inp.get("components", {}).get("finit", "cosine2")
+
+    # We ensure we don't normalize at t=0, matching GKW's behavior when phi=0.
+    df_init = init_f(
+        nonlin_geom,
+        finit=finit,
+        amp_init_real=amp_init,
+        normalize_per_toroidal_mode=False,
+    )
+
+    params = gkparams_from_input_dat(f"{nonlin_dir}/input.dat", non_linear=True)
+    nky = len(nonlin_geom["krho"])
+
+    # 120 steps reaches K01 in iteration_13
+    state = default_state(nky=nky)
+
+    pred_df, _, _ = jax.jit(gksolve, static_argnums=(4,))(
+        df_init, nonlin_geom, params, state, 120
+    )
+
+    # We compare against K01, which is the dump at t=1.2 (120 steps)
+    ref_df = load_gkw_k_dump(f"{nonlin_dir}/K01", nonlin_shape)
+
+    # Check that error is extremely low (accounting for integrator drift over 120 steps)
+    error = _rel_l2(np.array(pred_df), np.array(ref_df))
+    assert error < 1e-2
 
 
 def test_runtime_params_types_and_values(nonlin_dir):
@@ -15,28 +67,6 @@ def test_runtime_params_types_and_values(nonlin_dir):
     assert isinstance(runtime["naverage"], int)
     assert isinstance(runtime["non_linear"], bool)
     assert isinstance(runtime["method"], str)
-
-
-def _harden_parity(spec_kxky, ixzero):
-    """ensure spectral data represents a real signal (conjugate symmetry at ky=0)."""
-    # for ky=0, we need f(kx) = conj(f(-kx))
-    # our array has kx indexed by jind.
-    # index 0 is kx=0.
-    # indices 1..nkx/2 are positive kx.
-    # indices nkx-1.. are negative kx.
-
-    # but spec_kxky is indexed by ix (0..nkx-1).
-    # ixzero is the index where kx=0.
-
-    # let's just make the ky=0 part satisfy the symmetry in ix space around ixzero.
-    # wait, kx connection is complex.
-    # actually, for a simple roundtrip test, we can just set ky=0 to zero
-    # and check if the other modes (ky > 0) are preserved.
-    # for ky > 0, there are no constraints on the half-spectrum.
-
-    # However, irfft also expects the imaginary part of the Nyquist frequency to be zero if it's even.
-    # To be safe, we just set the whole ky=0 column to zero for the roundtrip test.
-    return spec_kxky.at[:, 0].set(0.0)
 
 
 def test_term_iii_fft_roundtrip(nonlin_geom, nonlin_shape):

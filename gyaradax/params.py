@@ -66,6 +66,8 @@ class GKParams:
     norm_eps: float = 1.0e-14
     non_linear: bool = False
     enable_term_iii: bool = True
+    finit: str = "cosine2"
+    adiabatic_electrons: bool = True
 
     # physical parameters (typically from the kinetic species)
     rlt: float = 1.0
@@ -101,48 +103,6 @@ class GKParams:
         return cls(*leaves)
 
 
-@jax.tree_util.register_pytree_node_class
-@dataclass(frozen=True)
-class GKState:
-    """
-    Explicit diagnostic state used for large-step growth tracking and normalization.
-
-    This state tracks metadata across 'naverage' intervals to calculate growth rates
-    and maintain normalization history.
-
-    Attributes:
-        time: Current simulation time.
-        step: Cumulative small-step count.
-        accumulated_norm_factor: Product of all normalization rescalings applied per mode.
-        window_start_amp: Mode amplitudes at the beginning of the current diagnostic window.
-        last_growth_rate: Calculated exponential growth rate from the previous window per mode.
-    """
-
-    time: jnp.ndarray
-    step: jnp.ndarray
-    accumulated_norm_factor: jnp.ndarray
-    window_start_amp: jnp.ndarray
-    last_growth_rate: jnp.ndarray
-
-    def tree_flatten(self):
-        return tuple(vars(self).values()), None
-
-    @classmethod
-    def tree_unflatten(cls, aux_data, leaves):
-        return cls(*leaves)
-
-
-def default_state(nky: int = 1) -> GKState:
-    """Construct a default diagnostic state initialized at simulation startup."""
-    return GKState(
-        time=jnp.array(0.0, dtype=jnp.float64),
-        step=jnp.array(0, dtype=jnp.int32),
-        accumulated_norm_factor=jnp.ones(nky, dtype=jnp.float64),
-        window_start_amp=jnp.ones(nky, dtype=jnp.float64),
-        last_growth_rate=jnp.zeros(nky, dtype=jnp.float64),
-    )
-
-
 def gkparams_from_runtime(runtime: Dict[str, Any], **overrides) -> GKParams:
     """Build GKParams from a GKW-compatible runtime-controls dictionary."""
     params_dict = {
@@ -153,6 +113,8 @@ def gkparams_from_runtime(runtime: Dict[str, Any], **overrides) -> GKParams:
         "disp_x": float(runtime.get("disp_x", 0.1)),
         "disp_y": float(runtime.get("disp_y", 0.1)),
         "non_linear": bool(runtime.get("non_linear", False)),
+        "finit": str(runtime.get("finit", "cosine2")),
+        "adiabatic_electrons": bool(runtime.get("adiabatic_electrons", True)),
     }
     # fill physical and geometry params if available
     for k in [
@@ -222,6 +184,8 @@ def gkparams_from_config(config: Any, **overrides) -> GKParams:
         "idisp": int(getattr(solver_cfg, "idisp", 2)),
         "non_linear": bool(getattr(solver_cfg, "non_linear", False)),
         "enable_term_iii": bool(getattr(solver_cfg, "enable_term_iii", True)),
+        "finit": str(getattr(solver_cfg, "finit", "cosine2")),
+        "adiabatic_electrons": bool(getattr(config.grid, "adiabatic_electrons", True)),
     }
 
     # physics scalars

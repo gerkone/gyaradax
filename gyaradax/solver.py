@@ -34,15 +34,57 @@ Operates in standard GKW normalization (scaled by R_ref, v_th,ref). In linear mo
 import jax
 import jax.numpy as jnp
 
-# enforce 64-bit precision
 jax.config.update("jax_enable_x64", True)
 
 import math
 from typing import Dict, Tuple, Optional
+from dataclasses import dataclass
 
 from gyaradax.integrals import get_integrals, j0
 from gyaradax import stencils
-from gyaradax.params import GKParams, GKState
+from gyaradax.params import GKParams
+
+
+@jax.tree_util.register_pytree_node_class
+@dataclass(frozen=True)
+class GKState:
+    """
+    Explicit diagnostic state used for large-step growth tracking and normalization.
+
+    This state tracks metadata across 'naverage' intervals to calculate growth rates
+    and maintain normalization history.
+
+    Attributes:
+        time: Current simulation time.
+        step: Cumulative small-step count.
+        accumulated_norm_factor: Product of all normalization rescalings applied per mode.
+        window_start_amp: Mode amplitudes at the beginning of the current diagnostic window.
+        last_growth_rate: Calculated exponential growth rate from the previous window per mode.
+    """
+
+    time: jnp.ndarray
+    step: jnp.ndarray
+    accumulated_norm_factor: jnp.ndarray
+    window_start_amp: jnp.ndarray
+    last_growth_rate: jnp.ndarray
+
+    def tree_flatten(self):
+        return tuple(vars(self).values()), None
+
+    @classmethod
+    def tree_unflatten(cls, aux_data, leaves):
+        return cls(*leaves)
+
+
+def default_state(nky: int = 1) -> GKState:
+    """Construct a default diagnostic state initialized at simulation startup."""
+    return GKState(
+        time=jnp.array(0.0, dtype=jnp.float64),
+        step=jnp.array(0, dtype=jnp.int32),
+        accumulated_norm_factor=jnp.ones(nky, dtype=jnp.float64),
+        window_start_amp=jnp.ones(nky, dtype=jnp.float64),
+        last_growth_rate=jnp.zeros(nky, dtype=jnp.float64),
+    )
 
 
 def kx_ky_grids(geometry: Dict[str, jnp.ndarray]) -> Tuple[jnp.ndarray, jnp.ndarray]:
@@ -471,16 +513,27 @@ def linear_rhs(
 
 def init_f(
     geometry: Dict[str, jnp.ndarray],
+    finit: str = "cosine2",
     amp_init_real: float = 1.0e-4,
     amp_init_imag: float = 0.0,
-    normalize_per_toroidal_mode: bool = True,
+    normalize_per_toroidal_mode: bool = False,
     norm_eps: float = 1.0e-14,
+    n_species: int = 1,
 ) -> jnp.ndarray:
     """
-    Initialize the distribution function with a parallel cosine^2 profile.
+    Initialize the distribution function.
 
-    DISCLAIMER: This initialization implementation is currently experimental
-    and may not correctly reproduce GKW seed parity. Use with caution.
+    Args:
+        geometry: simulation geometry.
+        finit: initialization shape ('cosine2' or 'sine').
+        amp_init_real: real part of initial amplitude.
+        amp_init_imag: imaginary part of initial amplitude.
+        normalize_per_toroidal_mode: if true, normalize each mode to unit potential.
+        norm_eps: noise floor for normalization.
+        n_species: number of kinetic species to initialize.
+
+    Returns:
+        Initialized complex distribution function array.
     """
     nv, nmu, ns, nkx, nky = (
         len(geometry["intvp"]),
@@ -490,26 +543,41 @@ def init_f(
         len(geometry["krho"]),
     )
     sgrid = jnp.asarray(
-        geometry.get("sgrid", jnp.linspace(-0.5, 0.5, ns, dtype=jnp.float64)),
-        dtype=jnp.float64,
+        geometry.get("sgrid", jnp.linspace(-0.5, 0.5, ns)), dtype=jnp.float64
     )
-
     amp = jnp.asarray(amp_init_real, dtype=jnp.float64) + 1j * jnp.asarray(
         amp_init_imag, dtype=jnp.float64
     )
-    prof = amp * (jnp.cos(2.0 * jnp.pi * sgrid) + 1.0)
-    df = jnp.broadcast_to(
-        jnp.reshape(prof, (1, 1, ns, 1, 1)), (nv, nmu, ns, nkx, nky)
-    ).astype(jnp.complex128)
+
+    if finit == "sine":
+        prof = amp * (jnp.sin(2.0 * jnp.pi * sgrid) + 1.0)
+        if "de" in geometry:
+            de = jnp.asarray(geometry["de"], dtype=jnp.float64)
+            if de.ndim == 0:
+                prof = prof * de
+            elif de.ndim == 1:
+                prof = prof[None, :] * de[:, None]  # shape (nsp, ns)
+    else:
+        prof = amp * (jnp.cos(2.0 * jnp.pi * sgrid) + 1.0)
+
+    if n_species > 1:
+        if prof.ndim == 1:
+            prof = jnp.broadcast_to(prof[None, :], (n_species, ns))
+        df = jnp.broadcast_to(
+            jnp.reshape(prof, (n_species, 1, 1, ns, 1, 1)),
+            (n_species, nv, nmu, ns, nkx, nky),
+        ).astype(jnp.complex128)
+    else:
+        # prof is shape (ns,) or scalar-scaled (ns,)
+        df = jnp.broadcast_to(
+            jnp.reshape(prof, (1, 1, ns, 1, 1)), (nv, nmu, ns, nkx, nky)
+        ).astype(jnp.complex128)
 
     if nky > 1:
         iy0 = int(
             jnp.asarray(
                 geometry.get(
-                    "iyzero",
-                    jnp.argmin(
-                        jnp.abs(jnp.asarray(geometry["krho"], dtype=jnp.float64))
-                    ),
+                    "iyzero", jnp.argmin(jnp.abs(jnp.asarray(geometry["krho"])))
                 )
             ).item()
         )

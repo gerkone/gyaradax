@@ -42,6 +42,7 @@ def gkw_to_yaml(gkw_dir, output_yaml):
             "idisp": scalars.get("meth", 2),
             "non_linear": scalars.get("non_linear", False),
             "enable_term_iii": True,
+            "finit": scalars.get("finit", "cosine2"),
         },
         "physics": {
             "rlt": scalars.get("rlt", 0.0),
@@ -73,6 +74,7 @@ def gkw_to_yaml(gkw_dir, output_yaml):
             "ns": int(gridsize.get("n_s_grid", 0)),
             "nkx": int(gridsize.get("nx", 0)),
             "nky": int(gridsize.get("nmod", 0)),
+            "adiabatic_electrons": scalars.get("adiabatic_electrons", True),
         },
     }
 

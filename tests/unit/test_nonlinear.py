@@ -4,8 +4,8 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from gyaradax.solver import gksolve
-from gyaradax.params import GKParams, GKState, default_state, gkparams_from_input_dat
+from gyaradax.solver import gksolve, GKState, default_state
+from gyaradax.params import GKParams, gkparams_from_input_dat
 from gyaradax.utils import load_gkw_k_dump
 
 

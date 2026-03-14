@@ -319,6 +319,12 @@ def load_runtime_params(input_dat_path: str) -> Dict[str, Any]:
     method_val = control.get("method", "EXP")
     method = str(method_val).strip().strip("'").strip('"').upper()
 
+    finit = inp.get("spcgeneral", {}).get("finit", "cosine2")
+    if not finit:
+        finit = inp.get("components", {}).get("finit", "cosine2")
+
+    adiabatic_electrons = bool(inp.get("gridsize", {}).get("adiabatic_electrons", True))
+
     return {
         "dtim": _flt("dtim", 0.01),
         "naverage": _int("naverage", 40),
@@ -330,6 +336,8 @@ def load_runtime_params(input_dat_path: str) -> Dict[str, Any]:
         "nlapar": _bool("nlapar", False),
         "method": method,
         "meth": _int("meth", 0),
+        "finit": finit,
+        "adiabatic_electrons": adiabatic_electrons,
     }
 
 

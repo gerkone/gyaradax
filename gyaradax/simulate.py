@@ -18,8 +18,7 @@ jax.config.update("jax_enable_x64", True)
 from gyaradax.geometry import load_geometry
 from gyaradax.integrals import get_integrals
 from gyaradax.params import gkparams_from_config, load_config
-from gyaradax.solver import gksolve, init_f
-from gyaradax.params import GKState, default_state
+from gyaradax.solver import gksolve, init_f, GKState, default_state
 from gyaradax.utils import (
     load_checkpoint,
     load_gkw_k_dump,
