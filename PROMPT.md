@@ -8,7 +8,7 @@
 
 **CONTEXT FILES PROVIDED:**
 
-* @jax_integrals.py (Contains the newly implemented JAX flux integrals).
+* @jax_integrals.py (Contains the implemented JAX flux integrals).
 * @utils.py, @jax_geometry.py (Data, potential/phi, and geometry loading helpers).
 * @test_jax_integral.py
 * @test_linear.py, @test_nonlinear.py (Empirically verify content against GKW reference trajectories).
@@ -65,5 +65,5 @@ Individuate any additional files that are relevant to time integration and the a
 * **Mandatory:** Write unit tests verifying array shapes (based on your notes from Step 3) and basic conservation properties. **Stop and wait for user approval.**
 
 
-5. **IMPLEMENT LINEAR `gksolve`:** Write the `gksolve` function for the LINEAR case, based on the notes you created (Terms I, II, IV, V, VI, VII, VIII, Diffusion). Proceed to this step ONLY after all prior tests are passing, ESPECIALLY the @test_linear.py. **Stop and wait for user approval.**
-6. **IMPLEMENT NONLINEAR `gksolve`:** Finalize `gksolve` for the NONLINEAR case by extending the LINEAR version with Term III. Proceed to this step ONLY after all prior tests are passing. MAKE SURE that both @test_linear.py and @test_nonlinear.py PASS. **Report the final test results.**
+5. **IMPLEMENT LINEAR `gksolve`:** Write the `gksolve` function for the LINEAR case, based on the notes you created (Terms I, II, IV, V, VI, VII, VIII, Diffusion). Proceed to this step ONLY after all prior tests are passing. **Stop and wait for user approval.**
+6. **IMPLEMENT NONLINEAR `gksolve`:** Finalize `gksolve` for the NONLINEAR case by extending the LINEAR version with Term III. Proceed to this step ONLY after all prior tests are passing, ESPECIALLY @test_linear.py. TO CONCLUDE, make sure that both @test_linear.py and @test_nonlinear.py PASS. **Report the final test results.**
