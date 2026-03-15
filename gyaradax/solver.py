@@ -431,6 +431,24 @@ def linear_precompute(
     t7_sign = jnp.sign(out["term7_fac"])
     t7_sign_6d = rearrange(t7_sign, "v m s x y -> 1 v m s x y")
     out["s_d1_t7"] = jnp.where(t7_sign_6d < 0, s_d1_ipos, s_d1_ineg)
+
+    # Pass 3: Fused Stencils
+    # Streaming + Parallel Dissipation
+    out["s_total_upar"] = (
+        rearrange(out["upar"], "v m s x y -> 1 v m s x y") * out["s_d1_upar"]
+        + jnp.asarray(params.disp_par, dtype=jnp.float64) 
+        * rearrange(out["abs_dum2_par"], "v m s x y -> 1 v m s x y") * out["s_d4_upar"]
+    ) / out["sgr_dist"]
+
+    # Term VII drive
+    out["s_total_t7"] = (
+        rearrange(out["term7_fac"], "v m s x y -> 1 v m s x y") * out["s_d1_t7"]
+    ) / out["sgr_dist"]
+
+    # Hoist parallel metadata
+    out["s_shift"] = jnp.asarray(geometry["s_shift"], dtype=jnp.int32)
+    out["kx_shift"] = jnp.asarray(geometry["kx_shift"], dtype=jnp.int32)
+    out["valid_shift"] = jnp.asarray(geometry["valid_shift"], dtype=jnp.bool_)
     
     return out
 
@@ -449,13 +467,12 @@ def linear_rhs(
 
     def _apply_parallel(field, coeffs):
         out = jnp.zeros_like(field)
+        nky = field.shape[-1]
+        ky_idx = jnp.reshape(jnp.arange(nky, dtype=jnp.int32), (1, 1, -1))
         for i in range(9):
-            s_map = jnp.asarray(geometry["s_shift"], dtype=jnp.int32)[i]
-            kx_map = jnp.asarray(geometry["kx_shift"], dtype=jnp.int32)[i]
-            valid = jnp.asarray(geometry["valid_shift"], dtype=jnp.bool_)[i]
-            ky_idx = jnp.reshape(
-                jnp.arange(field.shape[-1], dtype=jnp.int32), (1, 1, -1)
-            )
+            s_map = pre["s_shift"][i]
+            kx_map = pre["kx_shift"][i]
+            valid = pre["valid_shift"][i]
             shifted = jnp.where(
                 valid[None, None, :, :, :], field[:, :, s_map, kx_map, ky_idx], 0.0
             )
@@ -472,14 +489,8 @@ def linear_rhs(
             out = out + c * jnp.where(valid[:, None, None, None, None], shifted, 0.0)
         return out
 
-    # Streaming and parallel dissipation
-    term_i = (pre["upar"] * _apply_parallel(df, pre["s_d1_upar"])) / pre["sgr_dist"]
-
-    term_par_diss = (
-        jnp.asarray(params.disp_par, dtype=jnp.float64)
-        * pre["abs_dum2_par"]
-        * _apply_parallel(df, pre["s_d4_upar"])
-    ) / pre["sgr_dist"]
+    # Streaming and parallel dissipation (Fused)
+    term_par = _apply_parallel(df, pre["s_total_upar"])
 
     # Trapping and velocity dissipation
     term_iv = pre["utrap"] * _apply_vpar(df, stencils.VPAR_D1) / pre["dvp"]
@@ -495,11 +506,10 @@ def linear_rhs(
 
     # Potential drives
     gyro_phi = pre["bessel"] * phi_b
-    term_vii = (pre["term7_fac"] * _apply_parallel(gyro_phi, pre["s_d1_t7"])) / pre["sgr_dist"]
+    term_vii = _apply_parallel(gyro_phi, pre["s_total_t7"])
 
     return (
-        term_i
-        + term_par_diss
+        term_par
         + term_iv
         + term_vp_diss
         - 1j * kdotvd * df
@@ -732,6 +742,7 @@ def gksolve(
     params: GKParams,
     state: GKState,
     n_steps: int = 1,
+    pre: Optional[Dict[str, jnp.ndarray]] = None,
 ) -> Tuple[
     jnp.ndarray,
     Tuple[jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]],
@@ -749,12 +760,14 @@ def gksolve(
         params: Solver parameters.
         state: Diagnostic metadata state.
         n_steps: Number of small steps to execute.
+        pre: Optional precomputed terms (linear_precompute).
 
     Returns:
         Tuple of (final_df, (final_phi, final_fluxes), final_state).
     """
 
-    pre = linear_precompute(geometry, params)
+    if pre is None:
+        pre = linear_precompute(geometry, params)
 
     def _scan_body(carry, _):
         curr_df, curr_state = carry

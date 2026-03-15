@@ -17,7 +17,7 @@ from typing import Dict, Tuple, Any
 sys.path.append(os.getcwd())
 
 from gyaradax.simulate import _setup_simulation, _init_condition
-from gyaradax.solver import gksolve, GKState
+from gyaradax.solver import gksolve, GKState, linear_precompute
 from gyaradax.integrals import get_integrals
 
 def rel_l2(pred: np.ndarray, ref: np.ndarray, eps: float = 1.0e-30) -> float:
@@ -54,19 +54,28 @@ def run_benchmark():
     
     print(f"[*] Grid resolution: {res} (vpar, mu, s, kx, ky)")
     print(f"[*] State size: {num_elements:,} elements ({size_mb:.2f} MB)")
+
+    # 2. Precompute (Time it once)
+    print("[*] Running precompute...")
+    t_pre_start = time.time()
+    pre = linear_precompute(geometry, params)
+    jax.block_until_ready(pre)
+    t_pre = time.time() - t_pre_start
+    print(f"[+] Precompute completed in {t_pre*1000:.2f} ms")
+
     print(f"[*] Target steps for benchmark: {args.steps}")
 
-    # 2. Warm-up (Compiles JIT kernels)
+    # 3. Warm-up (Compiles JIT kernels)
     print("[*] Warming up (JIT compilation)...")
     t0 = time.time()
     # Run 1 step to trigger compilation
-    df_warm, _, state_warm = gksolve(df, geometry, params, state, n_steps=1)
+    df_warm, _, state_warm = gksolve(df, geometry, params, state, n_steps=1, pre=pre)
     # Ensure completion
     jax.block_until_ready(df_warm)
     t_warm = time.time() - t0
     print(f"[+] Warm-up completed in {t_warm:.2f}s")
 
-    # 3. Timed Benchmark
+    # 4. Timed Benchmark
     print(f"[*] Running {args.steps} steps benchmark...")
     
     # Use a directory for intermittent outputs if time-averaging
@@ -74,10 +83,6 @@ def run_benchmark():
     os.makedirs(output_dir, exist_ok=True)
     
     t1 = time.time()
-    
-    # If steps is large, we might want to use the loop from simulate.py 
-    # but for benchmark we want to measure gksolve directly if possible.
-    # However, for 30k steps, we need to handle diagnostics if we want time-averaging.
     
     if args.time_average_flux:
         # We need to run with simulate-like loop to get fluxes history
@@ -92,7 +97,7 @@ def run_benchmark():
         )
         t_total = time.time() - t1
     else:
-        final_df, (phi, fluxes), final_state = gksolve(df, geometry, params, state, n_steps=args.steps)
+        final_df, (phi, fluxes), final_state = gksolve(df, geometry, params, state, n_steps=args.steps, pre=pre)
         jax.block_until_ready(final_df)
         t_total = time.time() - t1
     
@@ -104,6 +109,7 @@ def run_benchmark():
     print("\n" + "="*40)
     print(" PERFORMANCE RESULTS")
     print("="*40)
+    print(f"Precompute time:        {t_pre*1000:8.4f} ms")
     print(f"Total time ({args.steps} steps):  {t_total:8.4f} s")
     print(f"Average time per step:   {avg_step*1000:8.4f} ms")
     print(f"Average time per stage:  {ms_per_stage:8.4f} ms")
