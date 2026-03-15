@@ -1,6 +1,6 @@
 run:
   name: iteration_8
-  data_dir: /restricteddata/ukaea/gyrokinetics/raw/iteration_8
+  data_dir: /local00/bioinf/galletti/gyrokinetics/raw/iteration_8
 solver:
   dt: 0.01
   naverage: 40

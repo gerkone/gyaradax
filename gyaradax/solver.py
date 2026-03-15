@@ -40,9 +40,10 @@ import math
 from typing import Dict, Tuple, Optional
 from dataclasses import dataclass
 
-from gyaradax.integrals import get_integrals, j0
+from gyaradax.integrals import get_integrals, j0, geom_tensors
 from gyaradax import stencils
 from gyaradax.params import GKParams
+from einops import rearrange
 
 
 @jax.tree_util.register_pytree_node_class
@@ -369,7 +370,8 @@ def linear_precompute(
     mphi, mphiw3 = extended_firstdim_fft_size(nky)
     mrad = extended_seconddim_fft_size(nkx)
 
-    return {
+    out = {
+        "geom_tensors": geom_tensors(geometry, params=params),
         "kx_b": kx_b,
         "ky_b": ky_b,
         "bessel": bessel,
@@ -410,6 +412,28 @@ def linear_precompute(
         "nl_dum_s": -jnp.asarray(efun, dtype=jnp.float64),
     }
 
+    # Optimization: Pre-select upwind stencils to avoid jnp.where in RHS
+    # Explicitly broadcast to 6D: [9, nv, nmu, ns, nkx, nky]
+    # This allows direct multiply in apply_parallel
+    s_d1_ipos = rearrange(out["s_d1_ipos"], "i s x y -> i 1 1 s x y")
+    s_d1_ineg = rearrange(out["s_d1_ineg"], "i s x y -> i 1 1 s x y")
+    s_d4_ipos = rearrange(out["s_d4_ipos"], "i s x y -> i 1 1 s x y")
+    s_d4_ineg = rearrange(out["s_d4_ineg"], "i s x y -> i 1 1 s x y")
+
+    # u_par sign (for streaming and dissipation)
+    upar_sign = jnp.sign(out["upar"]) # (nv, 1, ns, 1, 1)
+    upar_sign_6d = rearrange(upar_sign, "v m s x y -> 1 v m s x y")
+    
+    out["s_d1_upar"] = jnp.where(upar_sign_6d > 0, s_d1_ipos, s_d1_ineg)
+    out["s_d4_upar"] = jnp.where(upar_sign_6d > 0, s_d4_ipos, s_d4_ineg)
+    
+    # Term VII sign (complex 5D: nv, nmu, ns, 1, 1)
+    t7_sign = jnp.sign(out["term7_fac"])
+    t7_sign_6d = rearrange(t7_sign, "v m s x y -> 1 v m s x y")
+    out["s_d1_t7"] = jnp.where(t7_sign_6d < 0, s_d1_ipos, s_d1_ineg)
+    
+    return out
+
 
 def linear_rhs(
     df: jnp.ndarray,
@@ -420,7 +444,7 @@ def linear_rhs(
 ) -> jnp.ndarray:
     """Assemble the linear RHS contribution."""
     if phi is None:
-        phi, _ = get_integrals(df, geometry, params=params, include_fluxes=False)
+        phi, _ = get_integrals(df, geometry, params=params, include_fluxes=False, geom=pre.get("geom_tensors"))
     phi_b = jnp.reshape(phi, (1, 1, phi.shape[0], phi.shape[1], phi.shape[2]))
 
     def _apply_parallel(field, coeffs):
@@ -435,7 +459,7 @@ def linear_rhs(
             shifted = jnp.where(
                 valid[None, None, :, :, :], field[:, :, s_map, kx_map, ky_idx], 0.0
             )
-            out = out + coeffs[i][None, None, :, :, :] * shifted
+            out = out + coeffs[i] * shifted
         return out
 
     def _apply_vpar(field, coeffs):
@@ -449,24 +473,12 @@ def linear_rhs(
         return out
 
     # Streaming and parallel dissipation
-    term_i = (
-        pre["upar"]
-        * jnp.where(
-            pre["upar"] > 0.0,
-            _apply_parallel(df, pre["s_d1_ipos"]),
-            _apply_parallel(df, pre["s_d1_ineg"]),
-        )
-        / pre["sgr_dist"]
-    )
+    term_i = (pre["upar"] * _apply_parallel(df, pre["s_d1_upar"])) / pre["sgr_dist"]
 
     term_par_diss = (
         jnp.asarray(params.disp_par, dtype=jnp.float64)
         * pre["abs_dum2_par"]
-        * jnp.where(
-            pre["upar"] > 0.0,
-            _apply_parallel(df, pre["s_d4_ipos"]),
-            _apply_parallel(df, pre["s_d4_ineg"]),
-        )
+        * _apply_parallel(df, pre["s_d4_upar"])
     ) / pre["sgr_dist"]
 
     # Trapping and velocity dissipation
@@ -483,15 +495,7 @@ def linear_rhs(
 
     # Potential drives
     gyro_phi = pre["bessel"] * phi_b
-    term_vii = (
-        pre["term7_fac"]
-        * jnp.where(
-            pre["term7_fac"] < 0.0,
-            _apply_parallel(gyro_phi, pre["s_d1_ipos"]),
-            _apply_parallel(gyro_phi, pre["s_d1_ineg"]),
-        )
-        / pre["sgr_dist"]
-    )
+    term_vii = (pre["term7_fac"] * _apply_parallel(gyro_phi, pre["s_d1_t7"])) / pre["sgr_dist"]
 
     return (
         term_i
@@ -644,6 +648,7 @@ def gkstep_single(
     geometry: Dict[str, jnp.ndarray],
     params: GKParams,
     state: GKState,
+    pre: Dict[str, jnp.ndarray],
 ) -> Tuple[
     jnp.ndarray,
     Tuple[jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]],
@@ -653,11 +658,10 @@ def gkstep_single(
     Perform a single small-step (dt) time integration using an explicit RK4 scheme.
     """
     dt = jnp.array(params.dt, dtype=jnp.float64)
-    pre = linear_precompute(geometry, params)
 
     def _rhs(df: jnp.ndarray) -> jnp.ndarray:
         # electrostatic Poisson solve
-        phi_local, _ = get_integrals(df, geometry, params=params, include_fluxes=False)
+        phi_local, _ = get_integrals(df, geometry, params=params, include_fluxes=False, geom=pre.get("geom_tensors"))
         rhs_linear = linear_rhs(df, geometry, params, pre, phi=phi_local)
 
         def _with_nl(_: None) -> jnp.ndarray:
@@ -699,7 +703,7 @@ def gkstep_single(
     def _skip_norm(_: None):
         # current amplitude for growth rate tracking
         phi_curr, _ = get_integrals(
-            next_df_raw, geometry, params=params, include_fluxes=False
+            next_df_raw, geometry, params=params, include_fluxes=False, geom=pre.get("geom_tensors")
         )
         amp_curr = mode_amplitude(phi_curr, geometry, params.norm_eps)
         return (
@@ -717,7 +721,7 @@ def gkstep_single(
     )
 
     # final field calculation for output
-    phi, fluxes = get_integrals(next_df, geometry, params=params)
+    phi, fluxes = get_integrals(next_df, geometry, params=params, geom=pre.get("geom_tensors"))
     next_state = advance_state(state, params, is_window_end, current_amp, norm_factor)
     return next_df, (phi, fluxes), next_state
 
@@ -750,9 +754,11 @@ def gksolve(
         Tuple of (final_df, (final_phi, final_fluxes), final_state).
     """
 
+    pre = linear_precompute(geometry, params)
+
     def _scan_body(carry, _):
         curr_df, curr_state = carry
-        next_df, out, next_state = gkstep_single(curr_df, geometry, params, curr_state)
+        next_df, out, next_state = gkstep_single(curr_df, geometry, params, curr_state, pre)
         return (next_df, next_state), None
 
     (final_df, final_state), _ = jax.lax.scan(
@@ -760,6 +766,6 @@ def gksolve(
     )
 
     # Calculate final diagnostics only at the end of the block
-    phi, fluxes = get_integrals(final_df, geometry, params=params)
+    phi, fluxes = get_integrals(final_df, geometry, params=params, geom=pre.get("geom_tensors"))
 
     return final_df, (phi, fluxes), final_state

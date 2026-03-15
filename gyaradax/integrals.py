@@ -156,9 +156,12 @@ def get_integrals(
     geometry: Dict[str, jnp.ndarray],
     params: Any = None,
     include_fluxes: bool = True,
+    geom: Dict[str, jnp.ndarray] = None,
 ) -> Tuple[jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]]:
     """Main interface for field and flux integrals."""
-    geom = geom_tensors(geometry, params=params)
+    if geom is None:
+        geom = geom_tensors(geometry, params=params)
+        
     phi = calculate_phi(geom, df)
 
     def _with_fluxes():
