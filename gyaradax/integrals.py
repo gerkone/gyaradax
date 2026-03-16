@@ -1,3 +1,4 @@
+import jax
 import jax.numpy as jnp
 from jax.scipy.special import i0, bessel_jn
 from einops import rearrange
@@ -76,6 +77,7 @@ def geom_tensors(
     return geom_
 
 
+@jax.jit
 def calculate_phi(geom: Dict[str, jnp.ndarray], df: jnp.ndarray) -> jnp.ndarray:
     """Adiabatic electron phi from single-species quasineutrality.
 
@@ -203,6 +205,7 @@ def calculate_phi_kinetic(
     return -phi_num / diag
 
 
+@jax.jit
 def calculate_fluxes(
     geom: Dict[str, jnp.ndarray], df: jnp.ndarray, phi: jnp.ndarray
 ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:

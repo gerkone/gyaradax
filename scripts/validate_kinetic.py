@@ -96,7 +96,7 @@ def validate_case(case_name):
     sim_times = []
     t0 = time.time()
 
-    gksolve_jit = jax.jit(gksolve, static_argnames="n_steps")
+    gksolve_jit = gksolve
 
     for block in range(n_blocks):
         df, (phi, fluxes), state = gksolve_jit(

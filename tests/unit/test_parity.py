@@ -51,9 +51,7 @@ def test_init_f_trajectory_parity(nonlin_dir, nonlin_geom, nonlin_shape):
     # 120 steps reaches K01 in iteration_13
     state = default_state(nky=nky)
 
-    pred_df, _, _ = jax.jit(gksolve, static_argnames="n_steps")(
-        df_init, nonlin_geom, params, state, 120
-    )
+    pred_df, _, _ = gksolve(df_init, nonlin_geom, params, state, 120)
 
     # We compare against K01, which is the dump at t=1.2 (120 steps)
     ref_df = load_gkw_k_dump(f"{nonlin_dir}/K01", nonlin_shape)

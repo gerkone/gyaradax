@@ -28,7 +28,8 @@ import jax.numpy as jnp
 jax.config.update("jax_enable_x64", True)
 
 import math
-from typing import Dict, Tuple, Optional
+import functools
+from typing import Dict, Tuple, Optional, Any
 from dataclasses import dataclass
 
 import jax.random
@@ -42,6 +43,47 @@ from gyaradax.integrals import (
 from gyaradax import stencils
 from gyaradax.params import GKParams
 from einops import rearrange
+
+
+@jax.tree_util.register_pytree_node_class
+class GKPre:
+    """precomputed terms container. separates dynamic arrays (leaves) from
+    static metadata (auxiliary) so FFT sizes stay concrete under JIT."""
+
+    def __init__(self, items: Dict[str, Any]):
+        self._items = items
+
+    def tree_flatten(self):
+        leaves = []
+        leaf_keys = []
+        aux = {}
+        for k, v in self._items.items():
+            if k.startswith("nl_m") or k in ("ixzero", "iyzero", "nsp"):
+                aux[k] = v
+            elif isinstance(v, (jnp.ndarray, float, int, bool)):
+                leaves.append(v)
+                leaf_keys.append(k)
+            else:
+                aux[k] = v
+        return tuple(leaves), {"leaf_keys": tuple(leaf_keys), "aux": aux}
+
+    @classmethod
+    def tree_unflatten(cls, metadata, leaves):
+        items = dict(zip(metadata["leaf_keys"], leaves))
+        items.update(metadata["aux"])
+        return cls(items)
+
+    def __getitem__(self, key):
+        return self._items[key]
+
+    def get(self, key, default=None):
+        return self._items.get(key, default)
+
+    def items(self):
+        return self._items.items()
+
+    def keys(self):
+        return self._items.keys()
 
 
 @jax.tree_util.register_pytree_node_class
@@ -161,6 +203,7 @@ def unpack_half_spectrum(
     return spec_half[..., jind, :nky]
 
 
+@jax.jit
 def nonlinear_term_iii(
     df: jnp.ndarray,
     phi: jnp.ndarray,
@@ -666,7 +709,7 @@ def linear_precompute(
         out.update(sp)
         out["geom_tensors"] = geom_tensors(geometry, params=params)
 
-    return out
+    return GKPre(out)
 
 
 def _linear_rhs_core(
@@ -736,6 +779,7 @@ def _linear_rhs_core(
     )
 
 
+@jax.jit
 def linear_rhs(
     df: jnp.ndarray,
     geometry: Dict[str, jnp.ndarray],
@@ -1012,12 +1056,13 @@ def _compute_nonlinear_rhs(df, phi, geometry, params, pre):
         return jax.vmap(_nl_sp)(df, pre["bessel"])
 
 
+@jax.jit
 def gkstep_single(
     prev_df: jnp.ndarray,
     geometry: Dict[str, jnp.ndarray],
     params: GKParams,
     state: GKState,
-    pre: Dict[str, jnp.ndarray],
+    pre: GKPre,
     dt_override: Optional[jnp.ndarray] = None,
 ) -> Tuple[
     jnp.ndarray,
@@ -1081,13 +1126,14 @@ def gkstep_single(
     return next_df, (phi, (z, z, z)), next_state
 
 
+@functools.partial(jax.jit, static_argnames=("n_steps",))
 def gksolve(
     df: jnp.ndarray,
     geometry: Dict[str, jnp.ndarray],
     params: GKParams,
     state: GKState,
     n_steps: int = 1,
-    pre: Optional[Dict[str, jnp.ndarray]] = None,
+    pre: Optional[GKPre] = None,
 ) -> Tuple[
     jnp.ndarray,
     Tuple[jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]],
