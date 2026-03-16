@@ -31,7 +31,6 @@ class GKParams:
         drive_scale: Scaling factor for equilibrium drive terms.
         norm_eps: Numerical floor for mode amplitude normalization.
         non_linear: Toggle for nonlinear term inclusion.
-        enable_term_iii: Specifically enable/disable ExB advection.
         rlt: Inverse temperature gradient scale length (R/LT).
         rln: Inverse density gradient scale length (R/LN).
         mas: Atomic mass of the kinetic species.
@@ -65,7 +64,6 @@ class GKParams:
     drive_scale: float = 1.0
     norm_eps: float = 1.0e-14
     non_linear: bool = False
-    enable_term_iii: bool = True
     finit: str = "cosine2"
     adiabatic_electrons: bool = True
 
@@ -183,7 +181,6 @@ def gkparams_from_config(config: Any, **overrides) -> GKParams:
         "disp_y": float(getattr(solver_cfg, "disp_y", 0.1)),
         "idisp": int(getattr(solver_cfg, "idisp", 2)),
         "non_linear": bool(getattr(solver_cfg, "non_linear", False)),
-        "enable_term_iii": bool(getattr(solver_cfg, "enable_term_iii", True)),
         "finit": str(getattr(solver_cfg, "finit", "cosine2")),
         "adiabatic_electrons": bool(getattr(config.grid, "adiabatic_electrons", True)),
     }

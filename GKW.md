@@ -169,7 +169,7 @@ Notes:
 ## 8) Known limitations / next extension points
 
 - Full linear operator parity with all GKW terms I, II, IV, V, VII, VIII is not complete yet.
-- Nonlinear term III is now included as a switchable path (`non_linear` + `enable_term_iii`),
+- Nonlinear term III is now included as a switchable path (`non_linear`),
   while all non-target nonlinear/EM branches remain inert in this scope.
 - No collision/neoclassical/electromagnetic terms in this stage.
 - Next steps should expand RHS term-by-term against `linear_terms.f90` while preserving:
@@ -275,7 +275,6 @@ Notes:
     - Net correction is Fortran-consistent with `add_non_linear_terms_spectral` scaling path.
   - Preserved switchable backward compatibility:
     - `params.non_linear` gates nonlinear behavior.
-    - `params.enable_term_iii` keeps Term-III on/off switch.
 
 - Post-fix smoke metrics (same `100 -> 101` window):
   - State parity recovered:

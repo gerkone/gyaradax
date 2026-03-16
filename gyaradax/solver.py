@@ -40,6 +40,7 @@ import math
 from typing import Dict, Tuple, Optional
 from dataclasses import dataclass
 
+import jax.random
 from gyaradax.integrals import get_integrals, j0, geom_tensors
 from gyaradax import stencils
 from gyaradax.params import GKParams
@@ -421,12 +422,12 @@ def linear_precompute(
     s_d4_ineg = rearrange(out["s_d4_ineg"], "i s x y -> i 1 1 s x y")
 
     # u_par sign (for streaming and dissipation)
-    upar_sign = jnp.sign(out["upar"]) # (nv, 1, ns, 1, 1)
+    upar_sign = jnp.sign(out["upar"])  # (nv, 1, ns, 1, 1)
     upar_sign_6d = rearrange(upar_sign, "v m s x y -> 1 v m s x y")
-    
+
     out["s_d1_upar"] = jnp.where(upar_sign_6d > 0, s_d1_ipos, s_d1_ineg)
     out["s_d4_upar"] = jnp.where(upar_sign_6d > 0, s_d4_ipos, s_d4_ineg)
-    
+
     # Term VII sign (complex 5D: nv, nmu, ns, 1, 1)
     t7_sign = jnp.sign(out["term7_fac"])
     t7_sign_6d = rearrange(t7_sign, "v m s x y -> 1 v m s x y")
@@ -436,8 +437,9 @@ def linear_precompute(
     # Streaming + Parallel Dissipation
     out["s_total_upar"] = (
         rearrange(out["upar"], "v m s x y -> 1 v m s x y") * out["s_d1_upar"]
-        + jnp.asarray(params.disp_par, dtype=jnp.float64) 
-        * rearrange(out["abs_dum2_par"], "v m s x y -> 1 v m s x y") * out["s_d4_upar"]
+        + jnp.asarray(params.disp_par, dtype=jnp.float64)
+        * rearrange(out["abs_dum2_par"], "v m s x y -> 1 v m s x y")
+        * out["s_d4_upar"]
     ) / out["sgr_dist"]
 
     # Term VII drive
@@ -449,7 +451,7 @@ def linear_precompute(
     out["s_shift"] = jnp.asarray(geometry["s_shift"], dtype=jnp.int32)
     out["kx_shift"] = jnp.asarray(geometry["kx_shift"], dtype=jnp.int32)
     out["valid_shift"] = jnp.asarray(geometry["valid_shift"], dtype=jnp.bool_)
-    
+
     return out
 
 
@@ -462,7 +464,13 @@ def linear_rhs(
 ) -> jnp.ndarray:
     """Assemble the linear RHS contribution."""
     if phi is None:
-        phi, _ = get_integrals(df, geometry, params=params, include_fluxes=False, geom=pre.get("geom_tensors"))
+        phi, _ = get_integrals(
+            df,
+            geometry,
+            params=params,
+            include_fluxes=False,
+            geom=pre.get("geom_tensors"),
+        )
     phi_b = jnp.reshape(phi, (1, 1, phi.shape[0], phi.shape[1], phi.shape[2]))
 
     def _apply_parallel(field, coeffs):
@@ -533,18 +541,20 @@ def init_f(
     normalize_per_toroidal_mode: bool = False,
     norm_eps: float = 1.0e-14,
     n_species: int = 1,
+    seed: int = 42,
 ) -> jnp.ndarray:
     """
     Initialize the distribution function.
 
     Args:
         geometry: simulation geometry.
-        finit: initialization shape ('cosine2' or 'sine').
+        finit: initialization shape ('cosine2', 'sine', or 'noise').
         amp_init_real: real part of initial amplitude.
         amp_init_imag: imaginary part of initial amplitude.
         normalize_per_toroidal_mode: if true, normalize each mode to unit potential.
         norm_eps: noise floor for normalization.
         n_species: number of kinetic species to initialize.
+        seed: random seed for 'noise' initialization.
 
     Returns:
         Initialized complex distribution function array.
@@ -563,30 +573,42 @@ def init_f(
         amp_init_imag, dtype=jnp.float64
     )
 
-    if finit == "sine":
-        prof = amp * (jnp.sin(2.0 * jnp.pi * sgrid) + 1.0)
-        if "de" in geometry:
-            de = jnp.asarray(geometry["de"], dtype=jnp.float64)
-            if de.ndim == 0:
-                prof = prof * de
-            elif de.ndim == 1:
-                prof = prof[None, :] * de[:, None]  # shape (nsp, ns)
+    if finit == "noise":
+        key = jax.random.PRNGKey(seed)
+        shape = (
+            (n_species, nv, nmu, ns, nkx, nky)
+            if n_species > 1
+            else (nv, nmu, ns, nkx, nky)
+        )
+        k1, k2 = jax.random.split(key)
+        noise_real = jax.random.uniform(k1, shape, minval=-1.0, maxval=1.0)
+        noise_imag = jax.random.uniform(k2, shape, minval=-1.0, maxval=1.0)
+        df = amp * (noise_real + 1j * noise_imag)
     else:
-        prof = amp * (jnp.cos(2.0 * jnp.pi * sgrid) + 1.0)
+        # sine or squared cosine
+        if finit == "sine":
+            prof = amp * (jnp.sin(2.0 * jnp.pi * sgrid) + 1.0)
+            if "de" in geometry:
+                de = jnp.asarray(geometry["de"], dtype=jnp.float64)
+                if de.ndim == 0:
+                    prof = prof * de
+                elif de.ndim == 1:
+                    prof = prof[None, :] * de[:, None]  # shape (nsp, ns)
+        elif finit == "cosine2":
+            prof = amp * (jnp.cos(2.0 * jnp.pi * sgrid) + 1.0)
+            raise ValueError(f"Unknown finit: {finit}")
+        # broadcase to shape, only for analytical init functions
+        if n_species > 1:
+            if prof.ndim == 1:
+                prof = jnp.broadcast_to(prof[None, :], (n_species, ns))
+            df = jnp.reshape(prof, (n_species, 1, 1, ns, 1, 1))
+            df = jnp.broadcast_to(df, (n_species, nv, nmu, ns, nkx, nky))
+        else:
+            # prof is shape (ns,) or scalar-scaled (ns,)
+            df = jnp.reshape(prof, (1, 1, ns, 1, 1))
+            df = jnp.broadcast_to(df, (nv, nmu, ns, nkx, nky))
 
-    if n_species > 1:
-        if prof.ndim == 1:
-            prof = jnp.broadcast_to(prof[None, :], (n_species, ns))
-        df = jnp.broadcast_to(
-            jnp.reshape(prof, (n_species, 1, 1, ns, 1, 1)),
-            (n_species, nv, nmu, ns, nkx, nky),
-        ).astype(jnp.complex128)
-    else:
-        # prof is shape (ns,) or scalar-scaled (ns,)
-        df = jnp.broadcast_to(
-            jnp.reshape(prof, (1, 1, ns, 1, 1)), (nv, nmu, ns, nkx, nky)
-        ).astype(jnp.complex128)
-
+    df = df.astype(jnp.complex128)
     if nky > 1:
         iy0 = int(
             jnp.asarray(
@@ -671,7 +693,13 @@ def gkstep_single(
 
     def _rhs(df: jnp.ndarray) -> jnp.ndarray:
         # electrostatic Poisson solve
-        phi_local, _ = get_integrals(df, geometry, params=params, include_fluxes=False, geom=pre.get("geom_tensors"))
+        phi_local, _ = get_integrals(
+            df,
+            geometry,
+            params=params,
+            include_fluxes=False,
+            geom=pre.get("geom_tensors"),
+        )
         rhs_linear = linear_rhs(df, geometry, params, pre, phi=phi_local)
 
         def _with_nl(_: None) -> jnp.ndarray:
@@ -683,10 +711,7 @@ def gkstep_single(
             return rhs_linear
 
         # conditional inclusion of Term III
-        term_iii_on = jnp.logical_and(
-            jnp.asarray(params.non_linear, dtype=jnp.bool_),
-            jnp.asarray(params.enable_term_iii, dtype=jnp.bool_),
-        )
+        term_iii_on = jnp.asarray(params.non_linear, dtype=jnp.bool_)
         return jax.lax.cond(term_iii_on, _with_nl, _without_nl, operand=None)
 
     # explicit Runge-Kutta 4th order integration
@@ -713,7 +738,11 @@ def gkstep_single(
     def _skip_norm(_: None):
         # current amplitude for growth rate tracking
         phi_curr, _ = get_integrals(
-            next_df_raw, geometry, params=params, include_fluxes=False, geom=pre.get("geom_tensors")
+            next_df_raw,
+            geometry,
+            params=params,
+            include_fluxes=False,
+            geom=pre.get("geom_tensors"),
         )
         amp_curr = mode_amplitude(phi_curr, geometry, params.norm_eps)
         return (
@@ -731,7 +760,13 @@ def gkstep_single(
     )
 
     # final field calculation for output
-    phi, fluxes = get_integrals(next_df, geometry, params=params, geom=pre.get("geom_tensors"))
+    phi, fluxes = get_integrals(
+        next_df,
+        geometry,
+        params=params,
+        include_fluxes=False,
+        geom=pre.get("geom_tensors"),
+    )
     next_state = advance_state(state, params, is_window_end, current_amp, norm_factor)
     return next_df, (phi, fluxes), next_state
 
@@ -771,7 +806,9 @@ def gksolve(
 
     def _scan_body(carry, _):
         curr_df, curr_state = carry
-        next_df, out, next_state = gkstep_single(curr_df, geometry, params, curr_state, pre)
+        next_df, out, next_state = gkstep_single(
+            curr_df, geometry, params, curr_state, pre
+        )
         return (next_df, next_state), None
 
     (final_df, final_state), _ = jax.lax.scan(
@@ -779,6 +816,8 @@ def gksolve(
     )
 
     # Calculate final diagnostics only at the end of the block
-    phi, fluxes = get_integrals(final_df, geometry, params=params, geom=pre.get("geom_tensors"))
+    phi, fluxes = get_integrals(
+        final_df, geometry, params=params, geom=pre.get("geom_tensors")
+    )
 
     return final_df, (phi, fluxes), final_state

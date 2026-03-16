@@ -1,6 +1,6 @@
 run:
-  name: iteration_0
-  data_dir: /restricteddata/ukaea/gyrokinetics/raw/iteration_0
+  name: iteration_200
+  data_dir: /restricteddata/ukaea/gyrokinetics/raw/iteration_200
 solver:
   dt: 0.01
   naverage: 40
@@ -12,10 +12,10 @@ solver:
   disp_y: 0.1
   idisp: 2
   non_linear: true
-  finit: noise
+  finit: sine
 physics:
-  rlt: 7.699769449040685
-  rln: 5.321044679479737
+  rlt: 7.366463312621599
+  rln: 1.5940168155580587
   mas: 1.0
   tmp: 1.0
   de: 1.0
@@ -24,17 +24,17 @@ physics:
   dgrid: 1.0
   tgrid: 1.0
 geometry:
-  shat: 2.27561
-  q: 5.54617
+  shat: 1.67212
+  q: 8.98969
   eps: 0.19
-  kthnorm: 3.83524
+  kthnorm: 6.21414
   Rref: 100.0
   d2X: 1.0
   signB: 1.0
   dvp: 0.1875
   sgr_dist: 0.0625
-  kxmax: 6.57037
-  kymax: 0.36503582565888965
+  kxmax: 4.82973
+  kymax: 0.22529263904578908
 grid:
   nvpar: 32
   nmu: 8

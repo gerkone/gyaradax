@@ -92,7 +92,7 @@ def test_nonlinear_scaling(nonlin_geom, nonlin_shape):
     key = jax.random.PRNGKey(42)
     df_rand = jax.random.normal(key, nonlin_shape, dtype=jnp.float64) + 0j
 
-    params_nl = GKParams(dt=0.01, non_linear=True, enable_term_iii=True)
+    params_nl = GKParams(dt=0.01, non_linear=True)
     params_lin = GKParams(dt=0.01, non_linear=False)
     state = default_state(nky=len(nonlin_geom["krho"]))
 

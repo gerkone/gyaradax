@@ -18,7 +18,14 @@ jax.config.update("jax_enable_x64", True)
 from gyaradax.geometry import load_geometry
 from gyaradax.integrals import get_integrals
 from gyaradax.params import gkparams_from_config, load_config
-from gyaradax.solver import gksolve, init_f, GKState, default_state
+from gyaradax.solver import (
+    gksolve,
+    init_f,
+    GKState,
+    default_state,
+    linear_precompute,
+    mode_amplitude,
+)
 from gyaradax.utils import (
     load_checkpoint,
     load_gkw_k_dump,
@@ -108,12 +115,10 @@ def _init_condition(
         if verbose:
             print("WARNING: Initializing new simulation from experimental init_f.")
             print("         This profile may not correctly reproduce GKW seed parity.")
-        df = init_f(geometry, norm_eps=params.norm_eps)
+        df = init_f(geometry, finit=params.finit, norm_eps=params.norm_eps)
         phi0, _ = get_integrals(df, geometry, params=params, include_fluxes=False)
-        from gyaradax.solver import mode_amplitude
 
         amp0 = mode_amplitude(phi0, geometry, params.norm_eps)
-        state = state.at[...].set(state._replace(window_start_amp=amp0))
         # dataclasses are frozen, use _replace if possible or recreate
         state = GKState(
             time=state.time,
@@ -163,6 +168,7 @@ def simulate(
     os.makedirs(output_dir, exist_ok=True)
 
     phi, fluxes = get_integrals(df, geometry, params=params)
+    pre = linear_precompute(geometry, params)
 
     if verbose:
         print(f"Starting simulation: total_steps={total_steps}, interval={interval}")
@@ -188,7 +194,7 @@ def simulate(
 
         t_block_start = time.time()
         df, (phi, fluxes), state = gksolve(
-            df, geometry, params, state, n_steps=steps_to_run
+            df, geometry, params, state, n_steps=steps_to_run, pre=pre
         )
         t_block_end = time.time()
 

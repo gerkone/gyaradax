@@ -12,7 +12,6 @@ solver:
   disp_y: 0.1
   idisp: 2
   non_linear: true
-  enable_term_iii: true
 physics:
   rlt: 9.89495303048062
   rln: 0.5227769270362006

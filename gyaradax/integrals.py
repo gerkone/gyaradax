@@ -161,7 +161,7 @@ def get_integrals(
     """Main interface for field and flux integrals."""
     if geom is None:
         geom = geom_tensors(geometry, params=params)
-        
+
     phi = calculate_phi(geom, df)
 
     def _with_fluxes():

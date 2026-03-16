@@ -1,6 +1,6 @@
 run:
   name: iteration_8
-  data_dir: /local00/bioinf/galletti/gyrokinetics/raw/iteration_8
+  data_dir: /restricteddata/ukaea/gyrokinetics/raw/iteration_8
 solver:
   dt: 0.01
   naverage: 40
@@ -12,7 +12,7 @@ solver:
   disp_y: 0.1
   idisp: 2
   non_linear: true
-  enable_term_iii: true
+  finit: sine
 physics:
   rlt: 11.890701836262648
   rln: 6.157114531268134
@@ -41,3 +41,4 @@ grid:
   ns: 16
   nkx: 85
   nky: 32
+  adiabatic_electrons: true

@@ -81,5 +81,10 @@ def validate_time_averaged(config_paths):
 
 
 if __name__ == "__main__":
-    configs = ["configs/iteration_13.yaml", "configs/iteration_8.yaml"]
+    configs = [
+        "configs/iteration_0.yaml",
+        "configs/iteration_8.yaml",
+        "configs/iteration_13.yaml",
+        "configs/iteration_200.yaml",
+    ]
     validate_time_averaged(configs)

@@ -1,6 +1,6 @@
 run:
-  name: iteration_0
-  data_dir: /restricteddata/ukaea/gyrokinetics/raw/iteration_0
+  name: iteration_0_Lin
+  data_dir: /restricteddata/ukaea/gyrokinetics/raw/iteration_0_Lin
 solver:
   dt: 0.01
   naverage: 40
@@ -11,7 +11,7 @@ solver:
   disp_x: 0.1
   disp_y: 0.1
   idisp: 2
-  non_linear: true
+  non_linear: false
   finit: noise
 physics:
   rlt: 7.699769449040685

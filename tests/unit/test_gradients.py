@@ -48,7 +48,7 @@ def test_nonlinear_gradient_validity(nonlin_geom, nonlin_shape):
     """
     key = jax.random.PRNGKey(42)
     df0 = jax.random.normal(key, nonlin_shape, dtype=jnp.float64) + 0j
-    params = GKParams(dt=0.01, naverage=40, non_linear=True, enable_term_iii=True)
+    params = GKParams(dt=0.01, naverage=40, non_linear=True)
     state = default_state(nky=len(nonlin_geom["krho"]))
 
     def loss_fn(alpha):
