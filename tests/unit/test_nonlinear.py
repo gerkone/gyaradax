@@ -1,4 +1,4 @@
-import re
+from conftest import rel_l2, read_dump_time, read_dump_dtim
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -16,16 +16,7 @@ def _step_jitted(prev_df, geom, params, state):
     return gksolve(prev_df, geom, params, state, n_steps=1)
 
 
-def _read_dump_time(dat_path: str) -> float:
-    with open(dat_path, "r", encoding="utf-8") as f:
-        text = f.read()
-    m = re.search(r"TIME\s*=\s*([0-9eE+\-.]+)", text)
-    if m is None:
-        raise ValueError(f"TIME entry not found in {dat_path}")
-    return float(m.group(1))
-
-
-def _selected_ky_representatives(iyzero: int, nky: int):
+def _selected_ky_representatives(iyzero, nky):
     candidates = [1, nky // 2, nky - 1]
     out = []
     for ky in candidates:
@@ -37,7 +28,7 @@ def _selected_ky_representatives(iyzero: int, nky: int):
     return out if out else [(iyzero + 1) % nky]
 
 
-def _subset_mask_from_mode_chains(mode_label, ixzero: int, ky_list):
+def _subset_mask_from_mode_chains(mode_label, ixzero, ky_list):
     nkx, nky = mode_label.shape
     mask = np.zeros((nkx, nky), dtype=bool)
     labels = []
@@ -46,10 +37,6 @@ def _subset_mask_from_mode_chains(mode_label, ixzero: int, ky_list):
         labels.append(lbl)
         mask[:, ky] = mode_label[:, ky] == lbl
     return mask, np.asarray(labels, dtype=np.int32)
-
-
-def _rel_l2(pred: np.ndarray, ref: np.ndarray, eps: float = 1.0e-30) -> float:
-    return float(np.linalg.norm(pred - ref) / (np.linalg.norm(ref) + eps))
 
 
 @pytest.mark.parametrize("start_name, end_name, steps", [("100", "101", 120)])
@@ -64,7 +51,7 @@ def test_iteration_parity(
     nky = len(nonlin_geom["krho"])
     state = GKState(
         time=jnp.array(
-            _read_dump_time(f"{nonlin_dir}/{start_name}.dat"), dtype=jnp.float64
+            read_dump_time(f"{nonlin_dir}/{start_name}.dat"), dtype=jnp.float64
         ),
         step=jnp.array(0, dtype=jnp.int32),
         accumulated_norm_factor=jnp.ones(nky, dtype=jnp.float64),
@@ -86,7 +73,7 @@ def test_iteration_parity(
     ref_sub = np.asarray(end_df_ref) * subset_mask_2d[None, None, None, :, :]
 
     # relaxed tolerance for multi-scenario parity check
-    assert _rel_l2(pred_sub, ref_sub) <= 1.0e-3
+    assert rel_l2(pred_sub, ref_sub) <= 1.0e-3
 
 
 def test_nonlinear_scaling(nonlin_geom, nonlin_shape):
@@ -120,7 +107,7 @@ def _kinetic_params_from_dir(kinetic_dir, dump_name="100", **overrides):
     The dump metadata records the dtim that was actually used.
     """
     # Read the actual dtim from the dump metadata
-    actual_dt = _read_dump_dtim(os.path.join(kinetic_dir, f"{dump_name}.dat"))
+    actual_dt = read_dump_dtim(os.path.join(kinetic_dir, f"{dump_name}.dat"))
     params = gkparams_from_input_dat(
         os.path.join(kinetic_dir, "input.dat"),
         non_linear=True,
@@ -129,16 +116,6 @@ def _kinetic_params_from_dir(kinetic_dir, dump_name="100", **overrides):
         **overrides,
     )
     return params
-
-
-def _read_dump_dtim(dat_path: str) -> float:
-    """Read the actual DTIM from a GKW dump .dat metadata file."""
-    with open(dat_path, "r", encoding="utf-8") as f:
-        text = f.read()
-    m = re.search(r"DTIM\s*=\s*([0-9eE+\-.]+)", text)
-    if m is None:
-        raise ValueError(f"DTIM not found in {dat_path}")
-    return float(m.group(1))
 
 
 @pytest.mark.parametrize("start_name, end_name", [("100", "101")])
@@ -167,8 +144,8 @@ def test_kinetic_iteration_parity(
     params = _kinetic_params_from_dir(kinetic_dir, dump_name=start_name)
 
     # Compute exact step count from time difference and actual dtim
-    t_start = _read_dump_time(os.path.join(kinetic_dir, f"{start_name}.dat"))
-    t_end = _read_dump_time(os.path.join(kinetic_dir, f"{end_name}.dat"))
+    t_start = read_dump_time(os.path.join(kinetic_dir, f"{start_name}.dat"))
+    t_end = read_dump_time(os.path.join(kinetic_dir, f"{end_name}.dat"))
     steps = int(round((t_end - t_start) / params.dt))
 
     nky = len(kinetic_geom["krho"])
@@ -187,7 +164,7 @@ def test_kinetic_iteration_parity(
     # Validate per-species trajectory parity
     for isp in range(n_species):
         sp_name = "ion" if isp == 0 else "electron"
-        err = _rel_l2(np.asarray(pred_df[isp]), np.asarray(end_df_ref[isp]))
+        err = rel_l2(np.asarray(pred_df[isp]), np.asarray(end_df_ref[isp]))
         assert (
             err <= 1.0e-3
         ), f"{sp_name} trajectory error {err:.6e} > 1e-3 in {kinetic_dir}"
@@ -222,7 +199,7 @@ def test_kinetic_flux_trajectory(kinetic_dir, kinetic_geom, kinetic_shape):
         if not os.path.exists(k_dat_path):
             continue
 
-        time_val = _read_dump_time(k_dat_path)
+        time_val = read_dump_time(k_dat_path)
         ts_idx = np.argmin(np.abs(orig_times - time_val))
         if not np.isclose(orig_times[ts_idx], time_val, rtol=1e-4):
             continue

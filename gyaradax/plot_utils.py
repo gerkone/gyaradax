@@ -141,27 +141,19 @@ def plot_spectra(
     ref_ky_spec: Optional[np.ndarray] = None,
     title: str = "",
 ) -> plt.Figure:
-    """
-    Plot radial and bi-normal spectra with publication styling.
-    Supports either full 3D potential (phi) or pre-computed 1D spectra.
-    """
-    # 1. gyaradax spectra
+    """Plot radial and binormal spectra. Accepts either phi or pre-computed 1D spectra."""
     if kx_spec is None or ky_spec is None:
         if phi is None:
-            raise ValueError("Must provide either phi or both (kx_spec, ky_spec)")
+            raise ValueError("provide either phi or both (kx_spec, ky_spec)")
         phi_sq = np.abs(np.array(phi)) ** 2
-        # phi indices: [s, kx, ky]
         kx_spec = np.sum(phi_sq, axis=(0, 2))
         ky_spec = np.sum(phi_sq, axis=(0, 1))
 
-    # 2. reference spectra
     if ref_phi is not None:
         ref_phi_sq = np.abs(np.array(ref_phi)) ** 2
         ref_kx_spec = np.sum(ref_phi_sq, axis=(0, 2))
         ref_ky_spec = np.sum(ref_phi_sq, axis=(0, 1))
 
-    # Nature single-column width might be tight for side-by-side;
-    # using a slightly wider figure for 1x2 layout
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(7.0, 2.8))
 
     ax1.semilogy(
@@ -201,8 +193,7 @@ def plot_zonal_residual(
     phi_history: np.ndarray,
     target_residual: Optional[float] = None,
 ) -> plt.Figure:
-    """Specific Nature-ready plot for Rosenbluth-Hinton Zonal Flow test."""
-    # Normalize potential to t=0
+    """Rosenbluth-Hinton zonal flow residual test."""
     phi_norm = phi_history / phi_history[0]
 
     fig, ax = plt.subplots()
@@ -244,12 +235,7 @@ def plot_nd(
     mark_bad: bool = False,
     **kwargs,
 ):
-    """
-    Generic n-dimensional plotting function.
-    Creates a grid of 2D slices for all combinations of dimensions.
-    If 'y' is provided, shows side-by-side comparison.
-    """
-    # Detect spatial dimensions (ndim) and channel dimension
+    """Grid of 2D slices for all dimension pairs. If y is provided, shows side-by-side."""
     if labels is not None:
         ndim = len(labels)
         has_channel = x.ndim > ndim
@@ -348,9 +334,7 @@ def plot_gradient_comparison(
     labels: Optional[List[str]] = None,
     title: str = "Gradient Validation (Analytical vs FD)",
 ) -> plt.Figure:
-    """
-    Qualitative comparison of analytical gradients vs Finite Differences.
-    """
+    """Analytical vs finite-difference gradient comparison."""
     grad_to_plot = np.real(analytical_grad)
     fd_to_plot = np.real(fd_grad) if fd_grad is not None else None
 

@@ -365,22 +365,33 @@ def load_scalars(directory: str) -> Dict[str, Any]:
         "signB": 1.0,  # default
     }
 
-    # 3. extract species info (first species)
+    # 3. extract species info (all kinetic species)
     num_sp = input_data.get("gridsize", {}).get("number_of_species", 1)
     species_keys = [k for k in input_data.keys() if k.startswith("species")][:num_sp]
     if species_keys:
-        sp = input_data[species_keys[0]]
+        sp_mas = np.array([float(input_data[k].get("mass", 1.0)) for k in species_keys])
+        sp_tmp = np.array([float(input_data[k].get("temp", 1.0)) for k in species_keys])
+        sp_de = np.array([float(input_data[k].get("dens", 1.0)) for k in species_keys])
+        sp_signz = np.array([float(input_data[k].get("z", 1.0)) for k in species_keys])
+        sp_rlt = np.array([float(input_data[k].get("rlt", 0.0)) for k in species_keys])
+        sp_rln = np.array([float(input_data[k].get("rln", 0.0)) for k in species_keys])
+        sp_vthrat = np.sqrt(sp_tmp / sp_mas)
+
+        # scalar for single species, array for multi-species
+        def _maybe_scalar(arr):
+            return float(arr[0]) if len(arr) == 1 else arr
+
         scalars.update(
             {
-                "mas": float(sp.get("mass", 1.0)),
-                "tmp": float(sp.get("temp", 1.0)),
-                "de": float(sp.get("dens", 1.0)),
-                "signz": float(sp.get("z", 1.0)),
-                "rlt": float(sp.get("rlt", 0.0)),
-                "rln": float(sp.get("rln", 0.0)),
+                "mas": _maybe_scalar(sp_mas),
+                "tmp": _maybe_scalar(sp_tmp),
+                "de": _maybe_scalar(sp_de),
+                "signz": _maybe_scalar(sp_signz),
+                "rlt": _maybe_scalar(sp_rlt),
+                "rln": _maybe_scalar(sp_rln),
+                "vthrat": _maybe_scalar(sp_vthrat),
             }
         )
-        scalars["vthrat"] = float(np.sqrt(scalars["tmp"] / scalars["mas"]))
     else:
         scalars.update(
             {

@@ -546,16 +546,17 @@ def linear_precompute(
     )
 
     if not params.adiabatic_electrons:
-        # Kinetic: per-species arrays with leading nsp dimension
-        nsp = int(geometry["mas"].shape[0])
+        # kinetic: per-species arrays with leading nsp dimension
+        mas_arr = jnp.asarray(params.mas, dtype=jnp.float64)
+        nsp = int(mas_arr.shape[0])
         sp = _compute_species_coeffs(
-            jnp.asarray(geometry["mas"], dtype=jnp.float64),
-            jnp.asarray(geometry["signz"], dtype=jnp.float64),
-            jnp.asarray(geometry["vthrat"], dtype=jnp.float64),
-            jnp.asarray(geometry["tmp"], dtype=jnp.float64),
-            jnp.asarray(geometry["de"], dtype=jnp.float64),
-            jnp.asarray(geometry["rln"], dtype=jnp.float64),
-            jnp.asarray(geometry["rlt"], dtype=jnp.float64),
+            mas_arr,
+            jnp.asarray(params.signz, dtype=jnp.float64),
+            jnp.asarray(params.vthrat, dtype=jnp.float64),
+            jnp.asarray(params.tmp, dtype=jnp.float64),
+            jnp.asarray(params.de, dtype=jnp.float64),
+            jnp.asarray(params.rln, dtype=jnp.float64),
+            jnp.asarray(params.rlt, dtype=jnp.float64),
             vpgr,
             mugr,
             bn,
@@ -573,7 +574,7 @@ def linear_precompute(
         if "vpgr_rms" in geometry:
             vp_rms = jnp.asarray(geometry["vpgr_rms"], dtype=jnp.float64)
             mu_rms = jnp.asarray(geometry.get("mugr_rms", 1.0), dtype=jnp.float64)
-            vthrat_6 = jnp.asarray(geometry["vthrat"], dtype=jnp.float64).reshape(
+            vthrat_6 = jnp.asarray(params.vthrat, dtype=jnp.float64).reshape(
                 nsp, 1, 1, 1, 1, 1
             )
             ffun_6 = jnp.reshape(ffun, (1, 1, 1, -1, 1, 1))

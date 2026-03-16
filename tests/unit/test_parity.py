@@ -1,3 +1,4 @@
+from conftest import rel_l2
 import os
 import jax
 import jax.numpy as jnp
@@ -15,10 +16,6 @@ from gyaradax.solver import (
 from gyaradax.params import gkparams_from_input_dat
 from gyaradax.utils import load_gkw_k_dump
 from gyaradax.integrals import calculate_phi, geom_tensors
-
-
-def _rel_l2(pred: np.ndarray, ref: np.ndarray, eps: float = 1.0e-30) -> float:
-    return float(np.linalg.norm(pred - ref) / (np.linalg.norm(ref) + eps))
 
 
 def test_init_f_trajectory_parity(nonlin_dir, nonlin_geom, nonlin_shape):
@@ -62,7 +59,7 @@ def test_init_f_trajectory_parity(nonlin_dir, nonlin_geom, nonlin_shape):
     ref_df = load_gkw_k_dump(f"{nonlin_dir}/K01", nonlin_shape)
 
     # Check that error is extremely low (accounting for integrator drift over 120 steps)
-    error = _rel_l2(np.array(pred_df), np.array(ref_df))
+    error = rel_l2(np.array(pred_df), np.array(ref_df))
     assert error < 1e-2
 
 

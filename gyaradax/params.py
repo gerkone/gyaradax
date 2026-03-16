@@ -126,15 +126,15 @@ def gkparams_from_runtime(runtime: Dict[str, Any], **overrides) -> GKParams:
         "finit": str(runtime.get("finit", "cosine2")),
         "adiabatic_electrons": bool(runtime.get("adiabatic_electrons", True)),
     }
-    # fill physical and geometry params if available
+    # species params may be arrays (multi-species) or scalars
+    _SPECIES_PARAMS = {"rlt", "rln", "mas", "tmp", "de", "signz", "vthrat"}
+    for k in _SPECIES_PARAMS:
+        if k in runtime:
+            v = runtime[k]
+            params_dict[k] = v if hasattr(v, "__len__") else float(v)
+
+    # geometry and grid scalars (always scalar)
     for k in [
-        "rlt",
-        "rln",
-        "mas",
-        "tmp",
-        "de",
-        "signz",
-        "vthrat",
         "shat",
         "q",
         "eps",

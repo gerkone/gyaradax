@@ -328,7 +328,6 @@ order. Species is the outermost (slowest) index.
 ### 7.3 known limitations
 
 - adaptive CFL uses one-step lag (current step uses previous step's CFL estimate)
-- `GKParams` stores species parameters as scalars (first species); multi-species
   data comes from the geometry dict
 - no multi-species output in `save_dumps` (fluxes are summed over species)
 

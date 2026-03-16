@@ -1,10 +1,40 @@
 import os
+import re
 import pytest
 import jax
+import numpy as np
 from gyaradax import load_geometry
 
-# ensure fp64 for all tests
 jax.config.update("jax_enable_x64", True)
+
+
+def rel_l2(pred, ref, eps=1e-30):
+    """relative l2 error between two arrays."""
+    return float(
+        np.linalg.norm(np.asarray(pred) - np.asarray(ref))
+        / (np.linalg.norm(np.asarray(ref)) + eps)
+    )
+
+
+def read_dump_time(dat_path):
+    """read simulation TIME from a gkw .dat metadata file."""
+    with open(dat_path, "r", encoding="utf-8") as f:
+        text = f.read()
+    m = re.search(r"TIME\s*=\s*([0-9eE+\-.]+)", text)
+    if m is None:
+        raise ValueError(f"TIME not found in {dat_path}")
+    return float(m.group(1))
+
+
+def read_dump_dtim(dat_path):
+    """read the actual DTIM from a gkw dump .dat metadata file."""
+    with open(dat_path, "r", encoding="utf-8") as f:
+        text = f.read()
+    m = re.search(r"DTIM\s*=\s*([0-9eE+\-.]+)", text)
+    if m is None:
+        raise ValueError(f"DTIM not found in {dat_path}")
+    return float(m.group(1))
+
 
 # standard iterations for verification across different parameter regimes
 ITERATIONS = [8, 13, 131, 200]
@@ -76,8 +106,6 @@ def lin_shape(lin_geom):
 def nonlin_shape(nonlin_geom):
     return _get_shape(nonlin_geom)
 
-
-# ── Kinetic electron fixtures ──────────────────────────────────────────────
 
 KINETIC_CASES = [
     "v3_kiteration_991_half_rlt",
