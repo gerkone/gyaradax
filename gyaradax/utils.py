@@ -108,13 +108,10 @@ def save_dumps(
     """
     os.makedirs(output_dir, exist_ok=True)
 
-    # compute spectra with proper ds and parseval weighting
-    ds = float(jnp.asarray(geometry["ints"])[0])
-    parseval = jnp.asarray(geometry["parseval"])
+    # spectra: sum |phi|^2 over complementary axes (matches GKW kyspec/kxspec format)
     phi_sq = jnp.abs(phi) ** 2
-    weighted = ds * phi_sq * parseval[None, None, :]
-    kx_spec = jnp.sum(weighted, axis=(0, 2))
-    ky_spec = jnp.sum(weighted, axis=(0, 1))
+    kx_spec = jnp.sum(phi_sq, axis=(0, 2))
+    ky_spec = jnp.sum(phi_sq, axis=(0, 1))
 
     diags = {
         "fluxes": np.array([fluxes[0], fluxes[1], fluxes[2]]),

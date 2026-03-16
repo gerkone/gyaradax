@@ -70,8 +70,8 @@ def plot_flux_trace(
     if ref_fluxes is not None and isinstance(ref_fluxes, tuple):
         ref_fluxes = np.stack(ref_fluxes)
 
-    if species_labels is None:
-        species_labels = [SPECIES_LABELS.get(i, f"sp{i}") for i in range(n_species)]
+    # if species_labels is None:
+    #     species_labels = [SPECIES_LABELS.get(i, f"sp{i}") for i in range(n_species)]
 
     n_flux = len(labels)
     ncols = n_species
@@ -120,7 +120,7 @@ def plot_flux_trace(
                 ax.set_ylabel(labels[i])
             ax.grid(True, axis="y")
             if i == 0:
-                ax.set_title(species_labels[isp])
+                # ax.set_title(species_labels[isp])
                 ax.legend(frameon=False, loc="best")
 
         axes[-1, isp].set_xlabel(r"time $[v_{th}/R]$")
