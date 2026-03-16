@@ -1,3 +1,4 @@
+from conftest import rel_l2
 import os
 import jax
 import jax.numpy as jnp
@@ -5,13 +6,16 @@ import numpy as np
 
 from gyaradax.diag import term_iii_fft_pack_roundtrip, term_iii_rhs
 from gyaradax.geometry import load_runtime_params
-from gyaradax.solver import init_f, gksolve, default_state
+from gyaradax.solver import (
+    init_f,
+    gksolve,
+    default_state,
+    linear_precompute,
+    estimate_nl_timestep,
+)
 from gyaradax.params import gkparams_from_input_dat
 from gyaradax.utils import load_gkw_k_dump
-
-
-def _rel_l2(pred: np.ndarray, ref: np.ndarray, eps: float = 1.0e-30) -> float:
-    return float(np.linalg.norm(pred - ref) / (np.linalg.norm(ref) + eps))
+from gyaradax.integrals import calculate_phi, geom_tensors
 
 
 def test_init_f_trajectory_parity(nonlin_dir, nonlin_geom, nonlin_shape):
@@ -47,15 +51,13 @@ def test_init_f_trajectory_parity(nonlin_dir, nonlin_geom, nonlin_shape):
     # 120 steps reaches K01 in iteration_13
     state = default_state(nky=nky)
 
-    pred_df, _, _ = jax.jit(gksolve, static_argnums=(4,))(
-        df_init, nonlin_geom, params, state, 120
-    )
+    pred_df, _, _ = gksolve(df_init, nonlin_geom, params, state, 120)
 
     # We compare against K01, which is the dump at t=1.2 (120 steps)
     ref_df = load_gkw_k_dump(f"{nonlin_dir}/K01", nonlin_shape)
 
     # Check that error is extremely low (accounting for integrator drift over 120 steps)
-    error = _rel_l2(np.array(pred_df), np.array(ref_df))
+    error = rel_l2(np.array(pred_df), np.array(ref_df))
     assert error < 1e-2
 
 
@@ -96,3 +98,46 @@ def test_term_iii_rhs_shapes(nonlin_geom, nonlin_shape):
     df = jnp.zeros(nonlin_shape, dtype=jnp.complex128)
     rhs_nl = term_iii_rhs(df, nonlin_geom)
     assert rhs_nl.shape == nonlin_shape
+
+
+def test_cfl_timestep_estimate(nonlin_dir, nonlin_geom, nonlin_shape):
+    """verify that the cfl estimate produces reasonable timesteps.
+
+    the estimate should be finite, positive, and comparable to the reference dt
+    for a typical nonlinear state.
+    """
+    df = load_gkw_k_dump(f"{nonlin_dir}/100", nonlin_shape)
+    params = gkparams_from_input_dat(f"{nonlin_dir}/input.dat", non_linear=True)
+    pre = linear_precompute(nonlin_geom, params)
+
+    phi = calculate_phi(geom_tensors(nonlin_geom, params=params), df)
+    bessel = pre["bessel"]
+
+    dt_est = estimate_nl_timestep(
+        phi, pre, bessel, dt_input=float(params.dt), safety_factor=0.95
+    )
+
+    dt_est_val = float(dt_est)
+    assert np.isfinite(dt_est_val), "cfl estimate should be finite"
+    assert dt_est_val > 0, "cfl estimate should be positive"
+    assert dt_est_val <= float(params.dt), "cfl estimate should not exceed dt_input"
+    # for a turbulent state, cfl should be within an order of magnitude of dt
+    assert (
+        dt_est_val > float(params.dt) * 0.01
+    ), f"cfl estimate {dt_est_val:.3e} is unreasonably small vs dt={params.dt}"
+
+
+def test_cfl_zero_phi_returns_dt_input(nonlin_geom, nonlin_shape):
+    """with zero potential, cfl estimate should return dt_input (no constraint)."""
+    params = gkparams_from_input_dat(
+        "/restricteddata/ukaea/gyrokinetics/raw/iteration_13/input.dat",
+        non_linear=True,
+    )
+    pre = linear_precompute(nonlin_geom, params)
+    phi_zero = jnp.zeros(nonlin_shape[2:], dtype=jnp.complex128)
+    bessel = pre["bessel"]
+
+    dt_est = estimate_nl_timestep(
+        phi_zero, pre, bessel, dt_input=float(params.dt), safety_factor=0.95
+    )
+    assert float(dt_est) == float(params.dt), "zero phi should give dt_input"
