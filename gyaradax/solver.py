@@ -203,7 +203,6 @@ def unpack_half_spectrum(
     return spec_half[..., jind, :nky]
 
 
-@jax.jit
 def nonlinear_term_iii(
     df: jnp.ndarray,
     phi: jnp.ndarray,
@@ -653,6 +652,13 @@ def linear_precompute(
         out.update(sp)
         out["geom_tensors"] = None
         out["nsp"] = nsp
+
+        # precompute kinetic phi solve arrays (avoids recomputing bessel/gamma per RHS call)
+        from gyaradax.integrals import precompute_phi_kinetic
+
+        phi_w, phi_d = precompute_phi_kinetic(geometry)
+        out["phi_weight"] = phi_w
+        out["phi_diag"] = phi_d
     else:
         # Adiabatic: scalar species params, 5D arrays
         sp = _compute_species_coeffs(
@@ -779,7 +785,6 @@ def _linear_rhs_core(
     )
 
 
-@jax.jit
 def linear_rhs(
     df: jnp.ndarray,
     geometry: Dict[str, jnp.ndarray],
@@ -968,7 +973,12 @@ def _compute_phi(df, geometry, params, pre):
     if params.adiabatic_electrons:
         return calculate_phi(pre["geom_tensors"], df)
     else:
-        return calculate_phi_kinetic(geometry, df)
+        return calculate_phi_kinetic(
+            geometry,
+            df,
+            phi_weight=pre.get("phi_weight"),
+            phi_diag=pre.get("phi_diag"),
+        )
 
 
 def _compute_linear_rhs(df, phi, geometry, params, pre):
@@ -1056,7 +1066,6 @@ def _compute_nonlinear_rhs(df, phi, geometry, params, pre):
         return jax.vmap(_nl_sp)(df, pre["bessel"])
 
 
-@jax.jit
 def gkstep_single(
     prev_df: jnp.ndarray,
     geometry: Dict[str, jnp.ndarray],

@@ -165,18 +165,20 @@ def _species_bessel_gamma(geometry):
     return bessel, gamma
 
 
-def calculate_phi_kinetic(
-    geometry: Dict[str, jnp.ndarray], df: jnp.ndarray
-) -> jnp.ndarray:
-    """Kinetic electron phi from multi-species quasineutrality.
+def precompute_phi_kinetic(geometry: Dict[str, jnp.ndarray]):
+    """precompute static arrays for the kinetic phi solve.
 
-    df: (nsp, nvpar, nmu, ns, nkx, nky).
-    Returns phi: (ns, nkx, nky).
+    returns (phi_weight, phi_diag) where:
+        phi_weight: (nsp, 1, nmu, ns, nkx, nky) — poisson integral weight
+        phi_diag: (ns, nkx, nky) — poisson diagonal (with zonal mode set to 1)
     """
-    nsp = df.shape[0]
+    bessel, gamma = _species_bessel_gamma(geometry)
+
+    mas = jnp.asarray(geometry["mas"], dtype=jnp.float64)
     signz = jnp.asarray(geometry["signz"], dtype=jnp.float64)
     tmp = jnp.asarray(geometry["tmp"], dtype=jnp.float64)
     de = jnp.asarray(geometry["de"], dtype=jnp.float64)
+    nsp = mas.shape[0]
 
     signz_6d = signz.reshape(nsp, 1, 1, 1, 1, 1)
     de_6d = de.reshape(nsp, 1, 1, 1, 1, 1)
@@ -186,12 +188,11 @@ def calculate_phi_kinetic(
     intmu = jnp.asarray(geometry["intmu"], dtype=jnp.float64).reshape(1, 1, -1, 1, 1, 1)
     bn = jnp.asarray(geometry["bn"], dtype=jnp.float64).reshape(1, 1, 1, -1, 1, 1)
 
-    bessel, gamma = _species_bessel_gamma(geometry)
-
+    # poisson integral weight: sum(weight * df) over (species, vpar, mu) gives phi numerator
     weight = signz_6d * de_6d * intmu * intvp * bessel * bn
     weight = jnp.where(jnp.abs(intvp) < 1e-9, 0.0, weight)
-    phi_num = jnp.sum(weight * df, axis=(0, 1, 2))
 
+    # poisson diagonal: sum over species of Z^2 * n * (Gamma0 - 1) / T
     diag_per_sp = signz_6d**2 * de_6d * (gamma - 1.0) / tmp_6d
     diag = jnp.sum(diag_per_sp, axis=0).squeeze()
 
@@ -202,7 +203,26 @@ def calculate_phi_kinetic(
     diag = diag.at[:, ixzero, iyzero].set(1.0)
     diag = jnp.where(jnp.abs(diag) < 1e-15, -1.0, diag)
 
-    return -phi_num / diag
+    return weight, diag
+
+
+def calculate_phi_kinetic(
+    geometry: Dict[str, jnp.ndarray],
+    df: jnp.ndarray,
+    phi_weight: jnp.ndarray = None,
+    phi_diag: jnp.ndarray = None,
+) -> jnp.ndarray:
+    """Kinetic electron phi from multi-species quasineutrality.
+
+    df: (nsp, nvpar, nmu, ns, nkx, nky).
+    If phi_weight and phi_diag are provided (from precompute_phi_kinetic),
+    skips expensive bessel/gamma recomputation.
+    """
+    if phi_weight is None or phi_diag is None:
+        phi_weight, phi_diag = precompute_phi_kinetic(geometry)
+
+    phi_num = jnp.sum(phi_weight * df, axis=(0, 1, 2))
+    return -phi_num / phi_diag
 
 
 @jax.jit

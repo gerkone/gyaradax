@@ -1,132 +1,183 @@
 #!/usr/bin/env python3
-"""
-Benchmark and verification tool for the Gyaradax JAX solver.
-Used to track performance gains and numerical correctness during optimization.
-"""
-# Bootstrap JAX environment BEFORE any JAX imports
-from gyaradax.bootstrap import init_jax
+"""benchmark for gyaradax solver with component-level timing."""
 
-init_jax()
-
+import os
+import re
 import time
 import argparse
 import numpy as np
 
-from gyaradax.simulate import _setup_simulation, _init_condition
-from gyaradax.solver import gksolve, linear_precompute
+os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
+
+import jax
+import jax.numpy as jnp
+
+jax.config.update("jax_enable_x64", True)
+
+from gyaradax import load_geometry
+from gyaradax.solver import (
+    gksolve,
+    GKState,
+    linear_precompute,
+    _compute_phi,
+    _compute_linear_rhs,
+    _compute_nonlinear_rhs,
+)
+from gyaradax.params import gkparams_from_input_dat
+from gyaradax.utils import load_gkw_k_dump
 
 
-def rel_l2(pred: np.ndarray, ref: np.ndarray, eps: float = 1.0e-30) -> float:
-    """Calculate relative L2 error."""
-    return float(np.linalg.norm(pred - ref) / (np.linalg.norm(ref) + eps))
+def bench_component(fn, n_iters=5, label=""):
+    """time a function over n_iters, return mean ms."""
+    # warmup
+    result = fn()
+    jax.block_until_ready(result)
+    times = []
+    for _ in range(n_iters):
+        t0 = time.time()
+        result = fn()
+        jax.block_until_ready(result)
+        times.append((time.time() - t0) * 1000)
+    mean_ms = np.mean(times)
+    std_ms = np.std(times)
+    print(f"  {label:30s}: {mean_ms:8.2f} +/- {std_ms:5.2f} ms")
+    return mean_ms
 
 
 def run_benchmark():
-    parser = argparse.ArgumentParser(description="Benchmark Gyaradax JAX solver")
-    parser.add_argument("--config", type=str, required=True, help="Path to YAML config")
+    parser = argparse.ArgumentParser(description="benchmark gyaradax solver")
+    parser.add_argument("--data-dir", type=str, required=True)
+    parser.add_argument("--steps", type=int, default=120)
+    parser.add_argument("--blocks", type=int, default=3)
+    parser.add_argument("--kinetic", action="store_true")
+    parser.add_argument("--resume", type=str, default="100")
+    parser.add_argument("--device", type=int, default=None)
     parser.add_argument(
-        "--steps", type=int, default=10, help="Number of steps for timing"
+        "--components", action="store_true", help="benchmark individual components"
     )
-    parser.add_argument(
-        "--reference", type=str, help="Path to .npz reference to verify against"
-    )
-    parser.add_argument(
-        "--save-reference", type=str, help="Path to save final state as reference"
-    )
-    parser.add_argument(
-        "--resume-k-file", type=str, help="Path to GKW K-file to resume from"
-    )
-    parser.add_argument(
-        "--time-average-flux",
-        action="store_true",
-        help="Calculate time-averaged heat flux (last 80 big steps)",
-    )
-    parser.add_argument(
-        "--verbose", action="store_true", help="Print detailed runtime info"
-    )
-    parser.add_argument("--device", type=int, default=None, help="GPU device ID to use")
-
+    parser.add_argument("--save-reference", type=str)
+    parser.add_argument("--reference", type=str)
     args = parser.parse_args()
 
-    # 2. Setup (Logic now entirely on the top level via bootstrap and standard imports)
-    print(f"[*] Loading configuration: {args.config}")
-    params, geometry, _, _, _ = _setup_simulation(args.config, None, False, {})
+    if args.device is not None:
+        os.environ["CUDA_VISIBLE_DEVICES"] = str(args.device)
 
-    # Handle K-file resumption if specified
-    if args.resume_k_file:
-        print(f"[*] Resuming from K-file: {args.resume_k_file}")
-        df, state = _init_condition(
-            None, args.resume_k_file, geometry, params, args.verbose
-        )
+    data_dir = args.data_dir
+    n_species = 2 if args.kinetic else 1
+
+    geom = load_geometry(data_dir)
+    shape = tuple(len(geom[k]) for k in ("intvp", "intmu", "ints", "kxrh", "krho"))
+    dump_path = os.path.join(data_dir, args.resume)
+    df = load_gkw_k_dump(dump_path, shape, n_species=n_species)
+
+    dat_path = dump_path + ".dat"
+    dt_override = {}
+    if os.path.exists(dat_path):
+        with open(dat_path) as f:
+            text = f.read()
+        m = re.search(r"DTIM\s*=\s*([0-9eE+\-.]+)", text)
+        if m:
+            dt_override["dt"] = float(m.group(1))
+        m = re.search(r"TIME\s*=\s*([0-9eE+\-.]+)", text)
+        t_start = float(m.group(1)) if m else 0.0
     else:
-        df, state = _init_condition(None, None, geometry, params, args.verbose)
+        t_start = 0.0
 
-    # Determine grid resolution
-    res = df.shape
-    num_elements = np.prod(res)
-    size_mb = (num_elements * 16) / (1024 * 1024)  # complex128 is 16 bytes
-
-    print(f"[*] Grid resolution: {res} (vpar, mu, s, kx, ky)")
-    print(f"[*] State size: {num_elements:,} elements ({size_mb:.2f} MB)")
-
-    # 3. Precompute
-    print("[*] Running precompute...")
-    t0 = time.time()
-    pre = linear_precompute(geometry, params)
-    # block on one result to ensure compilation completes
-    for k, v in pre.items():
-        if hasattr(v, "block_until_ready"):
-            v.block_until_ready()
-            break
-    t_pre = time.time() - t0
-    print(f"[*] Precompute complete in {t_pre:.3f}s")
-
-    # 4. Solvers Benchmarks
-    print(f"[*] Running solver for {args.steps} steps...")
-
-    # If reference is provided, we might want to be careful with total steps.
-    # We do a 1-step warmup using the INITIAL state, but discard the result
-    # for the benchmark run to ensure we start from step 0 (or resume step).
-
-    print("[*] Performing warmup/compilation (1 step)...")
-    _ = gksolve(df, geometry, params, state, n_steps=1, pre=pre)
-
-    # Actual Benchmark loop (using JAX internal scan)
-    # We run EXACTLY args.steps from the INITIAL state.
-    t_run_start = time.time()
-    df_next, (phi, fluxes), state_next = gksolve(
-        df, geometry, params, state, n_steps=args.steps, pre=pre
+    params = gkparams_from_input_dat(
+        os.path.join(data_dir, "input.dat"),
+        non_linear=True,
+        adiabatic_electrons=not args.kinetic,
+        **dt_override,
     )
 
-    if hasattr(df_next, "block_until_ready"):
-        df_next.block_until_ready()
-    t_total = time.time() - t_run_start
+    nky = len(geom["krho"])
+    state = GKState(
+        time=jnp.array(t_start, dtype=jnp.float64),
+        step=jnp.array(0, dtype=jnp.int32),
+        accumulated_norm_factor=jnp.ones(nky, dtype=jnp.float64),
+        window_start_amp=jnp.ones(nky, dtype=jnp.float64),
+        last_growth_rate=jnp.zeros(nky, dtype=jnp.float64),
+    )
 
-    m_steps_s = args.steps / t_total
-    print(f"[*] Solver loop complete in {t_total:.3f}s ({m_steps_s:.2f} steps/s)")
+    mode = "kinetic" if args.kinetic else "adiabatic"
+    print(f"mode: {mode}, grid: {df.shape}, dt: {params.dt}")
 
-    # 5. Verification
+    # precompute
+    t0 = time.time()
+    pre = linear_precompute(geom, params)
+    t_pre = time.time() - t0
+    print(f"precompute: {t_pre:.3f}s")
+
+    # component-level benchmarks (before full scan warmup)
+    if args.components:
+        print(f"\ncomponent benchmarks (single evaluation, {mode}):")
+
+        bench_component(
+            lambda: _compute_phi(df, geom, params, pre),
+            label="phi solve",
+        )
+
+        phi = _compute_phi(df, geom, params, pre)
+
+        bench_component(
+            lambda: _compute_linear_rhs(df, phi, geom, params, pre),
+            label="linear rhs",
+        )
+
+        if params.non_linear:
+            bench_component(
+                lambda: _compute_nonlinear_rhs(df, phi, geom, params, pre),
+                label="nonlinear rhs (term iii)",
+            )
+        print()
+
+    # full solver benchmark
+    print(f"steps/block: {args.steps}, blocks: {args.blocks}")
+    print(f"warmup (compile {args.steps} steps)...")
+    t0 = time.time()
+    df_w, _, state_w = gksolve(df, geom, params, state, n_steps=args.steps, pre=pre)
+    jax.block_until_ready(df_w)
+    t_warmup = time.time() - t0
+    print(f"warmup: {t_warmup:.2f}s")
+
+    df_cur, state_cur = df_w, state_w
+    block_times = []
+    for i in range(args.blocks):
+        t0 = time.time()
+        df_cur, (phi, fluxes), state_cur = gksolve(
+            df_cur, geom, params, state_cur, n_steps=args.steps, pre=pre
+        )
+        jax.block_until_ready(df_cur)
+        dt_block = time.time() - t0
+        block_times.append(dt_block)
+        sps = args.steps / dt_block
+        print(f"  block {i+1}/{args.blocks}: {dt_block:.3f}s ({sps:.1f} steps/s)")
+
+    times = np.array(block_times)
+    mean_sps = args.steps / np.mean(times)
+    std_sps = args.steps * np.std(times) / np.mean(times) ** 2
+    print(f"\n{'='*50}")
+    print(f"  {args.steps * args.blocks} steps in {np.sum(times):.3f}s")
+    print(f"  {mean_sps:.2f} +/- {std_sps:.2f} steps/s")
+    print(f"  {np.mean(times)*1000/args.steps:.2f} ms/step")
+    print(f"{'='*50}")
+
     if args.reference:
-        print(f"[*] Verifying against reference: {args.reference}")
         ref = np.load(args.reference)
-        ref_df = ref["df"]
-
-        err = rel_l2(np.array(df_next), ref_df)
-        print(f"[*] Final state relative L2 difference: {err:.4e}")
-
-        if err < 1e-10:
-            print("[SUCCESS] Result significantly matches baseline.")
-        else:
-            print("[WARNING] Result deviates from baseline!")
+        err = float(
+            np.linalg.norm(np.array(df_cur) - ref["df"])
+            / (np.linalg.norm(ref["df"]) + 1e-30)
+        )
+        print(f"rel_l2 vs reference: {err:.4e}")
 
     if args.save_reference:
-        print(f"[*] Saving final state to {args.save_reference}")
         np.savez(
             args.save_reference,
-            df=np.array(df_next),
-            time=np.array(state_next.time),
-            step=np.array(state_next.step),
+            df=np.array(df_cur),
+            time=np.array(state_cur.time),
+            step=np.array(state_cur.step),
         )
+        print(f"saved reference to {args.save_reference}")
 
 
 if __name__ == "__main__":
