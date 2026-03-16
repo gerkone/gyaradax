@@ -93,14 +93,28 @@ def plot_flux_trace(
 
             if show_average and len(fluxes[flux_idx]) >= avg_window:
                 avg_val = np.mean(fluxes[flux_idx][-avg_window:])
-                ax.axhline(avg_val, color=JAX_COLORS["red"], linestyle=":", lw=2.0,
-                           label=f"avg (last {avg_window})", zorder=-1)
+                ax.axhline(
+                    avg_val,
+                    color=JAX_COLORS["red"],
+                    linestyle=":",
+                    lw=2.0,
+                    label=f"avg (last {avg_window})",
+                    zorder=-1,
+                )
 
             if ref_fluxes is not None and ref_time is not None:
                 ref_idx = col_offset + i
                 if ref_idx < ref_fluxes.shape[0]:
-                    ax.plot(ref_time, ref_fluxes[ref_idx], color="black",
-                            linestyle="--", label="GKW", alpha=0.8, lw=1.4, zorder=0)
+                    ax.plot(
+                        ref_time,
+                        ref_fluxes[ref_idx],
+                        color="black",
+                        linestyle="--",
+                        label="GKW",
+                        alpha=0.8,
+                        lw=1.4,
+                        zorder=0,
+                    )
 
             if isp == 0:
                 ax.set_ylabel(labels[i])
@@ -151,7 +165,13 @@ def plot_spectra(
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(7.0, 2.8))
 
     ax1.semilogy(
-        ky, ky_spec, "o-", color=JAX_COLORS["purple"], markersize=3, lw=1, label="gyaradax"
+        ky,
+        ky_spec,
+        "o-",
+        color=JAX_COLORS["purple"],
+        markersize=3,
+        lw=1,
+        label="gyaradax",
     )
     if ref_ky_spec is not None:
         ax1.semilogy(

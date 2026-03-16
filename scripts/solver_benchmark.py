@@ -11,13 +11,12 @@ import argparse
 import jax
 import jax.numpy as jnp
 import numpy as np
-from typing import Dict, Tuple, Any
 
 # Ensure we are in the project root
 sys.path.append(os.getcwd())
 
 from gyaradax.simulate import _setup_simulation, _init_condition
-from gyaradax.solver import gksolve, GKState, linear_precompute
+from gyaradax.solver import gksolve, linear_precompute
 from gyaradax.integrals import get_integrals
 
 
@@ -196,7 +195,7 @@ def run_benchmark():
 
     # 5. Diagnostic Check (Self-consistency)
     phi_val, (p, e, v) = get_integrals(final_df, geometry, params=params)
-    print(f"\n[*] Diagnostics at end of run:")
+    print("\n[*] Diagnostics at end of run:")
     print(f"    - Energy Flux: {float(e):.6e}")
     print(
         f"    - Potential Amp (L2): {float(jnp.sqrt(jnp.mean(jnp.abs(phi_val)**2))):.6e}"

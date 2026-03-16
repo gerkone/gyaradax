@@ -21,7 +21,9 @@ from gyaradax import load_geometry  # noqa: E402
 from gyaradax.solver import gksolve, GKState  # noqa: E402
 from gyaradax.params import gkparams_from_input_dat  # noqa: E402
 from gyaradax.utils import load_gkw_k_dump, K_files  # noqa: E402
-from gyaradax.integrals import calculate_phi_kinetic, calculate_fluxes_kinetic  # noqa: E402
+from gyaradax.integrals import (
+    calculate_fluxes_kinetic,
+)  # noqa: E402
 
 
 KINETIC_DIR = "/restricteddata/ukaea/gyrokinetics/raw/kinetic_electrons"
@@ -93,10 +95,12 @@ def validate_case(case_name):
     sim_times = []
     t0 = time.time()
 
-    gksolve_jit = jax.jit(gksolve, static_argnums=(4,))
+    gksolve_jit = jax.jit(gksolve, static_argnames="n_steps")
 
     for block in range(n_blocks):
-        df, (phi, fluxes), state = gksolve_jit(df, geom, params, state, BLOCK_SIZE)
+        df, (phi, fluxes), state = gksolve_jit(
+            df, geom, params, state, n_steps=BLOCK_SIZE
+        )
 
         # compute per-species fluxes
         fl = calculate_fluxes_kinetic(geom, df, phi)
@@ -134,10 +138,14 @@ def validate_case(case_name):
     ref_avg_elec = np.mean(ref_eflux_elec)
 
     print(f"\ntime-averaged eflux (last {len(sim_eflux_ion) - avg_start} blocks):")
-    print(f"  ion:      sim={sim_avg_ion:.4e}  ref={ref_avg_ion:.4e}  "
-          f"rel_err={abs(sim_avg_ion - ref_avg_ion) / max(abs(ref_avg_ion), 1e-15):.2e}")
-    print(f"  electron: sim={sim_avg_elec:.4e}  ref={ref_avg_elec:.4e}  "
-          f"rel_err={abs(sim_avg_elec - ref_avg_elec) / max(abs(ref_avg_elec), 1e-15):.2e}")
+    print(
+        f"  ion:      sim={sim_avg_ion:.4e}  ref={ref_avg_ion:.4e}  "
+        f"rel_err={abs(sim_avg_ion - ref_avg_ion) / max(abs(ref_avg_ion), 1e-15):.2e}"
+    )
+    print(
+        f"  electron: sim={sim_avg_elec:.4e}  ref={ref_avg_elec:.4e}  "
+        f"rel_err={abs(sim_avg_elec - ref_avg_elec) / max(abs(ref_avg_elec), 1e-15):.2e}"
+    )
 
     # save results
     out_dir = f"validation_kinetic_{case_name}"

@@ -72,8 +72,8 @@ def test_iteration_parity(
         last_growth_rate=jnp.zeros(nky, dtype=jnp.float64),
     )
 
-    pred_df, _, _ = jax.jit(gksolve, static_argnums=(4,))(
-        start_df, nonlin_geom, params, state, steps
+    pred_df, _, _ = jax.jit(gksolve, static_argnames="n_steps")(
+        start_df, nonlin_geom, params, state, n_steps=steps
     )
 
     # validate subset of modes for parity
@@ -180,8 +180,8 @@ def test_kinetic_iteration_parity(
         last_growth_rate=jnp.zeros(nky, dtype=jnp.float64),
     )
 
-    pred_df, _, _ = jax.jit(gksolve, static_argnums=(4,))(
-        start_df, kinetic_geom, params, state, steps
+    pred_df, _, _ = jax.jit(gksolve, static_argnames="n_steps")(
+        start_df, kinetic_geom, params, state, n_steps=steps
     )
 
     # Validate per-species trajectory parity
