@@ -1,6 +1,5 @@
 import jax.numpy as jnp
 from typing import Dict, Tuple, Any
-from gyaradax.integrals import get_integrals
 from gyaradax.solver import (
     linear_precompute,
     nonlinear_term_iii,
@@ -54,7 +53,9 @@ def term_iii_rhs(
     if params is None:
         params = GKParams()
     pre = linear_precompute(geometry, params)
-    phi, _ = get_integrals(df, geometry, params=params, include_fluxes=False)
+    from gyaradax.integrals import calculate_phi, geom_tensors
+
+    phi = calculate_phi(geom_tensors(geometry, params=params), df)
     return nonlinear_term_iii(
         df,
         phi,

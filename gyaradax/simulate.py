@@ -24,7 +24,6 @@ from gyaradax.solver import (
     GKState,
     default_state,
     linear_precompute,
-    mode_amplitude,
 )
 from gyaradax.utils import (
     load_checkpoint,
@@ -98,7 +97,9 @@ def _init_condition(
         if os.path.exists(dat_path):
             t_start = read_gkw_dump_time(dat_path)
             # We need initial amplitude for growth tracking
-            phi0, _ = get_integrals(df, geometry, params=params, include_fluxes=False)
+            from gyaradax.integrals import calculate_phi, geom_tensors as _gt
+
+            phi0 = calculate_phi(_gt(geometry, params=params), df)
             from gyaradax.solver import mode_amplitude
 
             amp0 = mode_amplitude(phi0, geometry, params.norm_eps)

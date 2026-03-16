@@ -1,19 +1,18 @@
-"""Publication-quality visualization functions for gyaradax gyrokinetics data."""
+"""Publication-quality visualization for gyaradax gyrokinetics data."""
 
 from typing import List, Optional, Union, Tuple
 import matplotlib.pyplot as plt
 import matplotlib
 import numpy as np
 import jax.numpy as jnp
-import io
 
-# Standard labels for GKW 5D phase space (vpar, mu, s, kx, ky)
 GK_LABELS = {
     5: [r"v_{||}", r"\mu", r"s", r"k_x", r"k_y"],
     6: [r"sp", r"v_{||}", r"\mu", r"s", r"k_x", r"k_y"],
 }
 
-# Updated JAX/Google brand color scheme from image
+SPECIES_LABELS = {0: "ion", 1: "electron"}
+
 JAX_COLORS = {
     "blue": "#4285F4",
     "red": "#EA4335",
@@ -23,12 +22,13 @@ JAX_COLORS = {
     "purple": "#9B51E0",
 }
 
-# Strict "Nature-ready" styling for scientific plots
+SPECIES_COLORS = [JAX_COLORS["cyan"], JAX_COLORS["purple"]]
+
 plt.rcParams.update(
     {
         "font.family": "sans-serif",
         "font.sans-serif": ["Helvetica", "Arial", "Liberation Sans"],
-        "font.size": 8,  # Standard Nature font size
+        "font.size": 8,
         "axes.labelsize": 9,
         "axes.titlesize": 9,
         "xtick.labelsize": 8,
@@ -40,9 +40,9 @@ plt.rcParams.update(
         "grid.linestyle": ":",
         "axes.spines.top": False,
         "axes.spines.right": False,
-        "savefig.dpi": 300,  # High resolution
+        "savefig.dpi": 300,
         "savefig.bbox": "tight",
-        "figure.figsize": (3.5, 2.8),  # Single-column width (~89mm)
+        "figure.figsize": (3.5, 2.8),
     }
 )
 
@@ -56,69 +56,62 @@ def plot_flux_trace(
     title: str = "Flux Evolution",
     show_average: bool = False,
     avg_window: int = 80,
+    n_species: int = 1,
+    species_labels: Optional[List[str]] = None,
 ) -> plt.Figure:
-    """Plot flux traces over time with GKW reference comparison and optional averaging."""
+    """Plot flux traces over time with optional multi-species side-by-side layout.
+
+    For n_species > 1, creates two columns (one per species). Fluxes should
+    have shape (n_species * n_flux, n_time) with species interleaved:
+    [pflux_i, eflux_i, vflux_i, pflux_e, eflux_e, vflux_e, ...].
+    """
     if isinstance(fluxes, tuple):
         fluxes = np.stack(fluxes)
     if ref_fluxes is not None and isinstance(ref_fluxes, tuple):
         ref_fluxes = np.stack(ref_fluxes)
 
-    n_flux = fluxes.shape[0]
-    fig, axes = plt.subplots(n_flux, 1, figsize=(6, 1.5 * n_flux), sharex=True)
-    if n_flux == 1:
-        axes = [axes]
+    if species_labels is None:
+        species_labels = [SPECIES_LABELS.get(i, f"sp{i}") for i in range(n_species)]
 
-    colors = [JAX_COLORS["cyan"]]
+    n_flux = len(labels)
+    ncols = n_species
+    fig, axes = plt.subplots(
+        n_flux, ncols, figsize=(6 * ncols, 1.5 * n_flux), sharex=True, squeeze=False
+    )
 
-    for i in range(n_flux):
-        ax = axes[i]
-        # Main trace
-        ax.plot(
-            time, fluxes[i], label="gyaradax", color=colors[i % len(colors)], lw=1.5
-        )
+    for isp in range(n_species):
+        col_offset = isp * n_flux
+        color = SPECIES_COLORS[isp % len(SPECIES_COLORS)]
 
-        # Optional average line for the last N timesteps
-        if show_average and len(fluxes[i]) >= avg_window:
-            avg_val = np.mean(fluxes[i][-avg_window:])
-            # Plotting from the start of the window to the end of time
-            ax.axhline(
-                avg_val,
-                color=JAX_COLORS["red"],
-                linestyle=":",
-                lw=2.0,
-                label=f"Avg (last {avg_window})",
-                zorder=-1,
-            )
-            # Optional: add text label for the value
-            ax.text(
-                time[-1],
-                avg_val,
-                f"{avg_val:.2e}",
-                va="bottom",
-                ha="right",
-                color=JAX_COLORS["red"],
-                fontsize=7,
-            )
+        for i in range(n_flux):
+            ax = axes[i, isp]
+            flux_idx = col_offset + i
+            if flux_idx >= fluxes.shape[0]:
+                continue
 
-        if ref_fluxes is not None and ref_time is not None:
-            ax.plot(
-                ref_time,
-                ref_fluxes[i],
-                color="black",
-                linestyle="--",
-                label="GKW",
-                alpha=0.8,
-                lw=1.4,
-                zorder=0,
-            )
+            ax.plot(time, fluxes[flux_idx], label="gyaradax", color=color, lw=1.5)
 
-        ax.set_ylabel(labels[i], fontsize=12)
-        ax.grid(True, axis="y")
-        if i == 0:
-            ax.legend(frameon=False, loc="best")
+            if show_average and len(fluxes[flux_idx]) >= avg_window:
+                avg_val = np.mean(fluxes[flux_idx][-avg_window:])
+                ax.axhline(avg_val, color=JAX_COLORS["red"], linestyle=":", lw=2.0,
+                           label=f"avg (last {avg_window})", zorder=-1)
 
-    axes[-1].set_xlabel(r"Time $[v_{th}/R]$", fontsize=12)
-    fig.suptitle(title, fontweight="bold", fontsize=16)
+            if ref_fluxes is not None and ref_time is not None:
+                ref_idx = col_offset + i
+                if ref_idx < ref_fluxes.shape[0]:
+                    ax.plot(ref_time, ref_fluxes[ref_idx], color="black",
+                            linestyle="--", label="GKW", alpha=0.8, lw=1.4, zorder=0)
+
+            if isp == 0:
+                ax.set_ylabel(labels[i])
+            ax.grid(True, axis="y")
+            if i == 0:
+                ax.set_title(species_labels[isp])
+                ax.legend(frameon=False, loc="best")
+
+        axes[-1, isp].set_xlabel(r"time $[v_{th}/R]$")
+
+    fig.suptitle(title, fontweight="bold")
     fig.tight_layout()
     return fig
 

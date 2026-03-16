@@ -18,11 +18,22 @@ def read_gkw_dump_time(dat_path: str) -> float:
 
 
 def load_gkw_dump(
-    file_path: str, resolution: Tuple[int, ...]
+    file_path: str, resolution: Tuple[int, ...], n_species: int = 1
 ) -> Tuple[jnp.ndarray, Dict[str, Any]]:
     """
     Load a GKW distribution function and associated metadata (.dat).
-    Returns (df, info_dict).
+
+    Args:
+        file_path: Path to the binary dump file.
+        resolution: Grid shape (nvpar, nmu, ns, nkx, nky).
+        n_species: Number of kinetic species stored in the dump.
+            For adiabatic electrons (default), n_species=1.
+            For kinetic electrons, n_species=2 (ions + electrons).
+
+    Returns:
+        (df, info_dict) where df has shape:
+            (nvpar, nmu, ns, nkx, nky) when n_species=1
+            (n_species, nvpar, nmu, ns, nkx, nky) when n_species>1
     """
     if not os.path.exists(file_path):
         raise FileNotFoundError(f"GKW dump not found: {file_path}")
@@ -31,8 +42,19 @@ def load_gkw_dump(
     with open(file_path, "rb") as fid:
         ff = np.fromfile(fid, dtype=np.float64)
     nvpar, nmu, ns, nkx, nky = resolution
-    knth = np.reshape(ff, (2, nvpar, nmu, ns, nkx, nky), order="F")
-    df = jnp.array(knth[0] + 1j * knth[1], dtype=jnp.complex128)
+
+    if n_species == 1:
+        knth = np.reshape(ff, (2, nvpar, nmu, ns, nkx, nky), order="F")
+        df = jnp.array(knth[0] + 1j * knth[1], dtype=jnp.complex128)
+    else:
+        # GKW stores species as the outermost (slowest) Fortran index.
+        # Binary layout: (2_re_im, nvpar, nmu, ns, nkx, nky, nspecies) Fortran order.
+        knth = np.reshape(ff, (2, nvpar, nmu, ns, nkx, nky, n_species), order="F")
+        # Combine real/imag and move species to leading axis
+        df_np = knth[0] + 1j * knth[1]  # (nvpar, nmu, ns, nkx, nky, nspecies)
+        df = jnp.array(
+            np.moveaxis(df_np, -1, 0), dtype=jnp.complex128
+        )  # (nspecies, nvpar, nmu, ns, nkx, nky)
 
     # 2. Load side info
     info = {"path": file_path, "time": 0.0}
@@ -43,9 +65,11 @@ def load_gkw_dump(
     return df, info
 
 
-def load_gkw_k_dump(file_path: str, resolution: Tuple[int, ...]) -> jnp.ndarray:
+def load_gkw_k_dump(
+    file_path: str, resolution: Tuple[int, ...], n_species: int = 1
+) -> jnp.ndarray:
     """Legacy wrapper for backward compatibility."""
-    df, _ = load_gkw_dump(file_path, resolution)
+    df, _ = load_gkw_dump(file_path, resolution, n_species=n_species)
     return df
 
 
@@ -84,11 +108,13 @@ def save_dumps(
     """
     os.makedirs(output_dir, exist_ok=True)
 
-    # 1. Append diagnostics to history
-    # Compute spectra
+    # compute spectra with proper ds and parseval weighting
+    ds = float(jnp.asarray(geometry["ints"])[0])
+    parseval = jnp.asarray(geometry["parseval"])
     phi_sq = jnp.abs(phi) ** 2
-    kx_spec = jnp.sum(phi_sq, axis=(0, 2))
-    ky_spec = jnp.sum(phi_sq, axis=(0, 1))
+    weighted = ds * phi_sq * parseval[None, None, :]
+    kx_spec = jnp.sum(weighted, axis=(0, 2))
+    ky_spec = jnp.sum(weighted, axis=(0, 1))
 
     diags = {
         "fluxes": np.array([fluxes[0], fluxes[1], fluxes[2]]),

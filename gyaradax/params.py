@@ -1,5 +1,4 @@
 import jax
-import jax.numpy as jnp
 
 # enforce 64-bit precision
 jax.config.update("jax_enable_x64", True)
@@ -66,6 +65,8 @@ class GKParams:
     non_linear: bool = False
     finit: str = "cosine2"
     adiabatic_electrons: bool = True
+    adaptive_dt: bool = False
+    cfl_safety: float = 0.95
 
     # physical parameters (typically from the kinetic species)
     rlt: float = 1.0
@@ -93,12 +94,23 @@ class GKParams:
     dgrid: float = 1.0
     tgrid: float = 1.0
 
+    # Fields that are not JAX-traceable (strings, booleans used for control flow)
+    # and must be stored as pytree auxiliary data rather than leaves.
+    _STATIC_FIELDS = ("finit", "adiabatic_electrons", "non_linear", "adaptive_dt")
+
     def tree_flatten(self):
-        return tuple(vars(self).values()), None
+        d = vars(self)
+        aux = {k: d[k] for k in self._STATIC_FIELDS}
+        leaves = [d[k] for k in d if k not in self._STATIC_FIELDS]
+        return leaves, aux
 
     @classmethod
-    def tree_unflatten(cls, aux_data, leaves):
-        return cls(*leaves)
+    def tree_unflatten(cls, aux, leaves):
+        d = vars(cls())  # get field ordering from defaults
+        leaf_keys = [k for k in d if k not in cls._STATIC_FIELDS]
+        kwargs = dict(zip(leaf_keys, leaves))
+        kwargs.update(aux)
+        return cls(**kwargs)
 
 
 def gkparams_from_runtime(runtime: Dict[str, Any], **overrides) -> GKParams:

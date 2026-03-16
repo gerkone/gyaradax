@@ -1,4 +1,3 @@
-import jax
 import jax.numpy as jnp
 from jax.scipy.special import i0, bessel_jn
 from einops import rearrange
@@ -6,7 +5,6 @@ from typing import Dict, Tuple, Any
 
 
 def j0(x):
-    # jax.scipy.special.bessel_jn has a bug/feature where x=0 results in nan
     safe_x = jnp.where(jnp.abs(x) < 1e-10, 1.0, x)
     res = bessel_jn(safe_x, v=0)[0]
     return jnp.where(jnp.abs(x) < 1e-10, 1.0, res)
@@ -15,7 +13,10 @@ def j0(x):
 def geom_tensors(
     geometry: Dict[str, jnp.ndarray], params: Any = None
 ) -> Dict[str, jnp.ndarray]:
-    """Expand geometry constants for broadcasting and compute Bessel terms."""
+    """Expand geometry constants for broadcasting and compute Bessel terms.
+
+    Single-species version. Species params are scalars reshaped to (1,1,1,1,1,1).
+    """
     geom_ = {}
     geom_["krho"] = rearrange(geometry["krho"], "y -> 1 1 1 1 1 y")
     geom_["ints"] = rearrange(geometry["ints"], "s -> 1 1 1 s 1 1")
@@ -64,7 +65,6 @@ def geom_tensors(
     sz = jnp.where(jnp.abs(geom_["signz"]) < 1e-15, 1.0, geom_["signz"])
     bessel_arg = jnp.sqrt(mugr_bn) / sz
     bessel_arg = geom_["mas"] * vthrat * krloc * bessel_arg
-
     bessel_arg = jnp.where(jnp.isnan(bessel_arg), 0.0, bessel_arg)
     geom_["bessel"] = j0(bessel_arg)
 
@@ -77,13 +77,15 @@ def geom_tensors(
 
 
 def calculate_phi(geom: Dict[str, jnp.ndarray], df: jnp.ndarray) -> jnp.ndarray:
-    """Computes electrostatic potential integral from the distribution function."""
+    """Adiabatic electron phi from single-species quasineutrality.
+
+    df: (nvpar, nmu, ns, nkx, nky).
+    """
     de = geom["de"]
     signz, tmp, bn = geom["signz"], geom["tmp"], geom["bn"]
     ints, intvp, intmu = geom["ints"], geom["intvp"], geom["intmu"]
     bessel, gamma = geom["bessel"], geom["gamma"]
 
-    # Matching GKW wrap_field_integrals logic
     poisson_int = signz * de * intmu * intvp * bessel * bn
     poisson_int = jnp.where(jnp.abs(intvp) < 1e-9, 0.0, poisson_int)
 
@@ -121,14 +123,90 @@ def calculate_phi(geom: Dict[str, jnp.ndarray], df: jnp.ndarray) -> jnp.ndarray:
     pdiag = jnp.where(jnp.abs(pdiag) < 1e-15, -1.0, pdiag)
 
     phi = phi * (-1.0 / pdiag)
-
     return jnp.squeeze(phi)
+
+
+def _species_bessel_gamma(geometry):
+    """Per-species Bessel J0 and Gamma_0 for multi-species phi solve."""
+    mas = jnp.asarray(geometry["mas"], dtype=jnp.float64)
+    signz = jnp.asarray(geometry["signz"], dtype=jnp.float64)
+    vthrat = jnp.asarray(geometry["vthrat"], dtype=jnp.float64)
+    nsp = mas.shape[0]
+
+    mas_6d = mas.reshape(nsp, 1, 1, 1, 1, 1)
+    signz_6d = signz.reshape(nsp, 1, 1, 1, 1, 1)
+    vthrat_6d = vthrat.reshape(nsp, 1, 1, 1, 1, 1)
+    sz = jnp.where(jnp.abs(signz_6d) < 1e-15, 1.0, signz_6d)
+
+    krho = jnp.asarray(geometry["krho"], dtype=jnp.float64).reshape(1, 1, 1, 1, 1, -1)
+    kxrh = jnp.asarray(geometry["kxrh"], dtype=jnp.float64).reshape(1, 1, 1, 1, -1, 1)
+    bn = jnp.asarray(geometry["bn"], dtype=jnp.float64).reshape(1, 1, 1, -1, 1, 1)
+    mugr = jnp.asarray(geometry["mugr"], dtype=jnp.float64).reshape(1, 1, -1, 1, 1, 1)
+    little_g = jnp.asarray(geometry["little_g"], dtype=jnp.float64)
+
+    g0 = little_g[:, 0].reshape(1, 1, 1, -1, 1, 1)
+    g1 = little_g[:, 1].reshape(1, 1, 1, -1, 1, 1)
+    g2 = little_g[:, 2].reshape(1, 1, 1, -1, 1, 1)
+    krloc_sq = krho**2 * g0 + 2 * krho * kxrh * g1 + kxrh**2 * g2
+    krloc = jnp.sqrt(jnp.maximum(krloc_sq, 0.0))
+
+    mugr_bn = jnp.maximum(2.0 * mugr / jnp.maximum(bn, 1e-15), 0.0)
+    bessel_arg = mas_6d * vthrat_6d * krloc * jnp.sqrt(mugr_bn) / sz
+    bessel_arg = jnp.where(jnp.isnan(bessel_arg), 0.0, bessel_arg)
+    bessel = j0(bessel_arg)
+
+    gamma_arg = 0.5 * (mas_6d * vthrat_6d * krloc / (sz * bn)) ** 2
+    gamma_arg = jnp.clip(gamma_arg, 0.0, 500.0)
+    gamma_arg_nommu = gamma_arg[:, :, 0:1, :, :, :]
+    gamma = i0(gamma_arg_nommu) * jnp.exp(-gamma_arg_nommu)
+
+    return bessel, gamma
+
+
+def calculate_phi_kinetic(
+    geometry: Dict[str, jnp.ndarray], df: jnp.ndarray
+) -> jnp.ndarray:
+    """Kinetic electron phi from multi-species quasineutrality.
+
+    df: (nsp, nvpar, nmu, ns, nkx, nky).
+    Returns phi: (ns, nkx, nky).
+    """
+    nsp = df.shape[0]
+    signz = jnp.asarray(geometry["signz"], dtype=jnp.float64)
+    tmp = jnp.asarray(geometry["tmp"], dtype=jnp.float64)
+    de = jnp.asarray(geometry["de"], dtype=jnp.float64)
+
+    signz_6d = signz.reshape(nsp, 1, 1, 1, 1, 1)
+    de_6d = de.reshape(nsp, 1, 1, 1, 1, 1)
+    tmp_6d = tmp.reshape(nsp, 1, 1, 1, 1, 1)
+
+    intvp = jnp.asarray(geometry["intvp"], dtype=jnp.float64).reshape(1, -1, 1, 1, 1, 1)
+    intmu = jnp.asarray(geometry["intmu"], dtype=jnp.float64).reshape(1, 1, -1, 1, 1, 1)
+    bn = jnp.asarray(geometry["bn"], dtype=jnp.float64).reshape(1, 1, 1, -1, 1, 1)
+
+    bessel, gamma = _species_bessel_gamma(geometry)
+
+    weight = signz_6d * de_6d * intmu * intvp * bessel * bn
+    weight = jnp.where(jnp.abs(intvp) < 1e-9, 0.0, weight)
+    phi_num = jnp.sum(weight * df, axis=(0, 1, 2))
+
+    diag_per_sp = signz_6d**2 * de_6d * (gamma - 1.0) / tmp_6d
+    diag = jnp.sum(diag_per_sp, axis=0).squeeze()
+
+    kxrh = jnp.asarray(geometry["kxrh"], dtype=jnp.float64)
+    krho = jnp.asarray(geometry["krho"], dtype=jnp.float64)
+    ixzero = jnp.argmin(jnp.abs(kxrh))
+    iyzero = jnp.argmin(jnp.abs(krho))
+    diag = diag.at[:, ixzero, iyzero].set(1.0)
+    diag = jnp.where(jnp.abs(diag) < 1e-15, -1.0, diag)
+
+    return -phi_num / diag
 
 
 def calculate_fluxes(
     geom: Dict[str, jnp.ndarray], df: jnp.ndarray, phi: jnp.ndarray
 ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
-    """Computes particle, heat and momentum fluxes."""
+    """Single-species fluxes. df: (nvpar, nmu, ns, nkx, nky)."""
     bn, bt_frac, parseval = geom["bn"], geom["bt_frac"], geom["parseval"]
     rfun, efun, d2X, signB = geom["rfun"], geom["efun"], geom["d2X"], geom["signB"]
     ints, intvp, intmu = geom["ints"], geom["intvp"], geom["intmu"]
@@ -141,7 +219,6 @@ def calculate_fluxes(
     dum = parseval * ints * (efun * krho) * df
     dum1 = dum * jnp.conj(phi_gyro)
     dum2 = dum1 * bn
-
     d3v = ints * d2X * intmu * bn * intvp
 
     pflux = d3v * jnp.imag(dum1)
@@ -151,26 +228,50 @@ def calculate_fluxes(
     return jnp.sum(pflux), jnp.sum(eflux), jnp.sum(vflux)
 
 
+def calculate_fluxes_kinetic(
+    geometry: Dict[str, jnp.ndarray], df: jnp.ndarray, phi: jnp.ndarray
+) -> jnp.ndarray:
+    """Per-species fluxes for kinetic case.
+
+    df: (nsp, nvpar, nmu, ns, nkx, nky).
+    Returns: (nsp, 3) array of [pflux, eflux, vflux] per species.
+    """
+    nsp = df.shape[0]
+
+    def _flux_single(isp):
+        sp_geom = dict(geometry)
+        for k in ("mas", "tmp", "de", "signz", "vthrat", "rlt", "rln"):
+            if k in geometry and jnp.asarray(geometry[k]).ndim > 0:
+                sp_geom[k] = jnp.asarray(geometry[k])[isp : isp + 1]
+        gt = geom_tensors(sp_geom)
+        pflux, eflux, vflux = calculate_fluxes(gt, df[isp], phi)
+        return jnp.stack([pflux, eflux, vflux])
+
+    return jnp.stack([_flux_single(i) for i in range(nsp)])
+
+
 def get_integrals(
     df: jnp.ndarray,
     geometry: Dict[str, jnp.ndarray],
     params: Any = None,
-    include_fluxes: bool = True,
     geom: Dict[str, jnp.ndarray] = None,
+    adiabatic_electrons: bool = True,
 ) -> Tuple[jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]]:
-    """Main interface for field and flux integrals."""
-    if geom is None:
-        geom = geom_tensors(geometry, params=params)
+    """Compute phi and fluxes from distribution function.
 
-    phi = calculate_phi(geom, df)
+    For phi-only calls, use calculate_phi / calculate_phi_kinetic directly.
 
-    def _with_fluxes():
-        return calculate_fluxes(geom, df, phi)
+    Returns:
+        (phi, (pflux, eflux, vflux)).
+    """
+    if not adiabatic_electrons and df.ndim == 6:
+        phi = calculate_phi_kinetic(geometry, df)
+        fl = calculate_fluxes_kinetic(geometry, df, phi)
+        fluxes = (jnp.sum(fl[:, 0]), jnp.sum(fl[:, 1]), jnp.sum(fl[:, 2]))
+    else:
+        if geom is None:
+            geom = geom_tensors(geometry, params=params)
+        phi = calculate_phi(geom, df)
+        fluxes = calculate_fluxes(geom, df, phi)
 
-    def _no_fluxes():
-        # return dummy scalar zeros to maintain signature
-        z = jnp.array(0.0, dtype=jnp.float64)
-        return (z, z, z)
-
-    fluxes = jax.lax.cond(include_fluxes, _with_fluxes, _no_fluxes)
     return phi, fluxes

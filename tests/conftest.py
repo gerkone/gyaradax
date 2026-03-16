@@ -75,3 +75,31 @@ def lin_shape(lin_geom):
 @pytest.fixture
 def nonlin_shape(nonlin_geom):
     return _get_shape(nonlin_geom)
+
+
+# ── Kinetic electron fixtures ──────────────────────────────────────────────
+
+KINETIC_CASES = [
+    "v3_kiteration_991_half_rlt",
+    "v3_kiteration_991_ntsks128",
+    "v3_kiteration_991_double_rlt",
+]
+
+
+@pytest.fixture(params=KINETIC_CASES)
+def kinetic_dir(request):
+    """Directory for kinetic electron simulations."""
+    path = f"/restricteddata/ukaea/gyrokinetics/raw/kinetic_electrons/{request.param}"
+    if not os.path.exists(path):
+        pytest.skip(f"kinetic reference data not found at {path}")
+    return path
+
+
+@pytest.fixture
+def kinetic_geom(kinetic_dir):
+    return load_geometry(kinetic_dir)
+
+
+@pytest.fixture
+def kinetic_shape(kinetic_geom):
+    return _get_shape(kinetic_geom)
