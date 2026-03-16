@@ -36,6 +36,8 @@
 \theoremstyle{remark}
 \newtheorem{remark}[theorem]{Remark}
 
+\input{variables}
+
 \usepackage[textsize=tiny]{todonotes}
 
 \usepackage[most]{tcolorbox}
@@ -63,7 +65,7 @@
 
 \twocolumn[
 \icmltitle{
-\raisebox{-4.0pt}{\includegraphics[width=1.2em]{figures/gyarados_logo.png}}\hspace{0.2em}%
+\raisebox{-5.0pt}{\includegraphics[width=1.2em]{figures/gyarados_logo.png}}\hspace{0.2em}%
 \texttt{gyaradax}: Local Gyrokinetics JAX Code
 }
   \icmlsetsymbol{equal}{*}
@@ -127,7 +129,9 @@ Consequently, they are often CPU-bound, rely on complex MPI parallelization, and
 
 We developed \texttt{gyaradax} with heavy usage of coding agents \GG{TODO cite} and \textit{vibecoding}. This comes from the recent shift in software engineering, and our success with this code shows scientific software is no different.
 %
-By coupling (aspiring) expert humans with coding agents, we demonstrate that complex reimplementations of numerical codes can be bootstrapped in a fraction of the time, freeing time and resources for more fundamental research. We consider worth mentioning, that the entirety of this project was developed within \textit{two weeeks}, and we would most likely not have attempted it without coding agents.
+By coupling (aspiring) expert humans with coding agents, we demonstrate that complex reimplementations of numerical codes can be bootstrapped in a fraction of the time, freeing time and resources for more fundamental research. We consider worth mentioning that the entirety of this project was developed within \textit{two weeeks}, and we would most likely not have attempted it without coding agents.
+%
+It our response to a genuine gap in our broader research, and at the same time we wanted to answer the question: \textit{to what extent can current agents successfully navigate and translate extensive, complex scientific computing frameworks?} \GG{cite some agentic benchmarks of sort}
 
 \texttt{gyaradax} is a first step in bridging the gap between legacy gyrokinetics and the JAX ecosystem, enabling hardware-accelerated automatic differentiation for plasma turbulence research \cite{galletti20255dneuralsurrogatesnonlinear, paischer2025gyroswin}.
 %
@@ -232,7 +236,7 @@ This \textit{test-driven with empirical validation} cycle proved essential for t
 \section{Verification}
 Solver validity is established by running the same tests GKW went through in the publication \cite{PEETERS_GKW_2009} and the more extensive ones from the repository \footnote{\url{https://bitbucket.org/gkw/gkw}}.
 %
-Moreover, we execute empirical numerical alignment against additional GKW reference trajectories for ITG turbulence \cite{paischer2025gyroswin}.
+Moreover, we execute empirical numerical alignment against additional GKW reference trajectories for ITG turbulence \cite{paischer2025gyroswin}, for adiabatic and kinetic electrons.
 The goal is to verify parity across operators, as well as long-term stability and convergence across multiple test cases.
 
 \subsection{GKW Test Cases}
@@ -242,13 +246,44 @@ The goal is to verify parity across operators, as well as long-term stability an
 
 \subsection{Empirical Validation}
 
+\begin{figure*}[t]
+    \centering
+    \begin{subfigure}{\linewidth}
+        \centering
+        \includegraphics[width=0.48\linewidth]{figures/fluxes_iteration_13.pdf}
+        \hfill
+        \includegraphics[width=0.48\linewidth]{figures/fluxes_iteration_200.pdf}
+        \label{fig:emp_fluxes}
+    \end{subfigure}
+    \vspace{0.5em}
+    \begin{subfigure}{\linewidth}
+        \centering
+        \includegraphics[width=0.48\linewidth]{figures/spectra_iteration_13.pdf}
+        \hfill
+        \includegraphics[width=0.48\linewidth]{figures/spectra_iteration_200.pdf}
+        \label{fig:emp_spectras}
+    \end{subfigure}
+
+    \caption{Empirical validation of \texttt{gyaradax} against GKW trajectories.
+    \textbf{Top:}
+    heat and momentum flux traces for two empirical trajectories. The \texttt{gyaradax} flux detaches at the start of the turbulent phase due to system stiffness and non-deterministic floating-point optimizations.
+    \textbf{Bottom:} 
+    Time-averaged wavenumber distribution (spectral profiles) along the $k_y$ and $k_x$ dimensions: $k_y^{\text{spec}}(y) = \sum_{s, x} |\hat{\bm{\phi}}(x, s, y)|^2$ and $k_x^{\text{spec}}(x) = \sum_{s, y} |\hat{\bm{\phi}}(x, s, y)|^2$.
+    }
+    \label{fig:empirical}
+\end{figure*}
+
 \section{Experiments}
 As a demonstration of the differentiable, ML-oriented nature of this solver, we show some examples at the intersection of machine learning, plasma physics and differentiable programming.
-\begin{itemize}
-    \item \textbf{Inverse Parameter Identification.} Recovering profile gradients via AD-driven optimization.
-    \item \textbf{Sensitivity Analysis.} Pass-efficient computation of stability gradients across profiles.
-    \item \textbf{HPC Performance.} Speed benchmark against GKW.
-\end{itemize}
+
+\subsection{Inverse Problem}
+\GG{how and what to set up?}
+
+\subsection{Sensitivity Analysis}
+\GG{how and what to set up?}
+
+\subsection{Performance Comparison vs GKW}
+\GG{throughput, flops computation, memory usage / bound}
 
 \section{Conclusion and Future Work}
 \texttt{gyaradax} is a minimal and fully differentiable JAX implementation of local flux-tube gyrokinetics \GG{collisionless?}.
@@ -257,7 +292,6 @@ Development was heavily supported by modern agentic workflows, with human oversi
 Our implementation achieves numerical parity with the GKW reference, while offering native hardware acceleration and easy integration with machine learning pipelines.
 
 The availability of an accessible, end-to-end differentiable gyrokinetic solver opens new avenues for plasma research, from automated parameter optimization \GG{TODO cite} to the development of physics-informed surrogate models \cite{um2021solverinthelooplearningdifferentiablephysics,Karniadakis2021}.
-
 
 \textbf{Future work.}
 The current physical scope of \texttt{gyaradax} is limited to local, collisionless plasmas.
