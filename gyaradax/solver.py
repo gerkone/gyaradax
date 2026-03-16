@@ -32,7 +32,13 @@ from typing import Dict, Tuple, Optional
 from dataclasses import dataclass
 
 import jax.random
-from gyaradax.integrals import get_integrals, j0, geom_tensors, calculate_phi_kinetic
+from gyaradax.integrals import (
+    get_integrals,
+    j0,
+    geom_tensors,
+    calculate_phi,
+    calculate_phi_kinetic,
+)
 from gyaradax import stencils
 from gyaradax.params import GKParams
 from einops import rearrange
@@ -89,9 +95,7 @@ def mode_amplitude(
 def normalize_per_ky(
     df: jnp.ndarray, geometry: Dict[str, jnp.ndarray], params: GKParams
 ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
-    from gyaradax.integrals import calculate_phi, geom_tensors as _gt
-
-    phi = calculate_phi(_gt(geometry, params=params), df)
+    phi = calculate_phi(geom_tensors(geometry, params=params), df)
     amp_per_ky = mode_amplitude(phi, geometry, params.norm_eps)
     safe_amp = jnp.where(amp_per_ky < params.norm_eps, 1.0, amp_per_ky)
     inv = 1.0 / safe_amp
@@ -741,9 +745,7 @@ def linear_rhs(
 ) -> jnp.ndarray:
     """Adiabatic linear RHS (5D df). Delegates to _linear_rhs_core."""
     if phi is None:
-        from gyaradax.integrals import calculate_phi as _calc_phi
-
-        phi = _calc_phi(pre["geom_tensors"], df)
+        phi = calculate_phi(pre["geom_tensors"], df)
     phi_b = jnp.reshape(phi, (1, 1, phi.shape[0], phi.shape[1], phi.shape[2]))
     return _linear_rhs_core(
         df, phi_b, pre, params.dvp, params.disp_vp, params.drive_scale
@@ -760,7 +762,16 @@ def init_f(
     n_species: int = 1,
     seed: int = 42,
 ) -> jnp.ndarray:
-    """Initialize the distribution function."""
+    """Initialize the distribution function.
+
+    Supported finit modes (matching GKW):
+        cosine2 (default): amp * (cos(2*pi*s) + 1), flat in velocity space
+        cosine:  amp * cos(2*pi*s), flat in velocity space
+        cosine3: like cosine2 but weighted by exp(-E) in velocity space
+        sine:    amp * de(is) * (sin(2*pi*s) + 1), density-weighted
+        noise:   uniform random on [-1, 1] (real + imag)
+        gnoise:  gaussian random (Box-Muller transform)
+    """
     nv, nmu, ns, nkx, nky = (
         len(geometry["intvp"]),
         len(geometry["intmu"]),
@@ -771,48 +782,71 @@ def init_f(
     sgrid = jnp.asarray(
         geometry.get("sgrid", jnp.linspace(-0.5, 0.5, ns)), dtype=jnp.float64
     )
+    vpgr = jnp.asarray(geometry["vpgr"], dtype=jnp.float64)
+    mugr = jnp.asarray(geometry["mugr"], dtype=jnp.float64)
+    bn = jnp.asarray(geometry["bn"], dtype=jnp.float64)
+
     amp = jnp.asarray(amp_init_real, dtype=jnp.float64) + 1j * jnp.asarray(
         amp_init_imag, dtype=jnp.float64
     )
 
-    if finit == "noise":
-        key = jax.random.PRNGKey(seed)
-        shape = (
-            (n_species, nv, nmu, ns, nkx, nky)
-            if n_species > 1
-            else (nv, nmu, ns, nkx, nky)
-        )
-        k1, k2 = jax.random.split(key)
-        noise_real = jax.random.uniform(k1, shape, minval=-1.0, maxval=1.0)
-        noise_imag = jax.random.uniform(k2, shape, minval=-1.0, maxval=1.0)
-        df = amp * (noise_real + 1j * noise_imag)
-    else:
-        if finit == "sine":
-            prof = amp * (jnp.sin(2.0 * jnp.pi * sgrid) + 1.0)
-            if "de" in geometry:
-                de = jnp.asarray(geometry["de"], dtype=jnp.float64)
-                if de.ndim == 0:
-                    prof = prof * de
-                elif de.ndim == 1:
-                    prof = prof[None, :] * de[:, None]
-        elif finit == "cosine2":
-            prof = amp * (jnp.cos(2.0 * jnp.pi * sgrid) + 1.0)
-        else:
-            raise ValueError(f"Unknown finit: {finit}")
+    shape_5d = (nv, nmu, ns, nkx, nky)
+    shape_6d = (n_species, nv, nmu, ns, nkx, nky)
+    full_shape = shape_6d if n_species > 1 else shape_5d
 
-        if n_species > 1:
-            if prof.ndim == 1:
-                prof = jnp.broadcast_to(prof[None, :], (n_species, ns))
-            df = jnp.broadcast_to(
-                jnp.reshape(prof, (n_species, 1, 1, ns, 1, 1)),
-                (n_species, nv, nmu, ns, nkx, nky),
-            )
+    # velocity-space Maxwellian envelope: exp(-(vpar^2 + 2*mu*B))
+    vp2 = vpgr**2  # (nv,)
+    energy = vp2[:, None, None] + 2.0 * mugr[None, :, None] * bn[None, None, :]
+    maxwellian_env = jnp.exp(-energy)  # (nv, nmu, ns)
+
+    if finit in ("noise", "gnoise"):
+        key = jax.random.PRNGKey(seed)
+        k1, k2 = jax.random.split(key)
+        if finit == "gnoise":
+            noise_real = jax.random.normal(k1, full_shape)
+            noise_imag = jax.random.normal(k2, full_shape)
         else:
-            df = jnp.broadcast_to(
-                jnp.reshape(prof, (1, 1, ns, 1, 1)), (nv, nmu, ns, nkx, nky)
-            )
+            noise_real = jax.random.uniform(k1, full_shape, minval=-1.0, maxval=1.0)
+            noise_imag = jax.random.uniform(k2, full_shape, minval=-1.0, maxval=1.0)
+        df = amp * (noise_real + 1j * noise_imag)
+
+    elif finit == "cosine2":
+        # amp * (cos(2*pi*s) + 1), uniform in velocity
+        prof_s = amp * (jnp.cos(2.0 * jnp.pi * sgrid) + 1.0)  # (ns,)
+        df = _broadcast_profile(prof_s, None, n_species, nv, nmu, ns, nkx, nky)
+
+    elif finit == "cosine":
+        prof_s = amp * jnp.cos(2.0 * jnp.pi * sgrid)
+        df = _broadcast_profile(prof_s, None, n_species, nv, nmu, ns, nkx, nky)
+
+    elif finit == "cosine3":
+        # amp * (cos(2*pi*s) + 1) * exp(-(vpar^2 + 2*mu*B))
+        prof_s = amp * (jnp.cos(2.0 * jnp.pi * sgrid) + 1.0)
+        df = _broadcast_profile(
+            prof_s, maxwellian_env, n_species, nv, nmu, ns, nkx, nky
+        )
+
+    elif finit == "sine":
+        # amp * de(is) * (sin(2*pi*s) + 1)
+        de = jnp.asarray(
+            geometry.get("de", jnp.ones(max(n_species, 1))), dtype=jnp.float64
+        )
+        prof_s = amp * (jnp.sin(2.0 * jnp.pi * sgrid) + 1.0)
+        if n_species > 1 and de.ndim >= 1 and de.shape[0] > 1:
+            # (nsp, ns)
+            prof_2d = prof_s[None, :] * de[:, None]
+            df = jnp.broadcast_to(prof_2d[:, None, None, :, None, None], shape_6d)
+        else:
+            de_val = float(de) if de.ndim == 0 else float(de[0])
+            prof_s = prof_s * de_val
+            df = _broadcast_profile(prof_s, None, n_species, nv, nmu, ns, nkx, nky)
+
+    else:
+        raise ValueError(f"unknown finit: {finit}")
 
     df = df.astype(jnp.complex128)
+
+    # zero out the zonal mode (ky=0)
     if nky > 1:
         iy0 = int(
             jnp.asarray(
@@ -826,6 +860,30 @@ def init_f(
     if normalize_per_toroidal_mode:
         df, _, _ = normalize_per_ky(df, geometry, GKParams(norm_eps=norm_eps))
     return df
+
+
+def _broadcast_profile(prof_s, vel_env, n_species, nv, nmu, ns, nkx, nky):
+    """broadcast a parallel profile (and optional velocity envelope) to full shape."""
+    if vel_env is not None:
+        # vel_env: (nv, nmu, ns), prof_s: (ns,)
+        base = vel_env * prof_s[None, None, :]  # (nv, nmu, ns)
+        if n_species > 1:
+            return jnp.broadcast_to(
+                base[None, :, :, :, None, None], (n_species, nv, nmu, ns, nkx, nky)
+            )
+        else:
+            return jnp.broadcast_to(base[:, :, :, None, None], (nv, nmu, ns, nkx, nky))
+    else:
+        # flat in velocity
+        if n_species > 1:
+            prof = jnp.broadcast_to(prof_s[None, :], (n_species, ns))
+            return jnp.broadcast_to(
+                prof[:, None, None, :, None, None], (n_species, nv, nmu, ns, nkx, nky)
+            )
+        else:
+            return jnp.broadcast_to(
+                prof_s[None, None, :, None, None], (nv, nmu, ns, nkx, nky)
+            )
 
 
 def advance_state(
@@ -862,11 +920,9 @@ def advance_state(
 
 
 def _compute_phi(df, geometry, params, pre):
-    """Compute phi via the appropriate solver."""
+    """compute phi via the appropriate solver."""
     if params.adiabatic_electrons:
-        from gyaradax.integrals import calculate_phi as _calc_phi
-
-        return _calc_phi(pre["geom_tensors"], df)
+        return calculate_phi(pre["geom_tensors"], df)
     else:
         return calculate_phi_kinetic(geometry, df)
 
@@ -999,11 +1055,10 @@ def gkstep_single(
     is_window_end = jnp.equal(jnp.mod(new_step, params.naverage), 0)
 
     if params.non_linear:
-        phi_curr = _compute_phi(next_df_raw, geometry, params, pre)
-        amp_curr = mode_amplitude(phi_curr, geometry, params.norm_eps)
+        phi = _compute_phi(next_df_raw, geometry, params, pre)
+        current_amp = mode_amplitude(phi, geometry, params.norm_eps)
         next_df = next_df_raw
         norm_factor = jnp.ones_like(state.accumulated_norm_factor)
-        current_amp = amp_curr
     else:
 
         def _apply_norm(_):
@@ -1017,8 +1072,8 @@ def gkstep_single(
         next_df, norm_factor, current_amp = jax.lax.cond(
             is_window_end, _apply_norm, _skip_norm, operand=None
         )
+        phi = _compute_phi(next_df, geometry, params, pre)
 
-    phi = _compute_phi(next_df, geometry, params, pre)
     z = jnp.array(0.0, dtype=jnp.float64)
     next_state = advance_state(
         state, params, is_window_end, current_amp, norm_factor, dt_used=dt

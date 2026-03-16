@@ -1,9 +1,4 @@
-"""
-Simulation runtime and orchestration.
-
-This module provides high-level utilities to manage the simulation lifecycle,
-including configuration loading, state initialization, and periodic dumping.
-"""
+"""Simulation runtime and orchestration."""
 
 import os
 import time
@@ -16,7 +11,12 @@ import jax.numpy as jnp
 jax.config.update("jax_enable_x64", True)
 
 from gyaradax.geometry import load_geometry
-from gyaradax.integrals import get_integrals
+from gyaradax.integrals import (
+    get_integrals,
+    calculate_phi,
+    calculate_phi_kinetic,
+    geom_tensors,
+)
 from gyaradax.params import gkparams_from_config, load_config
 from gyaradax.solver import (
     gksolve,
@@ -24,6 +24,7 @@ from gyaradax.solver import (
     GKState,
     default_state,
     linear_precompute,
+    mode_amplitude,
 )
 from gyaradax.utils import (
     load_checkpoint,
@@ -31,6 +32,14 @@ from gyaradax.utils import (
     read_gkw_dump_time,
     save_dumps as save_dumps_fn,
 )
+
+
+def _compute_phi_for_init(df, geometry, params):
+    """compute phi for initial amplitude tracking."""
+    if params.adiabatic_electrons:
+        return calculate_phi(geom_tensors(geometry, params=params), df)
+    else:
+        return calculate_phi_kinetic(geometry, df)
 
 
 def _setup_simulation(
@@ -41,14 +50,10 @@ def _setup_simulation(
 ) -> Tuple[Any, Any, Dict[str, jnp.ndarray], int, int, bool]:
     """Load configuration and determine simulation-level hyperparameters."""
     cfg = load_config(config_path)
-
     total_steps = int(kwargs.pop("n_steps", getattr(cfg.solver, "n_steps", 120)))
-
     params = gkparams_from_config(cfg, **kwargs)
     data_dir = cfg.run.data_dir
     geometry = load_geometry(data_dir)
-    # priority to kwargs
-    # TODO include naverage? would match gkw fluxes, but slower
     interval = getattr(cfg.solver, "dump_interval", 3) * params.naverage
     if checkpoint_interval:
         interval = checkpoint_interval
@@ -63,16 +68,16 @@ def _init_condition(
     params: Any,
     verbose: bool,
 ) -> Tuple[jnp.ndarray, GKState]:
-    """
-    Initialize the simulation state either from scratch, an internal checkpoint,
-    or a GKW reference distribution file.
-    """
+    """Initialize from scratch, a checkpoint, or a GKW K-file."""
     nky = len(geometry["krho"])
     state = default_state(nky=nky)
+    n_species = 1
+    if not params.adiabatic_electrons:
+        n_species = int(jnp.asarray(params.mas).shape[0])
 
     if resume_from:
         if verbose:
-            print(f"Resuming from checkpoint: {resume_from}")
+            print(f"resuming from checkpoint: {resume_from}")
         ckpt = load_checkpoint(resume_from)
         df = ckpt["df"]
         state = GKState(
@@ -84,7 +89,7 @@ def _init_condition(
         )
     elif resume_k_file:
         if verbose:
-            print(f"Resuming from K-file: {resume_k_file}")
+            print(f"resuming from K-file: {resume_k_file}")
         res = (
             len(geometry["intvp"]),
             len(geometry["intmu"]),
@@ -92,16 +97,11 @@ def _init_condition(
             len(geometry["kxrh"]),
             len(geometry["krho"]),
         )
-        df = load_gkw_k_dump(resume_k_file, res)
+        df = load_gkw_k_dump(resume_k_file, res, n_species=n_species)
         dat_path = resume_k_file + ".dat"
         if os.path.exists(dat_path):
             t_start = read_gkw_dump_time(dat_path)
-            # We need initial amplitude for growth tracking
-            from gyaradax.integrals import calculate_phi, geom_tensors as _gt
-
-            phi0 = calculate_phi(_gt(geometry, params=params), df)
-            from gyaradax.solver import mode_amplitude
-
+            phi0 = _compute_phi_for_init(df, geometry, params)
             amp0 = mode_amplitude(phi0, geometry, params.norm_eps)
             state = GKState(
                 time=jnp.array(t_start, dtype=jnp.float64),
@@ -111,16 +111,18 @@ def _init_condition(
                 last_growth_rate=jnp.zeros(nky, dtype=jnp.float64),
             )
             if verbose:
-                print(f"Loaded start time from {dat_path}: {t_start:.4f}")
+                print(f"  start time: {t_start:.4f}")
     else:
         if verbose:
-            print("WARNING: Initializing new simulation from experimental init_f.")
-            print("         This profile may not correctly reproduce GKW seed parity.")
-        df = init_f(geometry, finit=params.finit, norm_eps=params.norm_eps)
-        phi0, _ = get_integrals(df, geometry, params=params, include_fluxes=False)
-
+            print("initializing from init_f")
+        df = init_f(
+            geometry,
+            finit=params.finit,
+            norm_eps=params.norm_eps,
+            n_species=n_species,
+        )
+        phi0 = _compute_phi_for_init(df, geometry, params)
         amp0 = mode_amplitude(phi0, geometry, params.norm_eps)
-        # dataclasses are frozen, use _replace if possible or recreate
         state = GKState(
             time=state.time,
             step=state.step,
@@ -142,24 +144,9 @@ def simulate(
     save_last: bool = True,
     **kwargs,
 ) -> Tuple[jnp.ndarray, GKState, List[Dict[str, float]]]:
-    """
-    Entry point to run a simulation from a YAML config.
+    """Run a simulation from a YAML config.
 
-    This function handles the simulation loop, including loading geometry, initial
-    conditions, time-stepping via gksolve, and dumping snapshots and diagnostics.
-
-    Args:
-        config_path: Path to the YAML configuration file.
-        output_dir: Directory where results and checkpoints will be saved.
-        checkpoint_interval: Interval (in small steps) for full state dumping.
-        resume_from: Optional path to an internal .npz checkpoint to resume from.
-        resume_k_file: Optional path to a GKW K* dump file to initialize from.
-        verbose: If True, prints simulation progress to console.
-        save_dumps: If True, saves full 5D distribution function snapshots.
-        **kwargs: Manual overrides for any GKParams or simulation controls.
-
-    Returns:
-        Tuple of (final_df, final_state, performance_metrics).
+    Handles both adiabatic and kinetic electron configurations.
     """
     params, geometry, total_steps, interval, save_dumps_flag = _setup_simulation(
         config_path, checkpoint_interval, save_dumps, kwargs
@@ -168,12 +155,20 @@ def simulate(
     df, state = _init_condition(resume_from, resume_k_file, geometry, params, verbose)
     os.makedirs(output_dir, exist_ok=True)
 
-    phi, fluxes = get_integrals(df, geometry, params=params)
+    phi, fluxes = get_integrals(
+        df,
+        geometry,
+        params=params,
+        adiabatic_electrons=params.adiabatic_electrons,
+    )
     pre = linear_precompute(geometry, params)
 
     if verbose:
-        print(f"Starting simulation: total_steps={total_steps}, interval={interval}")
-        print(f"Initial state: step={int(state.step)}, time={float(state.time):.4f}")
+        sp_label = "kinetic" if not params.adiabatic_electrons else "adiabatic"
+        print(
+            f"starting: steps={total_steps}, interval={interval}, electrons={sp_label}"
+        )
+        print(f"  step={int(state.step)}, time={float(state.time):.4f}, dt={params.dt}")
 
     start_step = int(state.step)
     performance_metrics = []
@@ -188,7 +183,6 @@ def simulate(
             geometry,
             save_dumps=save_dumps_flag,
         )
-        # NOTE: needs recompile if odd number of steps
         steps_to_run = min(interval, total_steps - int(state.step))
         if steps_to_run <= 0:
             break
@@ -210,11 +204,11 @@ def simulate(
             growth = float(jnp.mean(state.last_growth_rate))
             print(
                 f"[{int(state.step):8d}/{total_steps}] | t: {float(state.time):.1f} | "
-                f"eflux: {flux:.4f} | growth: {growth:.4f} | {steps_sec:.4f} steps/s"
+                f"eflux: {flux:.4f} | growth: {growth:.4f} | {steps_sec:.1f} steps/s"
             )
 
     save_dumps_fn(output_dir, df, phi, fluxes, state, geometry, save_dumps=save_last)
-    # performance metrics
+
     if performance_metrics:
         perf_path = os.path.join(output_dir, "performance.npz")
         keys = performance_metrics[0].keys()
@@ -222,6 +216,6 @@ def simulate(
         np.savez(perf_path, **perf_data)
 
     if verbose:
-        print("DONE\n")
+        print("done\n")
 
     return df, state, performance_metrics

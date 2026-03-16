@@ -355,14 +355,17 @@ def load_scalars(directory: str) -> Dict[str, Any]:
     runtime = load_runtime_params(os.path.join(directory, "input.dat"))
 
     # 2. extract geometry scalars
+    def _scalar(key, default=0.0):
+        return float(np.asarray(geom.get(key, default)).item())
+
     scalars = {
-        "shat": float(np.asarray(geom.get("shat", 0.0)).reshape(-1)[0]),
-        "q": float(np.asarray(geom.get("q", 1.0)).reshape(-1)[0]),
-        "eps": float(np.asarray(geom.get("eps", 0.0)).reshape(-1)[0]),
-        "kthnorm": float(np.asarray(geom.get("kthnorm", 1.0)).reshape(-1)[0]),
-        "Rref": float(np.abs(np.asarray(geom.get("Rref", 1.0)).reshape(-1)[0])),
-        "d2X": 1.0,  # default
-        "signB": 1.0,  # default
+        "shat": _scalar("shat", 0.0),
+        "q": _scalar("q", 1.0),
+        "eps": _scalar("eps", 0.0),
+        "kthnorm": _scalar("kthnorm", 1.0),
+        "Rref": abs(_scalar("Rref", 1.0)),
+        "d2X": 1.0,
+        "signB": 1.0,
     }
 
     # 3. extract species info (all kinetic species)
