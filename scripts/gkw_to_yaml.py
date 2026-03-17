@@ -41,6 +41,7 @@ def gkw_to_yaml(gkw_dir, output_yaml):
             "disp_y": scalars.get("disp_y", 0.1),
             "idisp": scalars.get("meth", 2),
             "non_linear": scalars.get("non_linear", False),
+            "adaptive_dt": not scalars.get("adiabatic_electrons", True),
             "finit": scalars.get("finit", "cosine2"),
         },
         "physics": {

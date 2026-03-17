@@ -1,0 +1,33 @@
+[project]
+name = "gyaradax"
+authors = [
+    {name = "Gianluca Galletti"},
+    {name = "Eric Volkmann"},
+]
+version = "0.0.1"
+description = "Gyrokinetic Vlasov-Poisson solver in JAX"
+requires-python = ">=3.10"
+dependencies = [
+    "jax[cuda12]",
+    "numpy",
+    "omegaconf",
+    "einops",
+    "matplotlib",
+    "pillow",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "ruff",
+    "black",
+]
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+ignore = ["E402"]
+
+[tool.black]
+line-length = 100

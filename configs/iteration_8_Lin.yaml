@@ -24,6 +24,7 @@ physics:
   dgrid: 1.0
   tgrid: 1.0
 geometry:
+  geometry_model: circ
   shat: 2.14389
   q: 7.73187
   eps: 0.19
@@ -42,3 +43,7 @@ grid:
   nkx: 85
   nky: 32
   adiabatic_electrons: true
+  vpar_max: 3.0
+  nperiod: 1
+  krhomax: 1.4
+  ikxspace: 5

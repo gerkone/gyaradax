@@ -2,220 +2,239 @@
 
 import os
 import time
-from typing import Any, Dict, Optional, Tuple, List
+from typing import Callable, Dict, Optional, Tuple
 
-import numpy as np
 import jax
 import jax.numpy as jnp
 
 jax.config.update("jax_enable_x64", True)
 
 from gyaradax.geometry import load_geometry
+from gyaradax.analytic_geometry import compute_geometry
 from gyaradax.integrals import (
     get_integrals,
     calculate_phi,
     calculate_phi_kinetic,
     geom_tensors,
 )
-from gyaradax.params import gkparams_from_config, load_config
+from gyaradax.params import gkparams_from_config, load_config, GKParams
 from gyaradax.solver import (
     gksolve,
     init_f,
     GKState,
+    GKPre,
     default_state,
     linear_precompute,
     mode_amplitude,
 )
-from gyaradax.utils import (
-    load_checkpoint,
-    load_gkw_k_dump,
-    read_gkw_dump_time,
-    save_dumps as save_dumps_fn,
-)
+from gyaradax.utils import save_dumps as save_dumps_fn
 
 
 def _compute_phi_for_init(df, geometry, params):
-    """compute phi for initial amplitude tracking."""
+    """Compute phi for initial amplitude tracking."""
     if params.adiabatic_electrons:
         return calculate_phi(geom_tensors(geometry, params=params), df)
     else:
         return calculate_phi_kinetic(geometry, df)
 
 
-def _setup_simulation(
-    config_path: str,
-    checkpoint_interval: Optional[int],
-    save_dumps_flag: bool,
-    kwargs: Dict[str, Any],
-) -> Tuple[Any, Any, Dict[str, jnp.ndarray], int, int, bool]:
-    """Load configuration and determine simulation-level hyperparameters."""
-    cfg = load_config(config_path)
-    total_steps = int(kwargs.pop("n_steps", getattr(cfg.solver, "n_steps", 120)))
-    params = gkparams_from_config(cfg, **kwargs)
-    data_dir = cfg.run.data_dir
-    geometry = load_geometry(data_dir)
-    interval = getattr(cfg.solver, "dump_interval", 3) * params.naverage
-    if checkpoint_interval:
-        interval = checkpoint_interval
-    save_dumps_flag = getattr(cfg.solver, "save_dumps", save_dumps_flag)
-    return params, geometry, total_steps, interval, save_dumps_flag
+def _geometry_from_config(cfg):
+    """build geometry from config when no data_dir is provided.
+
+    defaults are defined in compute_geometry(); we only forward
+    values that are actually present in the config.
+    """
+    gc = getattr(cfg, "geometry", {})
+    gr = cfg.grid
+    kwargs = {}
+    for key, section in [
+        ("q", gc), ("shat", gc), ("eps", gc), ("kxmax", gc),
+        ("signB", gc), ("Rref", gc),
+        ("ns", gr), ("nkx", gr), ("nky", gr), ("nvpar", gr), ("nmu", gr),
+        ("vpar_max", gr), ("nperiod", gr), ("krhomax", gr), ("ikxspace", gr),
+    ]:
+        val = getattr(section, key, None)
+        if val is not None:
+            kwargs[key] = float(val) if isinstance(val, (int, float)) else val
+    return compute_geometry(**kwargs)
 
 
-def _init_condition(
-    resume_from: Optional[str],
-    resume_k_file: Optional[str],
+def log_step(fluxes, state, wall_time: float, block_steps: int = 0):
+    fl = jnp.asarray(fluxes)
+    growth = float(jnp.mean(state.last_growth_rate))
+    if fl.ndim == 2:
+        parts = " | ".join(
+            f"eflux_{i} {float(fl[i, 1]):>12.2f}" for i in range(fl.shape[0])
+        )
+        eflux_str = parts
+    else:
+        eflux_str = f"eflux {float(fl[1]):>12.2f}"
+    steps_sec = block_steps / max(wall_time, 1e-6) if block_steps > 0 else 0.0
+    print(
+        f"\tstep {int(state.step):>8d} | "
+        f"t {float(state.time):>10.3f} | "
+        f"{eflux_str} | "
+        f"growth {growth:>12.2f} | "
+        f"{steps_sec:>8.1f} steps/s"
+    )
+
+
+def gk_init(
     geometry: Dict[str, jnp.ndarray],
-    params: Any,
-    verbose: bool,
+    params: GKParams,
+    n_species: int = 1,
 ) -> Tuple[jnp.ndarray, GKState]:
-    """Initialize from scratch, a checkpoint, or a GKW K-file."""
+    """Create initial (df, state) from geometry and params. No IO."""
+    df = init_f(
+        geometry,
+        finit=params.finit,
+        norm_eps=params.norm_eps,
+        n_species=n_species,
+    )
+    phi0 = _compute_phi_for_init(df, geometry, params)
+    amp0 = mode_amplitude(phi0, geometry, params.norm_eps)
     nky = len(geometry["krho"])
     state = default_state(nky=nky)
+    state = GKState(
+        time=state.time,
+        step=state.step,
+        accumulated_norm_factor=state.accumulated_norm_factor,
+        window_start_amp=amp0,
+        last_growth_rate=state.last_growth_rate,
+    )
+    return df, state
+
+
+def gk_run(
+    df: jnp.ndarray,
+    geometry: Dict[str, jnp.ndarray],
+    params: GKParams,
+    state: GKState,
+    n_steps: int,
+    pre: Optional[GKPre] = None,
+) -> Tuple[
+    jnp.ndarray, jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray], GKState
+]:
+    """Run n_steps. Pure, no IO. Returns (df, phi, fluxes, state)."""
+    if pre is None:
+        pre = linear_precompute(geometry, params)
+    final_df, (phi, fluxes), final_state = gksolve(
+        df, geometry, params, state, n_steps=n_steps, pre=pre
+    )
+    return final_df, phi, fluxes, final_state
+
+
+def gksimulate(
+    df: jnp.ndarray,
+    geometry: Dict[str, jnp.ndarray],
+    params: GKParams,
+    state: GKState,
+    n_steps: int,
+    *,
+    pre: Optional[GKPre] = None,
+    output_dir: Optional[str] = None,
+    checkpoint_interval: Optional[int] = None,
+    save_snapshots: bool = False,
+    save_final: bool = True,
+) -> Tuple[
+    jnp.ndarray, jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray], GKState
+]:
+    """Run n_steps with optional IO checkpointing and logging.
+
+    Returns:
+        (df, phi, fluxes, state)
+    """
+    if pre is None:
+        pre = linear_precompute(geometry, params)
+
+    interval = checkpoint_interval if checkpoint_interval else n_steps
+
+    if output_dir is not None:
+        os.makedirs(output_dir, exist_ok=True)
+        phi_init, fluxes_init = get_integrals(
+            df,
+            geometry,
+            params=params,
+            adiabatic_electrons=params.adiabatic_electrons,
+        )
+        save_dumps_fn(
+            output_dir,
+            df,
+            phi_init,
+            fluxes_init,
+            state,
+            geometry,
+            save_dumps=save_snapshots,
+        )
+
+    start_step = int(state.step)
+    target_step = start_step + n_steps
+    current_df = df
+    current_state = state
+    current_phi = None
+    current_fluxes = None
+
+    while int(current_state.step) < target_step:
+        steps_remaining = target_step - int(current_state.step)
+        block_steps = min(interval, steps_remaining)
+        if block_steps <= 0:
+            break
+
+        t0 = time.time()
+        current_df, current_phi, current_fluxes, current_state = gk_run(
+            current_df, geometry, params, current_state, block_steps, pre=pre
+        )
+        wall_time = time.time() - t0
+
+        if output_dir is not None:
+            is_final = int(current_state.step) >= target_step
+            save_dumps_fn(
+                output_dir,
+                current_df,
+                current_phi,
+                current_fluxes,
+                current_state,
+                geometry,
+                save_dumps=save_snapshots or (save_final and is_final),
+            )
+
+        log_step(current_fluxes, current_state, wall_time, block_steps)
+
+    if current_phi is None:
+        current_phi, current_fluxes = get_integrals(
+            df,
+            geometry,
+            params=params,
+            adiabatic_electrons=params.adiabatic_electrons,
+        )
+
+    return current_df, current_phi, current_fluxes, current_state
+
+
+def gk_from_config(
+    config_path: str,
+    **overrides,
+) -> Tuple[jnp.ndarray, Dict[str, jnp.ndarray], GKParams, GKState, GKPre]:
+    """Load YAML config -> (df, geometry, params, state, pre).
+
+    Fresh-start initialization only. Resume from checkpoint/K-file is the
+    caller's responsibility using load_checkpoint() or load_gkw_k_dump().
+    Uses analytic geometry when data_dir is absent from the config.
+    """
+    cfg = load_config(config_path)
+    params = gkparams_from_config(cfg, **overrides)
+
+    data_dir = getattr(cfg.run, "data_dir", None)
+    if data_dir:
+        geometry = load_geometry(data_dir)
+    else:
+        geometry = _geometry_from_config(cfg)
+
     n_species = 1
     if not params.adiabatic_electrons:
         n_species = int(jnp.asarray(params.mas).shape[0])
 
-    if resume_from:
-        if verbose:
-            print(f"resuming from checkpoint: {resume_from}")
-        ckpt = load_checkpoint(resume_from)
-        df = ckpt["df"]
-        state = GKState(
-            time=ckpt["time"],
-            step=ckpt["step"],
-            accumulated_norm_factor=ckpt["accumulated_norm_factor"],
-            window_start_amp=ckpt["window_start_amp"],
-            last_growth_rate=ckpt["last_growth_rate"],
-        )
-    elif resume_k_file:
-        if verbose:
-            print(f"resuming from K-file: {resume_k_file}")
-        res = (
-            len(geometry["intvp"]),
-            len(geometry["intmu"]),
-            len(geometry["ints"]),
-            len(geometry["kxrh"]),
-            len(geometry["krho"]),
-        )
-        df = load_gkw_k_dump(resume_k_file, res, n_species=n_species)
-        dat_path = resume_k_file + ".dat"
-        if os.path.exists(dat_path):
-            t_start = read_gkw_dump_time(dat_path)
-            phi0 = _compute_phi_for_init(df, geometry, params)
-            amp0 = mode_amplitude(phi0, geometry, params.norm_eps)
-            state = GKState(
-                time=jnp.array(t_start, dtype=jnp.float64),
-                step=jnp.array(0, dtype=jnp.int32),
-                accumulated_norm_factor=jnp.ones(nky, dtype=jnp.float64),
-                window_start_amp=amp0,
-                last_growth_rate=jnp.zeros(nky, dtype=jnp.float64),
-            )
-            if verbose:
-                print(f"  start time: {t_start:.4f}")
-    else:
-        if verbose:
-            print("initializing from init_f")
-        df = init_f(
-            geometry,
-            finit=params.finit,
-            norm_eps=params.norm_eps,
-            n_species=n_species,
-        )
-        phi0 = _compute_phi_for_init(df, geometry, params)
-        amp0 = mode_amplitude(phi0, geometry, params.norm_eps)
-        state = GKState(
-            time=state.time,
-            step=state.step,
-            accumulated_norm_factor=state.accumulated_norm_factor,
-            window_start_amp=amp0,
-            last_growth_rate=state.last_growth_rate,
-        )
-    return df, state
-
-
-def simulate(
-    config_path: str,
-    output_dir: str = "outputs",
-    checkpoint_interval: Optional[int] = None,
-    resume_from: Optional[str] = None,
-    resume_k_file: Optional[str] = None,
-    verbose: bool = True,
-    save_dumps: bool = False,
-    save_last: bool = True,
-    **kwargs,
-) -> Tuple[jnp.ndarray, GKState, List[Dict[str, float]]]:
-    """Run a simulation from a YAML config.
-
-    Handles both adiabatic and kinetic electron configurations.
-    """
-    params, geometry, total_steps, interval, save_dumps_flag = _setup_simulation(
-        config_path, checkpoint_interval, save_dumps, kwargs
-    )
-
-    df, state = _init_condition(resume_from, resume_k_file, geometry, params, verbose)
-    os.makedirs(output_dir, exist_ok=True)
-
-    phi, fluxes = get_integrals(
-        df,
-        geometry,
-        params=params,
-        adiabatic_electrons=params.adiabatic_electrons,
-    )
+    df, state = gk_init(geometry, params, n_species=n_species)
     pre = linear_precompute(geometry, params)
 
-    if verbose:
-        sp_label = "kinetic" if not params.adiabatic_electrons else "adiabatic"
-        print(
-            f"starting: steps={total_steps}, interval={interval}, electrons={sp_label}"
-        )
-        print(f"  step={int(state.step)}, time={float(state.time):.4f}, dt={params.dt}")
-
-    start_step = int(state.step)
-    performance_metrics = []
-
-    for _ in range(start_step, total_steps, interval):
-        save_dumps_fn(
-            output_dir,
-            df,
-            phi,
-            fluxes,
-            state,
-            geometry,
-            save_dumps=save_dumps_flag,
-        )
-        steps_to_run = min(interval, total_steps - int(state.step))
-        if steps_to_run <= 0:
-            break
-
-        t_block_start = time.time()
-        df, (phi, fluxes), state = gksolve(
-            df, geometry, params, state, n_steps=steps_to_run, pre=pre
-        )
-        t_block_end = time.time()
-
-        block_time = t_block_end - t_block_start
-        steps_sec = steps_to_run / max(block_time, 1e-6)
-
-        perf = {"block_time": block_time, "steps_per_sec": steps_sec}
-        performance_metrics.append(perf)
-
-        if verbose:
-            flux = float(fluxes[1])
-            growth = float(jnp.mean(state.last_growth_rate))
-            print(
-                f"[{int(state.step):8d}/{total_steps}] | t: {float(state.time):.1f} | "
-                f"eflux: {flux:.4f} | growth: {growth:.4f} | {steps_sec:.1f} steps/s"
-            )
-
-    save_dumps_fn(output_dir, df, phi, fluxes, state, geometry, save_dumps=save_last)
-
-    if performance_metrics:
-        perf_path = os.path.join(output_dir, "performance.npz")
-        keys = performance_metrics[0].keys()
-        perf_data = {k: np.array([p[k] for p in performance_metrics]) for k in keys}
-        np.savez(perf_path, **perf_data)
-
-    if verbose:
-        print("done\n")
-
-    return df, state, performance_metrics
+    return df, geometry, params, state, pre

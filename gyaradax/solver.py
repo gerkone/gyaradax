@@ -126,9 +126,7 @@ def kx_ky_grids(geometry: Dict[str, jnp.ndarray]) -> Tuple[jnp.ndarray, jnp.ndar
     return kx, ky
 
 
-def mode_amplitude(
-    phi: jnp.ndarray, geometry: Dict[str, jnp.ndarray], eps: float
-) -> jnp.ndarray:
+def mode_amplitude(phi: jnp.ndarray, geometry: Dict[str, jnp.ndarray], eps: float) -> jnp.ndarray:
     ints = jnp.asarray(geometry["ints"], dtype=jnp.float64)
     ds = ints[0]
     amp2 = ds * jnp.sum(jnp.abs(phi) ** 2, axis=(0, 1))
@@ -198,9 +196,7 @@ def pack_half_spectrum(
     return out.at[..., jind, :nky].set(spec_kxky)
 
 
-def unpack_half_spectrum(
-    spec_half: jnp.ndarray, jind: jnp.ndarray, nky: int
-) -> jnp.ndarray:
+def unpack_half_spectrum(spec_half: jnp.ndarray, jind: jnp.ndarray, nky: int) -> jnp.ndarray:
     return spec_half[..., jind, :nky]
 
 
@@ -237,9 +233,7 @@ def nonlinear_term_iii(
 
         def _to_real(spec):
             packed = pack_half_spectrum(spec, jind, mrad, mphiw3).astype(fft_dtype)
-            return jnp.fft.irfft2(
-                packed, s=(mrad, mphi), axes=(-2, -1), norm="backward"
-            )
+            return jnp.fft.irfft2(packed, s=(mrad, mphi), axes=(-2, -1), norm="backward")
 
         nl_real = (efun_sign * dum).astype(real_dtype) * (
             _to_real(grad_phi_y_k) * _to_real(grad_f_x_k)
@@ -321,17 +315,52 @@ def estimate_nl_timestep(
     return jnp.minimum(dt_est, jnp.asarray(dt_input, dtype=jnp.float64))
 
 
+def estimate_linear_timestep(
+    pre: GKPre,
+    safety_factor: float = 0.5,
+) -> jnp.ndarray:
+    """CFL estimate from linear parallel streaming and trapping.
+
+    Computes dt_parallel = sgr_dist / max|upar| and
+    dt_trapping = dvp / max|utrap|, returns the tighter constraint.
+    The precomputed upar and utrap already include per-species vthrat scaling.
+    """
+    max_upar = jnp.max(jnp.abs(pre["upar"]))
+    max_utrap = jnp.max(jnp.abs(pre["utrap"]))
+
+    sgr_dist = pre["sgr_dist"]
+    dvp = pre["dvp"]
+
+    dt_par = jnp.where(max_upar > 1e-30, safety_factor * sgr_dist / max_upar, 1e10)
+    dt_trap = jnp.where(max_utrap > 1e-30, safety_factor * dvp / max_utrap, 1e10)
+
+    return jnp.minimum(dt_par, dt_trap)
+
+
+def estimate_timestep(
+    phi: jnp.ndarray,
+    pre: GKPre,
+    bessel: jnp.ndarray,
+    dt_input: float,
+    safety_factor: float = 0.95,
+) -> jnp.ndarray:
+    """Combined CFL estimate: min(nonlinear ExB, linear streaming).
+
+    The nonlinear CFL uses the caller's safety_factor (typically 0.95).
+    The linear CFL uses a fixed 0.5 safety factor for RK4 stability.
+    """
+    dt_nl = estimate_nl_timestep(phi, pre, bessel, dt_input, safety_factor)
+    dt_lin = estimate_linear_timestep(pre, safety_factor=0.5)
+    return jnp.minimum(dt_nl, dt_lin)
+
+
 def _precompute_shared(
     geometry, params, kx, ky, ns, nkx, nky, vpgr, mugr, bn, ffun, gfun, dfun, efun
 ):
     """Species-independent precomputed quantities shared by both paths."""
     pos_par = jnp.asarray(geometry["pos_par_grid_class"], dtype=jnp.int32)
-    ixzero = jnp.asarray(
-        geometry.get("ixzero", jnp.argmin(jnp.abs(kx))), dtype=jnp.int32
-    )
-    iyzero = jnp.asarray(
-        geometry.get("iyzero", jnp.argmin(jnp.abs(ky))), dtype=jnp.int32
-    )
+    ixzero = jnp.asarray(geometry.get("ixzero", jnp.argmin(jnp.abs(kx))), dtype=jnp.int32)
+    iyzero = jnp.asarray(geometry.get("iyzero", jnp.argmin(jnp.abs(ky))), dtype=jnp.int32)
     mphi, mphiw3 = extended_firstdim_fft_size(nky)
     mrad = extended_seconddim_fft_size(nkx)
 
@@ -344,11 +373,9 @@ def _precompute_shared(
 
     hyper = -(
         jnp.abs(params.disp_y)
-        * (ky_b / jnp.maximum(params.kymax, 1e-15))
-        ** jnp.where(params.disp_y < 0.0, 2.0, 4.0)
+        * (ky_b / jnp.maximum(params.kymax, 1e-15)) ** jnp.where(params.disp_y < 0.0, 2.0, 4.0)
         + jnp.abs(params.disp_x)
-        * (kx_b / jnp.maximum(params.kxmax, 1e-15))
-        ** jnp.where(params.disp_x < 0.0, 2.0, 4.0)
+        * (kx_b / jnp.maximum(params.kxmax, 1e-15)) ** jnp.where(params.disp_x < 0.0, 2.0, 4.0)
     )
 
     return {
@@ -418,9 +445,7 @@ def _fuse_stencils(
 
     s_total_upar = (
         rearrange(upar, pat_coeff) * s_d1_upar
-        + jnp.asarray(disp_par, dtype=jnp.float64)
-        * rearrange(abs_par, pat_coeff)
-        * s_d4_upar
+        + jnp.asarray(disp_par, dtype=jnp.float64) * rearrange(abs_par, pat_coeff) * s_d4_upar
     ) / jnp.asarray(sgr_dist, dtype=jnp.float64)
 
     s_total_t7 = (rearrange(term7_fac, pat_coeff) * s_d1_t7) / jnp.asarray(
@@ -519,11 +544,7 @@ def _compute_species_coeffs(
 
     # Bessel J0
     b_arg = (
-        mas
-        * vthrat
-        * krloc
-        * jnp.sqrt(jnp.maximum(2.0 * mu / jnp.maximum(bn_b, 1e-15), 0.0))
-        / sz
+        mas * vthrat * krloc * jnp.sqrt(jnp.maximum(2.0 * mu / jnp.maximum(bn_b, 1e-15), 0.0)) / sz
     )
     bessel = j0(b_arg)
 
@@ -552,9 +573,7 @@ def _compute_species_coeffs(
     idisp = jnp.asarray(params.idisp, dtype=jnp.int32)
     use_abs = jnp.logical_or(jnp.equal(idisp, 1), jnp.equal(idisp, -1))
     abs_par = jnp.where(use_abs, jnp.abs(upar), jnp.abs(ffun_b * vthrat * vp_rms))
-    abs_vp = jnp.where(
-        use_abs, jnp.abs(utrap), jnp.abs(vthrat * bn_b * gfun_b * mu_rms)
-    )
+    abs_vp = jnp.where(use_abs, jnp.abs(utrap), jnp.abs(vthrat * bn_b * gfun_b * mu_rms))
 
     term7_fac = -signz * ffun_b * vthrat * vp * fmax / tmp
 
@@ -570,15 +589,11 @@ def _compute_species_coeffs(
         "abs_dum2_vp": abs_vp,
         "term7_fac": term7_fac,
         "tmp0": jnp.asarray(tmp if ndim == 5 else tmp.squeeze(), dtype=jnp.float64),
-        "signz0": jnp.asarray(
-            signz if ndim == 5 else signz.squeeze(), dtype=jnp.float64
-        ),
+        "signz0": jnp.asarray(signz if ndim == 5 else signz.squeeze(), dtype=jnp.float64),
     }
 
 
-def linear_precompute(
-    geometry: Dict[str, jnp.ndarray], params: GKParams
-) -> Dict[str, jnp.ndarray]:
+def linear_precompute(geometry: Dict[str, jnp.ndarray], params: GKParams) -> Dict[str, jnp.ndarray]:
     """Precompute static geometry-dependent coefficients and Bessel terms."""
     kx, ky = kx_ky_grids(geometry)
     ns, nkx, nky = len(geometry["ints"]), int(kx.shape[0]), int(ky.shape[0])
@@ -628,9 +643,7 @@ def linear_precompute(
         if "vpgr_rms" in geometry:
             vp_rms = jnp.asarray(geometry["vpgr_rms"], dtype=jnp.float64)
             mu_rms = jnp.asarray(geometry.get("mugr_rms", 1.0), dtype=jnp.float64)
-            vthrat_6 = jnp.asarray(params.vthrat, dtype=jnp.float64).reshape(
-                nsp, 1, 1, 1, 1, 1
-            )
+            vthrat_6 = jnp.asarray(params.vthrat, dtype=jnp.float64).reshape(nsp, 1, 1, 1, 1, 1)
             ffun_6 = jnp.reshape(ffun, (1, 1, 1, -1, 1, 1))
             bn_6 = jnp.reshape(bn, (1, 1, 1, -1, 1, 1))
             gfun_6 = jnp.reshape(gfun, (1, 1, 1, -1, 1, 1))
@@ -748,9 +761,7 @@ def _linear_rhs_core(
             s_map = pre["s_shift"][i]
             kx_map = pre["kx_shift"][i]
             valid = pre["valid_shift"][i]
-            shifted = jnp.where(
-                valid[None, None, :, :, :], field[:, :, s_map, kx_map, ky_idx], 0.0
-            )
+            shifted = jnp.where(valid[None, None, :, :, :], field[:, :, s_map, kx_map, ky_idx], 0.0)
             out = out + coeffs[i] * shifted
         return out
 
@@ -804,9 +815,7 @@ def linear_rhs(
     if phi is None:
         phi = calculate_phi(pre["geom_tensors"], df)
     phi_b = jnp.reshape(phi, (1, 1, phi.shape[0], phi.shape[1], phi.shape[2]))
-    return _linear_rhs_core(
-        df, phi_b, pre, params.dvp, params.disp_vp, params.drive_scale
-    )
+    return _linear_rhs_core(df, phi_b, pre, params.dvp, params.disp_vp, params.drive_scale)
 
 
 def init_f(
@@ -836,9 +845,7 @@ def init_f(
         len(geometry["kxrh"]),
         len(geometry["krho"]),
     )
-    sgrid = jnp.asarray(
-        geometry.get("sgrid", jnp.linspace(-0.5, 0.5, ns)), dtype=jnp.float64
-    )
+    sgrid = jnp.asarray(geometry.get("sgrid", jnp.linspace(-0.5, 0.5, ns)), dtype=jnp.float64)
     vpgr = jnp.asarray(geometry["vpgr"], dtype=jnp.float64)
     mugr = jnp.asarray(geometry["mugr"], dtype=jnp.float64)
     bn = jnp.asarray(geometry["bn"], dtype=jnp.float64)
@@ -879,15 +886,11 @@ def init_f(
     elif finit == "cosine3":
         # amp * (cos(2*pi*s) + 1) * exp(-(vpar^2 + 2*mu*B))
         prof_s = amp * (jnp.cos(2.0 * jnp.pi * sgrid) + 1.0)
-        df = _broadcast_profile(
-            prof_s, maxwellian_env, n_species, nv, nmu, ns, nkx, nky
-        )
+        df = _broadcast_profile(prof_s, maxwellian_env, n_species, nv, nmu, ns, nkx, nky)
 
     elif finit == "sine":
         # amp * de(is) * (sin(2*pi*s) + 1)
-        de = jnp.asarray(
-            geometry.get("de", jnp.ones(max(n_species, 1))), dtype=jnp.float64
-        )
+        de = jnp.asarray(geometry.get("de", jnp.ones(max(n_species, 1))), dtype=jnp.float64)
         prof_s = amp * (jnp.sin(2.0 * jnp.pi * sgrid) + 1.0)
         if n_species > 1 and de.ndim >= 1 and de.shape[0] > 1:
             # (nsp, ns)
@@ -907,9 +910,7 @@ def init_f(
     if nky > 1:
         iy0 = int(
             jnp.asarray(
-                geometry.get(
-                    "iyzero", jnp.argmin(jnp.abs(jnp.asarray(geometry["krho"])))
-                )
+                geometry.get("iyzero", jnp.argmin(jnp.abs(jnp.asarray(geometry["krho"]))))
             ).item()
         )
         df = df.at[..., iy0].set(0.0)
@@ -938,9 +939,7 @@ def _broadcast_profile(prof_s, vel_env, n_species, nv, nmu, ns, nkx, nky):
                 prof[:, None, None, :, None, None], (n_species, nv, nmu, ns, nkx, nky)
             )
         else:
-            return jnp.broadcast_to(
-                prof_s[None, None, :, None, None], (nv, nmu, ns, nkx, nky)
-            )
+            return jnp.broadcast_to(prof_s[None, None, :, None, None], (nv, nmu, ns, nkx, nky))
 
 
 def advance_state(
@@ -1093,11 +1092,7 @@ def gkstep_single(
         dt_override: If provided, use this dt instead of params.dt.
             Used by the adaptive CFL path where dt varies per step.
     """
-    dt = (
-        dt_override
-        if dt_override is not None
-        else jnp.array(params.dt, dtype=jnp.float64)
-    )
+    dt = dt_override if dt_override is not None else jnp.array(params.dt, dtype=jnp.float64)
 
     def _rhs(df):
         phi_local = _compute_phi(df, geometry, params, pre)
@@ -1138,9 +1133,7 @@ def gkstep_single(
         phi = _compute_phi(next_df, geometry, params, pre)
 
     z = jnp.array(0.0, dtype=jnp.float64)
-    next_state = advance_state(
-        state, params, is_window_end, current_amp, norm_factor, dt_used=dt
-    )
+    next_state = advance_state(state, params, is_window_end, current_amp, norm_factor, dt_used=dt)
     return next_df, (phi, (z, z, z)), next_state
 
 
@@ -1170,6 +1163,7 @@ def gksolve(
     if params.adaptive_dt and params.non_linear:
         # Adaptive CFL path: carry dt as part of scan state
         dt_input = jnp.array(params.dt, dtype=jnp.float64)
+        cfl_safety = jnp.array(params.cfl_safety, dtype=jnp.float64)
 
         def _scan_body(carry, _):
             curr_df, curr_state, curr_dt = carry
@@ -1180,13 +1174,13 @@ def gksolve(
             phi_for_cfl = out[0]  # phi from gkstep_single
             bessel_for_cfl = pre["bessel"]
             if not params.adiabatic_electrons:
-                bessel_for_cfl = bessel_for_cfl[0:1]  # use ion Bessel (largest FLR)
-            next_dt = estimate_nl_timestep(
+                bessel_for_cfl = bessel_for_cfl[0]  # ion Bessel (largest FLR), drop species dim
+            next_dt = estimate_timestep(
                 phi_for_cfl,
                 pre,
                 bessel_for_cfl,
-                dt_input=float(params.dt),
-                safety_factor=float(params.cfl_safety),
+                dt_input=dt_input,
+                safety_factor=cfl_safety,
             )
             return (next_df, next_state, next_dt), None
 
@@ -1198,14 +1192,10 @@ def gksolve(
         # Fixed dt path
         def _scan_body(carry, _):
             curr_df, curr_state = carry
-            next_df, out, next_state = gkstep_single(
-                curr_df, geometry, params, curr_state, pre
-            )
+            next_df, out, next_state = gkstep_single(curr_df, geometry, params, curr_state, pre)
             return (next_df, next_state), None
 
-        (final_df, final_state), _ = jax.lax.scan(
-            _scan_body, (df, state), None, length=n_steps
-        )
+        (final_df, final_state), _ = jax.lax.scan(_scan_body, (df, state), None, length=n_steps)
 
     phi, fluxes = get_integrals(
         final_df,

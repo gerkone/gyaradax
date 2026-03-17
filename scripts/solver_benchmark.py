@@ -15,6 +15,7 @@ import jax.numpy as jnp
 jax.config.update("jax_enable_x64", True)
 
 from gyaradax import load_geometry
+from gyaradax.analytic_geometry import compute_geometry_from_input
 from gyaradax.solver import (
     gksolve,
     GKState,
@@ -57,6 +58,11 @@ def run_benchmark():
     )
     parser.add_argument("--save-reference", type=str)
     parser.add_argument("--reference", type=str)
+    parser.add_argument(
+        "--computed-geometry",
+        action="store_true",
+        help="use analytic geometry instead of loading from files",
+    )
     args = parser.parse_args()
 
     if args.device is not None:
@@ -65,7 +71,10 @@ def run_benchmark():
     data_dir = args.data_dir
     n_species = 2 if args.kinetic else 1
 
-    geom = load_geometry(data_dir)
+    if args.computed_geometry:
+        geom = compute_geometry_from_input(os.path.join(data_dir, "input.dat"))
+    else:
+        geom = load_geometry(data_dir)
     shape = tuple(len(geom[k]) for k in ("intvp", "intmu", "ints", "kxrh", "krho"))
     dump_path = os.path.join(data_dir, args.resume)
     df = load_gkw_k_dump(dump_path, shape, n_species=n_species)

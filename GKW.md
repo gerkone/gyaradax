@@ -41,19 +41,47 @@ Species parameters are normalized relative to the reference species:
 - $\hat{T}_s = T_s / T_{ref}$, $\hat{n}_s = n_s / n_{ref}$
 - $v_{th,s}/v_{th,ref} = \sqrt{\hat{T}_s / \hat{m}_s}$ (stored as `vthrat`)
 
-### 1.2 phase space coordinates
+### 1.2 field-aligned coordinates and geometry
+
+The gyrokinetic equation is not solved on a physical $(R, Z, \phi)$ grid.
+Instead it operates in a field-aligned coordinate system $(\psi, \zeta, s)$
+that follows the magnetic field lines. Here $s$ runs along the field line
+(parallel direction), $\psi$ labels the flux surface (radial direction), and
+$\zeta$ is the field-line label within a surface (binormal direction).
+
+The *geometry* encodes how this abstract coordinate system maps to physical
+space. It provides:
+- the **covariant metric tensor** $g_{ij}$, needed for $k_\perp^2$ and
+  perpendicular gradients
+- the **magnetic field strength** $B(s)$, needed for the mirror force,
+  gyro-averaging, and drift velocities
+- a set of **derived drift tensors** (D, E, H, I) that enter the
+  gyrokinetic equation as advection coefficients
+
+gyaradax supports two geometry paths: loading precomputed GKW files via
+`load_geometry()`, or computing everything analytically from equilibrium
+parameters via `compute_geometry()`. See section 9 for the circular model
+formulas.
+
+**Equilibrium parameters.** The safety factor $q$ controls field-line winding;
+the magnetic shear $\hat{s} = (r/q)\,dq/dr$ drives spectral mode connectivity
+(adjacent $k_x$ modes couple with shift $\Delta k_x = 2\pi\hat{s} k_y$);
+the inverse aspect ratio $\varepsilon = r/R_0$ sets the strength of toroidal
+effects (trapped particles, ballooning).
+
+### 1.3 phase space coordinates
 
 | coordinate | symbol | grid | range |
 |-----------|--------|------|-------|
 | parallel velocity | $v_\parallel$ | uniform | $[-v_{max}, v_{max}]$, typically $\pm 3 v_{th}$ |
-| magnetic moment | $\mu$ | Gauss-Laguerre | $[0, \infty)$, 8 quadrature points |
-| field-line coordinate | $s$ | uniform | $[-0.5, 0.5]$ in units of $2\pi q$ |
-| radial wavenumber | $k_x$ | discrete | from mode connectivity |
+| magnetic moment | $\mu$ | uniform in $v_\perp$ | $\mu = v_\perp^2/2$, weights $2\pi v_\perp \Delta v_\perp$ |
+| field-line coordinate | $s$ | uniform | $[-0.5, 0.5]$ for `nperiod=1` |
+| radial wavenumber | $k_x$ | discrete | centered FFT grid, from mode connectivity |
 | binormal wavenumber | $k_y$ | uniform | $[0, k_{y,max}]$ |
 
 The standard grid is `(nvpar=32, nmu=8, ns=16, nkx=85, nky=32)`.
 
-### 1.3 species model
+### 1.4 species model
 
 **Adiabatic electrons** (`adiabatic_electrons=True`): only ions are evolved
 kinetically. Electrons respond instantaneously via the Boltzmann relation
@@ -152,10 +180,21 @@ nonlinear FFTs.
 The large-step cadence `naverage` groups small steps for diagnostic output.
 In linear mode, per-$k_y$ normalization is applied at large-step boundaries.
 
-**CFL-adaptive timestep** (optional, `adaptive_dt=True`): the timestep is
-adjusted each step based on the maximum real-space ExB velocity gradient:
-$\Delta t = \sigma \times 2 / \max|\nabla\phi|$, clamped to the input `dt`.
-Safety factor $\sigma = 0.95$ by default.
+**CFL-adaptive timestep** (`adaptive_dt=True`, default for kinetic electrons):
+the timestep is adjusted each step to satisfy two CFL constraints:
+
+1. **Nonlinear ExB CFL**: $\Delta t_{NL} = \sigma \times 2 / \max|\nabla\phi|$,
+   computed from the dealiased real-space potential gradient. Safety factor
+   $\sigma = 0.95$ by default (`cfl_safety` parameter).
+
+2. **Linear parallel streaming CFL**: $\Delta t_{par} = 0.5 \times \Delta s / \max|v_{\parallel,s}|$
+   and $\Delta t_{trap} = 0.5 \times \Delta v_\parallel / \max|v_{trap,s}|$,
+   where the characteristic speeds include the per-species $v_{th,s}/v_{th,ref}$
+   scaling. For kinetic electrons with $v_{th,e}/v_{th,i} \approx 60$, this is
+   the binding constraint (dt ~ 0.002 vs input dt = 0.004).
+
+The effective timestep is $\Delta t = \min(\Delta t_{NL}, \Delta t_{par}, \Delta t_{trap}, \Delta t_{input})$.
+Uses one-step lag: each step's dt is estimated from the previous step's $\phi$.
 
 ### 3.2 spatial discretization
 
@@ -191,14 +230,21 @@ per-step branching on the sign of $v_\parallel$.
 | `integrals.py` | phi solvers (adiabatic + kinetic), flux calculations |
 | `params.py` | `GKParams` dataclass, config/input.dat loading |
 | `geometry.py` | load geometry from GKW `geom.dat` and `input.dat` |
+| `analytic_geometry.py` | compute geometry analytically from equilibrium parameters (no GKW files) |
 | `stencils.py` | finite difference coefficient tables |
 | `utils.py` | K-dump loading, checkpoint save/load, diagnostics |
-| `simulate.py` | high-level simulation runner from YAML config |
+| `gksimulate.py` | high-level simulation runner from YAML config |
 | `plot_utils.py` | publication-quality visualization |
 
 ### 4.2 key interfaces
 
 ```python
+# standalone geometry (no GKW files needed)
+geometry = compute_geometry(q=7.73, shat=2.14, eps=0.19, ns=16, nkx=85, nky=32, nvpar=32, nmu=8)
+
+# or load from GKW files
+geometry = load_geometry("/path/to/gkw_run")
+
 # single/multi-step solver
 next_df, (phi, fluxes), state = gksolve(df, geometry, params, state, n_steps)
 
@@ -250,7 +296,7 @@ on `params.adiabatic_electrons` (a static pytree field resolved at trace time).
 | nonlinear terms | `non_linear_terms.F90` | `add_non_linear_terms_spectral` |
 | species setup | `components.f90` | `components_input_species` |
 | Gamma function | `functions.f90` | `gamma_gkw` |
-| geometry | `geom.f90` | geometry metric loading |
+| geometry | `geom.f90` | `geom_circ`, `calc_geom_tensors` |
 | CFL estimation | `matdat.F90`, `non_linear_terms.F90` | `get_estimated_timestep` |
 
 ### 5.2 manual references
@@ -307,7 +353,8 @@ order. Species is the outermost (slowest) index.
 - perpendicular hyper-dissipation
 - RK4 explicit time integration
 - per-$k_y$ normalization (linear mode)
-- CFL-adaptive timestep (optional)
+- CFL-adaptive timestep (nonlinear ExB + linear parallel streaming)
+- standalone circular geometry computation (no precomputed GKW files needed)
 
 ### 7.2 not implemented
 
@@ -328,7 +375,6 @@ order. Species is the outermost (slowest) index.
 ### 7.3 known limitations
 
 - adaptive CFL uses one-step lag (current step uses previous step's CFL estimate)
-  data comes from the geometry dict
 - no multi-species output in `save_dumps` (fluxes are summed over species)
 
 ## 8. validation results
@@ -350,4 +396,73 @@ order. Species is the outermost (slowest) index.
 | trajectory 300 steps | ntsks128 | `rel_l2(df, ion)` | verified |
 | trajectory 300 steps | double_rlt | `rel_l2(df, ion)` | verified |
 | per-species flux | all 3 cases × 2 dumps | `rtol(eflux)` | `< 1e-2` |
+| CFL vs GKW dtim | all 3 cases | `ratio(dt_est, dtim)` | `0.3 – 3.0` |
+| adaptive CFL 20 steps | all 3 cases | finiteness (dt=0.004) | pass |
 | adiabatic fallback | 4 iterations | shapes + finiteness | pass |
+
+## 9. circular geometry model (`analytic_geometry.py`)
+
+Formulas translated from `gkw_ref/src/geom.f90` (`geom_circ` lines 1444-1616,
+`calc_geom_tensors` lines 3487-3634). `compute_geometry()` produces the full
+geometry dict from equilibrium parameters; `simulate()` uses it automatically
+when `data_dir` is absent from the YAML config.
+
+### 9.1 magnetic field and poloidal angle
+
+The field-line coordinate $s$ maps to poloidal angle $\theta$ via
+$\theta + \varepsilon \sin\theta = 2\pi s$, solved by 10 fixed-point iterations
+(convergence $\sim \varepsilon^{10}$). The magnetic field strength is:
+
+$$B(s) = \frac{\delta}{1 + \varepsilon\cos\theta}, \qquad
+\delta = \sqrt{1 + \frac{\varepsilon^2}{q^2(1-\varepsilon^2)}}$$
+
+### 9.2 metric tensor
+
+In $(\psi, \zeta, s)$ coordinates, $g_{\psi\psi} = 1$ and:
+- $g_{\psi\zeta} = d\zeta/d\varepsilon$: shear coupling, computed with
+  branch-tracked `atan` (`geom.f90` lines 1492-1511)
+- $g_{\psi s} = \sin\theta / (2\pi)$
+- $g_{\zeta\zeta}$, $g_{\zeta s}$, $g_{ss}$: standard circular formulae
+
+### 9.3 jacobian transform
+
+All field derivatives ($dB/d\psi$, $dR/d\psi$, $dZ/d\psi$) are computed in
+$(\psi, \theta)$ space then transformed to $(\psi, s)$:
+
+$$f_\psi^{(s)} = f_\psi^{(\theta)} - \frac{\sin\theta}{1+\varepsilon\cos\theta} f_\theta, \qquad
+f_s = \frac{2\pi}{1+\varepsilon\cos\theta} f_\theta$$
+
+The radial derivative of $B$ in $(\psi, \theta)$ uses the finite-$\varepsilon$
+formula from `geom.f90` line 1528:
+
+$$\partial_\psi B\big|_\theta = B\left(\frac{-\cos\theta}{1+\varepsilon\cos\theta}
++ \frac{\varepsilon(1-\hat{s}+\varepsilon^2/(1-\varepsilon^2))}
+{\varepsilon^2 + q^2(1-\varepsilon^2)}\right)$$
+
+### 9.4 drift tensors
+
+**E-tensor** (ExB): antisymmetric cofactors of metric rows 0 and 1,
+scaled by $\pi \cdot dp_f/d\psi / B^2$ where
+$dp_f/d\psi = \varepsilon / (q\sqrt{1-\varepsilon^2})$.
+
+**D-tensor** (curvature + $\nabla B$):
+$D_j = (-2 E_{j,\psi}\,\partial_\psi B - 2 E_{j,s}\,\partial_s B) / B$
+
+**H-tensor** (Coriolis): $H_j = -\sigma_B(g_{j,\psi}\,\partial_\psi Z + g_{j,s}\,\partial_s Z)/B$
+with finite-$\varepsilon$ correction $H_s \mathrel{+}= \sigma_B b_{ups}^2 (\partial_s Z)/B^2$.
+
+**I-tensor** (centrifugal): $I_j = 2R(E_{j,\psi}\,\partial_\psi R + E_{j,s}\,\partial_s R)$
+
+### 9.5 validation
+
+All arrays verified against 7 GKW trajectories (4 adiabatic, 3 kinetic):
+
+| field | max relative error |
+|-------|--------------------|
+| `bn`, `ffun`, `bt_frac`, `rfun` | $< 5 \times 10^{-6}$ |
+| `gfun`, `efun`, `little_g` | $< 2 \times 10^{-5}$ |
+| `dfun`, `hfun`, `ifun` (all components) | $< 2 \times 10^{-5}$ |
+| velocity / wavenumber grids | $< 10^{-6}$ |
+
+68 tests in `tests/unit/test_analytic_geometry.py`.
+

@@ -117,13 +117,13 @@ def plot_flux_trace(
                     )
 
             if isp == 0:
-                ax.set_ylabel(labels[i])
+                ax.set_ylabel(labels[i], fontsize=12)
             ax.grid(True, axis="y")
             if i == 0:
                 # ax.set_title(species_labels[isp])
                 ax.legend(frameon=False, loc="best")
 
-        axes[-1, isp].set_xlabel(r"time $[v_{th}/R]$")
+        axes[-1, isp].set_xlabel(r"time $[v_{th}/R]$", fontsize=12)
 
     fig.suptitle(title, fontweight="bold")
     fig.tight_layout()
@@ -170,7 +170,7 @@ def plot_spectra(
             ky, ref_ky_spec, "x--", color="black", markersize=4, lw=1, label="GKW"
         )
     ax1.set_xlabel(r"$k_y \rho_{ref}$", fontsize=12)
-    ax1.set_ylabel(r"$\sum_{s, k_x} |\phi|^2$", fontsize=12)
+    ax1.set_ylabel(r"$\sum_{s, k_x} |\phi|^2$", fontsize=10)
     ax1.set_title(r"$k_y^{\text{spec}}$", fontsize=16)
     ax1.grid(True, which="both")
     ax1.legend()
@@ -179,7 +179,7 @@ def plot_spectra(
     if ref_kx_spec is not None:
         ax2.semilogy(kx, ref_kx_spec, "x--", color="black", markersize=4, lw=1)
     ax2.set_xlabel(r"$k_x \rho_{ref}$", fontsize=12)
-    ax2.set_ylabel(r"$\sum_{s, k_y} |\phi|^2$", fontsize=12)
+    ax2.set_ylabel(r"$\sum_{s, k_y} |\phi|^2$", fontsize=10)
     ax2.set_title(r"$k_x^{\text{spec}}$", fontsize=16)
     ax2.grid(True, which="both")
     if len(title) > 0:

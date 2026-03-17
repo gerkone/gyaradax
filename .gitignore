@@ -13,3 +13,6 @@ cache/
 gkw_ref
 .gemini
 .claude
+notebooks/figs/
+validation_*
+figs/

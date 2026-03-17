@@ -6,12 +6,22 @@
 
 `gyaradax` is a high-performance JAX code for local flux-tube gyrokinetic simulations. It is based on the [GKW code](https://bitbucket.org/gkw/gkw). It provides a differentiable simulation core for the electrostatic, adiabatic-electron Vlasov-Poisson system.
 
-This was made possible with significant usage of agentic workflows (gemini, codex).
+This was made possible with significant usage of agentic workflows (codex, claude code, gemini-cli).
+
+## Installation
+
+```bash
+uv venv --python 3.12
+source .venv/bin/activate
+uv pip install -e ".[dev]"
+```
+
+This installs `gyaradax` in editable mode with JAX (CUDA 12), numpy, and dev tools (pytest, ruff, black).
 
 ## Structure
 
 - **`solver.py`**: Linear and nonlinear Terms (I-VIII), RK4 integrator.
-- **`simulate.py`**: Interface for trajectory generation.
+- **`gksimulate.py`**: Interface for trajectory generation.
 - **`integrals.py`**: Field solvers and flux integrals.
 - **`geometry.py`**: Parsers for GKW geometry files and metric tensor coefficients.
 - **`params.py`**: Configuration pytrees.
@@ -28,24 +38,44 @@ PYTHONPATH=. python scripts/gkw_to_yaml.py /path/to/gkw_run configs/my_sim.yaml
 
 ### Run a Simulation
 ```python
-from gyaradax import simulate
+from gyaradax.simulate import gk_from_config, gksimulate, gk_init, gk_run, default_log
 
-df, final_state, perf = simulate(
-    "configs/my_sim.yaml",
-    output_dir="outputs",
-    n_steps=400,
-    checkpoint_interval=40
+# Load config and run with IO/checkpointing
+df, geometry, params, state, pre = gk_from_config("configs/my_sim.yaml")
+df, phi, fluxes, state = gksimulate(
+  df, geometry, params, state, 400, pre=pre,
+  output_dir="outputs", checkpoint_interval=40
 )
+```
+
+### Pure Computation (no IO, notebook-friendly)
+```python
+from gyaradax.simulate import gk_init, gk_run
+
+df, state = gk_init(geometry, params)
+df, phi, fluxes, state = gk_run(df, geometry, params, state, n_steps=1000, pre=pre)
 ```
 
 ### Resume from Checkpoints
 `gyaradax` supports resuming from internal `.npz` snapshots or GKW binary `K` files:
 ```python
+from gyaradax.utils import load_checkpoint, load_gkw_k_dump
+from gyaradax.solver import GKState
+
 # resume from internal checkpoint
-df, state, perf = simulate("configs/my_sim.yaml", resume_from="outputs/step_000040.npz")
+ckpt = load_checkpoint("outputs/step_000040.npz")
+state_ckpt = GKState(
+  time=ckpt["time"],
+  step=ckpt["step"],
+  accumulated_norm_factor=ckpt["accumulated_norm_factor"],
+  window_start_amp=ckpt["window_start_amp"],
+  last_growth_rate=ckpt["last_growth_rate"]
+)
+df, phi, fluxes, state = gksimulate(ckpt["df"], geometry, params, state_ckpt, 400, pre=pre)
 
 # resume from GKW dump K01
-df, state, perf = simulate("configs/my_sim.yaml", resume_k_file="/path/to/gkw/run/K01")
+df_k = load_gkw_k_dump("/path/to/gkw/run/K01", resolution, n_species=1)
+df, phi, fluxes, state = gksimulate(df_k, geometry, params, state_k, 400, pre=pre)
 ```
 
 ## Testing & Validation
