@@ -1,7 +1,7 @@
 import os
 import shutil
 import numpy as np
-from gyaradax import simulate
+from gyaradax.simulate import gksimulate
 
 
 def test_simulate_logic():
@@ -12,7 +12,7 @@ def test_simulate_logic():
         shutil.rmtree(output_dir)
 
     print("\n--- Test 1: New Simulation ---")
-    df1, state1, _ = simulate(
+    df1, state1, _ = gksimulate(
         config_path, output_dir=output_dir, n_steps=80, checkpoint_interval=40
     )
     assert int(state1.step) == 80
@@ -20,7 +20,7 @@ def test_simulate_logic():
 
     print("\n--- Test 2: Resume from Checkpoint ---")
     ckpt_path = os.path.join(output_dir, "step_000040.npz")
-    df2, state2, _ = simulate(
+    df2, state2, _ = gksimulate(
         config_path, output_dir=output_dir, n_steps=80, resume_from=ckpt_path
     )
     assert int(state2.step) == 80
@@ -38,7 +38,7 @@ def test_simulate_logic():
     print("\n--- Test 3: Resume from K-file ---")
     # Using a known dump from iteration_13
     k_file = "/restricteddata/ukaea/gyrokinetics/raw/iteration_13/100"
-    df3, state3, _ = simulate(
+    df3, state3, _ = gksimulate(
         config_path, output_dir=output_dir, n_steps=1, resume_k_file=k_file
     )
     print(f"Loaded state time: {float(state3.time):.4f}")

@@ -3,7 +3,8 @@ import shutil
 import pytest
 import numpy as np
 
-from gyaradax import simulate, load_config
+from gyaradax import load_config
+from gyaradax.simulate import gksimulate
 
 
 @pytest.mark.skip(
@@ -35,7 +36,7 @@ def test_simulation_saturation():
     start_k_file = os.path.join(data_dir, str(start_dump))
 
     # Run the simulation, skipping heavy 5D/3D state dumps
-    _, _ = simulate(
+    _, _ = gksimulate(
         config_path,
         output_dir=output_dir,
         resume_k_file=start_k_file,

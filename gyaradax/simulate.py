@@ -133,7 +133,7 @@ def _init_condition(
     return df, state
 
 
-def simulate(
+def gksimulate(
     config_path: str,
     output_dir: str = "outputs",
     checkpoint_interval: Optional[int] = None,

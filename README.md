@@ -28,9 +28,9 @@ PYTHONPATH=. python scripts/gkw_to_yaml.py /path/to/gkw_run configs/my_sim.yaml
 
 ### Run a Simulation
 ```python
-from gyaradax import simulate
+from gyaradax.simulate import gksimulate
 
-df, final_state, perf = simulate(
+df, final_state, perf = gksimulate(
     "configs/my_sim.yaml",
     output_dir="outputs",
     n_steps=400,

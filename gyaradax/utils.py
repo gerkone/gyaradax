@@ -108,13 +108,16 @@ def save_dumps(
     """
     os.makedirs(output_dir, exist_ok=True)
 
-    # compute spectra with proper ds and parseval weighting
+    # Spectra use field-line-averaged |phi|^2, matching GKW conventions:
+    #   ky_spec: per-mode spectral density = ds * sum_{s,kx} |phi|^2
+    #   kx_spec: total per kx = ds * sum_{s,ky} parseval_ky * |phi|^2
+    #     where parseval_ky = [1, 2, 2, ...] (one-sided Parseval for real fields)
     ds = float(jnp.asarray(geometry["ints"])[0])
-    parseval = jnp.asarray(geometry["parseval"])
+    nky = phi.shape[-1]
+    parseval_ky = jnp.array([1.0] + [2.0] * (nky - 1))
     phi_sq = jnp.abs(phi) ** 2
-    weighted = ds * phi_sq * parseval[None, None, :]
-    kx_spec = jnp.sum(weighted, axis=(0, 2))
-    ky_spec = jnp.sum(weighted, axis=(0, 1))
+    ky_spec = jnp.sum(ds * phi_sq, axis=(0, 1))
+    kx_spec = jnp.sum(ds * phi_sq * parseval_ky[None, None, :], axis=(0, 2))
 
     diags = {
         "fluxes": np.array([fluxes[0], fluxes[1], fluxes[2]]),

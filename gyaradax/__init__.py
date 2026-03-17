@@ -9,7 +9,7 @@ _submodule_mapping = {
     "default_state": "gyaradax.solver",
     "gkstep_single": "gyaradax.solver",
     "init_f": "gyaradax.solver",
-    "simulate": "gyaradax.simulate",
+    "gksimulate": "gyaradax.simulate",
     "load_geometry": "gyaradax.geometry",
     "get_integrals": "gyaradax.integrals",
     "load_gkw_k_dump": "gyaradax.utils",

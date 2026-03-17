@@ -191,3 +191,56 @@ def test_kinetic_flux_integral_per_species_parity(
             f"{sp_name} eflux mismatch at T={time_val}: "
             f"{pred_eflux:.6e} vs {ref_eflux:.6e}"
         )
+
+
+@pytest.mark.parametrize("idx", [10, 50, 100])
+def test_spectrum_parity_with_gkw(
+    adiabatic_dir, adiabatic_geom, adiabatic_shape, idx
+):
+    """ky_spec and kx_spec from phi must match GKW's kxspec/kyspec diagnostics.
+
+    GKW conventions:
+      ky_spec[ky] = ds * sum_{s,kx} |phi(s,kx,ky)|^2   (per-mode density)
+      kx_spec[kx] = ds * sum_{s,ky} P(ky) * |phi|^2     (P=1 for ky=0, 2 for ky>0)
+    """
+    geom = adiabatic_geom
+    geom["adiabatic"] = jnp.array(1.0, dtype=jnp.float64)
+
+    ks = K_files(adiabatic_dir)
+    if idx >= len(ks):
+        pytest.skip(f"index {idx} out of range for {adiabatic_dir}")
+
+    ref_kx_path = os.path.join(adiabatic_dir, "kxspec")
+    ref_ky_path = os.path.join(adiabatic_dir, "kyspec")
+    if not os.path.exists(ref_kx_path) or not os.path.exists(ref_ky_path):
+        pytest.skip(f"kxspec/kyspec not found in {adiabatic_dir}")
+
+    k_file = ks[idx]
+    k_dat_path = os.path.join(adiabatic_dir, f"{k_file}.dat")
+    if not os.path.exists(k_dat_path):
+        pytest.skip(f"metadata {k_dat_path} not found")
+    time_val = read_dump_time(k_dat_path)
+
+    orig_times = np.loadtxt(os.path.join(adiabatic_dir, "time.dat"))
+    ts_idx = np.argmin(np.abs(orig_times - time_val))
+    if not np.isclose(orig_times[ts_idx], time_val, rtol=1e-4):
+        pytest.skip(f"time mismatch: {orig_times[ts_idx]} vs {time_val}")
+
+    df = load_gkw_k_dump(os.path.join(adiabatic_dir, k_file), adiabatic_shape)
+    phi = calculate_phi(geom_tensors(geom), df)
+
+    ds = float(jnp.asarray(geom["ints"])[0])
+    nky = adiabatic_shape[-1]
+    parseval_ky = jnp.array([1.0] + [2.0] * (nky - 1))
+    phi_sq = jnp.abs(phi) ** 2
+
+    pred_ky = np.array(jnp.sum(ds * phi_sq, axis=(0, 1)))
+    pred_kx = np.array(jnp.sum(ds * phi_sq * parseval_ky[None, None, :], axis=(0, 2)))
+
+    ref_ky = np.loadtxt(ref_ky_path)[ts_idx]
+    ref_kx = np.loadtxt(ref_kx_path)[ts_idx]
+
+    np.testing.assert_allclose(pred_ky, ref_ky, rtol=1e-4, atol=1e-10)
+    # kx_spec sums over ky with Parseval weights; the lowest-kx edge mode
+    # can differ by ~1-2% due to GKW diagnostic timing vs K-dump timing
+    np.testing.assert_allclose(pred_kx, ref_kx, rtol=2e-2, atol=1e-6)

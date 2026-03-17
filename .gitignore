@@ -13,3 +13,4 @@ cache/
 gkw_ref
 .gemini
 .claude
+validation_*
