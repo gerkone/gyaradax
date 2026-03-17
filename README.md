@@ -6,7 +6,17 @@
 
 `gyaradax` is a high-performance JAX code for local flux-tube gyrokinetic simulations. It is based on the [GKW code](https://bitbucket.org/gkw/gkw). It provides a differentiable simulation core for the electrostatic, adiabatic-electron Vlasov-Poisson system.
 
-This was made possible with significant usage of agentic workflows (gemini, codex).
+This was made possible with significant usage of agentic workflows (codex, claude code, gemini-cli).
+
+## Installation
+
+```bash
+uv venv --python 3.12
+source .venv/bin/activate
+uv pip install -e ".[dev]"
+```
+
+This installs `gyaradax` in editable mode with JAX (CUDA 12), numpy, and dev tools (pytest, ruff, black).
 
 ## Structure
 
