@@ -23,6 +23,7 @@ physics:
   dgrid: 1.0
   tgrid: 1.0
 geometry:
+  geometry_model: circ
   shat: 1.8925
   q: 5.70811
   eps: 0.19

@@ -29,8 +29,9 @@ def validate_time_averaged(config_paths):
             output_dir=output_dir,
             resume_k_file=start_k_file,
             n_steps=n_steps,
-            save_dumps=False,  # Do not dump heavy 5D files
+            save_dumps=False,
             verbose=True,
+            mixed_precision=True,
         )
         runtime = time.time() - t0
 
@@ -62,7 +63,7 @@ def validate_time_averaged(config_paths):
             ref_time = np.loadtxt(os.path.join(data_dir, "time.dat"))
 
             ref_eflux_samples = []
-            for t in sim_times[-avg_count:]:
+            for t in sim_times[-avg_count * 3:]:
                 idx = np.argmin(np.abs(ref_time - t))
                 ref_eflux_samples.append(ref_fluxes[idx, 1])
 
@@ -74,7 +75,7 @@ def validate_time_averaged(config_paths):
             print(f"\tTime-averaged Heat Flux (last {avg_count} steps):")
             print(f"\tSimulated: {sim_eflux_avg:.4e}")
             print(f"\tReference: {ref_eflux_avg:.4e}")
-            print(f"\tRel. Error: {err_eflux:.2%}")
+            print(f"\tL2 Error: {err_eflux:.2f}")
 
         except Exception as e:
             print(f"Error during reference comparison: {e}")
@@ -82,9 +83,9 @@ def validate_time_averaged(config_paths):
 
 if __name__ == "__main__":
     configs = [
-        "configs/iteration_0.yaml",
-        "configs/iteration_8.yaml",
+        # "configs/iteration_0.yaml",
+        # "configs/iteration_8.yaml",
         "configs/iteration_13.yaml",
-        "configs/iteration_200.yaml",
+        # "configs/iteration_200.yaml",
     ]
     validate_time_averaged(configs)

@@ -11,6 +11,7 @@ import jax.numpy as jnp
 jax.config.update("jax_enable_x64", True)
 
 from gyaradax.geometry import load_geometry
+from gyaradax.analytic_geometry import compute_geometry
 from gyaradax.integrals import (
     get_integrals,
     calculate_phi,
@@ -34,6 +35,27 @@ from gyaradax.utils import (
 )
 
 
+def _geometry_from_config(cfg):
+    """build geometry from config when no data_dir is provided.
+
+    defaults are defined in compute_geometry(); we only forward
+    values that are actually present in the config.
+    """
+    gc = getattr(cfg, "geometry", {})
+    gr = cfg.grid
+    kwargs = {}
+    for key, section in [
+        ("q", gc), ("shat", gc), ("eps", gc), ("kxmax", gc),
+        ("signB", gc), ("Rref", gc),
+        ("ns", gr), ("nkx", gr), ("nky", gr), ("nvpar", gr), ("nmu", gr),
+        ("vpar_max", gr), ("nperiod", gr), ("krhomax", gr), ("ikxspace", gr),
+    ]:
+        val = getattr(section, key, None)
+        if val is not None:
+            kwargs[key] = float(val) if isinstance(val, (int, float)) else val
+    return compute_geometry(**kwargs)
+
+
 def _compute_phi_for_init(df, geometry, params):
     """compute phi for initial amplitude tracking."""
     if params.adiabatic_electrons:
@@ -52,8 +74,11 @@ def _setup_simulation(
     cfg = load_config(config_path)
     total_steps = int(kwargs.pop("n_steps", getattr(cfg.solver, "n_steps", 120)))
     params = gkparams_from_config(cfg, **kwargs)
-    data_dir = cfg.run.data_dir
-    geometry = load_geometry(data_dir)
+    data_dir = getattr(cfg.run, "data_dir", None)
+    if data_dir:
+        geometry = load_geometry(data_dir)
+    else:
+        geometry = _geometry_from_config(cfg)
     interval = getattr(cfg.solver, "dump_interval", 3) * params.naverage
     if checkpoint_interval:
         interval = checkpoint_interval
