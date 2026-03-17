@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 
 from gyaradax.diag import term_iii_fft_pack_roundtrip, term_iii_rhs
-from gyaradax.geometry import load_runtime_params
+from gyaradax.utils import load_runtime_params
 from gyaradax.solver import (
     init_f,
     gksolve,
@@ -29,7 +29,7 @@ def test_init_f_trajectory_parity(nonlin_dir, nonlin_geom, nonlin_shape):
     from scratch in JAX and integrating forward to match the K01 dump.
     """
     # GKW uses a default amp_init of 1e-4 if not specified
-    from gyaradax.geometry import parse_input_dat
+    from gyaradax.utils import parse_input_dat
 
     inp = parse_input_dat(f"{nonlin_dir}/input.dat")
     amp_init = inp.get("spcgeneral", {}).get("amp_init")

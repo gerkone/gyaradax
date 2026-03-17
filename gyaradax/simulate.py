@@ -9,8 +9,8 @@ import jax.numpy as jnp
 
 jax.config.update("jax_enable_x64", True)
 
-from gyaradax.geometry import load_geometry
-from gyaradax.analytic_geometry import compute_geometry
+from gyaradax.utils import load_geometry
+from gyaradax.geometry import compute_geometry
 from gyaradax.integrals import (
     get_integrals,
     calculate_phi,
@@ -47,6 +47,8 @@ def _geometry_from_config(cfg):
     gc = getattr(cfg, "geometry", {})
     gr = cfg.grid
     kwargs = {}
+    _float_keys = {"q", "shat", "eps", "kxmax", "signB", "Rref", "vpar_max", "krhomax"}
+    _int_keys = {"ns", "nkx", "nky", "nvpar", "nmu", "nperiod", "ikxspace"}
     for key, section in [
         ("q", gc), ("shat", gc), ("eps", gc), ("kxmax", gc),
         ("signB", gc), ("Rref", gc),
@@ -55,27 +57,20 @@ def _geometry_from_config(cfg):
     ]:
         val = getattr(section, key, None)
         if val is not None:
-            kwargs[key] = float(val) if isinstance(val, (int, float)) else val
+            kwargs[key] = int(val) if key in _int_keys else float(val)
     return compute_geometry(**kwargs)
 
 
-def log_step(fluxes, state, wall_time: float, block_steps: int = 0):
-    fl = jnp.asarray(fluxes)
+def log_step(fluxes, state: GKState, wall_time: float, n_steps: int = 0):
+    flx = jnp.asarray(fluxes)
     growth = float(jnp.mean(state.last_growth_rate))
-    if fl.ndim == 2:
-        parts = " | ".join(
-            f"eflux_{i} {float(fl[i, 1]):>12.2f}" for i in range(fl.shape[0])
-        )
-        eflux_str = parts
-    else:
-        eflux_str = f"eflux {float(fl[1]):>12.2f}"
-    steps_sec = block_steps / max(wall_time, 1e-6) if block_steps > 0 else 0.0
+    if flx.ndim == 1:
+        flx = flx[jnp.newaxis]
+    flx = " | ".join(f"eflux_{i} {float(flx[i, 1]):>6.2f}" for i in range(flx.shape[0]))
+    steps_sec = f"{n_steps / max(wall_time, 1e-6):>2.1f}" if n_steps > 0 else "N/A"
     print(
-        f"\tstep {int(state.step):>8d} | "
-        f"t {float(state.time):>10.3f} | "
-        f"{eflux_str} | "
-        f"growth {growth:>12.2f} | "
-        f"{steps_sec:>8.1f} steps/s"
+        f"[{int(state.step):>8d}] t {float(state.time):>10.2f} | "
+        f"{flx} | growth {growth:>12.2f} | {steps_sec} steps/s"
     )
 
 
@@ -198,7 +193,7 @@ def gksimulate(
                 save_dumps=save_snapshots or (save_final and is_final),
             )
 
-        log_step(current_fluxes, current_state, wall_time, block_steps)
+        log_step(current_fluxes, current_state, wall_time, n_steps=block_steps)
 
     if current_phi is None:
         current_phi, current_fluxes = get_integrals(

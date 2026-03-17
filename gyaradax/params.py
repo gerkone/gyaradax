@@ -175,7 +175,7 @@ def gkparams_from_input_dat(input_dat_path: str, **overrides) -> GKParams:
     Returns:
         Configured GKParams instance.
     """
-    from gyaradax.geometry import load_scalars
+    from gyaradax.utils import load_scalars
 
     directory = os.path.dirname(input_dat_path)
     scalars = load_scalars(directory)

@@ -1,8 +1,243 @@
-import jax.numpy as jnp
-import numpy as np
+"""Analytic circular geometry computation (Lapillonne model).
+
+Computes all geometry arrays from equilibrium parameters alone, eliminating
+the need for precomputed GKW geometry files. Formulas are translated directly
+from ``gkw_ref/src/geom.f90`` (``geom_circ`` lines 1444-1616 and
+``calc_geom_tensors`` lines 3487-3634).
+
+The public entry points are :func:`compute_geometry` (from scalar parameters)
+and :func:`compute_geometry_from_input` (from a GKW ``input.dat`` file).
+Both return a dict identical to the one produced by
+:func:`gyaradax.geometry.load_geometry`.
+"""
+
 import os
-import re
+
+import numpy as np
+import jax.numpy as jnp
 from typing import Dict, Any
+
+
+def _f64(x):
+    return jnp.array(x, dtype=jnp.float64)
+
+
+def _i32(x):
+    return jnp.array(x, dtype=jnp.int32)
+
+
+def _load_1d_array(path):
+    """Load a GKW grid file and flatten to 1-d (files may have nky rows)."""
+    data = np.loadtxt(path)
+    if data.ndim > 1:
+        data = data[0]
+    return data
+
+
+def _poloidal_angle(sgrid, eps, n_iter=10):
+    """Invert theta + eps*sin(theta) = 2*pi*s via fixed-point iteration.
+
+    Convergence is geometric with rate eps; 10 iterations give
+    O(eps^10) ~ 1e-7 for typical tokamak values.
+    """
+    theta = 2 * np.pi * sgrid.copy()
+    for _ in range(n_iter):
+        theta = 2 * np.pi * sgrid - eps * np.sin(theta)
+    return theta
+
+
+def _parallel_grid(ns, nperiod):
+    """Cell-centered uniform parallel grid on [-sgrmax, sgrmax]."""
+    sgrmax = nperiod - 0.5
+    return np.array([-sgrmax + 2 * sgrmax * (i + 0.5) / ns for i in range(ns)])
+
+
+def _parallel_weights(sgrid):
+    """Uniform integration weights (cell width)."""
+    if len(sgrid) < 2:
+        return np.ones(1)
+    return np.full(len(sgrid), sgrid[1] - sgrid[0])
+
+
+def _dzetadeps(theta, q, shat, eps, signB, signJ):
+    """Metric coupling g_{psi,zeta} = d(zeta)/d(eps) at fixed s.
+
+    Uses branch-tracked atan with monotonicity correction, then scales
+    by the shear and finite-epsilon correction terms.
+    Translated from geom.f90 lines 1492-1511.
+
+    Note: the finite-eps correction introduces ~0.1% model-level error
+    that propagates into all zeta-direction tensors (D_zeta, H_zeta,
+    I_zeta). The radial (eps) components are unaffected.
+    """
+    ns = len(theta)
+    dum2 = np.sqrt((1 - eps) / (1 + eps))
+
+    dzde = np.zeros(ns)
+    dzde[0] = np.arctan(dum2 * np.tan(theta[0] / 2))
+    for i in range(1, ns):
+        dzde[i] = np.arctan(dum2 * np.tan(theta[i] / 2))
+        while dzde[i] < dzde[i - 1]:
+            dzde[i] += np.pi
+    dzde -= np.pi * np.floor((dzde[0] - theta[0] / 2) / np.pi)
+
+    t2 = np.tan(theta / 2)
+    corr = eps / np.sqrt(1 - eps**2) * t2 / (1 + t2**2 + eps * (1 - t2**2))
+    return signB * signJ / np.pi * q / eps * (shat * dzde - corr)
+
+
+def _psi_theta_to_psi_s(f_psi, f_theta, theta, eps):
+    """Jacobian transform from (psi, theta) to (psi, s) coordinates.
+
+    Returns (f_psi_s, f_s) where:
+        f_psi_s = f_psi - sin(theta)/R * f_theta
+        f_s     = 2*pi/R * f_theta
+    with R = 1 + eps*cos(theta).
+    """
+    R = 1 + eps * np.cos(theta)
+    return f_psi - np.sin(theta) / R * f_theta, 2 * np.pi * f_theta / R
+
+
+def _circular_geometry(theta, q, shat, eps, signB=1.0, signJ=1.0):
+    """Compute all geometry quantities for the Lapillonne circular model.
+
+    Produces the magnetic field, metric tensor, and all field/position
+    derivatives in (psi, s) coordinates.  The returned dict is consumed
+    by :func:`_calc_geom_tensors` and :func:`compute_geometry`.
+
+    Translated from ``geom_circ`` in geom.f90 lines 1444-1616.
+    """
+    ns = len(theta)
+    R = 1 + eps * np.cos(theta)
+
+    dum = np.sqrt(1 + eps**2 / q**2 / (1 - eps**2))
+    bn = dum / R
+    bups = 1.0 / (2 * np.pi * q * np.sqrt(1 - eps**2))
+    dpfdpsi = eps / (q * np.sqrt(1 - eps**2))
+
+    dzde = _dzetadeps(theta, q, shat, eps, signB, signJ)
+
+    metric = np.zeros((ns, 3, 3))
+    metric[:, 0, 0] = 1.0
+    metric[:, 0, 1] = metric[:, 1, 0] = dzde
+    metric[:, 0, 2] = metric[:, 2, 0] = np.sin(theta) / (2 * np.pi)
+    metric[:, 1, 1] = (
+        (1 / (2 * np.pi * R)) ** 2 * (1 + (1 - eps**2) * (q / eps) ** 2)
+        + dzde**2
+    )
+    metric[:, 1, 2] = metric[:, 2, 1] = (
+        q * np.sqrt(1 - eps**2) / (2 * np.pi * eps) ** 2 * signB * signJ
+        + dzde * np.sin(theta) / (2 * np.pi)
+    )
+    metric[:, 2, 2] = (
+        (1 / (2 * np.pi)) ** 2
+        * ((1 / eps + np.cos(theta)) ** 2 + np.sin(theta) ** 2)
+    )
+
+    dBdpsi_pt = bn * (
+        -np.cos(theta) / R
+        + eps * (1 - shat + eps**2 / (1 - eps**2))
+        / (eps**2 + q**2 * (1 - eps**2))
+    )
+    dBds_pt = bn * eps * np.sin(theta) / R
+    dBdpsi, dBds = _psi_theta_to_psi_s(dBdpsi_pt, dBds_pt, theta, eps)
+
+    dRdpsi, dRds = _psi_theta_to_psi_s(
+        np.cos(theta), -eps * np.sin(theta), theta, eps
+    )
+    dZdpsi, dZds = _psi_theta_to_psi_s(
+        np.sin(theta), eps * np.cos(theta), theta, eps
+    )
+
+    return {
+        "bn": bn, "dum": dum, "R": R,
+        "ffun": bups / bn,
+        "gfun": bups / bn * dBds / bn,
+        "bt_frac": np.full(ns, 1 / dum),
+        "bups": bups, "dpfdpsi": dpfdpsi,
+        "metric": metric, "dzetadeps": dzde,
+        "dBdpsi": dBdpsi, "dBds": dBds,
+        "dRdpsi": dRdpsi, "dRds": dRds,
+        "dZdpsi": dZdpsi, "dZds": dZds,
+    }
+
+
+def _calc_geom_tensors(cg, signJ=1.0, signB=1.0):
+    """Compute E, D, H, I drift tensors from the circular geometry.
+
+    Translated from ``calc_geom_tensors`` in geom.f90 lines 3487-3634.
+
+    E-tensor (ExB): antisymmetric cofactors of metric rows 0/1,
+        scaled by pi * dpfdpsi / bn^2.
+    D-tensor (curvature + grad-B drift):
+        D_j = (-2*E_{j,psi}*dB/dpsi - 2*E_{j,s}*dB/ds) / B
+    H-tensor (Coriolis drift): from dZ/dpsi, dZ/ds with metric coupling
+        and a finite-eps correction on the s-component.
+    I-tensor (centrifugal drift): 2*R*(E . grad(R)).
+    """
+    bn = cg["bn"]
+    metric = cg["metric"]
+    R = cg["R"]
+    bups = cg["bups"]
+    dBdpsi, dBds = cg["dBdpsi"], cg["dBds"]
+    dRdpsi, dRds = cg["dRdpsi"], cg["dRds"]
+    dZdpsi, dZds = cg["dZdpsi"], cg["dZds"]
+
+    m0 = metric[:, 0, :]
+    m1 = metric[:, 1, :]
+    efun = m0[:, :, None] * m1[:, None, :] - m1[:, :, None] * m0[:, None, :]
+    efun *= signJ * np.pi * cg["dpfdpsi"] / bn[:, None, None] ** 2
+
+    e0, e2 = efun[:, :, 0], efun[:, :, 2]
+
+    dfun = (-2 * e0 * dBdpsi[:, None] - 2 * e2 * dBds[:, None]) / bn[:, None]
+
+    hfun = -signB * (
+        metric[:, :, 0] * dZdpsi[:, None] + metric[:, :, 2] * dZds[:, None]
+    )
+    hfun[:, 2] += signB * bups**2 * dZds / bn**2
+    hfun /= bn[:, None]
+
+    ifun = 2 * R[:, None] * (e0 * dRdpsi[:, None] + e2 * dRds[:, None])
+
+    return efun, dfun, hfun, ifun
+
+
+def _build_velocity_grids(nvpar, nmu, vpar_max):
+    """Uniform v_par grid and uniform-in-v_perp mu grid (GKW convention)."""
+    dvp = 2 * vpar_max / nvpar
+    vpgr = np.linspace(-vpar_max + dvp / 2, vpar_max - dvp / 2, nvpar)
+    dvperp = vpar_max / nmu
+    vperp = np.linspace(dvperp / 2, vpar_max - dvperp / 2, nmu)
+    return vpgr, vperp**2 / 2, np.full(nvpar, dvp), 2 * np.pi * vperp * dvperp
+
+
+def _build_wavevector_grids(nkx, nky, kxmax, krhomax):
+    """Centered kx grid and uniform ky grid."""
+    half = (nkx - 1) // 2
+    dkx = kxmax / half if half > 0 else 0.0
+    dky = krhomax / (nky - 1) if nky > 1 else krhomax
+    return np.arange(-half, half + 1) * dkx, np.arange(nky) * dky
+
+
+def _build_mode_label(nkx, nky, ikxspace):
+    """Mode-label array for open parallel boundary connectivity.
+
+    For ky=0 each kx is its own mode (periodic). For ky>0 modes are
+    grouped into chains spaced ikxspace apart in kx-index.
+    """
+    ml = np.zeros((nkx, nky), dtype=np.int32)
+    label = 1
+    for ix in range(nkx):
+        ml[ix, 0] = label
+        label += 1
+    for iy in range(1, nky):
+        for offset in range(ikxspace):
+            lbl = label
+            label += 1
+            for ix in range(offset, nkx, ikxspace):
+                ml[ix, iy] = lbl
+    return ml
 
 
 def _build_mode_connectivity(mode_label, kxrh, krho):
@@ -127,507 +362,149 @@ def _build_parallel_shift_maps(ixplus, ixminus, iyzero, ns, max_shift=4):
     return s_shift, kx_shift, valid
 
 
-def is_number(string):
-    pattern = r"^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$"
-    return bool(re.fullmatch(pattern, string.strip()))
+def compute_geometry(
+    q: float,
+    shat: float,
+    eps: float,
+    ns: int,
+    nkx: int,
+    nky: int,
+    nvpar: int,
+    nmu: int,
+    vpar_max: float = 3.0,
+    nperiod: int = 1,
+    kxmax: float = 0.0,
+    krhomax: float = 1.4,
+    ikxspace: int = 5,
+    signB: float = 1.0,
+    Rref: float = 100.0,
+) -> Dict[str, Any]:
+    """Compute geometry dict from circular equilibrium parameters.
 
-
-def _strip_inline_comment(line: str) -> str:
-    """Strip Fortran '!' comments while respecting quoted strings."""
-    out = []
-    quote = None
-    for ch in line:
-        if quote is None and ch in ("'", '"'):
-            quote = ch
-            out.append(ch)
-            continue
-        if quote is not None and ch == quote:
-            quote = None
-            out.append(ch)
-            continue
-        if quote is None and ch == "!":
-            break
-        out.append(ch)
-    return "".join(out).strip()
-
-
-def _split_top_level_commas(text: str):
-    """Split comma-separated assignments, ignoring commas inside quotes."""
-    chunks = []
-    buf = []
-    quote = None
-    for ch in text:
-        if quote is None and ch in ("'", '"'):
-            quote = ch
-            buf.append(ch)
-            continue
-        if quote is not None and ch == quote:
-            quote = None
-            buf.append(ch)
-            continue
-        if quote is None and ch == ",":
-            chunk = "".join(buf).strip()
-            if chunk:
-                chunks.append(chunk)
-            buf = []
-            continue
-        buf.append(ch)
-    chunk = "".join(buf).strip()
-    if chunk:
-        chunks.append(chunk)
-    return chunks
-
-
-def _parse_namelist_value(value: str):
-    """Parse Fortran-namelist-like scalar values into Python scalars."""
-    v = value.strip().rstrip(",")
-    if not v:
-        return ""
-
-    if (v.startswith("'") and v.endswith("'")) or (
-        v.startswith('"') and v.endswith('"')
-    ):
-        return v[1:-1]
-
-    lv = v.lower()
-    if lv in (".true.", "true", "t"):
-        return True
-    if lv in (".false.", "false", "f"):
-        return False
-
-    # Handle Fortran double-exponent notation 1.0d+00.
-    num = v.replace("D", "e").replace("d", "e")
-    if re.fullmatch(r"[+-]?\d+", num):
-        try:
-            return int(num)
-        except ValueError:
-            pass
-    if re.fullmatch(r"[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?", num):
-        try:
-            return float(num)
-        except ValueError:
-            pass
-    return v
-
-
-def load_geom_dat_file(file_path):
-    """Load geometric parameters from a .dat file."""
-    data = {}
-    with open(file_path, "r") as f:
-        lines = f.readlines()
-
-    key = None
-    values = []
-
-    for line in lines:
-        line = line.strip()
-        if not line:
-            continue
-
-        parts = line.split()
-        if len(parts) == 1 and not is_number(parts[0]):
-            try:
-                if len(values) == 0:
-                    values.extend(map(float, parts))
-                    data[key] = values[0]
-                    key = None
-                    values = []
-                    continue
-                else:
-                    raise ValueError
-            except Exception:
-                if key is not None:
-                    data[key] = np.array(values, dtype=np.float64)
-                key = parts[0]
-                values = []
-        else:
-            values.extend(map(float, parts))
-
-    if key is not None:
-        data[key] = np.array(values, dtype=np.float64)
-
-    return data
-
-
-def parse_input_dat(file_path):
-    """Parse GKW input.dat configuration file."""
-    parsed_data: Dict[str, Dict[str, Any]] = {}
-    if not os.path.exists(file_path):
-        return parsed_data
-
-    current_section = None
-    with open(file_path, "r", encoding="utf-8") as file:
-        for raw_line in file:
-            line = _strip_inline_comment(raw_line)
-            if not line:
-                continue
-
-            if line.startswith("&"):
-                section = line[1:].strip().lower()
-                while section in parsed_data:
-                    section = f"{section}0"
-                parsed_data[section] = {}
-                current_section = section
-                continue
-
-            if line.startswith("/"):
-                current_section = None
-                continue
-
-            if current_section is None:
-                continue
-
-            for assignment in _split_top_level_commas(line):
-                if "=" not in assignment:
-                    continue
-                key, value = assignment.split("=", 1)
-                key = key.strip().lower()
-                parsed_data[current_section][key] = _parse_namelist_value(value)
-
-    return parsed_data
-
-
-def load_runtime_params(input_dat_path: str) -> Dict[str, Any]:
+    Returns a dict with the same keys and dtypes as
+    :func:`gyaradax.geometry.load_geometry`, suitable for passing directly
+    to the solver.
     """
-    Load runtime controls for solver parity from `input.dat`.
+    signJ = 1.0
+    sgrid = _parallel_grid(ns, nperiod)
+    theta = _poloidal_angle(sgrid, eps)
 
-    Returned keys are typed scalars and can be fed into GKParams creation.
-    """
-    inp = parse_input_dat(input_dat_path)
-    control = inp.get("control", {})
+    cg = _circular_geometry(theta, q, shat, eps, signB=signB, signJ=signJ)
+    efun_3x3, dfun, hfun, ifun = _calc_geom_tensors(cg, signJ=signJ, signB=signB)
 
-    def _flt(name, default):
-        val = control.get(name, default)
-        return float(val) if val is not None else float(default)
+    bn, R = cg["bn"], cg["R"]
+    little_g = np.stack([cg["metric"][:, 1, 1], cg["dzetadeps"], np.ones(ns)], axis=-1)
 
-    def _int(name, default):
-        val = control.get(name, default)
-        return int(val) if val is not None else int(default)
+    g_zz_mid = (1 / (2 * np.pi * (1 + eps))) ** 2 * (
+        1 + (1 - eps**2) * (q / eps) ** 2
+    )
+    kthnorm = np.sqrt(g_zz_mid)
 
-    def _bool(name, default):
-        val = control.get(name, default)
-        if isinstance(val, bool):
-            return val
-        if isinstance(val, str):
-            lv = val.strip().lower()
-            if lv in (".true.", "true", "t"):
-                return True
-            if lv in (".false.", "false", "f"):
-                return False
-        return bool(default)
+    vpgr, mugr, intvp, intmu = _build_velocity_grids(nvpar, nmu, vpar_max)
+    kxrh, krho_raw = _build_wavevector_grids(nkx, nky, kxmax, krhomax)
+    krho = krho_raw / kthnorm
 
-    method_val = control.get("method", "EXP")
-    method = str(method_val).strip().strip("'").strip('"').upper()
-
-    finit = inp.get("spcgeneral", {}).get("finit", "cosine2")
-    if not finit:
-        finit = inp.get("components", {}).get("finit", "cosine2")
-
-    adiabatic_electrons = bool(inp.get("gridsize", {}).get("adiabatic_electrons", True))
+    ml = _build_mode_label(nkx, nky, ikxspace)
+    ml_kxky, ixp, ixm, ixz, iyz = _build_mode_connectivity(ml, kxrh, krho)
+    pos = _build_pos_par_grid_classes(ixp, ixm, ns)
+    ss, ks, vs = _build_parallel_shift_maps(ixp, ixm, iyz, ns, max_shift=4)
 
     return {
-        "dtim": _flt("dtim", 0.01),
-        "naverage": _int("naverage", 40),
-        "disp_par": _flt("disp_par", 1.0),
-        "disp_vp": _flt("disp_vp", 0.2),
-        "disp_x": _flt("disp_x", 0.1),
-        "disp_y": _flt("disp_y", 0.1),
-        "non_linear": _bool("non_linear", False),
-        "nlapar": _bool("nlapar", False),
-        "method": method,
-        "meth": _int("meth", 0),
-        "finit": finit,
-        "adiabatic_electrons": adiabatic_electrons,
+        "kthnorm": _f64(kthnorm),
+        "shat": _f64(shat),
+        "q": _f64(q),
+        "eps": _f64(eps),
+        "kxrh": _f64(kxrh),
+        "krho": _f64(krho),
+        "parseval": _f64([1.0] + [float(nky)] * (nky - 1)),
+        "intvp": _f64(intvp),
+        "vpgr": _f64(vpgr),
+        "vpgr_rms": _f64(np.sqrt(np.mean(vpgr**2))),
+        "dvp": _f64(float(np.mean(np.diff(vpgr))) if len(vpgr) > 1 else 1.0),
+        "intmu": _f64(intmu),
+        "mugr": _f64(mugr),
+        "mugr_rms": _f64(np.sqrt(np.mean(mugr**2))),
+        "ints": _f64(_parallel_weights(sgrid)),
+        "sgrid": _f64(sgrid),
+        "sgr_dist": _f64(float(np.abs(sgrid[1] - sgrid[0])) if ns > 1 else 1.0),
+        "bn": _f64(bn),
+        "ffun": _f64(cg["ffun"]),
+        "gfun": _f64(cg["gfun"]),
+        "bt_frac": _f64(cg["bt_frac"]),
+        "rfun": _f64(R),
+        "little_g": _f64(little_g),
+        "dfun": _f64(dfun),
+        "hfun": _f64(hfun),
+        "ifun": _f64(ifun),
+        "efun": _f64(-efun_3x3[:, 0, 1]),
+        "Rref": _f64(abs(Rref)),
+        "signz": _f64([1.0]),
+        "tmp": _f64([1.0]),
+        "mas": _f64([1.0]),
+        "de": _f64([1.0]),
+        "vthrat": _f64([1.0]),
+        "rlt": _f64([1.0]),
+        "rln": _f64([1.0]),
+        "d2X": _f64(1.0),
+        "signB": _f64(signB),
+        "mode_label": _i32(ml_kxky),
+        "ixplus": _i32(ixp),
+        "ixminus": _i32(ixm),
+        "ixzero": _i32(ixz),
+        "iyzero": _i32(iyz),
+        "pos_par_grid_class": jnp.array(pos, dtype=jnp.int8),
+        "s_shift": _i32(ss),
+        "kx_shift": _i32(ks),
+        "valid_shift": jnp.array(vs, dtype=jnp.bool_),
+        "kxmax": _f64(float(np.max(np.abs(kxrh)))),
+        "kymax": _f64(float(np.max(np.abs(krho)))),
     }
 
 
-def load_scalars(directory: str) -> Dict[str, Any]:
+def compute_geometry_from_input(input_dat_path: str) -> Dict[str, Any]:
+    """Compute geometry from a GKW ``input.dat`` file.
+
+    Reads ``kxrh`` and ``vpgr.dat`` from the same directory if available;
+    falls back to approximate formulas otherwise.
     """
-    Extract only the scalar configuration and physics parameters from GKW files.
+    from gyaradax.utils import parse_input_dat
 
-    This is a lightweight alternative to load_geometry, returning only the
-    scalars needed for GKParams and YAML configuration.
-    """
-    geom = load_geom_dat_file(os.path.join(directory, "geom.dat"))
-    input_data = parse_input_dat(os.path.join(directory, "input.dat"))
+    inp = parse_input_dat(input_dat_path)
+    geom_sec = inp.get("geom", {})
+    grid_sec = inp.get("gridsize", {})
+    mode_sec = inp.get("mode", {})
 
-    # 1. extract runtime/solver params
-    runtime = load_runtime_params(os.path.join(directory, "input.dat"))
+    q = float(geom_sec.get("q", 1.0))
+    shat = float(geom_sec.get("shat", 0.0))
+    eps = float(geom_sec.get("eps", 0.0))
+    nkx = int(grid_sec.get("nx", 1))
+    nky = int(grid_sec.get("nmod", 1))
+    krhomax = float(mode_sec.get("krhomax", 1.4))
+    ikxspace = int(mode_sec.get("ikxspace", 5))
 
-    # 2. extract geometry scalars
-    def _scalar(key, default=0.0):
-        return float(np.asarray(geom.get(key, default)).item())
+    data_dir = os.path.dirname(input_dat_path)
 
-    scalars = {
-        "shat": _scalar("shat", 0.0),
-        "q": _scalar("q", 1.0),
-        "eps": _scalar("eps", 0.0),
-        "kthnorm": _scalar("kthnorm", 1.0),
-        "Rref": abs(_scalar("Rref", 1.0)),
-        "d2X": 1.0,
-        "signB": 1.0,
-    }
-
-    # 3. extract species info (all kinetic species)
-    num_sp = input_data.get("gridsize", {}).get("number_of_species", 1)
-    species_keys = [k for k in input_data.keys() if k.startswith("species")][:num_sp]
-    if species_keys:
-        sp_mas = np.array([float(input_data[k].get("mass", 1.0)) for k in species_keys])
-        sp_tmp = np.array([float(input_data[k].get("temp", 1.0)) for k in species_keys])
-        sp_de = np.array([float(input_data[k].get("dens", 1.0)) for k in species_keys])
-        sp_signz = np.array([float(input_data[k].get("z", 1.0)) for k in species_keys])
-        sp_rlt = np.array([float(input_data[k].get("rlt", 0.0)) for k in species_keys])
-        sp_rln = np.array([float(input_data[k].get("rln", 0.0)) for k in species_keys])
-        sp_vthrat = np.sqrt(sp_tmp / sp_mas)
-
-        # scalar for single species, array for multi-species
-        def _maybe_scalar(arr):
-            return float(arr[0]) if len(arr) == 1 else arr
-
-        scalars.update(
-            {
-                "mas": _maybe_scalar(sp_mas),
-                "tmp": _maybe_scalar(sp_tmp),
-                "de": _maybe_scalar(sp_de),
-                "signz": _maybe_scalar(sp_signz),
-                "rlt": _maybe_scalar(sp_rlt),
-                "rln": _maybe_scalar(sp_rln),
-                "vthrat": _maybe_scalar(sp_vthrat),
-            }
-        )
+    kxrh_path = os.path.join(data_dir, "kxrh")
+    if os.path.exists(kxrh_path):
+        kxmax = float(_load_1d_array(kxrh_path)[-1])
     else:
-        scalars.update(
-            {
-                "mas": 1.0,
-                "tmp": 1.0,
-                "de": 1.0,
-                "signz": 1.0,
-                "rlt": 1.0,
-                "rln": 1.0,
-                "vthrat": 1.0,
-            }
-        )
+        dky = krhomax / (nky - 1) if nky > 1 else krhomax
+        kxmax = 2 * np.pi * abs(shat) * dky / ikxspace * (nkx - 1) / 2
 
-    # 4. extract grid/scaling info
-    kxrh = np.loadtxt(os.path.join(directory, "kxrh"))
-    if kxrh.ndim > 1:
-        kxrh = kxrh[0]
-    scalars["kxmax"] = float(np.max(np.abs(kxrh)))
-
-    krho = np.loadtxt(os.path.join(directory, "krho"))
-    if krho.ndim > 1:
-        krho = krho.T[0]
-    scalars["kymax"] = float(np.max(np.abs(krho / scalars["kthnorm"])))
-
-    vpgr = np.loadtxt(os.path.join(directory, "vpgr.dat"))
-    if vpgr.ndim > 1:
-        vpgr = vpgr[0]
-    scalars["dvp"] = float(np.mean(np.diff(vpgr))) if len(vpgr) > 1 else 1.0
-
-    sgrid = np.loadtxt(os.path.join(directory, "sgrid"))
-    scalars["sgr_dist"] = float(np.abs(sgrid[1] - sgrid[0])) if len(sgrid) > 1 else 1.0
-
-    scalars["dgrid"] = 1.0
-    if os.path.exists(os.path.join(directory, "dgrid.dat")):
-        dg = np.loadtxt(os.path.join(directory, "dgrid.dat"))
-        scalars["dgrid"] = float(np.asarray(dg).reshape(-1)[0])
-    elif "dgrid" in geom:
-        scalars["dgrid"] = float(np.asarray(geom["dgrid"]).reshape(-1)[0])
-
-    scalars["tgrid"] = 1.0
-    if os.path.exists(os.path.join(directory, "tgrid.dat")):
-        tg = np.loadtxt(os.path.join(directory, "tgrid.dat"))
-        scalars["tgrid"] = float(np.asarray(tg).reshape(-1)[0])
-    elif "tgrid" in geom:
-        scalars["tgrid"] = float(np.asarray(geom["tgrid"]).reshape(-1)[0])
-
-    # merge with runtime
-    scalars.update(runtime)
-    return scalars
-
-
-def load_geometry(directory):
-    """Load geometry and physics parameters into JAX arrays."""
-    geom = load_geom_dat_file(os.path.join(directory, "geom.dat"))
-    input_data = parse_input_dat(os.path.join(directory, "input.dat"))
-
-    geometry = {}
-
-    # Scalar geometry controls useful for parity diagnostics.
-    if "kthnorm" in geom:
-        geometry["kthnorm"] = jnp.array(
-            float(np.asarray(geom["kthnorm"]).reshape(-1)[0]), dtype=jnp.float64
-        )
-    if "shat" in geom:
-        geometry["shat"] = jnp.array(
-            float(np.asarray(geom["shat"]).reshape(-1)[0]), dtype=jnp.float64
-        )
-    if "q" in geom:
-        geometry["q"] = jnp.array(
-            float(np.asarray(geom["q"]).reshape(-1)[0]), dtype=jnp.float64
-        )
-    if "eps" in geom:
-        geometry["eps"] = jnp.array(
-            float(np.asarray(geom["eps"]).reshape(-1)[0]), dtype=jnp.float64
-        )
-
-    # Grids
-    kxrh = np.loadtxt(os.path.join(directory, "kxrh"))
-    if kxrh.ndim > 1:
-        kxrh = kxrh[0]
-    geometry["kxrh"] = jnp.array(kxrh, dtype=jnp.float64)
-
-    krho = np.loadtxt(os.path.join(directory, "krho"))
-    if krho.ndim > 1:
-        krho = krho.T[0]
-    kthnorm = (
-        float(np.asarray(geom["kthnorm"]).reshape(-1)[0]) if "kthnorm" in geom else 1.0
-    )
-    geometry["krho"] = jnp.array(krho / kthnorm, dtype=jnp.float64)
-
-    geometry["parseval"] = jnp.array(
-        [1.0] + [float(len(geometry["krho"]))] * (len(geometry["krho"]) - 1),
-        dtype=jnp.float64,
-    )
-
-    # Velocity space
-    intvp = np.loadtxt(os.path.join(directory, "intvp.dat"))
-    if intvp.ndim > 1:
-        intvp = intvp[0]
-    geometry["intvp"] = jnp.array(intvp, dtype=jnp.float64)
-
-    vpgr = np.loadtxt(os.path.join(directory, "vpgr.dat"))
-    if vpgr.ndim > 1:
-        vpgr = vpgr[0]
-    geometry["vpgr"] = jnp.array(vpgr, dtype=jnp.float64)
-    geometry["vpgr_rms"] = jnp.array(
-        float(np.sqrt(np.mean(vpgr**2))), dtype=jnp.float64
-    )
-    if len(vpgr) > 1:
-        geometry["dvp"] = jnp.array(float(np.mean(np.diff(vpgr))), dtype=jnp.float64)
+    vpgr_path = os.path.join(data_dir, "vpgr.dat")
+    if os.path.exists(vpgr_path):
+        vpgr_data = _load_1d_array(vpgr_path)
+        vpar_max = float(vpgr_data[-1] + np.mean(np.diff(vpgr_data)) / 2)
     else:
-        geometry["dvp"] = jnp.array(1.0, dtype=jnp.float64)
+        vpar_max = 3.0
 
-    if os.path.exists(os.path.join(directory, "intmu.dat")):
-        intmu = np.loadtxt(os.path.join(directory, "intmu.dat"))
-        if intmu.ndim == 2:
-            intmu = intmu[:, 0]
-        geometry["intmu"] = jnp.array(intmu, dtype=jnp.float64)
-
-    if os.path.exists(os.path.join(directory, "vperp.dat")):
-        vperp = np.loadtxt(os.path.join(directory, "vperp.dat"))
-        if vperp.ndim == 2:
-            vperp = vperp[:, 0]
-        geometry["mugr"] = jnp.array(vperp**2 / 2.0, dtype=jnp.float64)
-        geometry["mugr_rms"] = jnp.array(
-            float(np.sqrt(np.mean((vperp**2 / 2.0) ** 2))),
-            dtype=jnp.float64,
-        )
-
-    sgrid = np.loadtxt(os.path.join(directory, "sgrid"))
-    ints = np.concatenate([np.array([0.0]), np.diff(sgrid)])
-    ints[0] = ints[1]
-    geometry["ints"] = jnp.array(ints, dtype=jnp.float64)
-    geometry["sgrid"] = jnp.array(sgrid, dtype=jnp.float64)
-    if len(sgrid) > 1:
-        geometry["sgr_dist"] = jnp.array(
-            float(np.abs(sgrid[1] - sgrid[0])), dtype=jnp.float64
-        )
-    else:
-        geometry["sgr_dist"] = jnp.array(1.0, dtype=jnp.float64)
-
-    # Physics Constants Defaults
-    geometry["Rref"] = jnp.array(jnp.abs(geom["Rref"]), dtype=jnp.float64)
-    geometry["signz"] = jnp.array([1.0], dtype=jnp.float64)
-    geometry["tmp"] = jnp.array([1.0], dtype=jnp.float64)
-    geometry["mas"] = jnp.array([1.0], dtype=jnp.float64)
-    geometry["de"] = jnp.array([1.0], dtype=jnp.float64)
-    geometry["vthrat"] = jnp.array([1.0], dtype=jnp.float64)
-    geometry["rlt"] = jnp.array([1.0], dtype=jnp.float64)
-    geometry["rln"] = jnp.array([1.0], dtype=jnp.float64)
-    geometry["d2X"] = jnp.array(1.0, dtype=jnp.float64)
-    geometry["signB"] = jnp.array(1.0, dtype=jnp.float64)
-
-    # Load species info
-    num_sp = input_data.get("gridsize", {}).get("number_of_species", 1)
-    species_keys = [k for k in input_data.keys() if k.startswith("species")][:num_sp]
-    if species_keys:
-        mas, tmp, de, signz, rlt, rln = [], [], [], [], [], []
-        for k in species_keys:
-            sp = input_data[k]
-            mas.append(sp.get("mass", 1.0))
-            tmp.append(sp.get("temp", 1.0))
-            de.append(sp.get("dens", 1.0))
-            signz.append(sp.get("z", 1.0))
-            rlt.append(sp.get("rlt", 0.0))
-            rln.append(sp.get("rln", 0.0))
-
-        geometry["mas"] = jnp.array(mas, dtype=jnp.float64)
-        geometry["tmp"] = jnp.array(tmp, dtype=jnp.float64)
-        geometry["de"] = jnp.array(de, dtype=jnp.float64)
-        geometry["signz"] = jnp.array(signz, dtype=jnp.float64)
-        geometry["rlt"] = jnp.array(rlt, dtype=jnp.float64)
-        geometry["rln"] = jnp.array(rln, dtype=jnp.float64)
-        geometry["vthrat"] = jnp.sqrt(geometry["tmp"] / geometry["mas"])
-
-    # Geometry Arrays
-    geometry["bn"] = jnp.array(geom["bn"], dtype=jnp.float64)
-    geometry["ffun"] = jnp.array(geom["F"], dtype=jnp.float64)
-    if "G" in geom:
-        geometry["gfun"] = jnp.array(geom["G"], dtype=jnp.float64)
-    geometry["bt_frac"] = jnp.array(geom["Bt_frac"], dtype=jnp.float64)
-    geometry["rfun"] = jnp.array(geom["R"], dtype=jnp.float64)
-    geometry["little_g"] = jnp.array(
-        np.stack([geom["g_zeta_zeta"], geom["g_eps_zeta"], geom["g_eps_eps"]], -1),
-        dtype=jnp.float64,
+    return compute_geometry(
+        q=q, shat=shat, eps=eps,
+        ns=int(grid_sec.get("n_s_grid", 16)),
+        nkx=nkx, nky=nky,
+        nvpar=int(grid_sec.get("n_vpar_grid", 32)),
+        nmu=int(grid_sec.get("n_mu_grid", 8)),
+        vpar_max=vpar_max,
+        nperiod=int(grid_sec.get("nperiod", 1)),
+        kxmax=kxmax, krhomax=krhomax, ikxspace=ikxspace,
     )
-
-    # Drift functions (dfun components)
-    if "D_eps" in geom:
-        geometry["dfun"] = jnp.array(
-            np.stack([geom["D_eps"], geom["D_zeta"], geom["D_s"]], -1),
-            dtype=jnp.float64,
-        )
-    if "H_eps" in geom:
-        geometry["hfun"] = jnp.array(
-            np.stack([geom["H_eps"], geom["H_zeta"], geom["H_s"]], -1),
-            dtype=jnp.float64,
-        )
-    if "I_eps" in geom:
-        geometry["ifun"] = jnp.array(
-            np.stack([geom["I_eps"], geom["I_zeta"], geom["I_s"]], -1),
-            dtype=jnp.float64,
-        )
-
-    # ExB function (efun)
-    if "E_eps_zeta" in geom:
-        geometry["efun"] = jnp.array(-geom["E_eps_zeta"], dtype=jnp.float64)
-
-    # Spectral connectivity metadata for open-parallel boundary stencils.
-    mode_label_path = os.path.join(directory, "mode_label")
-    if os.path.exists(mode_label_path):
-        mode_label = np.loadtxt(mode_label_path)
-        mode_label_kxky, ixplus, ixminus, ixzero, iyzero = _build_mode_connectivity(
-            mode_label, kxrh, np.asarray(geometry["krho"])
-        )
-        pos_classes = _build_pos_par_grid_classes(ixplus, ixminus, len(sgrid))
-        s_shift, kx_shift, valid_shift = _build_parallel_shift_maps(
-            ixplus, ixminus, iyzero, len(sgrid), max_shift=4
-        )
-
-        geometry["mode_label"] = jnp.array(mode_label_kxky, dtype=jnp.int32)
-        geometry["ixplus"] = jnp.array(ixplus, dtype=jnp.int32)
-        geometry["ixminus"] = jnp.array(ixminus, dtype=jnp.int32)
-        geometry["ixzero"] = jnp.array(ixzero, dtype=jnp.int32)
-        geometry["iyzero"] = jnp.array(iyzero, dtype=jnp.int32)
-        geometry["pos_par_grid_class"] = jnp.array(pos_classes, dtype=jnp.int8)
-        geometry["s_shift"] = jnp.array(s_shift, dtype=jnp.int32)
-        geometry["kx_shift"] = jnp.array(kx_shift, dtype=jnp.int32)
-        geometry["valid_shift"] = jnp.array(valid_shift, dtype=jnp.bool_)
-
-    geometry["kxmax"] = jnp.array(float(np.max(np.abs(kxrh))), dtype=jnp.float64)
-    geometry["kymax"] = jnp.array(
-        float(np.max(np.abs(np.asarray(geometry["krho"])))), dtype=jnp.float64
-    )
-
-    return geometry

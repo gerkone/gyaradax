@@ -12,9 +12,9 @@ from gyaradax.solver import (
     gkstep_single,
     init_f,
 )
-from gyaradax.simulate import gksimulate, gk_init, gk_run, gk_from_config, default_log
-from gyaradax.geometry import load_geometry
-from gyaradax.analytic_geometry import compute_geometry
+from gyaradax.simulate import gksimulate, gk_init, gk_run, gk_from_config
+from gyaradax.utils import load_geometry
+from gyaradax.geometry import compute_geometry
 from gyaradax.integrals import get_integrals
 from gyaradax.utils import load_gkw_k_dump
 
@@ -28,7 +28,6 @@ __all__ = [
     "gk_init",
     "gk_run",
     "gk_from_config",
-    "default_log",
     "init_f",
     "load_config",
     "gkparams_from_config",

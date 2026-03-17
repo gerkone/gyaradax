@@ -15,7 +15,7 @@ import jax.numpy as jnp
 jax.config.update("jax_enable_x64", True)
 
 from gyaradax import load_geometry
-from gyaradax.analytic_geometry import compute_geometry_from_input
+from gyaradax.geometry import compute_geometry_from_input
 from gyaradax.solver import (
     gksolve,
     GKState,
