@@ -17,6 +17,18 @@ def read_gkw_dump_time(dat_path: str) -> float:
     return float(m.group(1))
 
 
+def read_gkw_dump_dtim(dat_path: str) -> float:
+    """Read timestep DTIM from a GKW .dat file."""
+    if not os.path.exists(dat_path):
+        return 0.0
+    with open(dat_path, "r", encoding="utf-8") as f:
+        text = f.read()
+    m = re.search(r"DTIM\s*=\s*([0-9eE+\-.]+)", text)
+    if m is None:
+        return 0.0
+    return float(m.group(1))
+
+
 def load_gkw_dump(
     file_path: str, resolution: Tuple[int, ...], n_species: int = 1
 ) -> Tuple[jnp.ndarray, Dict[str, Any]]:
@@ -65,9 +77,7 @@ def load_gkw_dump(
     return df, info
 
 
-def load_gkw_k_dump(
-    file_path: str, resolution: Tuple[int, ...], n_species: int = 1
-) -> jnp.ndarray:
+def load_gkw_k_dump(file_path: str, resolution: Tuple[int, ...], n_species: int = 1) -> jnp.ndarray:
     """Legacy wrapper for backward compatibility."""
     df, _ = load_gkw_dump(file_path, resolution, n_species=n_species)
     return df
@@ -76,12 +86,8 @@ def load_gkw_k_dump(
 def K_files(directory):
     """List distribution function files in a directory."""
     files = os.listdir(directory)
-    digit_files = sorted(
-        [file for file in files if file.isdigit()], key=lambda x: int(x)
-    )
-    k_files = sorted(
-        [file for file in files if file.startswith("K") and not file.endswith(".dat")]
-    )
+    digit_files = sorted([file for file in files if file.isdigit()], key=lambda x: int(x))
+    k_files = sorted([file for file in files if file.startswith("K") and not file.endswith(".dat")])
     return k_files + digit_files
 
 
@@ -119,8 +125,14 @@ def save_dumps(
     ky_spec = jnp.sum(ds * phi_sq, axis=(0, 1))
     kx_spec = jnp.sum(ds * phi_sq * parseval_ky[None, None, :], axis=(0, 2))
 
+    # fluxes: tuple of 3 scalars (adiabatic) or (nsp, 3) array (kinetic)
+    fluxes_arr = np.asarray(fluxes)
+    if fluxes_arr.ndim == 0 or (fluxes_arr.ndim == 1 and fluxes_arr.shape[0] != 3):
+        # tuple of scalars -> (3,)
+        fluxes_arr = np.array([fluxes[0], fluxes[1], fluxes[2]])
+
     diags = {
-        "fluxes": np.array([fluxes[0], fluxes[1], fluxes[2]]),
+        "fluxes": fluxes_arr,
         "kx_spec": np.array(kx_spec),
         "ky_spec": np.array(ky_spec),
         "time": np.array(state.time),
@@ -140,15 +152,11 @@ def save_dumps(
                     if "step" in data.files:
                         mask = data["step"] < current_step
                         updated = {
-                            k: np.append(data[k][mask], [new_data[k]], axis=0)
-                            for k in data.files
+                            k: np.append(data[k][mask], [new_data[k]], axis=0) for k in data.files
                         }
                     else:
                         # Fallback for legacy files without 'step'
-                        updated = {
-                            k: np.append(data[k], [new_data[k]], axis=0)
-                            for k in data.files
-                        }
+                        updated = {k: np.append(data[k], [new_data[k]], axis=0) for k in data.files}
             except (IOError, ValueError):
                 # If file is corrupted or incompatible, start fresh
                 updated = {k: np.array([v]) for k, v in new_data.items()}
@@ -174,9 +182,7 @@ def save_dumps(
         checkpoint = {
             "df": np.array(df),
             "phi": np.array(phi),
-            "pflux": np.array(fluxes[0]),
-            "eflux": np.array(fluxes[1]),
-            "vflux": np.array(fluxes[2]),
+            "fluxes": fluxes_arr,
             "time": np.array(state.time),
             "step": np.array(state.step),
             "accumulated_norm_factor": np.array(state.accumulated_norm_factor),
@@ -192,3 +198,52 @@ def load_checkpoint(path: str) -> Dict[str, Any]:
     """Load a .npz checkpoint into a dictionary of arrays."""
     with np.load(path) as data:
         return {k: jnp.array(v) for k, v in data.items()}
+
+
+def print_params(params, grid_shape=None):
+    """Pretty-print GKParams and optional grid shape."""
+    d = vars(params)
+
+    # group fields
+    solver_keys = [
+        "dt",
+        "naverage",
+        "non_linear",
+        "adaptive_dt",
+        "cfl_safety",
+        "finit",
+        "adiabatic_electrons",
+        "mixed_precision",
+    ]
+    dissipation_keys = ["disp_par", "disp_vp", "disp_x", "disp_y", "idisp"]
+    species_keys = ["rlt", "rln", "mas", "tmp", "de", "signz", "vthrat"]
+    geometry_keys = ["shat", "q", "eps", "kthnorm", "Rref", "d2X", "signB"]
+    grid_keys = ["dvp", "sgr_dist", "kxmax", "kymax", "dgrid", "tgrid"]
+
+    def _fmt(v):
+        if hasattr(v, "shape") and v.shape:
+            return "[" + ", ".join(f"{float(x):.6g}" for x in np.asarray(v).flat) + "]"
+        elif isinstance(v, float):
+            return f"{v:.6g}"
+        return str(v)
+
+    def _section(title, keys):
+        print(f"  {title}:")
+        for k in keys:
+            if k in d:
+                print(f"    {k:<24s} {_fmt(d[k])}")
+
+    _section("solver", solver_keys)
+    _section("dissipation", dissipation_keys)
+    _section("species", species_keys)
+    _section("geometry", geometry_keys)
+    _section("grid", grid_keys)
+
+    if grid_shape is not None:
+        labels = ["nvpar", "nmu", "ns", "nkx", "nky"]
+        if len(grid_shape) == 6:
+            labels = ["nsp"] + labels
+        dims = ", ".join(f"{name}={s}" for name, s in zip(labels, grid_shape))
+        print(f"  grid shape: {dims}")
+
+    print("=" * 88)

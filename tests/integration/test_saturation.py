@@ -2,9 +2,17 @@ import os
 import shutil
 import pytest
 import numpy as np
+import jax.numpy as jnp
 
 from gyaradax import load_config
-from gyaradax.simulate import gksimulate
+from gyaradax.simulate import (
+    gk_from_config,
+    gksimulate,
+    default_log,
+    _compute_phi_for_init,
+)
+from gyaradax.solver import GKState, mode_amplitude
+from gyaradax.utils import load_gkw_k_dump, read_gkw_dump_time
 
 
 @pytest.mark.skip(
@@ -35,15 +43,46 @@ def test_simulation_saturation():
 
     start_k_file = os.path.join(data_dir, str(start_dump))
 
-    # Run the simulation, skipping heavy 5D/3D state dumps
-    _, _ = gksimulate(
-        config_path,
+    # Load config and geometry
+    df, geometry, params, state, pre = gk_from_config(config_path)
+
+    # Resume from K-file
+    n_species = 1
+    if not params.adiabatic_electrons:
+        n_species = int(jnp.asarray(params.mas).shape[0])
+    res = (
+        len(geometry["intvp"]),
+        len(geometry["intmu"]),
+        len(geometry["ints"]),
+        len(geometry["kxrh"]),
+        len(geometry["krho"]),
+    )
+    df_k = load_gkw_k_dump(start_k_file, res, n_species=n_species)
+    nky = len(geometry["krho"])
+    dat_path = start_k_file + ".dat"
+    t_start = read_gkw_dump_time(dat_path) if os.path.exists(dat_path) else 0.0
+    phi0 = _compute_phi_for_init(df_k, geometry, params)
+    amp0 = mode_amplitude(phi0, geometry, params.norm_eps)
+    state_k = GKState(
+        time=jnp.array(t_start, dtype=jnp.float64),
+        step=jnp.array(0, dtype=jnp.int32),
+        accumulated_norm_factor=jnp.ones(nky, dtype=jnp.float64),
+        window_start_amp=amp0,
+        last_growth_rate=jnp.zeros(nky, dtype=jnp.float64),
+    )
+
+    # Run the simulation
+    gksimulate(
+        df_k,
+        geometry,
+        params,
+        state_k,
+        n_steps,
+        pre=pre,
         output_dir=output_dir,
-        resume_k_file=start_k_file,
-        n_steps=n_steps,
         checkpoint_interval=dump_interval,
-        save_dumps=False,  # do not save intermediate df and phi
-        verbose=True,
+        save_snapshots=False,
+        log_fn=default_log,
     )
 
     # simulated history

@@ -194,9 +194,7 @@ def test_kinetic_flux_integral_per_species_parity(
 
 
 @pytest.mark.parametrize("idx", [10, 50, 100])
-def test_spectrum_parity_with_gkw(
-    adiabatic_dir, adiabatic_geom, adiabatic_shape, idx
-):
+def test_spectrum_parity_with_gkw(adiabatic_dir, adiabatic_geom, adiabatic_shape, idx):
     """ky_spec and kx_spec from phi must match GKW's kxspec/kyspec diagnostics.
 
     GKW conventions:

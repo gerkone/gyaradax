@@ -202,12 +202,21 @@ def gkparams_from_config(config: Any, **overrides) -> GKParams:
         "non_linear": bool(getattr(solver_cfg, "non_linear", False)),
         "finit": str(getattr(solver_cfg, "finit", "cosine2")),
         "adiabatic_electrons": bool(getattr(config.grid, "adiabatic_electrons", True)),
+        "adaptive_dt": bool(getattr(solver_cfg, "adaptive_dt", False)),
+        "cfl_safety": float(getattr(solver_cfg, "cfl_safety", 0.95)),
     }
 
-    # physics scalars
+    # physics scalars (may be arrays for multi-species kinetic configs)
+    _SPECIES_PARAMS = {"rlt", "rln", "mas", "tmp", "de", "signz", "vthrat"}
     for k in ["rlt", "rln", "mas", "tmp", "de", "signz", "vthrat", "dgrid", "tgrid"]:
         if hasattr(physics_cfg, k):
-            params_dict[k] = float(getattr(physics_cfg, k))
+            v = getattr(physics_cfg, k)
+            if k in _SPECIES_PARAMS and hasattr(v, "__iter__") and not isinstance(v, str):
+                import jax.numpy as jnp
+
+                params_dict[k] = jnp.array([float(x) for x in v])
+            else:
+                params_dict[k] = float(v)
 
     # geometry scalars
     for k in ["shat", "q", "eps", "kthnorm", "Rref", "d2X", "signB"]:
