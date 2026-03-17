@@ -180,10 +180,21 @@ nonlinear FFTs.
 The large-step cadence `naverage` groups small steps for diagnostic output.
 In linear mode, per-$k_y$ normalization is applied at large-step boundaries.
 
-**CFL-adaptive timestep** (optional, `adaptive_dt=True`): the timestep is
-adjusted each step based on the maximum real-space ExB velocity gradient:
-$\Delta t = \sigma \times 2 / \max|\nabla\phi|$, clamped to the input `dt`.
-Safety factor $\sigma = 0.95$ by default.
+**CFL-adaptive timestep** (`adaptive_dt=True`, default for kinetic electrons):
+the timestep is adjusted each step to satisfy two CFL constraints:
+
+1. **Nonlinear ExB CFL**: $\Delta t_{NL} = \sigma \times 2 / \max|\nabla\phi|$,
+   computed from the dealiased real-space potential gradient. Safety factor
+   $\sigma = 0.95$ by default (`cfl_safety` parameter).
+
+2. **Linear parallel streaming CFL**: $\Delta t_{par} = 0.5 \times \Delta s / \max|v_{\parallel,s}|$
+   and $\Delta t_{trap} = 0.5 \times \Delta v_\parallel / \max|v_{trap,s}|$,
+   where the characteristic speeds include the per-species $v_{th,s}/v_{th,ref}$
+   scaling. For kinetic electrons with $v_{th,e}/v_{th,i} \approx 60$, this is
+   the binding constraint (dt ~ 0.002 vs input dt = 0.004).
+
+The effective timestep is $\Delta t = \min(\Delta t_{NL}, \Delta t_{par}, \Delta t_{trap}, \Delta t_{input})$.
+Uses one-step lag: each step's dt is estimated from the previous step's $\phi$.
 
 ### 3.2 spatial discretization
 
@@ -222,7 +233,7 @@ per-step branching on the sign of $v_\parallel$.
 | `analytic_geometry.py` | compute geometry analytically from equilibrium parameters (no GKW files) |
 | `stencils.py` | finite difference coefficient tables |
 | `utils.py` | K-dump loading, checkpoint save/load, diagnostics |
-| `simulate.py` | high-level simulation runner from YAML config |
+| `gksimulate.py` | high-level simulation runner from YAML config |
 | `plot_utils.py` | publication-quality visualization |
 
 ### 4.2 key interfaces
@@ -342,7 +353,7 @@ order. Species is the outermost (slowest) index.
 - perpendicular hyper-dissipation
 - RK4 explicit time integration
 - per-$k_y$ normalization (linear mode)
-- CFL-adaptive timestep (optional)
+- CFL-adaptive timestep (nonlinear ExB + linear parallel streaming)
 - standalone circular geometry computation (no precomputed GKW files needed)
 
 ### 7.2 not implemented
@@ -364,7 +375,6 @@ order. Species is the outermost (slowest) index.
 ### 7.3 known limitations
 
 - adaptive CFL uses one-step lag (current step uses previous step's CFL estimate)
-  data comes from the geometry dict
 - no multi-species output in `save_dumps` (fluxes are summed over species)
 
 ## 8. validation results
@@ -386,6 +396,8 @@ order. Species is the outermost (slowest) index.
 | trajectory 300 steps | ntsks128 | `rel_l2(df, ion)` | verified |
 | trajectory 300 steps | double_rlt | `rel_l2(df, ion)` | verified |
 | per-species flux | all 3 cases × 2 dumps | `rtol(eflux)` | `< 1e-2` |
+| CFL vs GKW dtim | all 3 cases | `ratio(dt_est, dtim)` | `0.3 – 3.0` |
+| adaptive CFL 20 steps | all 3 cases | finiteness (dt=0.004) | pass |
 | adiabatic fallback | 4 iterations | shapes + finiteness | pass |
 
 ## 9. circular geometry model (`analytic_geometry.py`)

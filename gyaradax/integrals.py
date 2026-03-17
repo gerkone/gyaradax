@@ -285,12 +285,12 @@ def get_integrals(
     For phi-only calls, use calculate_phi / calculate_phi_kinetic directly.
 
     Returns:
-        (phi, (pflux, eflux, vflux)).
+        (phi, fluxes) where fluxes is (pflux, eflux, vflux) for adiabatic
+        or (nsp, 3) array for kinetic electrons.
     """
     if not adiabatic_electrons and df.ndim == 6:
         phi = calculate_phi_kinetic(geometry, df)
-        fl = calculate_fluxes_kinetic(geometry, df, phi)
-        fluxes = (jnp.sum(fl[:, 0]), jnp.sum(fl[:, 1]), jnp.sum(fl[:, 2]))
+        fluxes = calculate_fluxes_kinetic(geometry, df, phi)  # (nsp, 3)
     else:
         if geom is None:
             geom = geom_tensors(geometry, params=params)
