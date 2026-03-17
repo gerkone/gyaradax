@@ -67,6 +67,7 @@ class GKParams:
     adiabatic_electrons: bool = True
     adaptive_dt: bool = False
     cfl_safety: float = 0.95
+    mixed_precision: bool = True
 
     # physical parameters (typically from the kinetic species)
     rlt: float = 1.0
@@ -96,7 +97,13 @@ class GKParams:
 
     # Fields that are not JAX-traceable (strings, booleans used for control flow)
     # and must be stored as pytree auxiliary data rather than leaves.
-    _STATIC_FIELDS = ("finit", "adiabatic_electrons", "non_linear", "adaptive_dt")
+    _STATIC_FIELDS = (
+        "finit",
+        "adiabatic_electrons",
+        "non_linear",
+        "adaptive_dt",
+        "mixed_precision",
+    )
 
     def tree_flatten(self):
         d = vars(self)

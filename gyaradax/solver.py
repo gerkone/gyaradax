@@ -26,6 +26,7 @@ import jax
 import jax.numpy as jnp
 
 jax.config.update("jax_enable_x64", True)
+jax.config.update("jax_compilation_cache_dir", "/tmp/jax_cache")
 
 import math
 import functools
@@ -212,6 +213,7 @@ def nonlinear_term_iii(
     efun_sign: float = 1.0,
     fft_prefactor: complex = 1.0 + 0.0j,
     exclude_zero_mode: bool = True,
+    mixed_precision: bool = True,
 ) -> jnp.ndarray:
     """Nonlinear ExB advection via pseudospectral method. df is 5D."""
     mrad, mphi, mphiw3 = pre["nl_mrad"], pre["nl_mphi"], pre["nl_mphiw3"]
@@ -230,22 +232,28 @@ def nonlinear_term_iii(
         grad_f_x_k = 1j * kx2d[None, None, :, :] * df_s
         grad_f_y_k = 1j * ky2d[None, None, :, :] * df_s
 
+        fft_dtype = jnp.complex64 if mixed_precision else jnp.complex128
+        real_dtype = jnp.float32 if mixed_precision else jnp.float64
+
         def _to_real(spec):
+            packed = pack_half_spectrum(spec, jind, mrad, mphiw3).astype(fft_dtype)
             return jnp.fft.irfft2(
-                pack_half_spectrum(spec, jind, mrad, mphiw3),
-                s=(mrad, mphi),
-                axes=(-2, -1),
-                norm="backward",
+                packed, s=(mrad, mphi), axes=(-2, -1), norm="backward"
             )
 
-        nl_real = (efun_sign * dum) * (
+        nl_real = (efun_sign * dum).astype(real_dtype) * (
             _to_real(grad_phi_y_k) * _to_real(grad_f_x_k)
             - _to_real(grad_phi_x_k) * _to_real(grad_f_y_k)
         )
         nl_half = (
             jnp.asarray(fft_prefactor, dtype=jnp.complex128)
             * jnp.asarray(fft_scale, dtype=jnp.complex128)
-            * jnp.fft.rfft2(nl_real, s=(mrad, mphi), axes=(-2, -1), norm="backward")
+            * jnp.fft.rfft2(
+                nl_real.astype(jnp.float64),
+                s=(mrad, mphi),
+                axes=(-2, -1),
+                norm="backward",
+            )
         )
         return unpack_half_spectrum(nl_half, jind, nky)
 
@@ -1055,13 +1063,14 @@ def _compute_linear_rhs(df, phi, geometry, params, pre):
 
 def _compute_nonlinear_rhs(df, phi, geometry, params, pre):
     """Compute nonlinear Term III for adiabatic (5D) or kinetic (6D) df."""
+    mp = params.mixed_precision
     if params.adiabatic_electrons:
-        return nonlinear_term_iii(df, phi, geometry, pre)
+        return nonlinear_term_iii(df, phi, geometry, pre, mixed_precision=mp)
     else:
 
         def _nl_sp(df_sp, bessel_sp):
             pre_sp = {**pre, "bessel": bessel_sp}
-            return nonlinear_term_iii(df_sp, phi, geometry, pre_sp)
+            return nonlinear_term_iii(df_sp, phi, geometry, pre_sp, mixed_precision=mp)
 
         return jax.vmap(_nl_sp)(df, pre["bessel"])
 

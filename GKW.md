@@ -193,7 +193,7 @@ per-step branching on the sign of $v_\parallel$.
 | `geometry.py` | load geometry from GKW `geom.dat` and `input.dat` |
 | `stencils.py` | finite difference coefficient tables |
 | `utils.py` | K-dump loading, checkpoint save/load, diagnostics |
-| `simulate.py` | high-level simulation runner from YAML config |
+| `gksimulate.py` | high-level simulation runner from YAML config |
 | `plot_utils.py` | publication-quality visualization |
 
 ### 4.2 key interfaces

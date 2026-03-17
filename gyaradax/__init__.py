@@ -1,28 +1,27 @@
 # lazy-loading package. jax config is handled by gyaradax.bootstrap.init_jax().
 
-_submodule_mapping = {
-    "GKParams": "gyaradax.params",
-    "load_config": "gyaradax.params",
-    "gkparams_from_config": "gyaradax.params",
-    "gksolve": "gyaradax.solver",
-    "GKPre": "gyaradax.solver",
-    "default_state": "gyaradax.solver",
-    "gkstep_single": "gyaradax.solver",
-    "init_f": "gyaradax.solver",
-    "gksimulate": "gyaradax.simulate",
-    "load_geometry": "gyaradax.geometry",
-    "get_integrals": "gyaradax.integrals",
-    "load_gkw_k_dump": "gyaradax.utils",
-}
+import jax
 
+jax.config.update("jax_enable_x64", True)
 
-def __getattr__(name):
-    if name in _submodule_mapping:
-        import importlib
+from gyaradax.params import GKParams, load_config, gkparams_from_config
+from gyaradax.solver import gksolve, GKPre, default_state, gkstep_single, init_f
+from gyaradax.simulate import gksimulate
+from gyaradax.geometry import load_geometry
+from gyaradax.integrals import get_integrals
+from gyaradax.utils import load_gkw_k_dump
 
-        module = importlib.import_module(_submodule_mapping[name])
-        return getattr(module, name)
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-
-
-__all__ = list(_submodule_mapping.keys())
+__all__ = [
+    "GKParams",
+    "GKPre",
+    "default_state",
+    "gksolve",
+    "gkstep_single",
+    "gksimulate",
+    "init_f",
+    "load_config",
+    "gkparams_from_config",
+    "load_geometry",
+    "get_integrals",
+    "load_gkw_k_dump",
+]
