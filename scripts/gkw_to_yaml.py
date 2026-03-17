@@ -1,7 +1,7 @@
 import os
 import argparse
 from omegaconf import OmegaConf
-from gyaradax.geometry import parse_input_dat, load_scalars
+from gyaradax.utils import parse_input_dat, load_scalars
 
 
 def gkw_to_yaml(gkw_dir, output_yaml):

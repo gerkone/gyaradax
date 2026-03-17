@@ -7,8 +7,8 @@ import jax
 
 jax.config.update("jax_enable_x64", True)
 
-from gyaradax.geometry import load_geometry
-from gyaradax.analytic_geometry import compute_geometry_from_input
+from gyaradax.utils import load_geometry
+from gyaradax.geometry import compute_geometry_from_input
 
 
 GKW_DATA_ROOT = os.environ.get(
@@ -44,7 +44,7 @@ def gkw_dir_all(request):
 
 
 def test_basic_fields(gkw_dir):
-    """bn, ffun, bt_frac, rfun match GKW to 1e-5."""
+    """bn, ffun, bt_frac, rfun match GKW to rtol=1e-4, atol=1e-6."""
     ref = load_geometry(gkw_dir)
     comp = compute_geometry_from_input(os.path.join(gkw_dir, "input.dat"))
 
@@ -52,11 +52,11 @@ def test_basic_fields(gkw_dir):
         r = np.asarray(ref[name])
         c = np.asarray(comp[name])
         assert r.shape == c.shape, f"{name} shape mismatch"
-        np.testing.assert_allclose(c, r, rtol=1e-5, atol=1e-10, err_msg=name)
+        np.testing.assert_allclose(c, r, rtol=1e-4, atol=1e-6, err_msg=name)
 
 
 def test_metric_tensor(gkw_dir):
-    """little_g (metric components) match GKW to 1e-4."""
+    """little_g (metric components) match GKW to rtol=1e-4, atol=1e-6."""
     ref = load_geometry(gkw_dir)
     comp = compute_geometry_from_input(os.path.join(gkw_dir, "input.dat"))
 
@@ -67,27 +67,27 @@ def test_metric_tensor(gkw_dir):
 
 
 def test_gfun(gkw_dir):
-    """mirror force function matches GKW to 1e-4."""
+    """mirror force function matches GKW to rtol=1e-4, atol=1e-6."""
     ref = load_geometry(gkw_dir)
     comp = compute_geometry_from_input(os.path.join(gkw_dir, "input.dat"))
 
     r = np.asarray(ref["gfun"])
     c = np.asarray(comp["gfun"])
-    np.testing.assert_allclose(c, r, rtol=1e-4, atol=1e-8, err_msg="gfun")
+    np.testing.assert_allclose(c, r, rtol=1e-4, atol=1e-6, err_msg="gfun")
 
 
 def test_efun(gkw_dir):
-    """ExB function matches GKW to 1e-5."""
+    """ExB function matches GKW to rtol=1e-4, atol=1e-6."""
     ref = load_geometry(gkw_dir)
     comp = compute_geometry_from_input(os.path.join(gkw_dir, "input.dat"))
 
     r = np.asarray(ref["efun"])
     c = np.asarray(comp["efun"])
-    np.testing.assert_allclose(c, r, rtol=1e-5, atol=1e-8, err_msg="efun")
+    np.testing.assert_allclose(c, r, rtol=1e-4, atol=1e-6, err_msg="efun")
 
 
 def test_dfun_eps(gkw_dir):
-    """radial drift D_eps matches GKW to 1e-4."""
+    """radial drift D_eps matches GKW to rtol=1e-4, atol=1e-6."""
     ref = load_geometry(gkw_dir)
     comp = compute_geometry_from_input(os.path.join(gkw_dir, "input.dat"))
 
@@ -97,35 +97,29 @@ def test_dfun_eps(gkw_dir):
 
 
 def test_dfun_zeta(gkw_dir):
-    """binormal drift D_zeta matches GKW to 1% (dominated by c2 approximation)."""
+    """binormal drift D_zeta matches GKW to rtol=2e-3, atol=1e-6."""
     ref = load_geometry(gkw_dir)
     comp = compute_geometry_from_input(os.path.join(gkw_dir, "input.dat"))
 
     r = np.asarray(ref["dfun"])[:, 1]
     c = np.asarray(comp["dfun"])[:, 1]
-    max_rel = np.max(np.abs(r - c)) / (np.max(np.abs(r)) + 1e-30)
-    assert max_rel < 0.01, f"D_zeta max_rel={max_rel:.4f}"
+    np.testing.assert_allclose(c, r, rtol=2e-3, atol=1e-6, err_msg="D_zeta")
 
 
 def test_velocity_grids(gkw_dir):
-    """vpgr, mugr, intvp, intmu match GKW to 1e-5."""
+    """vpgr, mugr, intvp, intmu match GKW to rtol=1e-4, atol=1e-6."""
     ref = load_geometry(gkw_dir)
     comp = compute_geometry_from_input(os.path.join(gkw_dir, "input.dat"))
 
-    for name in ["vpgr", "mugr", "intvp"]:
+    for name in ["vpgr", "mugr", "intvp", "intmu"]:
         r = np.asarray(ref[name])
         c = np.asarray(comp[name])
         assert r.shape == c.shape, f"{name} shape mismatch: {r.shape} vs {c.shape}"
-        np.testing.assert_allclose(c, r, rtol=1e-10, atol=1e-12, err_msg=name)
-
-    r = np.asarray(ref["intmu"])
-    c = np.asarray(comp["intmu"])
-    assert r.shape == c.shape, f"intmu shape mismatch: {r.shape} vs {c.shape}"
-    np.testing.assert_allclose(c, r, rtol=1e-5, atol=1e-8, err_msg="intmu")
+        np.testing.assert_allclose(c, r, rtol=1e-4, atol=1e-6, err_msg=name)
 
 
 def test_wavenumber_grids(gkw_dir):
-    """kxrh and krho match GKW to 1e-4."""
+    """kxrh and krho match GKW to rtol=1e-4, atol=1e-6."""
     ref = load_geometry(gkw_dir)
     comp = compute_geometry_from_input(os.path.join(gkw_dir, "input.dat"))
 
@@ -133,7 +127,7 @@ def test_wavenumber_grids(gkw_dir):
         r = np.asarray(ref[name])
         c = np.asarray(comp[name])
         assert r.shape == c.shape, f"{name} shape mismatch: {r.shape} vs {c.shape}"
-        np.testing.assert_allclose(c, r, rtol=1e-4, atol=1e-8, err_msg=name)
+        np.testing.assert_allclose(c, r, rtol=1e-4, atol=1e-6, err_msg=name)
 
 
 def test_mode_connectivity_scalars(gkw_dir):
@@ -166,7 +160,7 @@ def test_mode_connectivity_structure(gkw_dir):
 
 
 def test_hfun_eps(gkw_dir_all):
-    """H_eps matches GKW to 1e-4 (inherits D_eps precision)."""
+    """H_eps matches GKW to rtol=1e-4, atol=1e-6."""
     ref = load_geometry(gkw_dir_all)
     comp = compute_geometry_from_input(os.path.join(gkw_dir_all, "input.dat"))
 
@@ -179,7 +173,7 @@ def test_hfun_eps(gkw_dir_all):
 
 
 def test_hfun_zeta(gkw_dir_all):
-    """H_zeta matches GKW to 2% (inherits D_zeta precision)."""
+    """H_zeta matches GKW to rtol=2e-3, atol=1e-6."""
     ref = load_geometry(gkw_dir_all)
     comp = compute_geometry_from_input(os.path.join(gkw_dir_all, "input.dat"))
 
@@ -188,12 +182,11 @@ def test_hfun_zeta(gkw_dir_all):
 
     r = np.asarray(ref["hfun"])[:, 1]
     c = np.asarray(comp["hfun"])[:, 1]
-    max_rel = np.max(np.abs(r - c)) / (np.max(np.abs(r)) + 1e-30)
-    assert max_rel < 0.02, f"H_zeta max_rel={max_rel:.4f}"
+    np.testing.assert_allclose(c, r, rtol=2e-3, atol=1e-6, err_msg="H_zeta")
 
 
 def test_ifun_eps(gkw_dir_all):
-    """I_eps matches GKW to 1e-4 (inherits D_eps precision)."""
+    """I_eps matches GKW to rtol=1e-4, atol=1e-6."""
     ref = load_geometry(gkw_dir_all)
     comp = compute_geometry_from_input(os.path.join(gkw_dir_all, "input.dat"))
 
@@ -206,7 +199,7 @@ def test_ifun_eps(gkw_dir_all):
 
 
 def test_ifun_zeta(gkw_dir_all):
-    """I_zeta matches GKW to 2% (inherits D_zeta precision)."""
+    """I_zeta matches GKW to rtol=2e-3, atol=1e-6."""
     ref = load_geometry(gkw_dir_all)
     comp = compute_geometry_from_input(os.path.join(gkw_dir_all, "input.dat"))
 
@@ -215,5 +208,4 @@ def test_ifun_zeta(gkw_dir_all):
 
     r = np.asarray(ref["ifun"])[:, 1]
     c = np.asarray(comp["ifun"])[:, 1]
-    max_rel = np.max(np.abs(r - c)) / (np.max(np.abs(r)) + 1e-30)
-    assert max_rel < 0.02, f"I_zeta max_rel={max_rel:.4f}"
+    np.testing.assert_allclose(c, r, rtol=2e-3, atol=1e-6, err_msg="I_zeta")

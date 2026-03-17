@@ -206,7 +206,7 @@ $}
 \section{\texttt{gyaradax} Implementation}
 \label{sec:gyaradax}
 % TODO general introduction, and explain what does this code do
-\texttt{gyaradax} solves the collisionless electrostatic gyrokinetic equations in the local flux-tube limit, supporting both adiabatic and kinetic electron species. We designed it to be a slim, modern and ML-friendly alternative to GKW, written in JAX with the core solver in approximately 2000 lines.
+\texttt{gyaradax} solves the collisionless electrostatic gyrokinetic equations in the local flux-tube limit, supporting both adiabatic and kinetic electron soecues. We designed it to be a slim, modern and ML-friendly alternative to GKW, written in JAX with the core integrator and solver in about 1000 lines.
 % We release it publicly on GitHub\footnote{\url{https://github.com/gerkone/gyaradax}}.
 
 \subsection{Time Integration}
@@ -421,6 +421,7 @@ The metric components $g_{\psi\psi}$, $g_{\psi\zeta}$, $g_{\zeta\zeta}$, $g_{\ps
 k_\perp^2 = k_y^2 g_{\zeta\zeta} + 2 k_x k_y\, g_{\psi\zeta} + k_x^2 g_{\psi\psi}
 \end{equation}
 The cross-term $g_{\psi\zeta}$ (the ``dzetadeps'' coupling) encodes the integrated magnetic shear: it vanishes at the outboard midplane and grows along the field line, tilting eddies via $k_{x,\text{loc}} = k_x + k_y\, g_{\psi\zeta}$.
+The $d\zeta/d\varepsilon$ computation uses a branch-tracked $\arctan$ with a finite-$\varepsilon$ correction (GKW \texttt{geom.f90} lines 1492--1511). This correction introduces an inherent $\sim 0.1\%$ model-level approximation that propagates into all $\zeta$-direction drift tensors ($D_\zeta$, $H_\zeta$, $I_\zeta$), while the radial ($\psi$) components remain accurate to $< 10^{-4}$.
 
 \paragraph{Drift tensors.}
 All derivatives ($dB/d\psi$, $dR/d\psi$, $dZ/d\psi$, etc.) are first computed in $(\psi, \theta)$ space, then transformed to $(\psi, s)$ coordinates via the Jacobian:

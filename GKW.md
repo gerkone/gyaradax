@@ -229,10 +229,9 @@ per-step branching on the sign of $v_\parallel$.
 | `solver.py` | RK4 integrator, linear RHS, nonlinear term III, precomputation, CFL |
 | `integrals.py` | phi solvers (adiabatic + kinetic), flux calculations |
 | `params.py` | `GKParams` dataclass, config/input.dat loading |
-| `geometry.py` | load geometry from GKW `geom.dat` and `input.dat` |
-| `analytic_geometry.py` | compute geometry analytically from equilibrium parameters (no GKW files) |
+| `geometry.py` | analytic circular geometry + mode connectivity (primary path) |
 | `stencils.py` | finite difference coefficient tables |
-| `utils.py` | K-dump loading, checkpoint save/load, diagnostics |
+| `utils.py` | K-dump loading, checkpoint save/load, diagnostics, GKW file-loading (`load_geometry`, `parse_input_dat`) |
 | `gksimulate.py` | high-level simulation runner from YAML config |
 | `plot_utils.py` | publication-quality visualization |
 
@@ -400,7 +399,7 @@ order. Species is the outermost (slowest) index.
 | adaptive CFL 20 steps | all 3 cases | finiteness (dt=0.004) | pass |
 | adiabatic fallback | 4 iterations | shapes + finiteness | pass |
 
-## 9. circular geometry model (`analytic_geometry.py`)
+## 9. circular geometry model (`geometry.py`)
 
 Formulas translated from `gkw_ref/src/geom.f90` (`geom_circ` lines 1444-1616,
 `calc_geom_tensors` lines 3487-3634). `compute_geometry()` produces the full
@@ -461,8 +460,15 @@ All arrays verified against 7 GKW trajectories (4 adiabatic, 3 kinetic):
 |-------|--------------------|
 | `bn`, `ffun`, `bt_frac`, `rfun` | $< 5 \times 10^{-6}$ |
 | `gfun`, `efun`, `little_g` | $< 2 \times 10^{-5}$ |
-| `dfun`, `hfun`, `ifun` (all components) | $< 2 \times 10^{-5}$ |
+| `dfun`, `hfun`, `ifun` (eps component) | $< 10^{-4}$ |
+| `dfun`, `hfun`, `ifun` (zeta component) | $< 2 \times 10^{-3}$ |
 | velocity / wavenumber grids | $< 10^{-6}$ |
+
+The zeta-direction tensors (`D_zeta`, `H_zeta`, `I_zeta`) have ~0.1% model-level
+error originating from the finite-$\varepsilon$ correction in `_dzetadeps` (the
+branch-tracked atan for $d\zeta/d\varepsilon$). This is an inherent approximation
+in the Lapillonne circular model, not numerical error. The radial (eps) components
+are unaffected.
 
 68 tests in `tests/unit/test_analytic_geometry.py`.
 
