@@ -206,7 +206,7 @@ $}
 \section{\texttt{gyaradax} Implementation}
 \label{sec:gyaradax}
 % TODO general introduction, and explain what does this code do
-\texttt{gyaradax} solves the collisionless electrostatic gyrokinetic equations in the local flux-tube limit, supporting both adiabatic and kinetic electron models. We designed it to be a slim, modern and ML-friendly alternative to GKW, written in JAX with the core solver in approximately 2000 lines.
+\texttt{gyaradax} solves the collisionless electrostatic gyrokinetic equations in the local flux-tube limit, supporting both adiabatic and kinetic electron soecues. We designed it to be a slim, modern and ML-friendly alternative to GKW, written in JAX with the core integrator and solver in about 1000 lines.
 % We release it publicly on GitHub\footnote{\url{https://github.com/gerkone/gyaradax}}.
 
 \subsection{Time Integration}
@@ -257,17 +257,17 @@ Because the authors have a conceptual understanding of the solver structure and 
 Intermediate verification was requested at the end of each stage, allowing for correction of sign errors, NaNs and drift from reference.
 %
 To obtain the final prompt, we feed this initial human-written version to Gemini 3.1 Pro, with the goal of obtaining a structured format that's better suited for modern LLMs.
-
+%
 We include the final version of the prompt in Appendix \ref{app:prompt}.
 
 \textbf{Models.}
-Regarding the specific models used, our original attempt was with Google Gemini 3.1 Pro \cite{gemini31pro_2026} through the \texttt{gemini-cli} agent. However, for multiple times this produced unreasonable results and was blocked by the authors before reaching the later testing stages.
+Our original attempt was with Gemini 3.1 Pro \cite{gemini31pro_2026} through the \texttt{gemini-cli} agent. However, over multiple parallel tries this produced unreasonable results and was blocked by the authors before reaching later stages.
 %
-We transitioned to OpenAI GPT-5.3 CODEX \cite{openai_gpt53_codex_2026}, which ended up performing the heavy lifting of the port.
+We switched to GPT-5.3 CODEX \cite{openai_gpt53_codex_2026} and Claude Opus 4.6 \cite{anthropic2026claude46opus}, which ended up being more successful. CODEX performed the heavy lifting in the initial port, while Claude helped in the kinetic electron part.
 %
-Gemini 3.1 Flash and Pro models were mostly applied to refactoring and paper writing. With the entire codebase into context, we found Gemini to be quite capable of producing documentation material.
+Gemini and Claude were then applied to refactoring and documentation writing. With the entire codebase into context, we found both models capable of producing quality documentation material.
 %
-The final performance optimizations was ...\GG{claude?}
+The final performance optimizations was ... \GG{TODO}
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
@@ -279,7 +279,7 @@ Moreover, we execute empirical numerical alignment against additional GKW refere
 The goal is to verify parity across operators, as well as long-term stability and convergence across multiple test cases.
 
 \subsection{GKW Test Cases}
-\textbf{Cyclone Base Cases.}
+\textbf{Cyclone Base Cases (CBC).}
 
 \textbf{Analytical scenarios.}
 
@@ -352,6 +352,8 @@ Ultimately, we present our work as a proof-of-concept for the rapid agent-assist
 \onecolumn
 
 \section{Parameters}
+
+\subsection{Phase-Space Variables}
 \renewcommand{\arraystretch}{1.4}
 \begin{longtable}{p{0.125\textwidth} p{0.2\textwidth} p{0.525\textwidth}}
 \toprule
@@ -367,27 +369,98 @@ Ultimately, we present our work as a proof-of-concept for the rapid agent-assist
 $\delta f_a$ & \texttt{df} & Perturbed distribution function for species $a$. Shape: $(N_{v\parallel}, N_\mu, N_s, N_{kx}, N_{ky})$ for adiabatic; $(N_{sp}, N_{v\parallel}, N_\mu, N_s, N_{kx}, N_{ky})$ for kinetic electrons. \\
 $\phi, \langle\phi\rangle$ & \texttt{phi, gyro\_phi} & Electrostatic and gyro-averaged potential ($J_0 \phi$). Shape: $(N_s, N_{kx}, N_{ky})$. \\
 $s$ & \texttt{sgrid} & Field-line coordinate, $s \in [-0.5, 0.5]$ in units of $2\pi q$. \\
-$v_\parallel, \mu$ & \texttt{vpgr, mugr} & Parallel velocity (uniform grid) and magnetic moment (Gauss-Laguerre quadrature). \\
+$v_\parallel, \mu$ & \texttt{vpgr, mugr} & Parallel velocity (uniform grid) and magnetic moment ($\mu = v_\perp^2/2$, uniform in $v_\perp$). \\
 $k_x, k_y$ & \texttt{kxrh, krho} & Radial and binormal spectral wavevectors, normalized to $\rho_{ref}$. \\
-$m_a, T_a$ & \texttt{mas, tmp} & Species mass and temperature, normalized to reference. Scalar (adiabatic) or array of length $N_{sp}$ (kinetic). \\
-$n_a, Z_a$ & \texttt{de, signz} & Species density and charge number. Same shape convention as mass/temperature. \\
-$R/L_T, R/L_n$ & \texttt{rlt, rln} & Inverse temperature and density gradient scale lengths. Per-species for kinetic electrons. \\
-$B$ & \texttt{bn} & Magnetic field magnitude along $s$, normalized to $B_{ref}$. \\
-$v_{th,a}/v_{th,ref}$ & \texttt{vthrat} & Thermal velocity ratio $\sqrt{T_a/m_a}$ relative to reference species. \\
-$F_{M,a}, J_0$ & \texttt{fmaxwl, bessel} & Background Maxwellian and Bessel $J_0(k_\perp \rho_a)$. Per-species in kinetic mode. \\
-$\Gamma_0$ & \texttt{gamma} & FLR kernel $I_0(b_a) e^{-b_a}$ with $b_a = \tfrac{1}{2}(m_a v_{th,a} k_\perp / Z_a B)^2$. \\
-$\mathcal{F}, \mathcal{G}$ & \texttt{ffun, gfun} & Parallel gradient ($\mathbf{b} \cdot \nabla s$) and mirror term ($-B^{-1}\nabla_\parallel B$). \\
-$\mathcal{D}, \mathcal{E}$ & \texttt{dfun, efun} & Magnetic drift tensor components and $E \times B$ geometric factor. \\
-$g^{ij}$ & \texttt{little\_g} & Metric tensor for local perpendicular wavevectors: $k_\perp^2 = g^{11} k_y^2 + 2g^{12} k_x k_y + g^{22} k_x^2$. \\
 $\Delta s, \Delta v_\parallel$ & \texttt{sgr\_dist, dvp} & Parallel and velocity grid spacing. \\
-$w_s, w_v, w_\mu$ & \texttt{ints, intvp, intmu} & Phase-space integration weights for $s$, $v_\parallel$, and $\mu$ quadrature. \\
+$w_s, w_v, w_\mu$ & \texttt{ints, intvp, intmu} & Phase-space integration weights for $s$, $v_\parallel$, and $\mu$. The $\mu$ weights are $2\pi v_\perp \Delta v_\perp$ (cylindrical Jacobian). \\
 $P_{k_y}$ & \texttt{parseval} & Parseval normalization: 1 for $k_y=0$, $2N_{ky}$ otherwise. \\
-$\hat{s}, q, \epsilon$ & \texttt{shat, q, eps} & Magnetic shear, safety factor, and inverse aspect ratio. \\
 $\Delta t$ & \texttt{dt} & Small timestep for RK4 integration. May vary per step when CFL-adaptive. \\
 \bottomrule
 \end{longtable}
 
-\newpage
+\subsection{Species Parameters}
+
+\begin{longtable}{p{0.125\textwidth} p{0.2\textwidth} p{0.525\textwidth}}
+\toprule
+\textbf{Symbol} & \textbf{Code Key} & \textbf{Description} \\
+\midrule
+\endfirsthead
+\midrule
+\endhead
+\bottomrule
+\endfoot
+$m_a, T_a$ & \texttt{mas, tmp} & Species mass and temperature, normalized to reference. Scalar (adiabatic) or array of length $N_{sp}$ (kinetic). \\
+$n_a, Z_a$ & \texttt{de, signz} & Species density and charge number. Same shape convention as mass/temperature. \\
+$R/L_T, R/L_n$ & \texttt{rlt, rln} & Inverse temperature and density gradient scale lengths. Per-species for kinetic electrons. \\
+$v_{th,a}/v_{th,ref}$ & \texttt{vthrat} & Thermal velocity ratio $\sqrt{T_a/m_a}$ relative to reference species. \\
+$F_{M,a}, J_0$ & \texttt{fmaxwl, bessel} & Background Maxwellian and Bessel $J_0(k_\perp \rho_a)$. Per-species in kinetic mode. \\
+$\Gamma_0$ & \texttt{gamma} & FLR kernel $I_0(b_a) e^{-b_a}$ with $b_a = \tfrac{1}{2}(m_a v_{th,a} k_\perp / Z_a B)^2$. \\
+\bottomrule
+\end{longtable}
+
+\subsection{Geometry and Magnetic Equilibrium}
+\label{app:geometry}
+
+The gyrokinetic equation is formulated in a field-aligned coordinate system $(\psi, \zeta, s)$, where $\psi$ labels the flux surface (radial direction), $\zeta$ is the field-line label (binormal direction), and $s$ follows the magnetic field line (parallel direction). The \textit{geometry} encodes how this abstract coordinate system maps to physical space: it provides the covariant metric tensor $g_{ij}$ (for $k_\perp^2$ and perpendicular gradients), the magnetic field strength $B(s)$ (for mirror forces, gyro-averaging, and drifts), and a set of derived tensors that enter the gyrokinetic equation as advection coefficients.
+
+\texttt{gyaradax} supports a standalone circular equilibrium model (Lapillonne, translated from GKW \texttt{geom.f90}) that computes all geometry arrays from three equilibrium scalars $(q, \hat{s}, \varepsilon)$ plus grid resolution parameters, eliminating the need for precomputed geometry files.
+
+\paragraph{Equilibrium parameters.}
+The safety factor $q$ controls how tightly wound the field lines are (large $q$ = nearly toroidal lines, weak poloidal field). The magnetic shear $\hat{s} = (r/q)\,dq/dr$ measures how $q$ varies radially and drives the spectral mode connectivity: adjacent $k_x$ modes couple across the parallel boundary with shift $\Delta k_x = 2\pi\hat{s}\,k_y$. The inverse aspect ratio $\varepsilon = r/R_0$ sets the strength of toroidal effects: the outboard midplane ($\theta=0$) sees a weaker field than the inboard side ($\theta=\pi$), producing trapped-particle physics and the ballooning structure characteristic of tokamak turbulence.
+
+In the circular model, the magnetic field strength is:
+\begin{equation}
+B(s) = \frac{\delta}{1 + \varepsilon\cos\theta(s)}, \qquad \delta = \sqrt{1 + \frac{\varepsilon^2}{q^2(1-\varepsilon^2)}}
+\label{eq:bn_circ}
+\end{equation}
+where $\theta(s)$ is obtained by inverting $\theta + \varepsilon\sin\theta = 2\pi s$.
+
+\paragraph{Metric tensor.}
+The metric components $g_{\psi\psi}$, $g_{\psi\zeta}$, $g_{\zeta\zeta}$, $g_{\psi s}$, $g_{\zeta s}$, $g_{ss}$ define how coordinate distances map to physical distances. The solver uses these in the perpendicular wavenumber calculation:
+\begin{equation}
+k_\perp^2 = k_y^2 g_{\zeta\zeta} + 2 k_x k_y\, g_{\psi\zeta} + k_x^2 g_{\psi\psi}
+\end{equation}
+The cross-term $g_{\psi\zeta}$ (the ``dzetadeps'' coupling) encodes the integrated magnetic shear: it vanishes at the outboard midplane and grows along the field line, tilting eddies via $k_{x,\text{loc}} = k_x + k_y\, g_{\psi\zeta}$.
+
+\paragraph{Drift tensors.}
+All derivatives ($dB/d\psi$, $dR/d\psi$, $dZ/d\psi$, etc.) are first computed in $(\psi, \theta)$ space, then transformed to $(\psi, s)$ coordinates via the Jacobian:
+\begin{equation}
+f^{(s)}_\psi = f^{(\theta)}_\psi - \frac{\sin\theta}{1+\varepsilon\cos\theta}\, f_\theta, \qquad
+f_s = \frac{2\pi}{1+\varepsilon\cos\theta}\, f_\theta
+\end{equation}
+The $E$-tensor (ExB operator) is built from the antisymmetric cofactors of the first two metric rows, scaled by $\pi\, dp_f/d\psi / B^2$ where $dp_f/d\psi = \varepsilon/(q\sqrt{1-\varepsilon^2})$. The curvature drift tensor is then:
+\begin{equation}
+D_j = \frac{-2\bigl(E_{j,\psi}\,\partial_\psi B + E_{j,s}\,\partial_s B\bigr)}{B}
+\end{equation}
+$D_\psi$ drives radial transport (proportional to $\sin\theta$, strongest at top/bottom); $D_\zeta$ drives binormal transport (proportional to $\cos\theta$ + shear corrections, strongest at the outboard midplane). They enter Term~II of the gyrokinetic equation as $-i(k_x D_\psi + k_y D_\zeta)(v_\parallel^2 + \mu B)\,\delta f$.
+
+The $H$-tensor (Coriolis drift) uses $dZ/d\psi$ and $dZ/ds$ with metric coupling; the $I$-tensor (centrifugal drift) uses $E \cdot \nabla R$ scaled by $2R$. Both are stored for future rotation physics.
+
+\begin{longtable}{p{0.125\textwidth} p{0.2\textwidth} p{0.525\textwidth}}
+\toprule
+\textbf{Symbol} & \textbf{Code Key} & \textbf{Description} \\
+\midrule
+\endfirsthead
+\midrule
+\endhead
+\bottomrule
+\endfoot
+$q$ & \texttt{q} & Safety factor. Controls field-line winding and parallel domain extent. \\
+$\hat{s}$ & \texttt{shat} & Magnetic shear $(r/q)\,dq/dr$. Drives mode connectivity across the parallel boundary. \\
+$\varepsilon$ & \texttt{eps} & Inverse aspect ratio $r/R_0$. Controls trapped-particle fraction and ballooning. \\
+$B(s)$ & \texttt{bn} & Magnetic field magnitude along the field line, normalized to $B_{ref}$. \\
+$\mathcal{F}$ & \texttt{ffun} & Parallel streaming coefficient: $\mathcal{F} = b_{ups}/B$ where $b_{ups} = 1/(2\pi q\sqrt{1-\varepsilon^2})$. \\
+$\mathcal{G}$ & \texttt{gfun} & Mirror force: $\mathcal{G} = \mathcal{F} \cdot (\partial_s B)/B$. Drives particle trapping. \\
+$g_{ij}$ & \texttt{little\_g} & Perpendicular metric: stores $(g_{\zeta\zeta}, g_{\psi\zeta}, g_{\psi\psi})$ for $k_\perp^2$. \\
+$\mathcal{D}_j$ & \texttt{dfun} & Curvature + $\nabla B$ drift (3 components: $\psi$, $\zeta$, $s$). \\
+$\mathcal{E}_{\psi\zeta}$ & \texttt{efun} & ExB geometric factor (constant along the field line for circular geometry). \\
+$\mathcal{H}_j$ & \texttt{hfun} & Coriolis drift tensor (3 components). For rotation physics. \\
+$\mathcal{I}_j$ & \texttt{ifun} & Centrifugal drift tensor (3 components). For rotation physics. \\
+$B_t/B$ & \texttt{bt\_frac} & Toroidal fraction of the total field $= 1/\delta$. \\
+$R$ & \texttt{rfun} & Major radius along the field line: $R = 1 + \varepsilon\cos\theta$. \\
+$k_{th}$ & \texttt{kthnorm} & Binormal wavenumber normalization: $k_{th} = \sqrt{g_{\zeta\zeta}(\theta=0)}$. \\
+\bottomrule
+\end{longtable}
 
 \section{Functions}
 \renewcommand{\arraystretch}{1.4}

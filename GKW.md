@@ -41,19 +41,47 @@ Species parameters are normalized relative to the reference species:
 - $\hat{T}_s = T_s / T_{ref}$, $\hat{n}_s = n_s / n_{ref}$
 - $v_{th,s}/v_{th,ref} = \sqrt{\hat{T}_s / \hat{m}_s}$ (stored as `vthrat`)
 
-### 1.2 phase space coordinates
+### 1.2 field-aligned coordinates and geometry
+
+The gyrokinetic equation is not solved on a physical $(R, Z, \phi)$ grid.
+Instead it operates in a field-aligned coordinate system $(\psi, \zeta, s)$
+that follows the magnetic field lines. Here $s$ runs along the field line
+(parallel direction), $\psi$ labels the flux surface (radial direction), and
+$\zeta$ is the field-line label within a surface (binormal direction).
+
+The *geometry* encodes how this abstract coordinate system maps to physical
+space. It provides:
+- the **covariant metric tensor** $g_{ij}$, needed for $k_\perp^2$ and
+  perpendicular gradients
+- the **magnetic field strength** $B(s)$, needed for the mirror force,
+  gyro-averaging, and drift velocities
+- a set of **derived drift tensors** (D, E, H, I) that enter the
+  gyrokinetic equation as advection coefficients
+
+gyaradax supports two geometry paths: loading precomputed GKW files via
+`load_geometry()`, or computing everything analytically from equilibrium
+parameters via `compute_geometry()`. See section 9 for the circular model
+formulas.
+
+**Equilibrium parameters.** The safety factor $q$ controls field-line winding;
+the magnetic shear $\hat{s} = (r/q)\,dq/dr$ drives spectral mode connectivity
+(adjacent $k_x$ modes couple with shift $\Delta k_x = 2\pi\hat{s} k_y$);
+the inverse aspect ratio $\varepsilon = r/R_0$ sets the strength of toroidal
+effects (trapped particles, ballooning).
+
+### 1.3 phase space coordinates
 
 | coordinate | symbol | grid | range |
 |-----------|--------|------|-------|
 | parallel velocity | $v_\parallel$ | uniform | $[-v_{max}, v_{max}]$, typically $\pm 3 v_{th}$ |
-| magnetic moment | $\mu$ | Gauss-Laguerre | $[0, \infty)$, 8 quadrature points |
-| field-line coordinate | $s$ | uniform | $[-0.5, 0.5]$ in units of $2\pi q$ |
-| radial wavenumber | $k_x$ | discrete | from mode connectivity |
+| magnetic moment | $\mu$ | uniform in $v_\perp$ | $\mu = v_\perp^2/2$, weights $2\pi v_\perp \Delta v_\perp$ |
+| field-line coordinate | $s$ | uniform | $[-0.5, 0.5]$ for `nperiod=1` |
+| radial wavenumber | $k_x$ | discrete | centered FFT grid, from mode connectivity |
 | binormal wavenumber | $k_y$ | uniform | $[0, k_{y,max}]$ |
 
 The standard grid is `(nvpar=32, nmu=8, ns=16, nkx=85, nky=32)`.
 
-### 1.3 species model
+### 1.4 species model
 
 **Adiabatic electrons** (`adiabatic_electrons=True`): only ions are evolved
 kinetically. Electrons respond instantaneously via the Boltzmann relation
@@ -360,279 +388,69 @@ order. Species is the outermost (slowest) index.
 | per-species flux | all 3 cases × 2 dumps | `rtol(eflux)` | `< 1e-2` |
 | adiabatic fallback | 4 iterations | shapes + finiteness | pass |
 
-## 9. analytic geometry (`analytic_geometry.py`)
+## 9. circular geometry model (`analytic_geometry.py`)
 
-### 9.1 overview
+Formulas translated from `gkw_ref/src/geom.f90` (`geom_circ` lines 1444-1616,
+`calc_geom_tensors` lines 3487-3634). `compute_geometry()` produces the full
+geometry dict from equilibrium parameters; `simulate()` uses it automatically
+when `data_dir` is absent from the YAML config.
 
-`compute_geometry()` produces the full geometry dict from equilibrium parameters
-alone, replacing `load_geometry()` when precomputed GKW files are unavailable.
-The formulas are translated directly from `gkw_ref/src/geom.f90` (`geom_circ`
-and `calc_geom_tensors`). When `data_dir` is absent from a YAML config,
-`simulate()` automatically falls back to computed geometry.
+### 9.1 magnetic field and poloidal angle
 
-### 9.2 circular model (Lapillonne)
+The field-line coordinate $s$ maps to poloidal angle $\theta$ via
+$\theta + \varepsilon \sin\theta = 2\pi s$, solved by 10 fixed-point iterations
+(convergence $\sim \varepsilon^{10}$). The magnetic field strength is:
 
-The model uses `geom_type='circ'` with `finite_epsilon=True`. Input parameters:
+$$B(s) = \frac{\delta}{1 + \varepsilon\cos\theta}, \qquad
+\delta = \sqrt{1 + \frac{\varepsilon^2}{q^2(1-\varepsilon^2)}}$$
 
-| parameter | symbol | description |
-|-----------|--------|-------------|
-| `q` | $q$ | safety factor |
-| `shat` | $\hat{s}$ | magnetic shear $= (r/q) dq/dr$ |
-| `eps` | $\varepsilon$ | inverse aspect ratio $= r/R$ |
-| `ns` | $N_s$ | parallel grid points |
-| `nperiod` | | number of poloidal turns |
+### 9.2 metric tensor
 
-All 7 GKW trajectories use $\varepsilon = 0.19$, $N_s = 16$, `nperiod=1`.
-
-**Poloidal angle inversion.** The field-line coordinate $s$ maps to poloidal
-angle $\theta$ via $\theta + \varepsilon \sin\theta = 2\pi s$, solved by
-10 fixed-point iterations (convergence $\sim \varepsilon^{10}$).
-
-**Magnetic field.** $B(s) = \delta / (1 + \varepsilon\cos\theta)$ where
-$\delta = \sqrt{1 + \varepsilon^2 / (q^2(1-\varepsilon^2))}$.
-
-**Metric tensor** in $(\psi, \zeta, s)$ coordinates:
-- $g_{\psi\psi} = 1$
-- $g_{\psi\zeta} = d\zeta/d\varepsilon$ (shear-related coupling, computed with
-  branch-tracked `atan` following `geom.f90` lines 1492-1511)
+In $(\psi, \zeta, s)$ coordinates, $g_{\psi\psi} = 1$ and:
+- $g_{\psi\zeta} = d\zeta/d\varepsilon$: shear coupling, computed with
+  branch-tracked `atan` (`geom.f90` lines 1492-1511)
 - $g_{\psi s} = \sin\theta / (2\pi)$
-- $g_{\zeta\zeta}$, $g_{\zeta s}$, $g_{ss}$ from the standard circular formulae
+- $g_{\zeta\zeta}$, $g_{\zeta s}$, $g_{ss}$: standard circular formulae
 
-**Jacobian transform.** All derivatives ($dB/d\psi$, $dR/d\psi$, $dZ/d\psi$)
-are computed in $(\psi, \theta)$ space then transformed to $(\psi, s)$ via:
+### 9.3 jacobian transform
+
+All field derivatives ($dB/d\psi$, $dR/d\psi$, $dZ/d\psi$) are computed in
+$(\psi, \theta)$ space then transformed to $(\psi, s)$:
+
 $$f_\psi^{(s)} = f_\psi^{(\theta)} - \frac{\sin\theta}{1+\varepsilon\cos\theta} f_\theta, \qquad
 f_s = \frac{2\pi}{1+\varepsilon\cos\theta} f_\theta$$
 
-### 9.3 geometry tensors (`calc_geom_tensors`)
+The radial derivative of $B$ in $(\psi, \theta)$ uses the finite-$\varepsilon$
+formula from `geom.f90` line 1528:
 
-Translated from `geom.f90` lines 3487-3634.
+$$\partial_\psi B\big|_\theta = B\left(\frac{-\cos\theta}{1+\varepsilon\cos\theta}
++ \frac{\varepsilon(1-\hat{s}+\varepsilon^2/(1-\varepsilon^2))}
+{\varepsilon^2 + q^2(1-\varepsilon^2)}\right)$$
 
-**E-tensor** (ExB operator): antisymmetric cofactors of metric rows 0 and 1,
-scaled by $\text{sign}(J) \cdot \pi \cdot dp_f/d\psi / B^2$ where
+### 9.4 drift tensors
+
+**E-tensor** (ExB): antisymmetric cofactors of metric rows 0 and 1,
+scaled by $\pi \cdot dp_f/d\psi / B^2$ where
 $dp_f/d\psi = \varepsilon / (q\sqrt{1-\varepsilon^2})$.
 
-**D-tensor** (curvature drift):
-$D_j = \bigl(-2 E_{j,\psi} \, dB/d\psi - 2 E_{j,s} \, dB/ds\bigr) / B$
+**D-tensor** (curvature + $\nabla B$):
+$D_j = (-2 E_{j,\psi}\,\partial_\psi B - 2 E_{j,s}\,\partial_s B) / B$
 
-**H-tensor** (Coriolis drift): uses $dZ/d\psi$, $dZ/ds$ with metric coupling
-and a finite-$\varepsilon$ correction on the $s$-component.
+**H-tensor** (Coriolis): $H_j = -\sigma_B(g_{j,\psi}\,\partial_\psi Z + g_{j,s}\,\partial_s Z)/B$
+with finite-$\varepsilon$ correction $H_s \mathrel{+}= \sigma_B b_{ups}^2 (\partial_s Z)/B^2$.
 
-**I-tensor** (centrifugal drift): $I_j = 2R(E_{j,\psi} \, dR/d\psi + E_{j,s} \, dR/ds)$.
+**I-tensor** (centrifugal): $I_j = 2R(E_{j,\psi}\,\partial_\psi R + E_{j,s}\,\partial_s R)$
 
-### 9.4 velocity and wavenumber grids
+### 9.5 validation
 
-- $v_\parallel$: uniform cell-centered grid on $[-v_{max}, v_{max}]$,
-  $\Delta v = 2 v_{max} / N_{v\parallel}$
-- $\mu$: uniform in $v_\perp$ with $\Delta v_\perp = v_{max}/N_\mu$,
-  then $\mu = v_\perp^2/2$. Integration weights $= 2\pi v_\perp \Delta v_\perp$
-- $k_x$: centered grid $[-k_{x,max}, k_{x,max}]$ with $N_{kx}$ points
-- $k_y$: $= [0, dk_y, \ldots, (N_{ky}-1) dk_y]$ where $dk_y = k_{\rho,max}/(N_{ky}-1)$
+All arrays verified against 7 GKW trajectories (4 adiabatic, 3 kinetic):
 
-### 9.5 standalone simulation
+| field | max relative error |
+|-------|--------------------|
+| `bn`, `ffun`, `bt_frac`, `rfun` | $< 5 \times 10^{-6}$ |
+| `gfun`, `efun`, `little_g` | $< 2 \times 10^{-5}$ |
+| `dfun`, `hfun`, `ifun` (all components) | $< 2 \times 10^{-5}$ |
+| velocity / wavenumber grids | $< 10^{-6}$ |
 
-YAML configs can omit `data_dir` to run with computed geometry:
+68 tests in `tests/unit/test_analytic_geometry.py`.
 
-```yaml
-run:
-  name: standalone_example
-solver:
-  dt: 0.01
-  # ...
-geometry:
-  geometry_model: circ
-  q: 7.73187
-  shat: 2.14389
-  eps: 0.19
-  kxmax: 6.1919
-grid:
-  ns: 16
-  nkx: 85
-  nky: 32
-  nvpar: 32
-  nmu: 8
-  vpar_max: 3.0
-  nperiod: 1
-  krhomax: 1.4
-  ikxspace: 5
-```
-
-When `data_dir` is present, `load_geometry()` is used for backward compatibility.
-K-file initial conditions (`resume_k_file`) still require `data_dir`.
-
-### 9.6 validation against GKW
-
-All geometry arrays verified against 7 GKW trajectories (4 adiabatic, 3 kinetic):
-
-| field | max relative error | notes |
-|-------|--------------------|-------|
-| `bn`, `ffun`, `bt_frac`, `rfun` | $< 5 \times 10^{-6}$ | exact |
-| `gfun` (mirror force) | $< 2 \times 10^{-5}$ | exact |
-| `efun` (ExB) | $< 2 \times 10^{-6}$ | exact |
-| `little_g` (metric) | $< 1 \times 10^{-5}$ | exact |
-| `dfun` (D-tensor) | $< 2 \times 10^{-5}$ | all 3 components |
-| `hfun` (H-tensor) | $< 2 \times 10^{-5}$ | all 3 components |
-| `ifun` (I-tensor) | $< 2 \times 10^{-5}$ | all 3 components |
-| velocity grids | $< 10^{-10}$ | machine precision |
-| wavenumber grids | $< 5 \times 10^{-6}$ | limited by `kxrh` file precision |
-
-68 tests in `tests/unit/test_analytic_geometry.py` (40 adiabatic + 28 kinetic).
-
-## Appendix A. geometry parameters
-
-### A.1 what is the geometry and why is it there
-
-A gyrokinetic simulation does not solve equations on a physical $(R, Z, \phi)$
-grid. Instead it operates in a field-aligned coordinate system
-$(\psi, \zeta, s)$ that follows the magnetic field lines of the tokamak
-equilibrium. In this system $s$ runs along the field line (the "parallel"
-direction), $\psi$ labels the flux surface (the "radial" direction), and $\zeta$
-is the field-line label within a surface (the "binormal" direction).
-
-The *geometry* encodes how this abstract coordinate system maps to physical
-space. It provides the metric tensor $g_{ij}$ (needed to compute
-$k_\perp^2$ and perpendicular gradients), the magnetic field strength $B(s)$
-(needed for the mirror force, gyro-averaging, and drift velocities), and a
-collection of derived drift tensors that enter the gyrokinetic equation as
-advection coefficients.
-
-In GKW this geometry is precomputed by a Fortran module (`geom.f90`) and
-written to `geom.dat`. gyaradax can either load these files via
-`load_geometry()` or compute them analytically via `compute_geometry()` from
-a small set of equilibrium parameters. The two paths produce identical output
-to $< 2 \times 10^{-5}$ relative error.
-
-### A.2 equilibrium parameters
-
-These define the magnetic equilibrium on a single flux surface. For the
-Lapillonne circular model they fully determine the geometry.
-
-| parameter | symbol | formula / definition |
-|-----------|--------|----------------------|
-| `q` | $q$ | safety factor: number of toroidal turns per poloidal turn |
-| `shat` | $\hat{s}$ | magnetic shear $= (r/q)\,dq/dr$. controls radial twisting of field lines |
-| `eps` | $\varepsilon$ | inverse aspect ratio $= r/R_0$. sets the ratio of minor to major radius |
-| `signB` | $\sigma_B$ | sign of the toroidal field ($\pm 1$) |
-| `Rref` | $R_{ref}$ | reference major radius for normalization (typically 100) |
-
-The safety factor $q$ controls how tightly wound the field lines are: large
-$q$ means nearly toroidal field lines with weak poloidal field. The magnetic
-shear $\hat{s}$ measures how $q$ varies radially and drives the spectral
-mode connectivity (adjacent $k_x$ modes couple across the parallel boundary).
-The inverse aspect ratio $\varepsilon$ sets the strength of toroidal effects:
-at $\varepsilon = 0$ the geometry is slab-like; at finite $\varepsilon$ the
-outboard side ($\theta = 0$) and inboard side ($\theta = \pi$) see different
-field strengths, producing trapped-particle physics and ballooning structure.
-
-In the circular model the magnetic field strength is
-$$B(s) = \frac{\delta}{1 + \varepsilon \cos\theta(s)}, \qquad
-\delta = \sqrt{1 + \frac{\varepsilon^2}{q^2(1-\varepsilon^2)}}$$
-where $\theta(s)$ is obtained by inverting $\theta + \varepsilon\sin\theta = 2\pi s$.
-The factor $\delta \approx 1$ for large aspect ratio; the $1/R$ dependence of
-the toroidal field produces the familiar $B_\text{max}/B_\text{min}$ variation
-that governs particle trapping.
-
-### A.3 grid resolution parameters
-
-These control the discretisation of the five-dimensional phase space.
-
-| parameter | symbol | typical value | role |
-|-----------|--------|---------------|------|
-| `ns` | $N_s$ | 16 | parallel grid points along the field line |
-| `nvpar` | $N_{v\parallel}$ | 32 | parallel velocity grid points |
-| `nmu` | $N_\mu$ | 8 | magnetic moment grid points |
-| `nkx` | $N_{kx}$ | 85 | radial Fourier modes |
-| `nky` | $N_{ky}$ | 32 | binormal Fourier modes |
-| `vpar_max` | $v_{\parallel,max}$ | 3.0 | extent of the velocity grid in units of $v_{th}$ |
-| `nperiod` | | 1 | poloidal turns covered by the parallel domain |
-
-The parallel grid covers $s \in [-(N_p - 1/2),\, N_p - 1/2]$ where
-$N_p$ = `nperiod`, sampled at cell centers with uniform spacing
-$\Delta s = (2N_p - 1)/N_s$.
-
-The velocity grid is uniform in $v_\parallel$ with spacing
-$\Delta v = 2 v_{max} / N_{v\parallel}$, and uniform in $v_\perp$ with
-$\Delta v_\perp = v_{max} / N_\mu$, mapped to magnetic moment via
-$\mu = v_\perp^2 / 2$. The $\mu$-integration weights are
-$w_\mu = 2\pi v_\perp \Delta v_\perp$, arising from the cylindrical Jacobian
-$d^2 v_\perp = 2\pi v_\perp\, dv_\perp$.
-
-### A.4 mode / wavevector parameters
-
-These define the perpendicular Fourier grid and the spectral connectivity.
-
-| parameter | symbol | typical value | role |
-|-----------|--------|---------------|------|
-| `kxmax` | $k_{x,max}$ | from GKW data | maximum radial wavenumber |
-| `krhomax` | $k_{\rho,max}$ | 1.4 | maximum binormal wavenumber (in $\rho_s$ units) |
-| `ikxspace` | | 5 | $k_x$ index spacing between connected modes |
-
-The binormal grid is $k_y = [0, \Delta k_y, \ldots, (N_{ky}-1)\Delta k_y]$
-with $\Delta k_y = k_{\rho,max} / (N_{ky} - 1)$.
-
-The radial grid is centered: $k_x = [-k_{x,max}, \ldots, 0, \ldots, k_{x,max}]$
-with $N_{kx}$ points (odd). The mode connectivity parameter `ikxspace` sets how
-many $k_x$ grid points separate connected modes at the parallel boundary. For a
-given $k_y$, the magnetic shear causes a radial shift
-$\Delta k_x = 2\pi\hat{s}\, k_y$ when the field line crosses one poloidal turn.
-Modes separated by `ikxspace` grid points in $k_x$ are thus physically connected
-and exchange information through the open parallel boundary conditions.
-
-The wavenumber normalization uses the binormal metric at the outboard midplane:
-$$k_{th} = \sqrt{g_{\zeta\zeta}(\theta=0)} = \sqrt{\frac{1}{(2\pi R_0)^2}\left(1 + (1-\varepsilon^2)\frac{q^2}{\varepsilon^2}\right)}$$
-The solver stores $k_y$ in units of $k_{th}$ (i.e. `krho` $= k_y^{raw} / k_{th}$).
-
-### A.5 geometry arrays and what they encode
-
-The geometry dict contains roughly 30 arrays. They fall into four groups.
-
-**Magnetic field arrays.** `bn` is the normalised field strength $B/B_{ref}$.
-`ffun` $= b_{ups}/B$ is the parallel streaming coefficient that converts
-$v_\parallel$ into a rate of change of the field-line coordinate $s$.
-`gfun` $= F \cdot (dB/ds)/B$ is the mirror force coefficient that drives
-particle trapping. `bt_frac` $= 1/\delta$ is the toroidal fraction of the
-total field.
-
-**Metric arrays.** `little_g` stores the three metric components
-$(g_{\zeta\zeta},\, g_{\psi\zeta},\, g_{\psi\psi})$ used in the
-$k_\perp^2$ calculation:
-$$k_\perp^2 = k_y^2\, g_{\zeta\zeta} + 2 k_x k_y\, g_{\psi\zeta} + k_x^2\, g_{\psi\psi}$$
-The cross-term $g_{\psi\zeta}$ encodes the integrated magnetic shear
-(the "dzetadeps" coupling). At the outboard midplane this vanishes; away from
-it the local radial wavenumber $k_{x,loc} = k_x + k_y g_{\psi\zeta}$ tilts
-the eddies, an effect central to turbulence saturation.
-
-**Drift tensors.** These encode how magnetic field gradients and curvature
-advect particles across the flux surface:
-
-- **D-tensor** (`dfun`, 3 components): the curvature + $\nabla B$ drift.
-  $D_\psi$ gives the radial drift (proportional to $\sin\theta$, strongest at
-  top/bottom of the flux surface). $D_\zeta$ gives the binormal drift
-  (proportional to $\cos\theta$ plus shear corrections, strongest at the
-  outboard midplane). These enter Term II of the gyrokinetic equation as
-  $-i(k_x D_\psi + k_y D_\zeta)(v_\parallel^2 + \mu B)\,\delta f$.
-
-- **E-tensor** (`efun`, scalar): the ExB advection coefficient
-  $E_{\psi\zeta} = \pi\,(dp_f/d\psi)\, C_{12} / B^2$ where $C_{12}$ is the
-  metric cofactor. This is constant along the field line for circular geometry
-  and enters the equilibrium drive (Term V).
-
-- **H-tensor** (`hfun`, 3 components): the Coriolis drift, proportional to
-  the vertical coordinate gradient $dZ/d\psi$, $dZ/ds$. Not currently used by
-  the solver but stored for future rotation physics.
-
-- **I-tensor** (`ifun`, 3 components): the centrifugal drift, proportional to
-  $R \cdot (E \cdot \nabla R)$ where $E$ is the ExB tensor. Also stored for
-  future rotation physics.
-
-All drift tensors are computed from the covariant metric and the field/position
-derivatives via `calc_geom_tensors` (geom.f90 lines 3487-3634). The formulas
-use the pressure gradient normalisation
-$dp_f/d\psi = \varepsilon / (q\sqrt{1-\varepsilon^2})$ and the Jacobian
-transform from $(\psi, \theta)$ to $(\psi, s)$ coordinates.
-
-**Spectral connectivity arrays.** `mode_label`, `ixplus`, `ixminus` encode
-which $k_x$ modes connect across the parallel boundary for each $k_y$. These
-are derived from `shat`, `ikxspace`, and the $k_x$/$k_y$ grids. The
-precomputed shift maps (`s_shift`, `kx_shift`, `valid_shift`) allow the
-parallel finite-difference stencils to reach across the boundary without
-per-step index arithmetic.
