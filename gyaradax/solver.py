@@ -26,7 +26,9 @@ import jax
 import jax.numpy as jnp
 
 jax.config.update("jax_enable_x64", True)
-jax.config.update("jax_compilation_cache_dir", "/tmp/jax_cache")
+import os as _os
+_jax_cache = _os.environ.get("JAX_COMPILATION_CACHE_DIR", "/tmp/jax_cache")
+jax.config.update("jax_compilation_cache_dir", _jax_cache)
 
 import math
 import functools
@@ -1101,12 +1103,14 @@ def gkstep_single(
             rhs = rhs + _compute_nonlinear_rhs(df, phi_local, geometry, params, pre)
         return rhs
 
-    # RK4
+    # RK4 — expanded accumulation lets XLA read k1..k4 and prev_df in one fused kernel
     k1 = _rhs(prev_df)
     k2 = _rhs(prev_df + 0.5 * dt * k1)
     k3 = _rhs(prev_df + 0.5 * dt * k2)
     k4 = _rhs(prev_df + dt * k3)
-    next_df_raw = prev_df + (dt / 6.0) * (k1 + 2.0 * k2 + 2.0 * k3 + k4)
+    dt6 = dt / 6.0
+    dt3 = dt / 3.0
+    next_df_raw = prev_df + dt6 * k1 + dt3 * k2 + dt3 * k3 + dt6 * k4
 
     # Post-step: normalization and amplitude tracking
     new_step = state.step + jnp.array(1, dtype=jnp.int32)

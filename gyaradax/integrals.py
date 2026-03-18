@@ -221,7 +221,7 @@ def calculate_phi_kinetic(
     if phi_weight is None or phi_diag is None:
         phi_weight, phi_diag = precompute_phi_kinetic(geometry)
 
-    phi_num = jnp.sum(phi_weight * df, axis=(0, 1, 2))
+    phi_num = jnp.einsum('avmjkl,avmjkl->jkl', phi_weight, df)
     return -phi_num / phi_diag
 
 
