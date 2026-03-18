@@ -22,19 +22,19 @@ JAX_COLORS = {
     "purple": "#9B51E0",
 }
 
-SPECIES_COLORS = [JAX_COLORS["cyan"], JAX_COLORS["purple"]]
+SPECIES_COLORS = [JAX_COLORS["cyan"], JAX_COLORS["cyan"]]
 
 plt.rcParams.update(
     {
         "font.family": "sans-serif",
         "font.sans-serif": ["Helvetica", "Arial", "Liberation Sans"],
-        "font.size": 8,
-        "axes.labelsize": 9,
-        "axes.titlesize": 9,
-        "xtick.labelsize": 8,
-        "ytick.labelsize": 8,
-        "legend.fontsize": 8,
-        "figure.titlesize": 10,
+        "font.size": 9,
+        "axes.labelsize": 10,
+        "axes.titlesize": 10,
+        "xtick.labelsize": 9,
+        "ytick.labelsize": 9,
+        "legend.fontsize": 9,
+        "figure.titlesize": 12,
         "lines.linewidth": 1.25,
         "grid.alpha": 0.15,
         "grid.linestyle": ":",
@@ -42,7 +42,7 @@ plt.rcParams.update(
         "axes.spines.right": False,
         "savefig.dpi": 300,
         "savefig.bbox": "tight",
-        "figure.figsize": (3.5, 2.8),
+        "figure.figsize": (7.0, 2.8),
     }
 )
 
@@ -70,14 +70,12 @@ def plot_flux_trace(
     if ref_fluxes is not None and isinstance(ref_fluxes, tuple):
         ref_fluxes = np.stack(ref_fluxes)
 
-    # if species_labels is None:
-    #     species_labels = [SPECIES_LABELS.get(i, f"sp{i}") for i in range(n_species)]
+    if species_labels is None:
+        species_labels = [SPECIES_LABELS.get(i, f"sp{i}") for i in range(n_species)]
 
     n_flux = len(labels)
     ncols = n_species
-    fig, axes = plt.subplots(
-        n_flux, ncols, figsize=(6 * ncols, 1.5 * n_flux), sharex=True, squeeze=False
-    )
+    fig, axes = plt.subplots(n_flux, ncols, figsize=(7.0, 1.5 * n_flux), sharex=True, squeeze=False)
 
     for isp in range(n_species):
         col_offset = isp * n_flux
@@ -117,13 +115,14 @@ def plot_flux_trace(
                     )
 
             if isp == 0:
-                ax.set_ylabel(labels[i], fontsize=12)
+                ax.set_ylabel(labels[i])
             ax.grid(True, axis="y")
             if i == 0:
-                # ax.set_title(species_labels[isp])
-                ax.legend(frameon=False, loc="best")
+                ax.set_title(species_labels[isp])
+                if isp == 0:
+                    ax.legend(frameon=False, loc="best")
 
-        axes[-1, isp].set_xlabel(r"time $[v_{th}/R]$", fontsize=12)
+        axes[-1, isp].set_xlabel(r"time $[v_{th}/R]$")
 
     fig.suptitle(title, fontweight="bold")
     fig.tight_layout()
@@ -166,24 +165,218 @@ def plot_spectra(
         label="gyaradax",
     )
     if ref_ky_spec is not None:
-        ax1.semilogy(
-            ky, ref_ky_spec, "x--", color="black", markersize=4, lw=1, label="GKW"
-        )
-    ax1.set_xlabel(r"$k_y \rho_{ref}$", fontsize=12)
-    ax1.set_ylabel(r"$\sum_{s, k_x} |\phi|^2$", fontsize=10)
-    ax1.set_title(r"$k_y^{\text{spec}}$", fontsize=16)
+        ax1.semilogy(ky, ref_ky_spec, "x--", color="black", markersize=4, lw=1, label="GKW")
+    ax1.set_xlabel(r"$k_y \rho_{ref}$")
+    ax1.set_ylabel(r"$\sum_{s, k_x} |\phi|^2$")
+    ax1.set_title(r"$k_y$ spectrum")
     ax1.grid(True, which="both")
     ax1.legend()
 
     ax2.semilogy(kx, kx_spec, "o-", color=JAX_COLORS["purple"], markersize=3, lw=1)
     if ref_kx_spec is not None:
         ax2.semilogy(kx, ref_kx_spec, "x--", color="black", markersize=4, lw=1)
-    ax2.set_xlabel(r"$k_x \rho_{ref}$", fontsize=12)
-    ax2.set_ylabel(r"$\sum_{s, k_y} |\phi|^2$", fontsize=10)
-    ax2.set_title(r"$k_x^{\text{spec}}$", fontsize=16)
+    ax2.set_xlabel(r"$k_x \rho_{ref}$")
+    ax2.set_ylabel(r"$\sum_{s, k_y} |\phi|^2$")
+    ax2.set_title(r"$k_x$ spectrum")
     ax2.grid(True, which="both")
     if len(title) > 0:
         fig.suptitle(title, fontweight="bold")
+    fig.tight_layout()
+    return fig
+
+
+def plot_growth_rates(
+    time: np.ndarray,
+    growth: np.ndarray,
+    ky: Optional[np.ndarray] = None,
+    ref_time: Optional[np.ndarray] = None,
+    ref_growth: Optional[np.ndarray] = None,
+    title: str = "",
+    max_modes: int = 8,
+) -> plt.Figure:
+    """Plot per-ky growth rates over time with optional GKW reference.
+
+    Args:
+        time: (n_windows,) simulation time.
+        growth: (n_windows,) or (n_windows, nky) growth rates.
+        ky: (nky,) wavenumber values for legend labels.
+        ref_time: (n_ref, >=2) GKW time.dat with columns [time, growth, ...].
+        ref_growth: (n_ref,) or (n_ref, nky) GKW growth rates. if None and
+            ref_time has >=2 columns, column 1 is used as the mean growth.
+        title: figure title.
+        max_modes: maximum number of ky modes to plot individually.
+    """
+    fig, ax = plt.subplots(figsize=(7.0, 2.8))
+
+    if growth.ndim == 2:
+        nky = growth.shape[1]
+        colors = plt.cm.viridis(np.linspace(0.15, 0.85, min(nky, max_modes)))
+        for iy in range(min(nky, max_modes)):
+            label = rf"$k_y={float(ky[iy]):.2f}$" if ky is not None and iy < len(ky) else f"ky={iy}"
+            ax.plot(time, growth[:, iy], lw=1, color=colors[iy], alpha=0.8, label=label)
+    else:
+        ax.plot(time, growth, "-", color=JAX_COLORS["blue"], lw=1.5, label="gyaradax")
+
+    if ref_growth is not None:
+        if ref_growth.ndim == 1:
+            ax.plot(
+                ref_time if ref_time is not None else np.arange(len(ref_growth)),
+                ref_growth,
+                "kx",
+                ms=4,
+                alpha=0.7,
+                label="GKW",
+            )
+    elif ref_time is not None and ref_time.ndim == 2 and ref_time.shape[1] >= 2:
+        ax.plot(ref_time[:, 0], ref_time[:, 1], "kx", ms=4, alpha=0.7, label="GKW (mean)")
+
+    ax.set_xlabel(r"time $[v_{th}/R]$")
+    ax.set_ylabel(r"$\gamma$")
+    ax.legend(frameon=False, ncol=3)
+    ax.grid(True)
+    if title:
+        ax.set_title(title)
+    fig.tight_layout()
+    return fig
+
+
+def plot_growth_snapshots(
+    ky: np.ndarray,
+    sim_growth: np.ndarray,
+    sim_time: np.ndarray,
+    ref_growth: Optional[np.ndarray] = None,
+    ref_time: Optional[np.ndarray] = None,
+    title: str = "",
+) -> plt.Figure:
+    """2x2 grid of per-ky growth rate profiles at 4 physically meaningful timesteps.
+
+    Snapshots: (1) early linear phase, (2) onset of saturation,
+    (3) mid-saturation, (4) late/converged.
+
+    Saturation onset is detected as the first time the mean growth rate
+    (over non-zonal ky modes) crosses below a small threshold.
+    """
+    n_total = len(sim_time)
+
+    # detect saturation: mean growth over ky>0 modes drops near zero
+    mean_gr = np.mean(sim_growth[:, 1:], axis=1) if sim_growth.shape[1] > 1 else sim_growth[:, 0]
+    # saturation onset: first index where a 5-window rolling mean drops below
+    # 10% of the peak growth rate
+    peak_gr = np.max(np.abs(mean_gr[: max(1, n_total // 4)]))
+    threshold = 0.1 * peak_gr if peak_gr > 0 else 0.5
+    window = min(5, n_total // 4)
+    if window > 0 and n_total > window:
+        rolling = np.convolve(np.abs(mean_gr), np.ones(window) / window, mode="valid")
+        sat_candidates = np.where(rolling < threshold)[0]
+        sat_idx = int(sat_candidates[0]) + window // 2 if len(sat_candidates) > 0 else n_total // 3
+    else:
+        sat_idx = n_total // 3
+    sat_idx = max(2, min(sat_idx, n_total - 3))
+
+    # panels: early linear, saturation onset, half-run, time-average
+    snap_indices = [
+        max(0, 1),
+        sat_idx,
+        n_total // 2,
+    ]
+    snap_indices = [min(i, n_total - 1) for i in snap_indices]
+
+    fig, axes = plt.subplots(2, 2, figsize=(7.0, 4.2), sharex=True, sharey=True)
+    axes = axes.flatten()
+
+    for i, idx in enumerate(snap_indices):
+        ax = axes[i]
+        t_sim = sim_time[idx]
+
+        if ref_growth is not None and ref_time is not None:
+            ref_idx = np.argmin(np.abs(ref_time - t_sim))
+            ax.plot(
+                ky[: ref_growth.shape[1]],
+                ref_growth[ref_idx],
+                "kx",
+                ms=5,
+                alpha=0.9,
+                label="GKW",
+                zorder=100,
+            )
+
+        ax.plot(
+            ky,
+            sim_growth[idx],
+            "o-",
+            color=JAX_COLORS["blue"],
+            ms=3,
+            lw=1.2,
+            label="gyaradax",
+        )
+
+        ax.set_title(rf"$t = {t_sim:.1f}$")
+        ax.grid(True)
+        if i == 0:
+            ax.legend(frameon=False)
+        if i >= 2:
+            ax.set_xlabel(r"$k_y \rho_{ref}$")
+        if i % 2 == 0:
+            ax.set_ylabel(r"$\gamma$")
+
+    # 4th panel: time-averaged growth rate
+    ax = axes[3]
+    sim_avg = np.mean(sim_growth, axis=0)
+    if ref_growth is not None:
+        ref_avg = np.mean(ref_growth, axis=0)
+        ax.plot(ky[: len(ref_avg)], ref_avg, "kx", ms=5, alpha=0.9, label="GKW", zorder=100)
+    ax.plot(ky, sim_avg, "o-", color=JAX_COLORS["blue"], ms=3, lw=1.2, label="gyaradax")
+    ax.set_title("time average")
+    ax.set_xlabel(r"$k_y \rho_{ref}$")
+    ax.grid(True)
+
+    if title:
+        fig.suptitle(title, fontweight="bold")
+    fig.tight_layout()
+    return fig
+
+
+def plot_ky_spectra_evolution(
+    ky: np.ndarray,
+    ky_spec_history: np.ndarray,
+    times: Optional[np.ndarray] = None,
+    ref_ky_spec: Optional[np.ndarray] = None,
+    n_snapshots: int = 5,
+    title: str = "",
+) -> plt.Figure:
+    """Plot ky spectra at selected timesteps showing time evolution.
+
+    Args:
+        ky: (nky,) wavenumber grid.
+        ky_spec_history: (n_windows, nky) spectral density over time.
+        times: (n_windows,) timestamps for labeling.
+        ref_ky_spec: (nky,) time-averaged GKW reference spectrum.
+        n_snapshots: number of timesteps to show.
+        title: figure title.
+    """
+    n_total = len(ky_spec_history)
+    if times is not None:
+        n_total = min(n_total, len(times))
+    indices = np.linspace(0, n_total - 1, min(n_snapshots, n_total), dtype=int)
+    colors = plt.cm.plasma(np.linspace(0.1, 0.9, len(indices)))
+
+    fig, ax = plt.subplots(figsize=(7.0, 2.8))
+
+    for i, idx in enumerate(indices):
+        t_label = f"t={times[idx]:.0f}" if times is not None else f"step {idx}"
+        ax.semilogy(
+            ky, ky_spec_history[idx], "o-", color=colors[i], ms=2, lw=0.8, alpha=0.7, label=t_label
+        )
+
+    if ref_ky_spec is not None:
+        ax.semilogy(ky, ref_ky_spec, "k--", lw=1.5, alpha=0.8, label="GKW (avg)")
+
+    ax.set_xlabel(r"$k_y \rho_{ref}$")
+    ax.set_ylabel(r"$|\phi|^2$")
+    ax.legend(frameon=False, ncol=2)
+    ax.grid(True, which="both")
+    if title:
+        ax.set_title(title)
     fig.tight_layout()
     return fig
 
@@ -314,17 +507,15 @@ def plot_nd(
                 ax.matshow(xx, cmap=c_map)
 
             if j == i + 1:
-                ax.set_ylabel(rf"${labels[i]}$", fontsize=12, labelpad=2)
+                ax.set_ylabel(rf"${labels[i]}$", labelpad=2)
             if i == j - 1:
-                ax.set_xlabel(rf"${labels[j]}$", fontsize=12, labelpad=2)
+                ax.set_xlabel(rf"${labels[j]}$", labelpad=2)
 
             ax.set_xticks([])
             ax.set_yticks([])
             force_aspect(ax, aspect=aspect * (2.1 if y is not None else 1.0))
 
-    plt.subplots_adjust(
-        left=0.01, right=0.99, bottom=0.01, top=0.99, wspace=0, hspace=0
-    )
+    plt.subplots_adjust(left=0.01, right=0.99, bottom=0.01, top=0.99, wspace=0, hspace=0)
     return fig
 
 

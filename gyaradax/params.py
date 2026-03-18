@@ -198,8 +198,19 @@ def gkparams_from_input_and_geometry(
 
     # geometry scalars from the computed geometry
     scalars = {}
-    for k in ("shat", "q", "eps", "kthnorm", "Rref", "d2X", "signB",
-              "dvp", "sgr_dist", "kxmax", "kymax"):
+    for k in (
+        "shat",
+        "q",
+        "eps",
+        "kthnorm",
+        "Rref",
+        "d2X",
+        "signB",
+        "dvp",
+        "sgr_dist",
+        "kxmax",
+        "kymax",
+    ):
         if k in geometry:
             scalars[k] = float(np.asarray(geometry[k]).reshape(-1)[0])
 
@@ -218,12 +229,17 @@ def gkparams_from_input_and_geometry(
         def _maybe_scalar(arr):
             return float(arr[0]) if len(arr) == 1 else arr
 
-        scalars.update({
-            "mas": _maybe_scalar(sp_mas), "tmp": _maybe_scalar(sp_tmp),
-            "de": _maybe_scalar(sp_de), "signz": _maybe_scalar(sp_signz),
-            "rlt": _maybe_scalar(sp_rlt), "rln": _maybe_scalar(sp_rln),
-            "vthrat": _maybe_scalar(sp_vthrat),
-        })
+        scalars.update(
+            {
+                "mas": _maybe_scalar(sp_mas),
+                "tmp": _maybe_scalar(sp_tmp),
+                "de": _maybe_scalar(sp_de),
+                "signz": _maybe_scalar(sp_signz),
+                "rlt": _maybe_scalar(sp_rlt),
+                "rln": _maybe_scalar(sp_rln),
+                "vthrat": _maybe_scalar(sp_vthrat),
+            }
+        )
 
     scalars.update(runtime)
     if overrides:

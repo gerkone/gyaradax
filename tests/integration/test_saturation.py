@@ -8,7 +8,6 @@ from gyaradax import load_config
 from gyaradax.simulate import (
     gk_from_config,
     gksimulate,
-    default_log,
     _compute_phi_for_init,
 )
 from gyaradax.solver import GKState, mode_amplitude

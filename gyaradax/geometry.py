@@ -125,44 +125,39 @@ def _circular_geometry(theta, q, shat, eps, signB=1.0, signJ=1.0, geom_type="cir
     metric[:, 0, 0] = 1.0
     metric[:, 0, 1] = metric[:, 1, 0] = dzde
     metric[:, 0, 2] = metric[:, 2, 0] = np.sin(theta) / (2 * np.pi)
-    metric[:, 1, 1] = (
-        (1 / (2 * np.pi * R)) ** 2 * (1 + (1 - eps**2) * (q / eps) ** 2)
-        + dzde**2
-    )
-    metric[:, 1, 2] = metric[:, 2, 1] = (
-        q * np.sqrt(1 - eps**2) / (2 * np.pi * eps) ** 2 * signB * signJ
-        + dzde * np.sin(theta) / (2 * np.pi)
-    )
-    metric[:, 2, 2] = (
-        (1 / (2 * np.pi)) ** 2
-        * ((1 / eps + np.cos(theta)) ** 2 + np.sin(theta) ** 2)
-    )
+    metric[:, 1, 1] = (1 / (2 * np.pi * R)) ** 2 * (1 + (1 - eps**2) * (q / eps) ** 2) + dzde**2
+    metric[:, 1, 2] = metric[:, 2, 1] = q * np.sqrt(1 - eps**2) / (
+        2 * np.pi * eps
+    ) ** 2 * signB * signJ + dzde * np.sin(theta) / (2 * np.pi)
+    metric[:, 2, 2] = (1 / (2 * np.pi)) ** 2 * ((1 / eps + np.cos(theta)) ** 2 + np.sin(theta) ** 2)
 
     dBdpsi_pt = bn * (
         -np.cos(theta) / R
-        + eps * (1 - shat + eps**2 / (1 - eps**2))
-        / (eps**2 + q**2 * (1 - eps**2))
+        + eps * (1 - shat + eps**2 / (1 - eps**2)) / (eps**2 + q**2 * (1 - eps**2))
     )
     dBds_pt = bn * eps * np.sin(theta) / R
     dBdpsi, dBds = _psi_theta_to_psi_s(dBdpsi_pt, dBds_pt, theta, eps)
 
-    dRdpsi, dRds = _psi_theta_to_psi_s(
-        np.cos(theta), -eps * np.sin(theta), theta, eps
-    )
-    dZdpsi, dZds = _psi_theta_to_psi_s(
-        np.sin(theta), eps * np.cos(theta), theta, eps
-    )
+    dRdpsi, dRds = _psi_theta_to_psi_s(np.cos(theta), -eps * np.sin(theta), theta, eps)
+    dZdpsi, dZds = _psi_theta_to_psi_s(np.sin(theta), eps * np.cos(theta), theta, eps)
 
     return {
-        "bn": bn, "dum": dum, "R": R,
+        "bn": bn,
+        "dum": dum,
+        "R": R,
         "ffun": bups / bn,
         "gfun": bups / bn * dBds / bn,
         "bt_frac": np.full(ns, 1 / dum),
-        "bups": bups, "dpfdpsi": dpfdpsi,
-        "metric": metric, "dzetadeps": dzde,
-        "dBdpsi": dBdpsi, "dBds": dBds,
-        "dRdpsi": dRdpsi, "dRds": dRds,
-        "dZdpsi": dZdpsi, "dZds": dZds,
+        "bups": bups,
+        "dpfdpsi": dpfdpsi,
+        "metric": metric,
+        "dzetadeps": dzde,
+        "dBdpsi": dBdpsi,
+        "dBds": dBds,
+        "dRdpsi": dRdpsi,
+        "dRds": dRds,
+        "dZdpsi": dZdpsi,
+        "dZds": dZds,
     }
 
 
@@ -196,9 +191,7 @@ def _calc_geom_tensors(cg, signJ=1.0, signB=1.0):
 
     dfun = (-2 * e0 * dBdpsi[:, None] - 2 * e2 * dBds[:, None]) / bn[:, None]
 
-    hfun = -signB * (
-        metric[:, :, 0] * dZdpsi[:, None] + metric[:, :, 2] * dZds[:, None]
-    )
+    hfun = -signB * (metric[:, :, 0] * dZdpsi[:, None] + metric[:, :, 2] * dZds[:, None])
     hfun[:, 2] += signB * bups**2 * dZds / bn**2
     hfun /= bn[:, None]
 
@@ -405,9 +398,7 @@ def compute_geometry(
     bn, R = cg["bn"], cg["R"]
     little_g = np.stack([cg["metric"][:, 1, 1], cg["dzetadeps"], np.ones(ns)], axis=-1)
 
-    g_zz_mid = (1 / (2 * np.pi * (1 + eps))) ** 2 * (
-        1 + (1 - eps**2) * (q / eps) ** 2
-    )
+    g_zz_mid = (1 / (2 * np.pi * (1 + eps))) ** 2 * (1 + (1 - eps**2) * (q / eps) ** 2)
     kthnorm = np.sqrt(g_zz_mid)
 
     vpgr, mugr, intvp, intmu = _build_velocity_grids(nvpar, nmu, vpar_max)
@@ -518,14 +509,19 @@ def compute_geometry_from_input(input_dat_path: str) -> Dict[str, Any]:
         vpar_max = 3.0
 
     return compute_geometry(
-        q=q, shat=shat, eps=eps,
+        q=q,
+        shat=shat,
+        eps=eps,
         ns=int(grid_sec.get("n_s_grid", 16)),
-        nkx=nkx, nky=nky,
+        nkx=nkx,
+        nky=nky,
         nvpar=int(grid_sec.get("n_vpar_grid", 32)),
         nmu=int(grid_sec.get("n_mu_grid", 8)),
         vpar_max=vpar_max,
         nperiod=int(grid_sec.get("nperiod", 1)),
-        kxmax=kxmax, krhomax=krhomax, ikxspace=ikxspace,
+        kxmax=kxmax,
+        krhomax=krhomax,
+        ikxspace=ikxspace,
         geom_type=geom_type,
     )
 

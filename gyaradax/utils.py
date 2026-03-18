@@ -309,9 +309,7 @@ def _parse_namelist_value(value: str):
     if not v:
         return ""
 
-    if (v.startswith("'") and v.endswith("'")) or (
-        v.startswith('"') and v.endswith('"')
-    ):
+    if (v.startswith("'") and v.endswith("'")) or (v.startswith('"') and v.endswith('"')):
         return v[1:-1]
 
     lv = v.lower()
@@ -597,9 +595,7 @@ def load_geometry(directory):
             float(np.asarray(geom["shat"]).reshape(-1)[0]), dtype=jnp.float64
         )
     if "q" in geom:
-        geometry["q"] = jnp.array(
-            float(np.asarray(geom["q"]).reshape(-1)[0]), dtype=jnp.float64
-        )
+        geometry["q"] = jnp.array(float(np.asarray(geom["q"]).reshape(-1)[0]), dtype=jnp.float64)
     if "eps" in geom:
         geometry["eps"] = jnp.array(
             float(np.asarray(geom["eps"]).reshape(-1)[0]), dtype=jnp.float64
@@ -614,9 +610,7 @@ def load_geometry(directory):
     krho = np.loadtxt(os.path.join(directory, "krho"))
     if krho.ndim > 1:
         krho = krho.T[0]
-    kthnorm = (
-        float(np.asarray(geom["kthnorm"]).reshape(-1)[0]) if "kthnorm" in geom else 1.0
-    )
+    kthnorm = float(np.asarray(geom["kthnorm"]).reshape(-1)[0]) if "kthnorm" in geom else 1.0
     geometry["krho"] = jnp.array(krho / kthnorm, dtype=jnp.float64)
 
     geometry["parseval"] = jnp.array(
@@ -634,9 +628,7 @@ def load_geometry(directory):
     if vpgr.ndim > 1:
         vpgr = vpgr[0]
     geometry["vpgr"] = jnp.array(vpgr, dtype=jnp.float64)
-    geometry["vpgr_rms"] = jnp.array(
-        float(np.sqrt(np.mean(vpgr**2))), dtype=jnp.float64
-    )
+    geometry["vpgr_rms"] = jnp.array(float(np.sqrt(np.mean(vpgr**2))), dtype=jnp.float64)
     if len(vpgr) > 1:
         geometry["dvp"] = jnp.array(float(np.mean(np.diff(vpgr))), dtype=jnp.float64)
     else:
@@ -664,9 +656,7 @@ def load_geometry(directory):
     geometry["ints"] = jnp.array(ints, dtype=jnp.float64)
     geometry["sgrid"] = jnp.array(sgrid, dtype=jnp.float64)
     if len(sgrid) > 1:
-        geometry["sgr_dist"] = jnp.array(
-            float(np.abs(sgrid[1] - sgrid[0])), dtype=jnp.float64
-        )
+        geometry["sgr_dist"] = jnp.array(float(np.abs(sgrid[1] - sgrid[0])), dtype=jnp.float64)
     else:
         geometry["sgr_dist"] = jnp.array(1.0, dtype=jnp.float64)
 

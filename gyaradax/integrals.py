@@ -81,10 +81,11 @@ def geom_tensors(geometry: Dict[str, jnp.ndarray], params: Any = None) -> Dict[s
 
 
 @jax.jit
-def calculate_phi(geom: Dict[str, jnp.ndarray], df: jnp.ndarray) -> jnp.ndarray:
+def _phi_adiabatic(geom: Dict[str, jnp.ndarray], df: jnp.ndarray) -> jnp.ndarray:
     """Adiabatic electron phi from single-species quasineutrality.
 
     df: (nvpar, nmu, ns, nkx, nky).
+    Internal — use calculate_phi() as the public interface.
     """
     de = geom["de"]
     signz, tmp, bn = geom["signz"], geom["tmp"], geom["bn"]
@@ -219,7 +220,7 @@ def precompute_phi_kinetic(geometry: Dict[str, jnp.ndarray]):
     return weight, diag
 
 
-def calculate_phi_kinetic(
+def _phi_kinetic(
     geometry: Dict[str, jnp.ndarray],
     df: jnp.ndarray,
     phi_weight: jnp.ndarray = None,
@@ -228,14 +229,49 @@ def calculate_phi_kinetic(
     """Kinetic electron phi from multi-species quasineutrality.
 
     df: (nsp, nvpar, nmu, ns, nkx, nky).
-    If phi_weight and phi_diag are provided (from precompute_phi_kinetic),
-    skips expensive bessel/gamma recomputation.
+    Internal — use calculate_phi() as the public interface.
     """
     if phi_weight is None or phi_diag is None:
         phi_weight, phi_diag = precompute_phi_kinetic(geometry)
 
     phi_num = jnp.sum(phi_weight * df, axis=(0, 1, 2))
     return -phi_num / phi_diag
+
+
+def calculate_phi(
+    geometry: Dict[str, jnp.ndarray],
+    df: jnp.ndarray,
+    params: Any = None,
+    pre: Dict = None,
+) -> jnp.ndarray:
+    """Compute electrostatic potential from quasineutrality.
+
+    Unified interface for both adiabatic and kinetic electron models.
+    Uses precomputed arrays from pre when available.
+
+    Args:
+        geometry: base geometry dict (or expanded geom_tensors for legacy calls).
+        df: distribution function — (nvpar, nmu, ns, nkx, nky) for adiabatic,
+            (nsp, nvpar, nmu, ns, nkx, nky) for kinetic.
+        params: GKParams (used to determine adiabatic vs kinetic and species scalars).
+        pre: precomputed arrays from linear_precompute (optional, for performance).
+    """
+    # legacy: calculate_phi(geom_tensors_dict, df) — detect by presence of "bessel"
+    if "bessel" in geometry:
+        return _phi_adiabatic(geometry, df)
+
+    adiabatic = params.adiabatic_electrons if params is not None else (df.ndim == 5)
+    if adiabatic:
+        gt = pre["geom_tensors"] if pre is not None else geom_tensors(geometry, params=params)
+        return _phi_adiabatic(gt, df)
+    else:
+        pw = pre.get("phi_weight") if pre is not None else None
+        pd = pre.get("phi_diag") if pre is not None else None
+        return _phi_kinetic(geometry, df, pw, pd)
+
+
+# backward-compatible aliases
+calculate_phi_kinetic = _phi_kinetic
 
 
 @jax.jit
@@ -290,24 +326,24 @@ def get_integrals(
     df: jnp.ndarray,
     geometry: Dict[str, jnp.ndarray],
     params: Any = None,
-    geom: Dict[str, jnp.ndarray] = None,
+    pre: Dict = None,
     adiabatic_electrons: bool = True,
+    geom: Dict[str, jnp.ndarray] = None,
 ) -> Tuple[jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]]:
     """Compute phi and fluxes from distribution function.
-
-    For phi-only calls, use calculate_phi / calculate_phi_kinetic directly.
 
     Returns:
         (phi, fluxes) where fluxes is (pflux, eflux, vflux) for adiabatic
         or (nsp, 3) array for kinetic electrons.
     """
     if not adiabatic_electrons and df.ndim == 6:
-        phi = calculate_phi_kinetic(geometry, df)
-        fluxes = calculate_fluxes_kinetic(geometry, df, phi)  # (nsp, 3)
+        phi = calculate_phi(geometry, df, params=params, pre=pre)
+        fluxes = calculate_fluxes_kinetic(geometry, df, phi)
     else:
-        if geom is None:
-            geom = geom_tensors(geometry, params=params)
-        phi = calculate_phi(geom, df)
-        fluxes = calculate_fluxes(geom, df, phi)
+        gt = geom or (
+            pre["geom_tensors"] if pre is not None else geom_tensors(geometry, params=params)
+        )
+        phi = _phi_adiabatic(gt, df)
+        fluxes = calculate_fluxes(gt, df, phi)
 
     return phi, fluxes
