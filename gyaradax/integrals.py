@@ -125,7 +125,8 @@ def calculate_phi(geom: Dict[str, jnp.ndarray], df: jnp.ndarray) -> jnp.ndarray:
     pdiag = jnp.where(jnp.abs(pdiag) < 1e-15, -1.0, pdiag)
 
     phi = phi * (-1.0 / pdiag)
-    return jnp.squeeze(phi)
+    # squeeze species + summed velocity axes, keep (ns, nkx, nky)
+    return jnp.squeeze(phi, axis=(0, 1, 2))
 
 
 def _species_bessel_gamma(geometry):

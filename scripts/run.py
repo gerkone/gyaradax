@@ -86,10 +86,10 @@ def run(config_path, args):
     # geometry: file-based if geom.dat exists, analytic otherwise
     if _has_geom_dat(data_dir):
         geometry = load_geometry(data_dir)
-        print(f"  geometry: loaded from {data_dir}")
+        print(f"geometry: loaded from {data_dir}")
     else:
         geometry = _geometry_from_config(cfg)
-        print("  geometry: computed from config parameters")
+        print("geometry: computed from config parameters")
 
     n_species = 1
     if not params.adiabatic_electrons:
@@ -124,10 +124,10 @@ def run(config_path, args):
             window_start_amp=amp0,
             last_growth_rate=jnp.zeros(nky, dtype=jnp.float64),
         )
-        print(f"  init: resumed from {os.path.basename(k_path)} (t={t_start:.4f})")
+        print(f"init: resumed from {os.path.basename(k_path)} (t={t_start:.4f})")
     else:
         df, state = gk_init(geometry, params, n_species=n_species)
-        print("  init: fresh (init_f)")
+        print("init: fresh (init_f)")
 
     pre = linear_precompute(geometry, params)
 

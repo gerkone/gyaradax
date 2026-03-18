@@ -182,6 +182,55 @@ def gkparams_from_input_dat(input_dat_path: str, **overrides) -> GKParams:
     return gkparams_from_runtime(scalars, **overrides)
 
 
+def gkparams_from_input_and_geometry(
+    input_dat_path: str, geometry: Dict[str, Any], **overrides
+) -> GKParams:
+    """build GKParams from input.dat + a pre-computed geometry dict.
+
+    unlike gkparams_from_input_dat, this does not require geom.dat or
+    other GKW output files — geometry scalars come from the dict.
+    """
+    import numpy as np
+    from gyaradax.utils import load_runtime_params, parse_input_dat
+
+    runtime = load_runtime_params(input_dat_path)
+    inp = parse_input_dat(input_dat_path)
+
+    # geometry scalars from the computed geometry
+    scalars = {}
+    for k in ("shat", "q", "eps", "kthnorm", "Rref", "d2X", "signB",
+              "dvp", "sgr_dist", "kxmax", "kymax"):
+        if k in geometry:
+            scalars[k] = float(np.asarray(geometry[k]).reshape(-1)[0])
+
+    # species from input.dat
+    num_sp = int(inp.get("gridsize", {}).get("number_of_species", 1))
+    species_keys = [k for k in inp if k.startswith("species")][:num_sp]
+    if species_keys:
+        sp_mas = np.array([float(inp[k].get("mass", 1.0)) for k in species_keys])
+        sp_tmp = np.array([float(inp[k].get("temp", 1.0)) for k in species_keys])
+        sp_de = np.array([float(inp[k].get("dens", 1.0)) for k in species_keys])
+        sp_signz = np.array([float(inp[k].get("z", 1.0)) for k in species_keys])
+        sp_rlt = np.array([float(inp[k].get("rlt", 0.0)) for k in species_keys])
+        sp_rln = np.array([float(inp[k].get("rln", 0.0)) for k in species_keys])
+        sp_vthrat = np.sqrt(sp_tmp / sp_mas)
+
+        def _maybe_scalar(arr):
+            return float(arr[0]) if len(arr) == 1 else arr
+
+        scalars.update({
+            "mas": _maybe_scalar(sp_mas), "tmp": _maybe_scalar(sp_tmp),
+            "de": _maybe_scalar(sp_de), "signz": _maybe_scalar(sp_signz),
+            "rlt": _maybe_scalar(sp_rlt), "rln": _maybe_scalar(sp_rln),
+            "vthrat": _maybe_scalar(sp_vthrat),
+        })
+
+    scalars.update(runtime)
+    if overrides:
+        scalars.update(overrides)
+    return gkparams_from_runtime(scalars)
+
+
 def load_config(config_path: str) -> Any:
     return OmegaConf.load(config_path)
 

@@ -448,7 +448,11 @@ def load_runtime_params(input_dat_path: str) -> Dict[str, Any]:
     if not finit:
         finit = inp.get("components", {}).get("finit", "cosine2")
 
-    adiabatic_electrons = bool(inp.get("gridsize", {}).get("adiabatic_electrons", True))
+    # adiabatic_electrons can appear in gridsize or spcgeneral depending on GKW version
+    ae_val = inp.get("gridsize", {}).get("adiabatic_electrons")
+    if ae_val is None:
+        ae_val = inp.get("spcgeneral", {}).get("adiabatic_electrons", True)
+    adiabatic_electrons = bool(ae_val)
 
     return {
         "dtim": _flt("dtim", 0.01),
