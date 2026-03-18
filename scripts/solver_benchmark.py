@@ -1,12 +1,17 @@
 #!/usr/bin/env python3
 """benchmark for gyaradax solver with component-level timing."""
 
-import os
-import re
-import time
 import argparse
+import os
+import time
 import numpy as np
 
+# parse --device before any jax import so cuda sees the right gpu
+_parser = argparse.ArgumentParser(add_help=False)
+_parser.add_argument("--device", type=int, default=-1)
+_early_args, _ = _parser.parse_known_args()
+if _early_args.device != -1:
+    os.environ["CUDA_VISIBLE_DEVICES"] = str(_early_args.device)
 os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
 
 import jax
@@ -14,8 +19,12 @@ import jax.numpy as jnp
 
 jax.config.update("jax_enable_x64", True)
 
-from gyaradax import load_geometry
-from gyaradax.geometry import compute_geometry_from_input
+from gyaradax import load_config, load_geometry
+from gyaradax.params import gkparams_from_config
+from gyaradax.simulate import (
+    gk_init,
+    _geometry_from_config,
+)
 from gyaradax.solver import (
     gksolve,
     GKState,
@@ -24,8 +33,7 @@ from gyaradax.solver import (
     _compute_linear_rhs,
     _compute_nonlinear_rhs,
 )
-from gyaradax.params import gkparams_from_input_dat
-from gyaradax.utils import load_gkw_k_dump
+from gyaradax.utils import load_gkw_k_dump, read_gkw_dump_time, read_gkw_dump_dtim
 
 
 def bench_component(fn, n_iters=5, label=""):
@@ -47,66 +55,74 @@ def bench_component(fn, n_iters=5, label=""):
 
 def run_benchmark():
     parser = argparse.ArgumentParser(description="benchmark gyaradax solver")
-    parser.add_argument("--data-dir", type=str, required=True)
+    parser.add_argument("config", type=str, help="yaml config path")
     parser.add_argument("--steps", type=int, default=120)
     parser.add_argument("--blocks", type=int, default=3)
     parser.add_argument("--kinetic", action="store_true")
-    parser.add_argument("--resume", type=str, default="100")
-    parser.add_argument("--device", type=int, default=None)
+    parser.add_argument("--device", type=int, default=-1, help="GPU device ID")
     parser.add_argument(
         "--components", action="store_true", help="benchmark individual components"
     )
     parser.add_argument("--save-reference", type=str)
     parser.add_argument("--reference", type=str)
-    parser.add_argument(
-        "--computed-geometry",
-        action="store_true",
-        help="use analytic geometry instead of loading from files",
-    )
+    parser.add_argument("--from-scratch", action="store_true", help="ignore K-files, use init_f")
+    parser.add_argument("--mp", action="store_true", help="mixed precision")
+
     args = parser.parse_args()
 
-    if args.device is not None:
-        os.environ["CUDA_VISIBLE_DEVICES"] = str(args.device)
+    cfg = load_config(args.config)
+    data_dir = getattr(cfg.run, "data_dir", None)
+    kinetic = args.kinetic
 
-    data_dir = args.data_dir
-    n_species = 2 if args.kinetic else 1
+    overrides = {"mixed_precision": args.mp}
+    params = gkparams_from_config(cfg, **overrides)
 
-    if args.computed_geometry:
-        geom = compute_geometry_from_input(os.path.join(data_dir, "input.dat"))
-    else:
+    # geometry: file-based if geom.dat exists, analytic otherwise
+    if data_dir and os.path.exists(os.path.join(data_dir, "geom.dat")):
         geom = load_geometry(data_dir)
-    shape = tuple(len(geom[k]) for k in ("intvp", "intmu", "ints", "kxrh", "krho"))
-    dump_path = os.path.join(data_dir, args.resume)
-    df = load_gkw_k_dump(dump_path, shape, n_species=n_species)
-
-    dat_path = dump_path + ".dat"
-    dt_override = {}
-    if os.path.exists(dat_path):
-        with open(dat_path) as f:
-            text = f.read()
-        m = re.search(r"DTIM\s*=\s*([0-9eE+\-.]+)", text)
-        if m:
-            dt_override["dt"] = float(m.group(1))
-        m = re.search(r"TIME\s*=\s*([0-9eE+\-.]+)", text)
-        t_start = float(m.group(1)) if m else 0.0
+        print(f"geometry: loaded from {data_dir}")
     else:
-        t_start = 0.0
+        geom = _geometry_from_config(cfg)
+        print("geometry: computed from config parameters")
 
-    params = gkparams_from_input_dat(
-        os.path.join(data_dir, "input.dat"),
-        non_linear=True,
-        adiabatic_electrons=not args.kinetic,
-        **dt_override,
-    )
+    n_species = 1
+    if not params.adiabatic_electrons:
+        n_species = int(jnp.asarray(params.mas).shape[0])
 
-    nky = len(geom["krho"])
-    state = GKState(
-        time=jnp.array(t_start, dtype=jnp.float64),
-        step=jnp.array(0, dtype=jnp.int32),
-        accumulated_norm_factor=jnp.ones(nky, dtype=jnp.float64),
-        window_start_amp=jnp.ones(nky, dtype=jnp.float64),
-        last_growth_rate=jnp.zeros(nky, dtype=jnp.float64),
-    )
+    # determine initial state
+    k_path = None
+    if not args.from_scratch and data_dir:
+        # look for K01 or similar in data_dir
+        from gyaradax.utils import K_files
+        ks = K_files(data_dir)
+        if ks:
+            k_path = os.path.join(data_dir, ks[0])
+
+    if k_path is not None:
+        shape = tuple(len(geom[k]) for k in ("intvp", "intmu", "ints", "kxrh", "krho"))
+        df = load_gkw_k_dump(k_path, shape, n_species=n_species)
+
+        dat_path = k_path + ".dat"
+        t_start = read_gkw_dump_time(dat_path) if os.path.exists(dat_path) else 0.0
+        nky = len(geom["krho"])
+
+        actual_dt = read_gkw_dump_dtim(dat_path) if os.path.exists(dat_path) else 0.0
+        if 0 < actual_dt < params.dt:
+            print(f"using dtim={actual_dt:.6f} from {os.path.basename(dat_path)}")
+            # params is frozen, but we can update it via some mechanism if needed
+            # for benchmark we might just want to use config dt unless explicitly resume-testing
+        
+        state = GKState(
+            time=jnp.array(t_start, dtype=jnp.float64),
+            step=jnp.array(0, dtype=jnp.int32),
+            accumulated_norm_factor=jnp.ones(nky, dtype=jnp.float64),
+            window_start_amp=jnp.ones(nky, dtype=jnp.float64), # keep it 1.0 for standard benchmark
+            last_growth_rate=jnp.zeros(nky, dtype=jnp.float64),
+        )
+        print(f"init: resumed from {os.path.basename(k_path)} (t={t_start:.4f})")
+    else:
+        df, state = gk_init(geom, params, n_species=n_species)
+        print("init: fresh (init_f)")
 
     mode = "kinetic" if args.kinetic else "adiabatic"
     print(f"mode: {mode}, grid: {df.shape}, dt: {params.dt}")
@@ -144,7 +160,7 @@ def run_benchmark():
     print(f"steps/block: {args.steps}, blocks: {args.blocks}")
     print(f"warmup (compile {args.steps} steps)...")
     t0 = time.time()
-    df_w, _, state_w = gksolve(df, geom, params, state, n_steps=args.steps, pre=pre)
+    df_w, (phi_w, fluxes_w), state_w = gksolve(df, geom, params, state, n_steps=args.steps, pre=pre)
     jax.block_until_ready(df_w)
     t_warmup = time.time() - t0
     print(f"warmup: {t_warmup:.2f}s")
