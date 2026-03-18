@@ -40,6 +40,8 @@ from gyaradax.integrals import (
     geom_tensors,
     calculate_phi,
     calculate_phi_kinetic,
+    precompute_phi_kinetic,
+    
 )
 from gyaradax import stencils
 from gyaradax.params import GKParams
@@ -134,9 +136,17 @@ def mode_amplitude(phi: jnp.ndarray, geometry: Dict[str, jnp.ndarray], eps: floa
 
 
 def normalize_per_ky(
-    df: jnp.ndarray, geometry: Dict[str, jnp.ndarray], params: GKParams
+    df: jnp.ndarray, geometry: Dict[str, jnp.ndarray], params: GKParams,
+    pre: Optional[Dict] = None,
 ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
-    phi = calculate_phi(geom_tensors(geometry, params=params), df)
+    if params.adiabatic_electrons:
+        if pre is not None:
+            geom = pre["geom_tensors"]
+        else:
+            geom = geom_tensors(geometry, params=params)
+        phi = calculate_phi(geom, df)
+    else:
+        phi = calculate_phi_kinetic(geometry, df)
     amp_per_ky = mode_amplitude(phi, geometry, params.norm_eps)
     safe_amp = jnp.where(amp_per_ky < params.norm_eps, 1.0, amp_per_ky)
     inv = 1.0 / safe_amp
@@ -675,8 +685,6 @@ def linear_precompute(geometry: Dict[str, jnp.ndarray], params: GKParams) -> Dic
         out["nsp"] = nsp
 
         # precompute kinetic phi solve arrays (avoids recomputing bessel/gamma per RHS call)
-        from gyaradax.integrals import precompute_phi_kinetic
-
         phi_w, phi_d = precompute_phi_kinetic(geometry)
         out["phi_weight"] = phi_w
         out["phi_diag"] = phi_d
@@ -995,69 +1003,30 @@ def _compute_linear_rhs(df, phi, geometry, params, pre):
     else:
         phi_b = phi[None, None, :, :, :]
 
-        def _per_species(
-            df_sp,
-            bessel_sp,
-            fmaxwl_sp,
-            dmaxwel_sp,
-            drift_x_sp,
-            drift_y_sp,
-            upar_sp,
-            utrap_sp,
-            abs_par_sp,
-            abs_vp_sp,
-            term7_fac_sp,
-            tmp0_sp,
-            signz0_sp,
-            s_total_upar_sp,
-            s_total_t7_sp,
-        ):
-            sp_pre = {
-                "bessel": bessel_sp,
-                "fmaxwl": fmaxwl_sp,
-                "dmaxwel_fm_ek": dmaxwel_sp,
-                "drift_x": drift_x_sp,
-                "drift_y": drift_y_sp,
-                "upar": upar_sp,
-                "utrap": utrap_sp,
-                "abs_dum2_par": abs_par_sp,
-                "abs_dum2_vp": abs_vp_sp,
-                "term7_fac": term7_fac_sp,
-                "tmp0": tmp0_sp,
-                "signz0": signz0_sp,
-                "s_total_upar": s_total_upar_sp,
-                "s_total_t7": s_total_t7_sp,
-                "kx_b": pre["kx_b"],
-                "ky_b": pre["ky_b"],
-                "hyper": pre["hyper"],
-                "s_shift": pre["s_shift"],
-                "kx_shift": pre["kx_shift"],
-                "valid_shift": pre["valid_shift"],
-            }
+        # split pre into per-species (vmapped) and shared (broadcast) arrays
+        # fmt: off
+        sp_arrays = {k: pre[k] for k in [
+            "bessel", "fmaxwl", "dmaxwel_fm_ek", "drift_x", "drift_y",
+            "upar", "utrap", "abs_dum2_par", "abs_dum2_vp",
+            "term7_fac", "tmp0", "signz0",
+            "s_total_upar", "s_total_t7",
+        ]}
+        # fmt: on
+        sp_in_axes = {k: 0 for k in sp_arrays}
+        sp_in_axes["s_total_upar"] = 1  # stencil arrays have species on axis 1
+        sp_in_axes["s_total_t7"] = 1
+
+        shared = {k: pre[k] for k in [
+            "kx_b", "ky_b", "hyper", "s_shift", "kx_shift", "valid_shift",
+        ]}
+
+        def _per_species(df_sp, sp):
+            sp_pre = {**sp, **shared}
             return _linear_rhs_core(
                 df_sp, phi_b, sp_pre, pre["dvp"], params.disp_vp, params.drive_scale
             )
 
-        return jax.vmap(
-            _per_species,
-            in_axes=(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1),
-        )(
-            df,
-            pre["bessel"],
-            pre["fmaxwl"],
-            pre["dmaxwel_fm_ek"],
-            pre["drift_x"],
-            pre["drift_y"],
-            pre["upar"],
-            pre["utrap"],
-            pre["abs_dum2_par"],
-            pre["abs_dum2_vp"],
-            pre["term7_fac"],
-            pre["tmp0"],
-            pre["signz0"],
-            pre["s_total_upar"],
-            pre["s_total_t7"],
-        )
+        return jax.vmap(_per_species, in_axes=(0, sp_in_axes))(df, sp_arrays)
 
 
 def _compute_nonlinear_rhs(df, phi, geometry, params, pre):
@@ -1120,7 +1089,7 @@ def gkstep_single(
     else:
 
         def _apply_norm(_):
-            return normalize_per_ky(next_df_raw, geometry, params)
+            return normalize_per_ky(next_df_raw, geometry, params, pre=pre)
 
         def _skip_norm(_):
             phi_curr = _compute_phi(next_df_raw, geometry, params, pre)

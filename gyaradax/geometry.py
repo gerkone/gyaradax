@@ -34,12 +34,14 @@ def _load_1d_array(path):
     return data
 
 
-def _poloidal_angle(sgrid, eps, n_iter=10):
-    """Invert theta + eps*sin(theta) = 2*pi*s via fixed-point iteration.
+def _poloidal_angle(sgrid, eps, geom_type="circ", n_iter=10):
+    """Map field-line coordinate s to poloidal angle theta.
 
-    Convergence is geometric with rate eps; 10 iterations give
-    O(eps^10) ~ 1e-7 for typical tokamak values.
+    For circ: invert theta + eps*sin(theta) = 2*pi*s (fixed-point, 10 iters).
+    For s-alpha: simple linear mapping theta = 2*pi*s.
     """
+    if geom_type == "s-alpha":
+        return 2 * np.pi * sgrid.copy()
     theta = 2 * np.pi * sgrid.copy()
     for _ in range(n_iter):
         theta = 2 * np.pi * sgrid - eps * np.sin(theta)
@@ -98,19 +100,21 @@ def _psi_theta_to_psi_s(f_psi, f_theta, theta, eps):
     return f_psi - np.sin(theta) / R * f_theta, 2 * np.pi * f_theta / R
 
 
-def _circular_geometry(theta, q, shat, eps, signB=1.0, signJ=1.0):
-    """Compute all geometry quantities for the Lapillonne circular model.
+def _circular_geometry(theta, q, shat, eps, signB=1.0, signJ=1.0, geom_type="circ"):
+    """Compute all geometry quantities for circular/s-alpha models.
 
-    Produces the magnetic field, metric tensor, and all field/position
-    derivatives in (psi, s) coordinates.  The returned dict is consumed
-    by :func:`_calc_geom_tensors` and :func:`compute_geometry`.
+    For circ: full Lapillonne model with delta correction and nonlinear theta.
+    For s-alpha: simplified B = 1/(1+eps*cos(theta)), delta=1.
 
-    Translated from ``geom_circ`` in geom.f90 lines 1444-1616.
+    Translated from ``geom_circ`` / ``geom_s_alpha`` in geom.f90.
     """
     ns = len(theta)
     R = 1 + eps * np.cos(theta)
 
-    dum = np.sqrt(1 + eps**2 / q**2 / (1 - eps**2))
+    if geom_type == "s-alpha":
+        dum = 1.0
+    else:
+        dum = np.sqrt(1 + eps**2 / q**2 / (1 - eps**2))
     bn = dum / R
     bups = 1.0 / (2 * np.pi * q * np.sqrt(1 - eps**2))
     dpfdpsi = eps / (q * np.sqrt(1 - eps**2))
@@ -384,18 +388,18 @@ def compute_geometry(
     ikxspace: int = 5,
     signB: float = 1.0,
     Rref: float = 100.0,
+    geom_type: str = "circ",
 ) -> Dict[str, Any]:
-    """Compute geometry dict from circular equilibrium parameters.
+    """Compute geometry dict from equilibrium parameters.
 
-    Returns a dict with the same keys and dtypes as
-    :func:`gyaradax.geometry.load_geometry`, suitable for passing directly
-    to the solver.
+    geom_type='circ': full Lapillonne circular model (nonlinear theta, delta).
+    geom_type='s-alpha': simplified model (theta=2*pi*s, B=1/(1+eps*cos(theta))).
     """
     signJ = 1.0
     sgrid = _parallel_grid(ns, nperiod)
-    theta = _poloidal_angle(sgrid, eps)
+    theta = _poloidal_angle(sgrid, eps, geom_type=geom_type)
 
-    cg = _circular_geometry(theta, q, shat, eps, signB=signB, signJ=signJ)
+    cg = _circular_geometry(theta, q, shat, eps, signB=signB, signJ=signJ, geom_type=geom_type)
     efun_3x3, dfun, hfun, ifun = _calc_geom_tensors(cg, signJ=signJ, signB=signB)
 
     bn, R = cg["bn"], cg["R"]
@@ -488,6 +492,7 @@ def compute_geometry_from_input(input_dat_path: str) -> Dict[str, Any]:
     nkx = int(grid_sec.get("nx", 1))
     nky = int(grid_sec.get("nmod", 1))
     ikxspace = int(mode_sec.get("ikxspace", 5))
+    geom_type = str(geom_sec.get("geom_type", "s-alpha")).strip("'\"").lower()
 
     # for single-mode (non-mode_box) cases, use kthrho as the wavenumber
     mode_box = mode_sec.get("mode_box", False)
@@ -521,6 +526,7 @@ def compute_geometry_from_input(input_dat_path: str) -> Dict[str, Any]:
         vpar_max=vpar_max,
         nperiod=int(grid_sec.get("nperiod", 1)),
         kxmax=kxmax, krhomax=krhomax, ikxspace=ikxspace,
+        geom_type=geom_type,
     )
 
 
@@ -580,7 +586,8 @@ def geometry_from_geom_dat_and_input(input_dat_path: str) -> Dict[str, Any]:
 
     sgrid = _parallel_grid(ns, nperiod)
 
-    ml = _build_mode_label(nkx, nky, ikxspace)
+    nkx_actual = len(kxrh)
+    ml = _build_mode_label(nkx_actual, nky, ikxspace)
     ml_kxky, ixp, ixm, ixz, iyz = _build_mode_connectivity(ml, kxrh, krho)
     pos = _build_pos_par_grid_classes(ixp, ixm, ns)
     ss, ks, vs = _build_parallel_shift_maps(ixp, ixm, iyz, ns, max_shift=4)

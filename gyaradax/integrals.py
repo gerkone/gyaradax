@@ -11,9 +11,7 @@ def j0(x):
     return jnp.where(jnp.abs(x) < 1e-10, 1.0, res)
 
 
-def geom_tensors(
-    geometry: Dict[str, jnp.ndarray], params: Any = None
-) -> Dict[str, jnp.ndarray]:
+def geom_tensors(geometry: Dict[str, jnp.ndarray], params: Any = None) -> Dict[str, jnp.ndarray]:
     """Expand geometry constants for broadcasting and compute Bessel terms.
 
     Single-species version. Species params are scalars reshaped to (1,1,1,1,1,1).
@@ -74,6 +72,11 @@ def geom_tensors(
     gamma_arg = jnp.clip(gamma_arg, 0.0, 500.0)
     geom_["gamma"] = i0(gamma_arg) * jnp.exp(-gamma_arg)
 
+    # zonal mode detection: ky-index 0 is only the zonal mode if krho[0] ≈ 0
+    krho_flat = jnp.asarray(geometry["krho"], dtype=jnp.float64)
+    iyzero = jnp.argmin(jnp.abs(krho_flat))
+    geom_["has_zonal"] = jnp.where(jnp.abs(krho_flat[iyzero]) < 1e-10, 1.0, 0.0)
+
     return geom_
 
 
@@ -96,13 +99,16 @@ def calculate_phi(geom: Dict[str, jnp.ndarray], df: jnp.ndarray) -> jnp.ndarray:
     denom = diagz - jnp.exp(-cfen) / tmp
     denom = jnp.where(jnp.abs(denom) < 1e-15, 1.0, denom)
     matz = -ints / (signz * de * denom)
+    # flux-surface averaging only applies to the zonal mode (ky=0)
+    has_zonal = geom["has_zonal"]
     matz = matz.at[..., 1:].set(0.0)
+    matz = matz * has_zonal
 
     phi = poisson_int * df
     phi = jnp.sum(phi, axis=(1, 2), keepdims=True)
 
     y_mask = jnp.zeros_like(phi)
-    y_mask = y_mask.at[..., 0].set(1.0)
+    y_mask = y_mask.at[..., 0].set(has_zonal)
 
     bufphi = matz * phi
     bufphi = jnp.sum(bufphi, axis=3, keepdims=True)
@@ -118,8 +124,9 @@ def calculate_phi(geom: Dict[str, jnp.ndarray], df: jnp.ndarray) -> jnp.ndarray:
     phi = phi + maty_val * bufphi * y_mask
 
     poisson_diag = jnp.exp(-cfen) * (signz**2) * de * (gamma - 1.0) / tmp
+    # only zero phi at (kx=0, ky=0) when a real zonal mode exists
     norm_mask = jnp.ones_like(phi)
-    norm_mask = norm_mask.at[..., 0, 0].set(0.0)
+    norm_mask = norm_mask.at[..., 0, 0].set(1.0 - has_zonal)
 
     pdiag = poisson_diag * norm_mask - signz * jnp.exp(-cfen) * de / tmp
     pdiag = jnp.where(jnp.abs(pdiag) < 1e-15, -1.0, pdiag)
@@ -195,13 +202,18 @@ def precompute_phi_kinetic(geometry: Dict[str, jnp.ndarray]):
 
     # poisson diagonal: sum over species of Z^2 * n * (Gamma0 - 1) / T
     diag_per_sp = signz_6d**2 * de_6d * (gamma - 1.0) / tmp_6d
-    diag = jnp.sum(diag_per_sp, axis=0).squeeze()
+    diag = jnp.sum(diag_per_sp, axis=0)
+    # reshape to (ns, nkx, nky), dropping summed velocity axes
+    diag = diag.reshape(diag.shape[-3], diag.shape[-2], diag.shape[-1])
 
     kxrh = jnp.asarray(geometry["kxrh"], dtype=jnp.float64)
     krho = jnp.asarray(geometry["krho"], dtype=jnp.float64)
     ixzero = jnp.argmin(jnp.abs(kxrh))
     iyzero = jnp.argmin(jnp.abs(krho))
-    diag = diag.at[:, ixzero, iyzero].set(1.0)
+    # only set zonal diagonal to 1 if a real ky=0 mode exists
+    has_zonal = jnp.abs(krho[iyzero]) < 1e-10
+    diag_with_zonal = diag.at[:, ixzero, iyzero].set(1.0)
+    diag = jnp.where(has_zonal, diag_with_zonal, diag)
     diag = jnp.where(jnp.abs(diag) < 1e-15, -1.0, diag)
 
     return weight, diag
