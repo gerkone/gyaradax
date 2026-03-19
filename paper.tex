@@ -273,9 +273,6 @@ The final performance optimizations was performed by the authors, with advice an
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 \section{Verification and Experiments}
-
-We validate \texttt{gyaradax} against reference GKW trajectories and present differentiable programming experiments enabled by the JAX implementation.
-
 \begin{figure*}[t]
     \centering
     \begin{subfigure}{\linewidth}
@@ -285,7 +282,7 @@ We validate \texttt{gyaradax} against reference GKW trajectories and present dif
         \includegraphics[width=0.48\linewidth]{figures/fluxes_iteration_200.pdf}
         \label{fig:emp_fluxes}
     \end{subfigure}
-    \vspace{0.5em}
+    \vspace{-0.5em}
     \begin{subfigure}{\linewidth}
         \centering
         \includegraphics[width=0.48\linewidth]{figures/spectra_iteration_13.pdf}
@@ -301,9 +298,12 @@ We validate \texttt{gyaradax} against reference GKW trajectories and present dif
     \label{fig:empirical}
 \end{figure*}
 
+We validate \texttt{gyaradax} against reference GKW trajectories and present differentiable programming experiments enabled by the JAX implementation.
+
+
 \subsection{Empirical Validation}
 \label{sec:verification}
-We verify \texttt{gyaradax} by empirical numerical alignment against reference GKW trajectories for ion-temperature-gradient (ITG) turbulence, covering both adiabatic \cite{paischer2025gyroswin} and kinetic electrons.
+We verify \texttt{gyaradax} by empirical numerical alignment against reference GKW trajectories for ion-temperature-gradient (ITG) turbulence, covering both adiabatic \cite{paischer2025gyroswin} and kinetic electrons. Figures \ref{fig:empirical} and \ref{fig:kinetic_fluxes} summarize these results.
 All test cases use a standard grid $(N_{v\parallel}, N_\mu, N_s, N_{kx}, N_{ky}) = (32, 8, 16, 85, 32)$.
 The adiabatic cases use $\textrm{d}t = 0.02$, while kinetic electron cases use adaptive timestepping with $\textrm{d}t \approx 2.1 \times 10^{-3}$ (CFL).
 We evaluate three complementary diagnostics: transport fluxes, wavenumber spectra, and per-$k_y$ growth rates.
@@ -322,16 +322,17 @@ We compare the time-averaged spectral profiles $k_y^{\text{spec}}(k_y) = \sum_{s
 \textbf{Growth rates.}
 Growth rates $\gamma(k_y)$ measure the linear instability drive. In the nonlinear regime they converge to zero, showing the balance between drive and dissipation.
 %
-The growth rate is defined as $\gamma = \ln(A_\text{end} / A_\text{start}) / \Delta t_\text{window}$, where the amplitude
-$A(k_y) = \sqrt{\Delta s \sum_{s,k_x} |\phi(s, k_x, k_y)|^2}$ (as in \citet{PEETERS_GKW_2009}).
-The four panels in \Cref{fig:emp_growth} compare the growth rate spectrum $\gamma(k_y)$ at three simulation times, and the simulation average.
-
 \begin{figure}[h]
     \centering
     \includegraphics[width=0.9\columnwidth]{figures/growth_snap_iteration_13.pdf}
     \caption{Per-$k_y$ growth rate profiles $\gamma(k_y)$ at three simulation snapshots and time-averaged (bottom right). The amplitude is computed over the connected $k_x$ chain containing $k_x{=}0$, matching the GKW convention.}
     \label{fig:emp_growth}
 \end{figure}
+
+The growth rate is defined as $\gamma = \ln(A_\text{end} / A_\text{start}) / \Delta t_\text{window}$, where the amplitude
+$A(k_y) = \sqrt{\Delta s \sum_{s,k_x} |\phi(s, k_x, k_y)|^2}$ (as in \citet{PEETERS_GKW_2009}).
+The four panels in \cref{fig:emp_growth} compare the growth rate spectrum $\gamma(k_y)$ at three simulation times, and the simulation average.
+
 
 
 \textbf{Kinetic electrons.}
@@ -357,20 +358,8 @@ Per-species transport fluxes track the GKW reference (\cref{fig:kinetic_fluxes})
 \label{sec:exp}
 As a demonstration of the differentiable, ML-oriented nature of this solver, we show some examples of differentiable programming.
 
-\subsection{Inverse Problem}
+\textbf{Inverse problem.}
 \label{sec:inverse}
-\begin{figure}[t]
-    % \centering
-    \includegraphics[height=0.49\linewidth]{figures/inverse_spectrum.pdf}\hfill
-    \includegraphics[height=0.49\linewidth]{figures/inv_landscape.pdf}
-    
-    \caption{Inverse recovery of $R/L_T$ from the electrostatic potential. 
-    \textbf{Top left:} $k_y$ spectral energy of the initial, target ($\times$), and recovered potentials. 
-    \textbf{Bottom left:} convergence during optimization iterations. 
-    \textbf{Right:} loss landscape $\mathcal{L}(R/L_T)$ (top) and AD gradient (bottom), with the Adam trajectory overlaid.}
-    \label{fig:inverse}
-\end{figure}
-
 A direct payoff of end-to-end differentiability is gradient-based inverse problems.
 We demonstrate this by recovering the temperature gradient $R/L_T$ from a target electrostatic potential $\phi^*$ produced by a linear simulation.
 %
@@ -382,13 +371,33 @@ The loss is the potential energy mismatch
 where $\phi$ is obtained by calling the solver.
 Reverse-mode AD provides exact $\partial\mathcal{L}/\partial(R/L_T)$ through the full integration.
 
+\begin{figure}[h]
+    % \centering
+    \includegraphics[height=0.49\linewidth]{figures/inverse_spectrum.pdf}\hfill
+    \includegraphics[height=0.49\linewidth]{figures/inv_landscape.pdf}
+    
+    \caption{Inverse recovery of $R/L_T$ from the electrostatic potential. 
+    \textbf{Top left:} $k_y$ spectral energy of the initial, target ($\times$), and recovered potentials. 
+    \textbf{Bottom left:} convergence during optimization iterations. 
+    \textbf{Right:} loss landscape $\mathcal{L}(R/L_T)$ (top) and AD gradient (bottom), with the Adam trajectory overlaid.}
+    \label{fig:inverse}
+\end{figure}
+
 Starting from $R/L_T^{(0)} = 10.0$, Adam \cite{kingma_adam_2015} converges to the ground truth (\cref{fig:inverse}).
 The recovered potential matches the target $k_y^{\textbf{spec}}$ (\cref{fig:inverse}, top left), confirming that the optimizer recovers both the instability drive and the eigenmode structure.
 The loss landscape (\cref{fig:inverse}, right) is smooth and unimodal, with a clean zero crossing of the gradient at the optimum.
 
-\subsection{Sensitivity Analysis}
+\textbf{Sensitivity analysis.}
 \label{sec:sensitivity}
-\begin{figure}[t]
+
+Sensitivity analysis quantifies how observables respond to parameter changes, informing experimental design and uncertainty quantification.
+Traditional approaches rely on finite differences, requiring $2N$ solver evaluations for $N$ parameters, among other tradeoffs.
+With AD, exact Jacobians are obtained in a single backward pass.
+
+We scan $R/L_T \in [3, 10]$ and at each value compute the per-$k_y$ growth rate $\gamma(k_y)$ and its derivative $\partial\gamma / \partial(R/L_T)$ through 400 RK4 steps.
+On this reduced grid, all modes are damped ($\gamma < 0$) across the parameter range, with the high-$k_y$ modes getting damped (\cref{fig:sensitivity}, top).
+Increasing $R/L_T$ reduces the damping rate, and the sensitivity map (\cref{fig:sensitivity}, bottom) reveals that the high-$k_y$ modes at low drive are the most responsive.
+\begin{figure}[h]
     \centering
     \includegraphics[width=0.9\columnwidth]{figures/sensitivity_gamma.pdf}\\
     \includegraphics[width=0.9\columnwidth]{figures/sensitivity_dgamma.pdf}
@@ -398,13 +407,14 @@ The loss landscape (\cref{fig:inverse}, right) is smooth and unimodal, with a cl
     \label{fig:sensitivity}
 \end{figure}
 
-Sensitivity analysis quantifies how observables respond to parameter changes, informing experimental design and uncertainty quantification.
-Traditional approaches rely on finite differences, requiring $2N$ solver evaluations for $N$ parameters, among other tradeoffs.
-With AD, exact Jacobians are obtained in a single backward pass.
+\textbf{Neural correction.}
+\label{sec:correction}
+As a proof-of-concept for solver + ML hybrid, we train a small neural network to correct the transport of a spectrally truncated simulation, similarly to what Solver in the Loop \cite{um2021solverinthelooplearningdifferentiablephysics} did in the temporal axis, to achieve long term stability with large timesteps.
+%
+The coarse solver uses a reduced grid ($N_{kx}{=}31$, $N_{ky}{=}8$ vs $N_{kx}{=}85$, $N_{ky}{=}32$), leading to the heat flux getting underestimated.
+After each solver block, an MLP applies a $k_y$ mode-wise multiplicative correction, with the heat flux MSE as target.
 
-We scan $R/L_T \in [3, 10]$ and at each value compute the per-$k_y$ growth rate $\gamma(k_y)$ and its derivative $\partial\gamma / \partial(R/L_T)$ through 400 RK4 steps.
-On this reduced grid, all modes are damped ($\gamma < 0$) across the parameter range, with the high-$k_y$ modes getting damped (\cref{fig:sensitivity}, top).
-Increasing $R/L_T$ reduces the damping rate, and the sensitivity map (\cref{fig:sensitivity}, bottom) reveals that the high-$k_y$ modes at low drive are the most responsive.
+\GG{TODO wrap up, include figure, check results}
 
 \subsection{Performance Comparison vs GKW}
 \GG{throughput, flops computation, memory usage / bound}

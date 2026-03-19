@@ -75,7 +75,7 @@ def plot_flux_trace(
 
     n_flux = len(labels)
     ncols = n_species
-    fig, axes = plt.subplots(n_flux, ncols, figsize=(7.0, 1.5 * n_flux), sharex=True, squeeze=False)
+    fig, axes = plt.subplots(n_flux, ncols, figsize=(7.0, 1.4 * n_flux), sharex=True, squeeze=False)
 
     for isp in range(n_species):
         col_offset = isp * n_flux
@@ -118,7 +118,8 @@ def plot_flux_trace(
                 ax.set_ylabel(labels[i])
             ax.grid(True, axis="y")
             if i == 0:
-                ax.set_title(species_labels[isp])
+                if n_species > 1:
+                    ax.set_title(species_labels[isp])
                 if isp == 0:
                     ax.legend(frameon=False, loc="best")
 
@@ -153,7 +154,7 @@ def plot_spectra(
         ref_kx_spec = np.sum(ref_phi_sq, axis=(0, 2))
         ref_ky_spec = np.sum(ref_phi_sq, axis=(0, 1))
 
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(7.0, 2.8))
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(7.0, 2.2))
 
     ax1.semilogy(
         ky,
@@ -165,7 +166,16 @@ def plot_spectra(
         label="gyaradax",
     )
     if ref_ky_spec is not None:
-        ax1.semilogy(ky, ref_ky_spec, "x--", color="black", markersize=4, lw=1, label="GKW")
+        ax1.semilogy(
+            ky, 
+            ref_ky_spec, 
+            marker="x", 
+            linestyle="None",
+            color="black", 
+            markersize=4, 
+            markeredgewidth=1,
+            label="GKW"
+        )
     ax1.set_xlabel(r"$k_y \rho_{ref}$")
     ax1.set_ylabel(r"$\sum_{s, k_x} |\phi|^2$")
     ax1.set_title(r"$k_y$ spectrum")
@@ -174,8 +184,16 @@ def plot_spectra(
 
     ax2.semilogy(kx, kx_spec, "o-", color=JAX_COLORS["purple"], markersize=3, lw=1)
     if ref_kx_spec is not None:
-        ax2.semilogy(kx, ref_kx_spec, "x--", color="black", markersize=4, lw=1)
-    ax2.set_xlabel(r"$k_x \rho_{ref}$")
+        ax2.semilogy(
+            kx, 
+            ref_kx_spec,
+            marker="x", 
+            linestyle="None",
+            color="black", 
+            markersize=4, 
+            markeredgewidth=1
+        )
+        ax2.set_xlabel(r"$k_x \rho_{ref}$")
     ax2.set_ylabel(r"$\sum_{s, k_y} |\phi|^2$")
     ax2.set_title(r"$k_x$ spectrum")
     ax2.grid(True, which="both")

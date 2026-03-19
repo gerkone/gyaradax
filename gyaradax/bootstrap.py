@@ -14,6 +14,7 @@ def init_jax(device: int = None):
     _initialized = True
 
     os.environ["JAX_ENABLE_X64"] = "True"
+    os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
 
     if device is None:
         for i, arg in enumerate(sys.argv):
