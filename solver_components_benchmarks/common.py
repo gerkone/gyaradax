@@ -52,8 +52,9 @@ def get_gpu_specs():
             specs = data
             break
     if specs is None:
-        raise ValueError(f"Unknown GPU kind: {kind}")
-            
+        print(f"  [WARN] Unknown GPU kind '{kind}' — roofline figures will be meaningless.")
+        return 0.0, 0.0, kind, kind
+
     bw_gbs = specs["bw_tbs"] * 1024
     return bw_gbs, specs["fp64_tflops"], kind, specs["name"]
 
@@ -165,15 +166,19 @@ def roofline_report(
     bw_gbs   : peak memory bandwidth of the target device (GB/s)
     """
     achieved_gbs = bytes_rw / 1e9 / (mean_ms / 1e3)
-    pct_bw = 100.0 * achieved_gbs / bw_gbs
+    pct_bw = 100.0 * achieved_gbs / bw_gbs if bw_gbs > 0 else float("nan")
     if flops > 0:
         ai_achieved = flops / bytes_rw
-        roofline_tflops = min(flops / bytes_rw * bw_gbs / 1024, fp64_tflops)
-        pct_roof = 100.0 * (flops / (mean_ms / 1e3)) / (roofline_tflops * 1e12)
+        if bw_gbs > 0 and fp64_tflops > 0:
+            roofline_tflops = min(flops / bytes_rw * bw_gbs / 1024, fp64_tflops)
+            pct_roof = 100.0 * (flops / (mean_ms / 1e3)) / (roofline_tflops * 1e12)
+            roof_str = f"{pct_roof:.0f}% roofline"
+        else:
+            roof_str = "roofline N/A"
         print(
             f"  {label:30s}  {mean_ms:7.3f} ms  "
             f"{achieved_gbs:6.1f} GB/s ({pct_bw:.0f}% BW)  "
-            f"AI={ai_achieved:.3f}  {pct_roof:.0f}% roofline"
+            f"AI={ai_achieved:.3f}  {roof_str}"
         )
     else:
         print(
