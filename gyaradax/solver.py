@@ -272,11 +272,11 @@ def nonlinear_term_iii(
             jnp.asarray(fft_prefactor, dtype=jnp.complex128)
             * jnp.asarray(fft_scale, dtype=jnp.complex128)
             * jnp.fft.rfft2(
-                nl_real.astype(jnp.float64),
+                nl_real,
                 s=(mrad, mphi),
                 axes=(-2, -1),
                 norm="backward",
-            )
+            ).astype(jnp.complex128)
         )
         return unpack_half_spectrum(nl_half, jind, nky)
 
