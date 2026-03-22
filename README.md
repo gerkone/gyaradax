@@ -49,52 +49,56 @@ python -m scripts.run configs/adiabatic_a.yaml configs/adiabatic_b.yaml --device
 ```
 
 ### Usage
-#### Configuration from GKW
-If you have an existing GKW run, you can extract its parameters and geometry into yaml:
-```bash
-PYTHONPATH=. python scripts/gkw_to_yaml.py /path/to/gkw_run configs/my_sim.yaml
-```
-
-#### Simulation wrapper
+#### Run a simulation
 ```python
 from gyaradax.simulate import gk_from_config, gksimulate
 
 # load yaml and run with IO/checkpointing
 df, geometry, params, state, pre = gk_from_config("configs/my_sim.yaml")
 df, phi, fluxes, state = gksimulate(
-  df, geometry, params, state, 400, pre=pre,
-  output_dir="outputs", checkpoint_interval=40
+  df, geometry, params, state, 1200, pre=pre,
+  output_dir="outputs", checkpoint_interval=120
 )
 ```
 
-#### Solver forward
+#### Resume from GKW checkpoints
+`gyaradax` can resume from GKW binary `K` files.
 ```python
-from gyaradax.simulate import gk_init, gk_run
+import jax.numpy as jnp
 
-df, state = gk_init(geometry, params)
-df, phi, fluxes, state = gk_run(df, geometry, params, state, n_steps=1000, pre=pre)
-```
-
-#### Resume from checkpoints
-`gyaradax` supports resuming from internal `.npz` snapshots or GKW binary `K` files:
-```python
-from gyaradax.utils import load_checkpoint, load_gkw_k_dump
-from gyaradax.solver import GKState
-
-# resume from internal checkpoint
-ckpt = load_checkpoint("outputs/step_000040.npz")
-state_ckpt = GKState(
-  time=ckpt["time"],
-  step=ckpt["step"],
-  accumulated_norm_factor=ckpt["accumulated_norm_factor"],
-  window_start_amp=ckpt["window_start_amp"],
-  last_growth_rate=ckpt["last_growth_rate"]
-)
-df, phi, fluxes, state = gksimulate(ckpt["df"], geometry, params, state_ckpt, 400, pre=pre)
+from gyaradax.utils import load_gkw_k_dump, load_geometry, read_gkw_dump_time
+from gyaradax.params import gkparams_from_input_and_geometry
+from gyaradax.solver import GKState, mode_amplitude
+from gyaradax.simulate import gksimulate, _compute_phi_for_init
 
 # resume from GKW dump K01
-df_k = load_gkw_k_dump("/path/to/gkw/run/K01", resolution, n_species=1)
-df, phi, fluxes, state = gksimulate(df_k, geometry, params, state_k, 400, pre=pre)
+geometry = load_geometry("/path/to/gkw/run/")
+params = gkparams_from_input_and_geometry("/path/to/gkw/run/input.dat", geometry)
+
+res = tuple(len(geometry[k]) for k in ("intvp", "intmu", "ints", "kxrh", "krho"))
+df_k = load_gkw_k_dump("/path/to/gkw/run/K01", res, n_species=1)
+
+t_start = read_gkw_dump_time("/path/to/gkw/run/K01.dat")
+nky = len(geometry["krho"])
+
+phi0 = _compute_phi_for_init(df, geometry, params)
+amp0 = mode_amplitude(phi0, geometry, params.norm_eps)
+
+state_k = GKState(
+    time=jnp.array(t_start, dtype=jnp.float64),
+    step=jnp.array(0, dtype=jnp.int32),
+    accumulated_norm_factor=jnp.ones(nky, dtype=jnp.float64),
+    window_start_amp=amp0,
+    last_growth_rate=jnp.zeros(nky, dtype=jnp.float64),
+)
+
+df, phi, fluxes, state = gksimulate(df_k, geometry, params, state_k, 120)
+```
+
+#### Configuration from GKW
+If you have an existing GKW run, you can extract its parameters and geometry into yaml:
+```bash
+python -m scripts.gkw_to_yaml /path/to/gkw_run configs/my_sim.yaml
 ```
 
 ## State of the project and TODOs
