@@ -2,7 +2,7 @@
 
 import os
 import time
-from typing import Callable, Dict, Optional, Tuple
+from typing import Dict, Optional, Tuple
 
 import jax
 import jax.numpy as jnp
@@ -14,8 +14,6 @@ from gyaradax.geometry import compute_geometry
 from gyaradax.integrals import (
     get_integrals,
     calculate_phi,
-    calculate_phi_kinetic,
-    geom_tensors,
 )
 from gyaradax.params import gkparams_from_config, load_config, GKParams
 from gyaradax.solver import (
@@ -32,10 +30,7 @@ from gyaradax.utils import save_dumps as save_dumps_fn
 
 def _compute_phi_for_init(df, geometry, params):
     """Compute phi for initial amplitude tracking."""
-    if params.adiabatic_electrons:
-        return calculate_phi(geom_tensors(geometry, params=params), df)
-    else:
-        return calculate_phi_kinetic(geometry, df)
+    return calculate_phi(geometry, df, params=params)
 
 
 def _geometry_from_config(cfg):
@@ -50,10 +45,21 @@ def _geometry_from_config(cfg):
     _float_keys = {"q", "shat", "eps", "kxmax", "signB", "Rref", "vpar_max", "krhomax"}
     _int_keys = {"ns", "nkx", "nky", "nvpar", "nmu", "nperiod", "ikxspace"}
     for key, section in [
-        ("q", gc), ("shat", gc), ("eps", gc), ("kxmax", gc),
-        ("signB", gc), ("Rref", gc),
-        ("ns", gr), ("nkx", gr), ("nky", gr), ("nvpar", gr), ("nmu", gr),
-        ("vpar_max", gr), ("nperiod", gr), ("krhomax", gr), ("ikxspace", gr),
+        ("q", gc),
+        ("shat", gc),
+        ("eps", gc),
+        ("kxmax", gc),
+        ("signB", gc),
+        ("Rref", gc),
+        ("ns", gr),
+        ("nkx", gr),
+        ("nky", gr),
+        ("nvpar", gr),
+        ("nmu", gr),
+        ("vpar_max", gr),
+        ("nperiod", gr),
+        ("krhomax", gr),
+        ("ikxspace", gr),
     ]:
         val = getattr(section, key, None)
         if val is not None:
@@ -66,11 +72,11 @@ def log_step(fluxes, state: GKState, wall_time: float, n_steps: int = 0):
     growth = float(jnp.mean(state.last_growth_rate))
     if flx.ndim == 1:
         flx = flx[jnp.newaxis]
-    flx = " | ".join(f"eflux_{i} {float(flx[i, 1]):>6.2f}" for i in range(flx.shape[0]))
-    steps_sec = f"{n_steps / max(wall_time, 1e-6):>2.1f}" if n_steps > 0 else "N/A"
+    flx = " | ".join(f"eflux_{i} {float(flx[i, 1]):>8.4f}" for i in range(flx.shape[0]))
+    steps_sec = f"{n_steps / max(wall_time, 1e-6):>.2f}" if n_steps > 0 else "N/A"
     print(
-        f"[{int(state.step):>8d}] t {float(state.time):>10.2f} | "
-        f"{flx} | growth {growth:>12.2f} | {steps_sec} steps/s"
+        f"[{int(state.step):>8d}] t {float(state.time):>8.2f} | "
+        f"{flx} | growth {growth:>8.4f} | {steps_sec} steps/s"
     )
 
 
@@ -107,9 +113,7 @@ def gk_run(
     state: GKState,
     n_steps: int,
     pre: Optional[GKPre] = None,
-) -> Tuple[
-    jnp.ndarray, jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray], GKState
-]:
+) -> Tuple[jnp.ndarray, jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray], GKState]:
     """Run n_steps. Pure, no IO. Returns (df, phi, fluxes, state)."""
     if pre is None:
         pre = linear_precompute(geometry, params)
@@ -117,6 +121,28 @@ def gk_run(
         df, geometry, params, state, n_steps=n_steps, pre=pre
     )
     return final_df, phi, fluxes, final_state
+
+
+def gk_run_batched(
+    df_batch: jnp.ndarray,
+    geometry_batch: Dict[str, jnp.ndarray],
+    params_batch: GKParams,
+    state_batch: GKState,
+    n_steps: int,
+    pre_batch: GKPre,
+) -> Tuple[jnp.ndarray, jnp.ndarray, Tuple, GKState]:
+    """Batched gk_run: vmap over all per-config arguments.
+
+    All arguments except n_steps carry a leading batch dimension.
+    Configs must share the same grid shape and static params
+    (adiabatic_electrons, non_linear, finit).
+    """
+
+    def _single(df, geom, par, st, pre):
+        final_df, (phi, fluxes), final_state = gksolve(df, geom, par, st, n_steps=n_steps, pre=pre)
+        return final_df, phi, fluxes, final_state
+
+    return jax.vmap(_single)(df_batch, geometry_batch, params_batch, state_batch, pre_batch)
 
 
 def gksimulate(
@@ -131,9 +157,7 @@ def gksimulate(
     checkpoint_interval: Optional[int] = None,
     save_snapshots: bool = False,
     save_final: bool = True,
-) -> Tuple[
-    jnp.ndarray, jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray], GKState
-]:
+) -> Tuple[jnp.ndarray, jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray], GKState]:
     """Run n_steps with optional IO checkpointing and logging.
 
     Returns:

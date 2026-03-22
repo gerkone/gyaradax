@@ -68,9 +68,7 @@ def test_gksolve_contract(lin_geom, lin_shape):
 
     assert next_df.shape == lin_shape
     assert phi.shape == (lin_shape[2], lin_shape[3], lin_shape[4])
-    assert all(
-        isinstance(f, jnp.ndarray) and f.shape == () for f in [pflux, eflux, vflux]
-    )
+    assert all(isinstance(f, jnp.ndarray) and f.shape == () for f in [pflux, eflux, vflux])
 
 
 def test_gksolve_zero_input_invariance(lin_geom, lin_shape):

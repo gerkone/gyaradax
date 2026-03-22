@@ -23,10 +23,8 @@ def test_gkstep_gradient_validity(lin_geom, lin_shape):
     alpha_val = 1.0
     analytical_grad = grad_fn(alpha_val)
 
-    epsilon = 1e-5
-    fd_grad = (loss_fn(alpha_val + epsilon) - loss_fn(alpha_val - epsilon)) / (
-        2 * epsilon
-    )
+    eps = 1e-5
+    fd_grad = (loss_fn(alpha_val + eps) - loss_fn(alpha_val - eps)) / (2 * eps)
 
     rel_error = jnp.abs(analytical_grad - fd_grad) / (jnp.abs(analytical_grad) + 1e-30)
     assert jnp.isfinite(analytical_grad)
@@ -50,10 +48,8 @@ def test_nonlinear_gradient_validity(nonlin_geom, nonlin_shape):
     alpha_val = 1.0
     analytical_grad = grad_fn(alpha_val)
 
-    epsilon = 1e-5
-    fd_grad = (loss_fn(alpha_val + epsilon) - loss_fn(alpha_val - epsilon)) / (
-        2 * epsilon
-    )
+    eps = 1e-5
+    fd_grad = (loss_fn(alpha_val + eps) - loss_fn(alpha_val - eps)) / (2 * eps)
 
     rel_error = jnp.abs(analytical_grad - fd_grad) / (jnp.abs(analytical_grad) + 1e-30)
     assert jnp.isfinite(analytical_grad)

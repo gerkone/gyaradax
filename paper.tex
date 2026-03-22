@@ -123,7 +123,7 @@ We achieve numerical parity with GKW, with a substantial speedup.
 % 
 \texttt{gyaradax} enables research at the intersection of machine learning and computational plasma physics. Finally, we include some simple differentiable programming demonstrations, including an inverse problem and sensitivity analysis.
 \end{abstract}
-
+\vspace{-8px}
 \textbf{Keywords:} Gyrokinetics, Differentiable Solvers, JAX
 
 % \section{TODO}
@@ -153,7 +153,7 @@ In this work, we present \texttt{gyaradax}, a slim JAX code for local flux-tube 
 
 We developed \texttt{gyaradax} with heavy usage of coding agents \cite{yang2024sweagentagentcomputerinterfacesenable} and \textit{vibecoding}. This comes from the recent shift in software engineering, and our success with this code shows scientific software is no different \cite{chen2025scienceagentbenchrigorousassessmentlanguage,duston2025ainsteinbenchbenchmarkingcodingagents}.
 %
-It is our response to a genuine gap in our broader research, and at the same time we wanted to answer the question: \textit{to what extent can current agents successfully navigate and translate extensive, complex scientific computing frameworks?}
+It is our response to a genuine gap in our broader research, and at the same time we wanted to answer the question: \textit{to what extent can current agents successfully navigate, translate and upgrade extensive, complex scientific computing frameworks?}
 
 By coupling (aspiring) expert humans with coding agents, we demonstrate that complex reimplementations of numerical codes can be bootstrapped in a fraction of the time, freeing time and resources for more fundamental research.
 %
@@ -165,15 +165,20 @@ We pick JAX following the path of recent works across scientific domains, for ex
 %
 By prioritizing a minimal codebase implemented in a modern language, we bypass the architectural constraints of traditional solvers like GKW in the context of differentiable programming and learned surrogate models.
 
-In this whitepaper, first we introduce our mathematical framework (\cref{sec:gyrokinetics}) and the implementation and optimization of \texttt{gyaradax} (\cref{sec:gyaradax}). To stress the how relevant were agents in this project, we include some notes on the development process (\cref{sec:vibecoding}).
+In this whitepaper, first we introduce our mathematical framework (\cref{sec:gyrokinetics}), the implementation and optimization of \texttt{gyaradax} (\cref{sec:gyaradax}). To stress the how relevant were agents in this project, we include some notes on the development process (\cref{sec:vibecoding}).
 %
-Finally, in the last sections we show numerical validation of the solver on test cases from GKW (\cref{sec:verification}), and some differentiable programming experiments (\cref{sec:exp}).
+We show numerical validation of the solver on empirical trajectories generated with GKW \footnote{\textbf{\url{https://bitbucket.org/gkw/gkw}}} (\cref{sec:verification}),
+and finally some differentiable programming experiments (\cref{sec:exp}).
 
 
 \section{Gyrokinetics}
 \label{sec:gyrokinetics}
-\texttt{gyaradax} evolves the perturbed distribution function $f(v_\parallel, \mu, s, \mathbf{k}_\perp)$ in the local flux-tube limit, where $v_\parallel$ and $\mu$ are the parallel velocity and magnetic moment, $s$ is along the magnetic field line, and $\mathbf{k}_\perp$ includes both radial $k_\psi$ ($k_x$) and bi-normal $k_\zeta$ ($k_y$). The right-hand side (RHS) of the Vlasov-Poisson equation is implemented as a multi-stage integration of different terms (I-VIII). We adopt a naming convention similar to \citet{PEETERS_GKW_2009}, and clearly mark each term separately (I to VIII).
+\texttt{gyaradax} evolves the perturbed distribution function $f(v_\parallel, \mu, s, \mathbf{k}_\perp)$, where $v_\parallel$ and $\mu$ are the parallel velocity and magnetic moment, $s$ is along the magnetic field line, and $\mathbf{k}_\perp$ includes both radial $k_\psi$ ($k_x$) and bi-normal $k_\zeta$ ($k_y$).
 
+\subsection{Physical Components}
+We clearly mark each term in the right-hand side of the Vlasov-Poisson equation (I to VIII), and adopt a naming convention similar to \citet{PEETERS_GKW_2009}, 
+%
+\vspace{-2px}
 \begin{equation*}
 \resizebox{\columnwidth}{!}{$\displaystyle
 \begin{aligned}
@@ -189,7 +194,7 @@ Finally, in the last sections we show numerical validation of the solver on test
 $}
 \end{equation*}
 
-\subsection{Physical Components}
+%
 \colorbox{jaxpurple!20}{\textbf{Kinetic Dynamics} (I, II, IV).} They describe the collisionless trajectories of particles in the background magnetic configuration. \textit{Parallel Advection} (I) represents motion along magnetic field lines, while \textit{Magnetic Drift} (II) accounts for curvature and $\nabla B$ drifts. The \textit{Mirror Term} (IV) models the force arising from the parallel gradient of the magnetic field magnitude, which leads to particle trapping.
 %
 
@@ -206,7 +211,7 @@ $}
 \section{\texttt{gyaradax} Implementation}
 \label{sec:gyaradax}
 % TODO general introduction, and explain what does this code do
-\texttt{gyaradax} solves the collisionless electrostatic gyrokinetic equations in the local flux-tube limit, supporting both adiabatic and kinetic electron soecues. We designed it to be a slim, modern and ML-friendly alternative to GKW, written in JAX with the core integrator and solver in about 1000 lines.
+\texttt{gyaradax} solves the collisionless electrostatic gyrokinetic equations in the local flux-tube limit, supporting both adiabatic and kinetic electrons. We designed it to be a slim, modern and ML-friendly alternative to GKW, written in JAX with the core integrator and solver in about 2000 lines.
 % We release it publicly on GitHub\footnote{\url{https://github.com/gerkone/gyaradax}}.
 
 \subsection{Time Integration}
@@ -214,78 +219,28 @@ $}
 %
 We use explicit fourth-order Runge-Kutta (RK4) as integrator.
 %
-We fuse the integration stages across sequential timesteps with \texttt{jax.lax.scan}, reducing the Python interpreter overhead and resulting in a significant speedup depending on the window size.
+Integration across sequential timesteps is fused with \texttt{jax.lax.scan}, reducing the Python interpreter overhead and resulting in a significant speedup (depending on the window size).
 %
-Spatial derivatives in the parallel and velocity coordinates are computed using 4th-order central and upwinded stencils, while the perpendicular dimensions are resolved pseudospectrally with 3/2-rule dealiasing to prevent aliasing errors in the nonlinear $E \times B$ term.
+Spatial derivatives in the parallel and velocity coordinates are computed using 4th-order central and upwinded stencils. The perpendicular dimensions are resolved pseudospectrally with 3/2-rule dealiasing to prevent aliasing errors in the nonlinear $E \times B$ term.
 
 \subsection{Performance}
-\GG{what do we do on optimization?}
+Transitioning to JAX opens up performance optimizations that would be not always trivial to implement in FORTRAN. Specifically, \texttt{gyaradax} has optional mixed precision. In particular, we run the FFT in the nonlinear solve in Float32 without loss off fidelity (for the cases at hand).
+Moreover, we aggressively precompute the linear terms to minimize redundant operations in the 4 Runge-Kutta function calls. \GG{TODO what else}
+%
+Moreover, we can execute batched simulation runs, as long as they share the same geometry and species.
+This allows \texttt{gyaradax} to achieve better scalability and throughput than the high-performance original GKW code. \GG{TODO is it true?}
 
 \subsection{Limitations and Differences to GKW}
-The main shortcoming of \texttt{gyaradax} is that at its current stage it can only handle collisionless electrostatic plasmas. It does not yet support electromagnetic perturbations or collisionality. Both adiabatic and kinetic electron models are available, supporting single-species (ion) and multi-species (ion + electron) simulations.
-
-For simplicity, we treat the 5D domain as dense matrices, instead of the sparse GKW format. Additionally, at the moment we do not support any kind of grid parallelism, unlike legacy codes that rely on global mutable state and complex MPI-based domain decomposition.
+The main shortcoming of \texttt{gyaradax} is that it can only handle electrostatic collisionless plasmas. It does not yet support electromagnetic perturbations, collisionality, Coriolis effects, or global gyrokinetics.
 %
-However, thanks to the stateless nature we can parallelize over different simulation runs, if the hardware allows.
+Both adiabatic and kinetic electron models are available, supporting single-species (ion) and multi-species (ion + electron) simulations.
 
-\GG{TODO add more}
+We treat the 5D domain as dense matrices, instead of the sparse GKW format. Additionally, at the moment we do not support grid parallelism, unlike legacy codes that rely on global mutable state and complex MPI-based domain decomposition.
+Both IO and simulation configurations are different formats but consistent with each other. Our diagnostics suite matches the one from GKW on the main fronts, with multi-species fluxes, spectras and mode-wise growth rates.
+%
+However, thanks to the stateless nature different simulations can be run in parallel on the same device.
 
-\subsection{Vibecoding Setup}
-\label{sec:vibecoding}
-Gyrokinetic codes require specialized development by physicists and software engineers. 
-On the contrary, \texttt{gyaradax} was built in about two weeks with substantial use of coding agents (so called \textit{vibecoding}). We consider relevant and useful to add some details on the workflow we used.
-%
-
-\textbf{Workspace.}
-In the preparation phase, we accomplish three things:
-\begin{enumerate*}[label=\textbf{\roman*.}]
-\item We provide utilities, such as GKW-specific I/O, parsing configuration, as well as field solvers and flux integrals that were implemented without the use of agents \cite{galletti2026pinc}. The goal here is to help the agent target solver logic, instead of side tasks.
-\item To give the opportunity to understand the GKW file structure, and potentially find new things the authors missed, we include some empirical trajectories produced by GKW, including flux time traces and spectras, growth rates, potentials, and periodic dumps of the full density function. 
-\item Finally, we wrote a collection unit tests that verify symbolic things, such as shapes and signs, as well as alignment with the available empirical results.
-\end{enumerate*}
-%
-We speculate that a measurable form of success is mandatory for positive results with agents when applied to hard tasks.
-%
-This \textit{test-driven with empirical validation} cycle proved essential for the agent-let portion of the GKW port.
-
-\textbf{Prompting.}
-This initial draft directed the agent to take notes on the GKW code (since it might not fit into context at over 30K lines) and to plan ahead for each step. After the initial code ingestion phase, the task was to iterate by going back and forth between adding functions and extending the tests.
-%
-The prompt also directly instructed agents on how to break down the problem, by first implementing the linear terms, and validate those before moving on to the nonlinear part (term III).
-Because the authors have a conceptual understanding of the solver structure and some of its inner workings, the agent could be already directed to the core FORTRAN files and the important manual pages.
-%
-Intermediate verification was requested at the end of each stage, allowing for correction of sign errors, NaNs and drift from reference.
-%
-To obtain the final prompt, we feed this initial human-written version to Gemini 3.1 Pro, with the goal of obtaining a structured format that's better suited for modern LLMs.
-%
-We include the final version of the prompt in Appendix \ref{app:prompt}.
-
-\textbf{Models.}
-Our original attempt was with Gemini 3.1 Pro \cite{gemini31pro_2026} through the \texttt{gemini-cli} agent. However, over multiple parallel tries this produced unreasonable results and was blocked by the authors before reaching later stages.
-%
-We switched to GPT-5.3 CODEX \cite{openai_gpt53_codex_2026} and Claude Opus 4.6 \cite{anthropic2026claude46opus}, which ended up being more successful. CODEX performed the heavy lifting in the initial port, while Claude helped in the kinetic electron part.
-%
-Gemini and Claude were then applied to refactoring and documentation writing. With the entire codebase into context, we found both models capable of producing quality documentation material.
-%
-The final performance optimizations was ... \GG{TODO}
-
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-
-\section{Verification}
-\label{sec:verification}
-Solver validity is established by running the same tests GKW went through in the publication \cite{PEETERS_GKW_2009} and the more extensive ones from the repository \footnote{\textbf{\url{https://bitbucket.org/gkw/gkw}}}.
-%
-Moreover, we execute empirical numerical alignment against additional GKW reference trajectories for ITG turbulence \cite{paischer2025gyroswin}, for adiabatic and kinetic electrons.
-The goal is to verify parity across operators, as well as long-term stability and convergence across multiple test cases.
-
-\subsection{GKW Test Cases}
-\textbf{Cyclone Base Cases (CBC).}
-
-\textbf{Analytical scenarios.}
-
-\subsection{Empirical Validation}
-
-\begin{figure*}[t]
+\begin{figure*}[!t]
     \centering
     \begin{subfigure}{\linewidth}
         \centering
@@ -294,7 +249,7 @@ The goal is to verify parity across operators, as well as long-term stability an
         \includegraphics[width=0.48\linewidth]{figures/fluxes_iteration_200.pdf}
         \label{fig:emp_fluxes}
     \end{subfigure}
-    \vspace{0.5em}
+    \vspace{-0.5em}
     \begin{subfigure}{\linewidth}
         \centering
         \includegraphics[width=0.48\linewidth]{figures/spectra_iteration_13.pdf}
@@ -303,26 +258,163 @@ The goal is to verify parity across operators, as well as long-term stability an
         \label{fig:emp_spectras}
     \end{subfigure}
 
-    \caption{Empirical validation of \texttt{gyaradax} against GKW trajectories for ITG turbulence.
-    \textbf{Top:}
-    heat and momentum flux traces for two empirical trajectories. The \texttt{gyaradax} flux detaches at the start of the turbulent phase due to system stiffness and nondeterministic hardware specific floating-point optimizations.
-    \textbf{Bottom:} 
-    Time-averaged wavenumber distribution (spectral profiles) along the $k_y$ and $k_x$ dimensions: $k_y^{\text{spec}}(y) = \sum_{s, x} |\hat{\bm{\phi}}(x, s, y)|^2$ and $k_x^{\text{spec}}(x) = \sum_{s, y} |\hat{\bm{\phi}}(x, s, y)|^2$.
+    \caption{Empirical validation of \texttt{gyaradax} against GKW for two adiabatic ITG equilibria.
+    \textbf{Top:} heat and momentum flux time traces. Both codes coincide during linear growth, but once the nonlinear effects kick in the trajectories diverge due to chaotic sensitivity.
+    \textbf{Bottom:} time-averaged $k_y$ and $k_x$ spectral profiles, with strong agreement on the slope and the peak location.
     }
     \label{fig:empirical}
 \end{figure*}
 
+\subsection{Vibecoding Setup}
+\label{sec:vibecoding}
+\texttt{gyaradax} was written and validated in two weeks with substantial use of coding agents. We consider fair and relevant to add some details on the workflow we used.
+%
+
+\textbf{Workspace.}
+In the preparation phase, we accomplish three things:
+\begin{enumerate*}[label=\textbf{\roman*.}]
+\item We provide utilities, such as GKW-specific I/O, parsing configuration, as well as field solvers and flux integrals \cite{galletti2026pinc}. The goal here is to help the agent target solver logic, instead of side tasks.
+\item Some reference trajectories are included to understand the GKW configuration and output structure. Notably, these contain periodic $f$ dumps, simplifying debugging by providing the full state instead of integrated observables.
+\item We wrote unit tests to symbolically and empirically verify alignment.
+\end{enumerate*}
+%
+This \textit{empirical test-driven} cycle proved essential for the agent-led portion of the GKW rewrite.
+We find that on hard tasks a measurable form of success is mandatory for vibecoding.
+
+\textbf{Prompting.}
+We structured the prompt to start from a deliberate code ingestion and note taking phase, using the authors'  understanding of the solver structure and some of its inner workings to refer agents to the core FORTRAN files and the important manual pages.
+%
+After this phase, the instruction was to alternate between implementing solver logic, validating it with tests and incrementally adding new ones.
+%
+We explicitly decomposed the problem to first implement and validate the linear terms before addressing the nonlinear part (Term III).
+%
+Intermediate stops and human verification allowed for the early correction of sign errors, NaNs, and reference drift. Finally, we refined these initial human-written instructions using Gemini 3.1 Pro to achieve a structured format better suited for modern LLMs. The final prompt is provided in Appendix \ref{app:prompt}.
+
+\textbf{Models.}
+Initial attempts using Gemini 3.1 Pro \cite{gemini31pro_2026} via the \texttt{gemini-cli} yielded unreasonable results over multiple parallel tries and were abandoned.
+%
+We had more success with GPT-5.3 CODEX \cite{openai_gpt53_codex_2026} for the core translation and Claude 4.6 Opus \cite{anthropic2026claude46opus} for the kinetic electron implementation.
+All agents and models proved highly effective at refactoring, documenting, and drafting this manuscript when loading the full codebase into context.
+%
+The final performance optimizations was mainly performed by the authors, with advice and quick experimentation with Claude Code. Some opportunities for speedup, such as precomputing the linear terms, were spotted and implemented entirely by Claude.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\section{Verification and Experiments}
+
+We validate \texttt{gyaradax} against reference GKW trajectories and present differentiable programming experiments enabled by the JAX implementation.
+
+
+\subsection{Empirical Validation}
+\label{sec:verification}
+We verify \texttt{gyaradax} by empirical numerical alignment against reference GKW trajectories for ion-temperature-gradient (ITG) turbulence, covering both adiabatic \cite{paischer2025gyroswin} and kinetic electrons. Figures \ref{fig:empirical} and \ref{fig:kinetic_fluxes} summarize these results.
+All test cases use a standard grid $(N_{v\parallel}, N_\mu, N_s, N_{kx}, N_{ky}) = (32, 8, 16, 85, 32)$.
+The adiabatic cases use $\textrm{d}t = 0.02$, while kinetic electron cases use adaptive timestepping with $\textrm{d}t \approx 2.1 \times 10^{-3}$ (CFL).
+We evaluate three complementary diagnostics: transport fluxes, wavenumber spectra, and per-$k_y$ growth rates.
+
+\textbf{Flux traces.}
+Transport fluxes are the primary observable for turbulence saturation. For adiabatic simulations, heat flux is the most meaningful one, while particle flux is constant at zero.
+In \cref{fig:empirical}, at the top we compare the ion heat flux $Q_i$ and momentum flux $\Pi_i$ over full nonlinear simulations.
+In the linear growth phase, \texttt{gyaradax} and GKW traces overlap. After the onset of nonlinear saturation, the trajectories diverge due to the chaotic sensitivity of turbulent dynamics to floating-point differences.
+The relevant comparison is on the statistical steady state: both codes converge to the same time-averaged flux levels, confirming that the transport is correctly reproduced.
+
+\textbf{Spectras.}
+The spectral energy distribution across perpendicular wavenumbers characterizes the turbulent cascade.
+We compare the time-averaged profiles $k_y^{\text{spec}} = \sum_{s, k_x} |\hat{\phi}(s, k_x, k_y)|^2$ and $k_x^{\text{spec}} = \sum_{s, k_y} |\hat{\phi}(s, k_x, k_y)|^2$, which measure how energy is distributed across binormal and radial scales respectively.
+\Cref{fig:emp_spectras} (bottom) shows that \texttt{gyaradax} matches reference spectras.
+
+\textbf{Growth rates.}
+Growth rates $\gamma(k_y)$ measure the linear instability drive. In the nonlinear regime they converge to zero, showing the balance between drive and dissipation.
+%
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.9\columnwidth]{figures/growth_snap_iteration_13.pdf}
+    \caption{Per-$k_y$ growth rate profiles $\gamma(k_y)$ at three simulation snapshots and time-averaged (bottom right).}
+    \label{fig:emp_growth}
+\end{figure}
+%
+The growth rate is defined as $\gamma = \ln(A_\text{end} / A_\text{start}) / \Delta t_\text{window}$, where the amplitude
+$A(k_y) = \sqrt{\Delta s \sum_{s,k_x} |\phi(s, k_x, k_y)|^2}$ (as in \citet{PEETERS_GKW_2009}).
+The four panels in \cref{fig:emp_growth} compare the growth rate spectrum $\gamma(k_y)$ at three simulation times, and the simulation average.
+
+\textbf{Kinetic electrons.}
+We additionally verify the solver on three kinetic electron configurations, with two species (ions and electrons).
+%
+Due to faster perturbations, adaptive CFL timestepping is required ($\mathrm{d}t \approx 2 \times 10^{-3}$, constrained by the electron thermal velocity $v_{th,e}/v_{th,i} \approx 60$).
+Per-species transport fluxes track the GKW reference (\cref{fig:kinetic_fluxes}), confirming that the multi-species field solver and species-dependent RHS terms are correctly implemented.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\columnwidth]{figures/kinetic_fluxes_kinetic_991_half_rlt.pdf}\\
+    \includegraphics[width=\columnwidth]{figures/kinetic_spectra_kinetic_991_half_rlt.pdf}
+    \caption{Kinetic electron validation.
+    \textbf{Top:} ion (left) and electron (right) transport fluxes, with perfect overlap.
+    \textbf{Bottom:} time-averaged $k_y$ and $k_x$ spectral profiles.}
+    \label{fig:kinetic_fluxes}
+\end{figure}
+
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
-\section{Experiments}
+\subsection{Experiments}
 \label{sec:exp}
-As a demonstration of the differentiable, ML-oriented nature of this solver, we show some examples at the intersection of machine learning, plasma physics and differentiable programming.
+We showcase the capabilities of this solver with some simple differentiable programming examples.
 
-\subsection{Inverse Problem}
-\GG{how and what to set up?}
+\textbf{Inverse problem.}
+\label{sec:inverse}
+A direct payoff of end-to-end differentiability is gradient-based inverse problems.
+We demonstrate this by recovering the temperature gradient $R/L_T$ from a target electrostatic potential $\phi^*$ produced by a linear simulation.
+%
+We fix the other parameters ($q{=}1.4$, $\hat{s}{=}0.78$, $\varepsilon{=}0.19$) on a reduced grid $(N_{v\parallel}, N_\mu, N_s, N_{kx}, N_{ky}) = (24, 8, 16, 9, 8)$ and generate the target at $R/L_T^{\text{true}} = 6.9$ over 400 RK4 steps.
+The loss is the potential energy mismatch
+\begin{equation*}
+    \mathcal{L}(R/L_T) = \frac{1}{N} \sum_{s, k_x, k_y} \bigl|\phi(s, k_x, k_y;\, R/L_T) - \phi^*\bigr|^2
+\end{equation*}
+where $\phi$ is obtained by calling the solver.
+Reverse-mode AD provides exact $\partial\mathcal{L}/\partial(R/L_T)$ through the full integration.
 
-\subsection{Sensitivity Analysis}
-\GG{how and what to set up?}
+\begin{figure}[b]
+    % \centering
+    \includegraphics[height=0.49\linewidth]{figures/inverse_spectrum.pdf}\hfill
+    \includegraphics[height=0.49\linewidth]{figures/inv_landscape.pdf}
+    
+    \caption{Inverse recovery of $R/L_T$ from the electrostatic potential. 
+    \textbf{Top left:} $k_y$ spectral energy of the initial, target ($\times$), and recovered potentials. 
+    \textbf{Bottom left:} convergence during optimization iterations. 
+    \textbf{Right:} loss landscape $\mathcal{L}(R/L_T)$ (top) and AD gradient (bottom), with the Adam trajectory overlaid.}
+    \label{fig:inverse}
+\end{figure}
+
+Starting from $R/L_T^{(0)} = 10.0$, Adam \cite{kingma_adam_2015} converges to the ground truth (\cref{fig:inverse}).
+The recovered potential matches the target $k_y^{\textbf{spec}}$ (\cref{fig:inverse}, top left), confirming that the optimizer recovers both the instability drive and the eigenmode structure.
+The loss landscape (\cref{fig:inverse}, right) is smooth and unimodal, with a clean zero crossing of the gradient at the optimum.
+
+\textbf{Sensitivity analysis.}
+\label{sec:sensitivity}
+%
+Sensitivity analysis quantifies how observables respond to parameter changes, informing experimental design and uncertainty quantification.
+Traditional approaches rely on finite differences, requiring $2N$ solver evaluations for $N$ parameters, among other tradeoffs.
+With AD, exact Jacobians are obtained in a single backward pass.
+
+We scan $R/L_T \in [3, 10]$ and at each value compute the per-$k_y$ growth rate $\gamma(k_y)$ and its derivative $\partial\gamma / \partial(R/L_T)$ through 400 RK4 steps.
+On this reduced grid, all modes are damped ($\gamma < 0$) across the parameter range, with the high-$k_y$ modes getting damped (\cref{fig:sensitivity}, top).
+Increasing $R/L_T$ reduces the damping rate, and the sensitivity map (\cref{fig:sensitivity}, bottom) reveals that the high-$k_y$ modes at low drive are the most responsive.
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=0.9\columnwidth]{figures/sensitivity_gamma.pdf}\\\vspace{-14px}
+    \includegraphics[width=0.9\columnwidth]{figures/sensitivity_dgamma.pdf}
+    \caption{Growth rate sensitivity to $R/L_T$ (black: $k_y{=}0$ zonal mode, masked).
+    \textbf{Top:} per-$k_y$ growth rate $\gamma(k_y, R/L_T)$.
+    \textbf{Bottom:} sensitivity $\partial\gamma / \partial(R/L_T)$ computed through AD.}
+    \label{fig:sensitivity}
+\end{figure}
+
+% \textbf{Neural correction.}
+% \label{sec:correction}
+% As a proof-of-concept for solver + ML hybrid, we train a small neural network to correct the transport of a spectrally truncated simulation. This is similar to what Solver in the Loop \cite{um2021solverinthelooplearningdifferentiablephysics} did in the temporal axis, to speed up solvers and achieve achieve long term stability with large timesteps. For reasons of stability, instead of taking larger steps we reduce the amounts of active modes seen by the solver.
+% %
+% The coarse solver uses a reduced grid ($N_{kx}{=}31$, $N_{ky}{=}8$ vs $N_{kx}{=}85$, $N_{ky}{=}32$), leading to the heat flux getting underestimated.
+% After each solver block, an MLP applies a mode-wise multiplicative correction along $k_y$, with the heat flux MSE as target.
+
+% \GG{TODO wrap up, include figure, check results}
 
 \subsection{Performance Comparison vs GKW}
 \GG{throughput, flops computation, memory usage / bound}
@@ -335,13 +427,16 @@ Development was heavily supported by modern agentic workflows, with human oversi
 %
 Our implementation achieves numerical parity with the GKW reference, while offering native hardware acceleration and easy integration with machine learning pipelines.
 
-The availability of an accessible, end-to-end differentiable gyrokinetic solver opens new avenues for plasma research, from automated parameter optimization \GG{TODO cite} to the development of physics-informed surrogate models \cite{um2021solverinthelooplearningdifferentiablephysics,Karniadakis2021}.
+The availability of an accessible, end-to-end differentiable gyrokinetic solver opens new avenues for plasma research, from automated parameter optimization \cite{McGreivy_2021,joglekar2026differentiableprogrammingplasmaphysics} to the development of physics-informed surrogate models \cite{um2021solverinthelooplearningdifferentiablephysics,Karniadakis2021}.
 
 \textbf{Future work.}
 The current physical scope of \texttt{gyaradax} is limited to local, collisionless plasmas.
 Future plans include extending it to electromagnetic perturbations and full kinetic species.
-As the problem sizes grows significantly when faster species are introduces, this implies support for grid parallelism via GPU sharding \GG{TODO cite}.
+As the problem sizes grow significantly when faster species are introduced, this implies support for grid parallelism via GPU sharding \GG{TODO cite}.
 Another avenue is fully spectral solvers \cite{CANDY201673}, which are significantly better suited for GPU acceleration. \GG{add some details}
+%
+On the verification side, a more rigorous validation is planned. This would include Cyclone Base Case \cite{cbc}, as well as tests used in \citet{PEETERS_GKW_2009} and other analytical scenarios (Rosenbluth-Hinton zonal flow, \citet{Rosenbluth}) that provide quantitative error bounds independent of empirical reference data.
+%
 Ultimately, we present our work as a proof-of-concept for the rapid agent-assisted development of modern high-performance scientific software.
 
 \bibliography{references}

@@ -12,9 +12,7 @@ from gyaradax.solver import (
 from gyaradax.params import GKParams
 
 
-def kx0_mode_columns(
-    mode_label: jnp.ndarray, kxrh: jnp.ndarray
-) -> Tuple[int, jnp.ndarray]:
+def kx0_mode_columns(mode_label: jnp.ndarray, kxrh: jnp.ndarray) -> Tuple[int, jnp.ndarray]:
     """
     Identify the wavevector columns corresponding to the kx=0 baseline.
 
@@ -53,9 +51,9 @@ def term_iii_rhs(
     if params is None:
         params = GKParams()
     pre = linear_precompute(geometry, params)
-    from gyaradax.integrals import calculate_phi, geom_tensors
+    from gyaradax.integrals import calculate_phi
 
-    phi = calculate_phi(geom_tensors(geometry, params=params), df)
+    phi = calculate_phi(geometry, df, params=params)
     return nonlinear_term_iii(
         df,
         phi,

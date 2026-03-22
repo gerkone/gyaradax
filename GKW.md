@@ -376,6 +376,22 @@ order. Species is the outermost (slowest) index.
 - adaptive CFL uses one-step lag (current step uses previous step's CFL estimate)
 - no multi-species output in `save_dumps` (fluxes are summed over species)
 
+### 7.4 growth rate convention
+
+gyaradax matches the GKW growth rate definition (`diagnos_growth_freq.f90`).
+
+**Amplitude.** Both codes compute per-$k_y$ amplitude as
+$A(k_y) = \sqrt{\Delta s \sum_s \sum_{k_x \in \text{chain}} |\phi(s, k_x, k_y)|^2}$,
+where the $k_x$ sum runs only over the connected mode chain containing $k_x = 0$
+(determined by `mode_label`). See `solver.py:mode_amplitude`.
+
+**Growth rate.** Computed as $\gamma = \ln(A_\text{end} / A_\text{start}) / \Delta t_\text{window}$
+over each `naverage` window. In linear mode, per-$k_y$ normalization resets the
+amplitude to $\approx 1$ at each window boundary, so $A_\text{start} = 1$. In
+nonlinear mode (no normalization), $A_\text{start}$ is set to the amplitude at
+the previous window boundary, giving the instantaneous growth rate between
+consecutive windows. See `solver.py:advance_state`.
+
 ## 8. validation results
 
 ### 8.1 adiabatic solver

@@ -31,9 +31,7 @@ def test_flux_integral_shapes(adiabatic_geom, adiabatic_shape):
 
 
 @pytest.mark.parametrize("idx", [10, 50, 100])
-def test_flux_integral_real_data_parity(
-    adiabatic_dir, adiabatic_geom, adiabatic_shape, idx
-):
+def test_flux_integral_real_data_parity(adiabatic_dir, adiabatic_geom, adiabatic_shape, idx):
     geom = adiabatic_geom
     geom["adiabatic"] = jnp.array(1.0, dtype=jnp.float64)
 
@@ -90,9 +88,7 @@ def test_kinetic_k_dump_loading(kinetic_dir, kinetic_shape):
     if len(ks) == 0:
         pytest.skip(f"no K files in {kinetic_dir}")
 
-    df, info = load_gkw_dump(
-        os.path.join(kinetic_dir, ks[0]), kinetic_shape, n_species=2
-    )
+    df, info = load_gkw_dump(os.path.join(kinetic_dir, ks[0]), kinetic_shape, n_species=2)
 
     nvpar, nmu, ns, nkx, nky = kinetic_shape
     assert df.shape == (2, nvpar, nmu, ns, nkx, nky)
@@ -124,9 +120,7 @@ def test_kinetic_flux_species_differ(kinetic_dir, kinetic_geom, kinetic_shape):
     if len(ks) == 0:
         pytest.skip(f"no K files in {kinetic_dir}")
 
-    df_full = load_gkw_k_dump(
-        os.path.join(kinetic_dir, ks[0]), kinetic_shape, n_species=2
-    )
+    df_full = load_gkw_k_dump(os.path.join(kinetic_dir, ks[0]), kinetic_shape, n_species=2)
 
     sp0_geom = dict(kinetic_geom)
     for k in ("mas", "tmp", "de", "signz", "vthrat", "rlt", "rln"):
@@ -146,18 +140,14 @@ def test_kinetic_flux_species_differ(kinetic_dir, kinetic_geom, kinetic_shape):
 
 
 @pytest.mark.parametrize("idx", [10, 50])
-def test_kinetic_flux_integral_per_species_parity(
-    kinetic_dir, kinetic_geom, kinetic_shape, idx
-):
+def test_kinetic_flux_integral_per_species_parity(kinetic_dir, kinetic_geom, kinetic_shape, idx):
     """per-species eflux matches gkw reference using kinetic quasineutrality."""
     ks = K_files(kinetic_dir)
     if idx >= len(ks):
         pytest.skip(f"index {idx} out of range")
 
     k_file = ks[idx]
-    df_full = load_gkw_k_dump(
-        os.path.join(kinetic_dir, k_file), kinetic_shape, n_species=2
-    )
+    df_full = load_gkw_k_dump(os.path.join(kinetic_dir, k_file), kinetic_shape, n_species=2)
 
     k_dat_path = os.path.join(kinetic_dir, f"{k_file}.dat")
     if not os.path.exists(k_dat_path):
@@ -188,8 +178,7 @@ def test_kinetic_flux_integral_per_species_parity(
         pred_eflux = float(per_sp_fluxes[isp, 1])
 
         assert np.isclose(pred_eflux, ref_eflux, rtol=1e-2, atol=1e-4), (
-            f"{sp_name} eflux mismatch at T={time_val}: "
-            f"{pred_eflux:.6e} vs {ref_eflux:.6e}"
+            f"{sp_name} eflux mismatch at T={time_val}: " f"{pred_eflux:.6e} vs {ref_eflux:.6e}"
         )
 
 

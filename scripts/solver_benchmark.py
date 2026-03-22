@@ -53,9 +53,7 @@ def run_benchmark():
     parser.add_argument("--kinetic", action="store_true")
     parser.add_argument("--resume", type=str, default="100")
     parser.add_argument("--device", type=int, default=None)
-    parser.add_argument(
-        "--components", action="store_true", help="benchmark individual components"
-    )
+    parser.add_argument("--components", action="store_true", help="benchmark individual components")
     parser.add_argument("--save-reference", type=str)
     parser.add_argument("--reference", type=str)
     parser.add_argument(
@@ -174,8 +172,7 @@ def run_benchmark():
     if args.reference:
         ref = np.load(args.reference)
         err = float(
-            np.linalg.norm(np.array(df_cur) - ref["df"])
-            / (np.linalg.norm(ref["df"]) + 1e-30)
+            np.linalg.norm(np.array(df_cur) - ref["df"]) / (np.linalg.norm(ref["df"]) + 1e-30)
         )
         print(f"rel_l2 vs reference: {err:.4e}")
 

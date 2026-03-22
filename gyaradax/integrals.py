@@ -11,9 +11,7 @@ def j0(x):
     return jnp.where(jnp.abs(x) < 1e-10, 1.0, res)
 
 
-def geom_tensors(
-    geometry: Dict[str, jnp.ndarray], params: Any = None
-) -> Dict[str, jnp.ndarray]:
+def geom_tensors(geometry: Dict[str, jnp.ndarray], params: Any = None) -> Dict[str, jnp.ndarray]:
     """Expand geometry constants for broadcasting and compute Bessel terms.
 
     Single-species version. Species params are scalars reshaped to (1,1,1,1,1,1).
@@ -74,14 +72,20 @@ def geom_tensors(
     gamma_arg = jnp.clip(gamma_arg, 0.0, 500.0)
     geom_["gamma"] = i0(gamma_arg) * jnp.exp(-gamma_arg)
 
+    # zonal mode detection: ky-index 0 is only the zonal mode if krho[0] ≈ 0
+    krho_flat = jnp.asarray(geometry["krho"], dtype=jnp.float64)
+    iyzero = jnp.argmin(jnp.abs(krho_flat))
+    geom_["has_zonal"] = jnp.where(jnp.abs(krho_flat[iyzero]) < 1e-10, 1.0, 0.0)
+
     return geom_
 
 
 @jax.jit
-def calculate_phi(geom: Dict[str, jnp.ndarray], df: jnp.ndarray) -> jnp.ndarray:
+def _phi_adiabatic(geom: Dict[str, jnp.ndarray], df: jnp.ndarray) -> jnp.ndarray:
     """Adiabatic electron phi from single-species quasineutrality.
 
     df: (nvpar, nmu, ns, nkx, nky).
+    Internal — use calculate_phi() as the public interface.
     """
     de = geom["de"]
     signz, tmp, bn = geom["signz"], geom["tmp"], geom["bn"]
@@ -96,13 +100,16 @@ def calculate_phi(geom: Dict[str, jnp.ndarray], df: jnp.ndarray) -> jnp.ndarray:
     denom = diagz - jnp.exp(-cfen) / tmp
     denom = jnp.where(jnp.abs(denom) < 1e-15, 1.0, denom)
     matz = -ints / (signz * de * denom)
+    # flux-surface averaging only applies to the zonal mode (ky=0)
+    has_zonal = geom["has_zonal"]
     matz = matz.at[..., 1:].set(0.0)
+    matz = matz * has_zonal
 
     phi = poisson_int * df
     phi = jnp.sum(phi, axis=(1, 2), keepdims=True)
 
     y_mask = jnp.zeros_like(phi)
-    y_mask = y_mask.at[..., 0].set(1.0)
+    y_mask = y_mask.at[..., 0].set(has_zonal)
 
     bufphi = matz * phi
     bufphi = jnp.sum(bufphi, axis=3, keepdims=True)
@@ -118,14 +125,16 @@ def calculate_phi(geom: Dict[str, jnp.ndarray], df: jnp.ndarray) -> jnp.ndarray:
     phi = phi + maty_val * bufphi * y_mask
 
     poisson_diag = jnp.exp(-cfen) * (signz**2) * de * (gamma - 1.0) / tmp
+    # only zero phi at (kx=0, ky=0) when a real zonal mode exists
     norm_mask = jnp.ones_like(phi)
-    norm_mask = norm_mask.at[..., 0, 0].set(0.0)
+    norm_mask = norm_mask.at[..., 0, 0].set(1.0 - has_zonal)
 
     pdiag = poisson_diag * norm_mask - signz * jnp.exp(-cfen) * de / tmp
     pdiag = jnp.where(jnp.abs(pdiag) < 1e-15, -1.0, pdiag)
 
     phi = phi * (-1.0 / pdiag)
-    return jnp.squeeze(phi)
+    # squeeze species + summed velocity axes, keep (ns, nkx, nky)
+    return jnp.squeeze(phi, axis=(0, 1, 2))
 
 
 def _species_bessel_gamma(geometry):
@@ -194,19 +203,24 @@ def precompute_phi_kinetic(geometry: Dict[str, jnp.ndarray]):
 
     # poisson diagonal: sum over species of Z^2 * n * (Gamma0 - 1) / T
     diag_per_sp = signz_6d**2 * de_6d * (gamma - 1.0) / tmp_6d
-    diag = jnp.sum(diag_per_sp, axis=0).squeeze()
+    diag = jnp.sum(diag_per_sp, axis=0)
+    # reshape to (ns, nkx, nky), dropping summed velocity axes
+    diag = diag.reshape(diag.shape[-3], diag.shape[-2], diag.shape[-1])
 
     kxrh = jnp.asarray(geometry["kxrh"], dtype=jnp.float64)
     krho = jnp.asarray(geometry["krho"], dtype=jnp.float64)
     ixzero = jnp.argmin(jnp.abs(kxrh))
     iyzero = jnp.argmin(jnp.abs(krho))
-    diag = diag.at[:, ixzero, iyzero].set(1.0)
+    # only set zonal diagonal to 1 if a real ky=0 mode exists
+    has_zonal = jnp.abs(krho[iyzero]) < 1e-10
+    diag_with_zonal = diag.at[:, ixzero, iyzero].set(1.0)
+    diag = jnp.where(has_zonal, diag_with_zonal, diag)
     diag = jnp.where(jnp.abs(diag) < 1e-15, -1.0, diag)
 
     return weight, diag
 
 
-def calculate_phi_kinetic(
+def _phi_kinetic(
     geometry: Dict[str, jnp.ndarray],
     df: jnp.ndarray,
     phi_weight: jnp.ndarray = None,
@@ -215,14 +229,49 @@ def calculate_phi_kinetic(
     """Kinetic electron phi from multi-species quasineutrality.
 
     df: (nsp, nvpar, nmu, ns, nkx, nky).
-    If phi_weight and phi_diag are provided (from precompute_phi_kinetic),
-    skips expensive bessel/gamma recomputation.
+    Internal — use calculate_phi() as the public interface.
     """
     if phi_weight is None or phi_diag is None:
         phi_weight, phi_diag = precompute_phi_kinetic(geometry)
 
     phi_num = jnp.sum(phi_weight * df, axis=(0, 1, 2))
     return -phi_num / phi_diag
+
+
+def calculate_phi(
+    geometry: Dict[str, jnp.ndarray],
+    df: jnp.ndarray,
+    params: Any = None,
+    pre: Dict = None,
+) -> jnp.ndarray:
+    """Compute electrostatic potential from quasineutrality.
+
+    Unified interface for both adiabatic and kinetic electron models.
+    Uses precomputed arrays from pre when available.
+
+    Args:
+        geometry: base geometry dict (or expanded geom_tensors for legacy calls).
+        df: distribution function — (nvpar, nmu, ns, nkx, nky) for adiabatic,
+            (nsp, nvpar, nmu, ns, nkx, nky) for kinetic.
+        params: GKParams (used to determine adiabatic vs kinetic and species scalars).
+        pre: precomputed arrays from linear_precompute (optional, for performance).
+    """
+    # legacy: calculate_phi(geom_tensors_dict, df) — detect by presence of "bessel"
+    if "bessel" in geometry:
+        return _phi_adiabatic(geometry, df)
+
+    adiabatic = params.adiabatic_electrons if params is not None else (df.ndim == 5)
+    if adiabatic:
+        gt = pre["geom_tensors"] if pre is not None else geom_tensors(geometry, params=params)
+        return _phi_adiabatic(gt, df)
+    else:
+        pw = pre.get("phi_weight") if pre is not None else None
+        pd = pre.get("phi_diag") if pre is not None else None
+        return _phi_kinetic(geometry, df, pw, pd)
+
+
+# backward-compatible aliases
+calculate_phi_kinetic = _phi_kinetic
 
 
 @jax.jit
@@ -277,24 +326,24 @@ def get_integrals(
     df: jnp.ndarray,
     geometry: Dict[str, jnp.ndarray],
     params: Any = None,
-    geom: Dict[str, jnp.ndarray] = None,
+    pre: Dict = None,
     adiabatic_electrons: bool = True,
+    geom: Dict[str, jnp.ndarray] = None,
 ) -> Tuple[jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]]:
     """Compute phi and fluxes from distribution function.
-
-    For phi-only calls, use calculate_phi / calculate_phi_kinetic directly.
 
     Returns:
         (phi, fluxes) where fluxes is (pflux, eflux, vflux) for adiabatic
         or (nsp, 3) array for kinetic electrons.
     """
     if not adiabatic_electrons and df.ndim == 6:
-        phi = calculate_phi_kinetic(geometry, df)
-        fluxes = calculate_fluxes_kinetic(geometry, df, phi)  # (nsp, 3)
+        phi = calculate_phi(geometry, df, params=params, pre=pre)
+        fluxes = calculate_fluxes_kinetic(geometry, df, phi)
     else:
-        if geom is None:
-            geom = geom_tensors(geometry, params=params)
-        phi = calculate_phi(geom, df)
-        fluxes = calculate_fluxes(geom, df, phi)
+        gt = geom or (
+            pre["geom_tensors"] if pre is not None else geom_tensors(geometry, params=params)
+        )
+        phi = _phi_adiabatic(gt, df)
+        fluxes = calculate_fluxes(gt, df, phi)
 
     return phi, fluxes
