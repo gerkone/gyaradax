@@ -40,9 +40,7 @@ def _subset_mask_from_mode_chains(mode_label, ixzero, ky_list):
 
 
 @pytest.mark.parametrize("start_name, end_name, steps", [("100", "101", 120)])
-def test_iteration_parity(
-    nonlin_dir, nonlin_geom, nonlin_shape, start_name, end_name, steps
-):
+def test_iteration_parity(nonlin_dir, nonlin_geom, nonlin_shape, start_name, end_name, steps):
     """verify trajectory parity against GKW reference dumps."""
     start_df = load_gkw_k_dump(f"{nonlin_dir}/{start_name}", nonlin_shape)
     end_df_ref = load_gkw_k_dump(f"{nonlin_dir}/{end_name}", nonlin_shape)
@@ -50,9 +48,7 @@ def test_iteration_parity(
     params = gkparams_from_input_dat(f"{nonlin_dir}/input.dat", non_linear=True)
     nky = len(nonlin_geom["krho"])
     state = GKState(
-        time=jnp.array(
-            read_dump_time(f"{nonlin_dir}/{start_name}.dat"), dtype=jnp.float64
-        ),
+        time=jnp.array(read_dump_time(f"{nonlin_dir}/{start_name}.dat"), dtype=jnp.float64),
         step=jnp.array(0, dtype=jnp.int32),
         accumulated_norm_factor=jnp.ones(nky, dtype=jnp.float64),
         window_start_amp=jnp.ones(nky, dtype=jnp.float64),
@@ -117,9 +113,7 @@ def _kinetic_params_from_dir(kinetic_dir, dump_name="100", **overrides):
 
 
 @pytest.mark.parametrize("start_name, end_name", [("100", "101")])
-def test_kinetic_iteration_parity(
-    kinetic_dir, kinetic_geom, kinetic_shape, start_name, end_name
-):
+def test_kinetic_iteration_parity(kinetic_dir, kinetic_geom, kinetic_shape, start_name, end_name):
     """Verify multi-species kinetic trajectory parity against GKW reference dumps.
 
     Loads the kinetic distribution at dump 100, computes the exact number
@@ -161,9 +155,7 @@ def test_kinetic_iteration_parity(
     for isp in range(n_species):
         sp_name = "ion" if isp == 0 else "electron"
         err = rel_l2(np.asarray(pred_df[isp]), np.asarray(end_df_ref[isp]))
-        assert (
-            err <= 1.0e-3
-        ), f"{sp_name} trajectory error {err:.6e} > 1e-3 in {kinetic_dir}"
+        assert err <= 1.0e-3, f"{sp_name} trajectory error {err:.6e} > 1e-3 in {kinetic_dir}"
 
 
 def test_kinetic_flux_trajectory(kinetic_dir, kinetic_geom, kinetic_shape):

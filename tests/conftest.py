@@ -11,8 +11,7 @@ jax.config.update("jax_enable_x64", True)
 def rel_l2(pred, ref, eps=1e-30):
     """relative l2 error between two arrays."""
     return float(
-        np.linalg.norm(np.asarray(pred) - np.asarray(ref))
-        / (np.linalg.norm(np.asarray(ref)) + eps)
+        np.linalg.norm(np.asarray(pred) - np.asarray(ref)) / (np.linalg.norm(np.asarray(ref)) + eps)
     )
 
 
@@ -36,9 +35,7 @@ def read_dump_dtim(dat_path):
     return float(m.group(1))
 
 
-GKW_DATA_ROOT = os.environ.get(
-    "GKW_DATA_ROOT", "/restricteddata/ukaea/gyrokinetics/raw"
-)
+GKW_DATA_ROOT = os.environ.get("GKW_DATA_ROOT", "/restricteddata/ukaea/gyrokinetics/raw")
 ITERATIONS = [8, 13, 131, 200]
 
 

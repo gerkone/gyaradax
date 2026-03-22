@@ -388,6 +388,8 @@ def compute_geometry(
     geom_type='circ': full Lapillonne circular model (nonlinear theta, delta).
     geom_type='s-alpha': simplified model (theta=2*pi*s, B=1/(1+eps*cos(theta))).
     """
+    assert geom_type in ["circ", "s-alpha"], "Only circular geometries supported."
+
     signJ = 1.0
     sgrid = _parallel_grid(ns, nperiod)
     theta = _poloidal_angle(sgrid, eps, geom_type=geom_type)

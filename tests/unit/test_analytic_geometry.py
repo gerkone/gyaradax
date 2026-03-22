@@ -11,9 +11,7 @@ from gyaradax.utils import load_geometry
 from gyaradax.geometry import compute_geometry_from_input
 
 
-GKW_DATA_ROOT = os.environ.get(
-    "GKW_DATA_ROOT", "/restricteddata/ukaea/gyrokinetics/raw"
-)
+GKW_DATA_ROOT = os.environ.get("GKW_DATA_ROOT", "/restricteddata/ukaea/gyrokinetics/raw")
 ITERATIONS = [8, 13, 131, 200]
 KINETIC_CASES = [
     "v3_kiteration_991_half_rlt",
@@ -151,9 +149,7 @@ def test_mode_connectivity_structure(gkw_dir):
     for iy in range(1, min(3, nky)):
         for ix in range(nkx):
             if ixplus[ix, iy] >= 0:
-                assert ixplus[ix, iy] - ix == 5, (
-                    f"ixplus spacing wrong at ix={ix}, iy={iy}"
-                )
+                assert ixplus[ix, iy] - ix == 5, f"ixplus spacing wrong at ix={ix}, iy={iy}"
 
 
 # --- hfun / ifun tests (adiabatic + kinetic cases) ---

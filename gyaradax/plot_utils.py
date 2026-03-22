@@ -167,14 +167,14 @@ def plot_spectra(
     )
     if ref_ky_spec is not None:
         ax1.semilogy(
-            ky, 
-            ref_ky_spec, 
-            marker="x", 
+            ky,
+            ref_ky_spec,
+            marker="x",
             linestyle="None",
-            color="black", 
-            markersize=4, 
+            color="black",
+            markersize=4,
             markeredgewidth=1,
-            label="GKW"
+            label="GKW",
         )
     ax1.set_xlabel(r"$k_y \rho_{ref}$")
     ax1.set_ylabel(r"$\sum_{s, k_x} |\phi|^2$")
@@ -185,13 +185,13 @@ def plot_spectra(
     ax2.semilogy(kx, kx_spec, "o-", color=JAX_COLORS["purple"], markersize=3, lw=1)
     if ref_kx_spec is not None:
         ax2.semilogy(
-            kx, 
+            kx,
             ref_kx_spec,
-            marker="x", 
+            marker="x",
             linestyle="None",
-            color="black", 
-            markersize=4, 
-            markeredgewidth=1
+            color="black",
+            markersize=4,
+            markeredgewidth=1,
         )
         ax2.set_xlabel(r"$k_x \rho_{ref}$")
     ax2.set_ylabel(r"$\sum_{s, k_y} |\phi|^2$")
