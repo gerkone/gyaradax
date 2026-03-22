@@ -1,4 +1,4 @@
-"""centralized jax configuration. call init_jax() before any jax imports."""
+"""Centralized jax configuration. call init_jax() before any jax imports."""
 
 import os
 import sys
@@ -7,7 +7,7 @@ _initialized = False
 
 
 def init_jax(device: int = None):
-    """configure jax: fp64 precision and optional gpu device isolation."""
+    """Configure jax: fp64 precision and optional gpu device isolation."""
     global _initialized
     if _initialized:
         return

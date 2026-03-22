@@ -207,11 +207,17 @@ def run_multi(args):
     print(f"  n_steps={n_steps}, checkpoint_interval={block_size}")
 
     # stack into batched pytrees
+    def _stack_pytrees(trees):
+        leaves_list = [jax.tree_util.tree_leaves(t) for t in trees]
+        stacked_leaves = [jnp.stack(leaf_group) for leaf_group in zip(*leaves_list)]
+        treedef = jax.tree_util.tree_structure(trees[0])
+        return jax.tree_util.tree_unflatten(treedef, stacked_leaves)
+    
     df_batch = jnp.stack([s["df"] for s in setups])
-    geometry_batch = jax.tree.map(lambda *xs: jnp.stack(xs), *[s["geometry"] for s in setups])
-    params_batch = jax.tree.map(lambda *xs: jnp.stack(xs), *[s["params"] for s in setups])
-    state_batch = jax.tree.map(lambda *xs: jnp.stack(xs), *[s["state"] for s in setups])
-    pre_batch = jax.tree.map(lambda *xs: jnp.stack(xs), *[s["pre"] for s in setups])
+    geometry_batch = _stack_pytrees([s["geometry"] for s in setups])
+    params_batch = _stack_pytrees([s["params"] for s in setups])
+    state_batch = _stack_pytrees([s["state"] for s in setups])
+    pre_batch = _stack_pytrees([s["pre"] for s in setups])
 
     # per-config accumulators
     accum = {s["name"]: {"fluxes": [], "growth": [], "times": []} for s in setups}
@@ -227,23 +233,29 @@ def run_multi(args):
             break
 
         t0 = time.time()
-        df_batch, phi_batch, fluxes_batch, state_batch = gk_run_batched(
+        df_batch, _, fluxes_batch, state_batch = gk_run_batched(
             df_batch, geometry_batch, params_batch, state_batch, block, pre_batch
         )
         wall = time.time() - t0
 
-        # log summary (mean across batch)
+        # log summary
         step = int(state_batch.step[0])
         t_sim = float(state_batch.time[0])
-        mean_growth = float(jnp.mean(state_batch.last_growth_rate))
-        flx_arr = np.asarray(fluxes_batch)
-        mean_eflux = float(np.mean(flx_arr[..., 1])) if flx_arr.ndim >= 2 else float(flx_arr[1])
+        
+        heat_fluxes = np.asarray(fluxes_batch[1])
+        growths = np.asarray(state_batch.last_growth_rate)
+        
+        traj_logs = []
+        for i, name in enumerate(names):
+            eflux_i = float(np.mean(heat_fluxes[i]))
+            growth_i = float(np.mean(growths[i]))
+            traj_logs.append(f"{name} [flx {eflux_i:.4f}, gr {growth_i:.4f}]")
+            
         print(
             f"[{step:>8d}] t {t_sim:>8.2f} | "
-            f"eflux(mean) {mean_eflux:>8.4f} | growth(mean) {mean_growth:>8.4f} | "
+            f"{' | '.join(traj_logs)} | "
             f"{block / wall:.2f} steps/s  x{n_batch}"
         )
-
         # accumulate per-config diagnostics
         for i, s in enumerate(setups):
             flx_i = np.asarray(jax.tree.map(lambda x: x[i], fluxes_batch))

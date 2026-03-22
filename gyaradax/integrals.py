@@ -12,7 +12,8 @@ def j0(x):
 
 
 def geom_tensors(geometry: Dict[str, jnp.ndarray], params: Any = None) -> Dict[str, jnp.ndarray]:
-    """Expand geometry constants for broadcasting and compute Bessel terms.
+    """
+    Expand geometry constants for broadcasting and compute Bessel terms.
 
     Single-species version. Species params are scalars reshaped to (1,1,1,1,1,1).
     """
@@ -175,7 +176,8 @@ def _species_bessel_gamma(geometry):
 
 
 def precompute_phi_kinetic(geometry: Dict[str, jnp.ndarray]):
-    """precompute static arrays for the kinetic phi solve.
+    """
+    Precompute static arrays for the kinetic phi solve.
 
     returns (phi_weight, phi_diag) where:
         phi_weight: (nsp, 1, nmu, ns, nkx, nky) — poisson integral weight
@@ -226,7 +228,8 @@ def _phi_kinetic(
     phi_weight: jnp.ndarray = None,
     phi_diag: jnp.ndarray = None,
 ) -> jnp.ndarray:
-    """Kinetic electron phi from multi-species quasineutrality.
+    """
+    Kinetic electron phi from multi-species quasineutrality.
 
     df: (nsp, nvpar, nmu, ns, nkx, nky).
     Internal — use calculate_phi() as the public interface.
@@ -244,7 +247,8 @@ def calculate_phi(
     params: Any = None,
     pre: Dict = None,
 ) -> jnp.ndarray:
-    """Compute electrostatic potential from quasineutrality.
+    """
+    Compute electrostatic potential from quasineutrality.
 
     Unified interface for both adiabatic and kinetic electron models.
     Uses precomputed arrays from pre when available.
@@ -303,7 +307,8 @@ def calculate_fluxes(
 def calculate_fluxes_kinetic(
     geometry: Dict[str, jnp.ndarray], df: jnp.ndarray, phi: jnp.ndarray
 ) -> jnp.ndarray:
-    """Per-species fluxes for kinetic case.
+    """
+    Per-species fluxes for kinetic case.
 
     df: (nsp, nvpar, nmu, ns, nkx, nky).
     Returns: (nsp, 3) array of [pflux, eflux, vflux] per species.
@@ -330,7 +335,8 @@ def get_integrals(
     adiabatic_electrons: bool = True,
     geom: Dict[str, jnp.ndarray] = None,
 ) -> Tuple[jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]]:
-    """Compute phi and fluxes from distribution function.
+    """
+    Compute phi and fluxes from distribution function.
 
     Returns:
         (phi, fluxes) where fluxes is (pflux, eflux, vflux) for adiabatic

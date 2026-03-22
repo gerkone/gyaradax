@@ -48,8 +48,10 @@ from einops import rearrange
 
 @jax.tree_util.register_pytree_node_class
 class GKPre:
-    """precomputed terms container. separates dynamic arrays (leaves) from
-    static metadata (auxiliary) so FFT sizes stay concrete under JIT."""
+    """
+    Precomputed terms container. Separates dynamic arrays (leaves) from static metadata
+    (auxiliary) so FFT sizes stay concrete under JIT.
+    """
 
     def __init__(self, items: Dict[str, Any]):
         self._items = items
@@ -142,7 +144,8 @@ def kx_ky_grids(geometry: Dict[str, jnp.ndarray]) -> Tuple[jnp.ndarray, jnp.ndar
 
 
 def mode_amplitude(phi: jnp.ndarray, geometry: Dict[str, jnp.ndarray], eps: float) -> jnp.ndarray:
-    """Per-ky mode amplitude over the connected kx chain containing kx=0.
+    """
+    Per-ky mode amplitude over the connected kx chain containing kx=0.
 
     Matches GKW convention (diagnos_growth_freq.f90): only kx modes sharing
     the same mode_label as kx=0 contribute to the amplitude for each ky.

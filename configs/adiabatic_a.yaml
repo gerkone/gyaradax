@@ -1,6 +1,5 @@
 run:
-  name: iteration_200
-  data_dir: /restricteddata/ukaea/gyrokinetics/raw/iteration_200
+  name: adiabatic_example_a
 solver:
   dt: 0.01
   naverage: 40
@@ -12,10 +11,11 @@ solver:
   disp_y: 0.1
   idisp: 2
   non_linear: true
-  finit: sine
+  adaptive_dt: false
+  finit: cosine2
 physics:
-  rlt: 7.366463312621599
-  rln: 1.5940168155580587
+  rlt: 10.2
+  rln: 2.6
   mas: 1.0
   tmp: 1.0
   de: 1.0
@@ -25,17 +25,17 @@ physics:
   tgrid: 1.0
 geometry:
   geometry_model: circ
-  shat: 1.67212
-  q: 8.98969
+  shat: 3.07514
+  q: 4.56844
   eps: 0.19
-  kthnorm: 6.21414
+  kthnorm: 3.16004
   Rref: 100.0
   d2X: 1.0
   signB: 1.0
   dvp: 0.1875
   sgr_dist: 0.0625
-  kxmax: 4.82973
-  kymax: 0.22529263904578908
+  kxmax: 8.87631
+  kymax: 0.4430323666789028
 grid:
   nvpar: 32
   nmu: 8

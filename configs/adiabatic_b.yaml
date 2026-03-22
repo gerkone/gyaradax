@@ -1,6 +1,5 @@
 run:
-  name: iteration_148
-  data_dir: /restricteddata/ukaea/gyrokinetics/raw/iteration_148
+  name: adiabatic_example_b
 solver:
   dt: 0.01
   naverage: 40
@@ -12,9 +11,11 @@ solver:
   disp_y: 0.1
   idisp: 2
   non_linear: true
+  adaptive_dt: false
+  finit: sine
 physics:
-  rlt: 6.113249729089787
-  rln: 1.6656395947262106
+  rlt: 10.173595669502436
+  rln: 2.6087803694867335
   mas: 1.0
   tmp: 1.0
   de: 1.0
@@ -24,20 +25,25 @@ physics:
   tgrid: 1.0
 geometry:
   geometry_model: circ
-  shat: 0.72192
-  q: 8.68136
+  shat: 1.67212
+  q: 8.98969
   eps: 0.19
-  kthnorm: 6.0011
+  kthnorm: 6.21414
   Rref: 100.0
   d2X: 1.0
   signB: 1.0
   dvp: 0.1875
   sgr_dist: 0.0625
-  kxmax: 2.08515
-  kymax: 0.2332905633967106
+  kxmax: 4.82973
+  kymax: 0.22529263904578908
 grid:
   nvpar: 32
   nmu: 8
   ns: 16
   nkx: 85
   nky: 32
+  adiabatic_electrons: true
+  vpar_max: 3.0
+  nperiod: 1
+  krhomax: 1.4
+  ikxspace: 5

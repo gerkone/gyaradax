@@ -5,13 +5,7 @@ from gyaradax.utils import parse_input_dat, load_scalars
 
 
 def gkw_to_yaml(gkw_dir, output_yaml):
-    """
-    Convert a GKW run directory into a complete Gyaradax YAML configuration.
-
-    This extracts runtime controls, species gradients, geometry scalars, and
-    grid scaling information, allowing the solver to be initialized
-    without the original GKW files.
-    """
+    """Convert a GKW run directory into a complete Gyaradax YAML configuration."""
     if not os.path.exists(gkw_dir):
         print(f"error: directory {gkw_dir} not found.")
         return

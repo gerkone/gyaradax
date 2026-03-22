@@ -1,6 +1,5 @@
 run:
-  name: kinetic_991_ntsks128
-  data_dir: /restricteddata/ukaea/gyrokinetics/raw/kinetic_electrons/v3_kiteration_991_ntsks128
+  name: kinetic_example
 solver:
   dt: 0.004
   naverage: 100
@@ -15,16 +14,17 @@ solver:
   adaptive_dt: true
   finit: cosine2
 physics:
-  rlt: [5.394021989480302, 6.9]
-  rln: [3.0309573188766237, 3.0309573188766237]
-  mas: [1.0, 0.000272]
+  rlt: [5.4, 3.45]
+  rln: [3.0, 3.0]
+  mas: [1.0, 0.0003]
   tmp: [1.0, 1.0]
   de: [1.0, 1.0]
   signz: [1.0, -1.0]
-  vthrat: [1.0, 60.63390626]
+  vthrat: [1.0, 60.6]
   dgrid: 1.0
   tgrid: 1.0
 geometry:
+  geometry_model: circ
   shat: 2.74913
   q: 3.48731
   eps: 0.19

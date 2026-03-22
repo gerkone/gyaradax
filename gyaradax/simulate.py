@@ -1,4 +1,4 @@
-"""Simulation runtime and orchestration."""
+"""Simulation runtime."""
 
 import os
 import time
