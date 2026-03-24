@@ -10,7 +10,7 @@
 tmp/
 upload_changed_py.sh
 cache/
-gkw_ref
+gkw_ref/
 .gemini
 .claude
 notebooks/figs/

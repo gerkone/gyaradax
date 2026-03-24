@@ -50,30 +50,48 @@ def plot_flux_trace(
     fluxes: Union[np.ndarray, Tuple[np.ndarray, ...]],
     labels: List[str] = ["Particle", "Heat", "Momentum"],
     ref_time: Optional[np.ndarray] = None,
-    ref_fluxes: Optional[Union[np.ndarray, Tuple[np.ndarray, ...]]] = None,
+    ref_fluxes: Optional[Union[np.ndarray, Tuple[np.ndarray, ...], List[np.ndarray]]] = None,
     title: str = "Flux Evolution",
     show_average: bool = False,
     avg_window: int = 80,
     n_species: int = 1,
     species_labels: Optional[List[str]] = None,
 ) -> plt.Figure:
-    """Plot flux traces over time with optional multi-species side-by-side layout.
+    if isinstance(fluxes, (tuple, list)):
+        min_len = min(f.shape[-1] for f in fluxes)
+        fluxes = np.stack([f[..., :min_len] for f in fluxes])
+        time = time[:min_len]
+        
+    if ref_fluxes is not None:
+        if isinstance(ref_fluxes, (tuple, list)):
+            ref_min_len = min(f.shape[-1] for f in ref_fluxes)
+            ref_fluxes = np.stack([f[..., :ref_min_len] for f in ref_fluxes])
+            if ref_time is not None:
+                ref_time = ref_time[:ref_min_len]
 
-    For n_species > 1, creates two columns (one per species). Fluxes should
-    have shape (n_species * n_flux, n_time) with species interleaved:
-    [pflux_i, eflux_i, vflux_i, pflux_e, eflux_e, vflux_e, ...].
-    """
-    if isinstance(fluxes, tuple):
-        fluxes = np.stack(fluxes)
-    if ref_fluxes is not None and isinstance(ref_fluxes, tuple):
-        ref_fluxes = np.stack(ref_fluxes)
+        if ref_fluxes.ndim == 3:
+            ref_fluxes_mean = np.mean(ref_fluxes, axis=0)
+            ref_fluxes_std = np.std(ref_fluxes, axis=0)
+        else:
+            ref_fluxes_mean = ref_fluxes
+            ref_fluxes_std = None
+    else:
+        ref_fluxes_mean = None
+        ref_fluxes_std = None
+
+    if fluxes.ndim == 3:
+        fluxes_mean = np.mean(fluxes, axis=0)
+        fluxes_std = np.std(fluxes, axis=0)
+    else:
+        fluxes_mean = fluxes
+        fluxes_std = None
 
     if species_labels is None:
         species_labels = [SPECIES_LABELS.get(i, f"sp{i}") for i in range(n_species)]
 
     n_flux = len(labels)
     ncols = n_species
-    fig, axes = plt.subplots(n_flux, ncols, figsize=(7.0, 1.4 * n_flux), sharex=True, squeeze=False)
+    fig, axes = plt.subplots(n_flux, ncols, figsize=(7.0, 1.6 * n_flux), sharex=True, squeeze=False)
 
     for isp in range(n_species):
         col_offset = isp * n_flux
@@ -82,48 +100,130 @@ def plot_flux_trace(
         for i in range(n_flux):
             ax = axes[i, isp]
             flux_idx = col_offset + i
-            if flux_idx >= fluxes.shape[0]:
+            if flux_idx >= fluxes_mean.shape[0]:
                 continue
 
-            ax.plot(time, fluxes[flux_idx], label="gyaradax", color=color, lw=1.5)
+            if fluxes.ndim == 3:
+                for run_idx in range(fluxes.shape[0]):
+                    ax.plot(time, fluxes[run_idx, flux_idx], color=color, alpha=0.15, lw=1.0, linestyle="-", zorder=1)
 
-            if show_average and len(fluxes[flux_idx]) >= avg_window:
-                avg_val = np.mean(fluxes[flux_idx][-avg_window:])
-                ax.axhline(
-                    avg_val,
-                    color=JAX_COLORS["red"],
-                    linestyle=":",
-                    lw=2.0,
-                    label=f"avg (last {avg_window})",
-                    zorder=-1,
+            ax.plot(time, fluxes_mean[flux_idx], label="gyaradax", color=color, lw=1.5, alpha=1.0, zorder=3)
+
+            if fluxes_std is not None:
+                ax.fill_between(
+                    time,
+                    fluxes_mean[flux_idx] - fluxes_std[flux_idx],
+                    fluxes_mean[flux_idx] + fluxes_std[flux_idx],
+                    color=color,
+                    alpha=0.3,
+                    lw=0,
+                    zorder=2
                 )
 
-            if ref_fluxes is not None and ref_time is not None:
+            if show_average and len(fluxes_mean[flux_idx]) >= avg_window:
+                avg_val = np.mean(fluxes_mean[flux_idx][-avg_window:])
+                t_start = time[-avg_window]
+                t_end = time[-1]
+                
+                ax.plot(
+                    [t_start, t_end], 
+                    [avg_val, avg_val], 
+                    color=color, 
+                    linestyle="-", 
+                    lw=2.0, 
+                    zorder=4
+                )
+                
+                ax.text(
+                    t_end, 
+                    avg_val, 
+                    f"{avg_val:.4g}", 
+                    color=color, 
+                    va="bottom", 
+                    ha="right", 
+                    fontweight="bold",
+                    fontsize=9,
+                    zorder=5,
+                    bbox=dict(facecolor="white", alpha=0.8, edgecolor="none", pad=0.2)
+                )
+
+            if ref_fluxes_mean is not None and ref_time is not None:
                 ref_idx = col_offset + i
-                if ref_idx < ref_fluxes.shape[0]:
+                if ref_idx < ref_fluxes_mean.shape[0]:
+                    if ref_fluxes.ndim == 3:
+                        for run_idx in range(ref_fluxes.shape[0]):
+                            ax.plot(
+                                ref_time,
+                                ref_fluxes[run_idx, ref_idx],
+                                color="black",
+                                alpha=0.15,
+                                lw=1.0,
+                                linestyle="--",
+                                zorder=0
+                            )
+
                     ax.plot(
                         ref_time,
-                        ref_fluxes[ref_idx],
+                        ref_fluxes_mean[ref_idx],
                         color="black",
                         linestyle="--",
                         label="GKW",
                         alpha=0.8,
                         lw=1.4,
-                        zorder=0,
+                        zorder=2,
                     )
 
+                    if ref_fluxes_std is not None:
+                        ax.fill_between(
+                            ref_time,
+                            ref_fluxes_mean[ref_idx] - ref_fluxes_std[ref_idx],
+                            ref_fluxes_mean[ref_idx] + ref_fluxes_std[ref_idx],
+                            color="black",
+                            alpha=0.2,
+                            lw=0,
+                            zorder=1
+                        )
+
+                    if show_average and len(ref_fluxes_mean[ref_idx]) >= avg_window:
+                        ref_avg_val = np.mean(ref_fluxes_mean[ref_idx][-3 * avg_window:])
+                        ref_t_start = ref_time[-3 * avg_window]
+                        ref_t_end = ref_time[-1]
+                        
+                        ax.plot(
+                            [ref_t_start, ref_t_end], 
+                            [ref_avg_val, ref_avg_val], 
+                            color="black", 
+                            linestyle="-", 
+                            lw=2.0, 
+                            zorder=4
+                        )
+                        
+                        ax.text(
+                            ref_t_end, 
+                            ref_avg_val, 
+                            f"{ref_avg_val:.4g}", 
+                            color="black", 
+                            va="top", 
+                            ha="right", 
+                            fontweight="bold",
+                            fontsize=9,
+                            zorder=5,
+                            bbox=dict(facecolor="white", alpha=0.8, edgecolor="none", pad=0.2)
+                        )
+
             if isp == 0:
-                ax.set_ylabel(labels[i])
+                ax.set_ylabel(labels[i], fontsize=12)
             ax.grid(True, axis="y")
             if i == 0:
                 if n_species > 1:
-                    ax.set_title(species_labels[isp])
+                    ax.set_title(species_labels[isp], fontsize=9)
                 if isp == 0:
-                    ax.legend(frameon=False, loc="best")
+                    ax.legend(frameon=False, loc="upper left", fontsize=10)
 
-        axes[-1, isp].set_xlabel(r"time $[v_{th}/R]$")
+        axes[-1, isp].set_xlabel(r"time $[v_{th}/R]$", fontsize=12)
 
-    fig.suptitle(title, fontweight="bold")
+    fig.suptitle(title, fontweight="bold", fontsize=14)
+    fig.align_ylabels(axes[:, 0])
     fig.tight_layout()
     return fig
 
@@ -152,6 +252,24 @@ def plot_spectra(
         ref_kx_spec = np.sum(ref_phi_sq, axis=(0, 2))
         ref_ky_spec = np.sum(ref_phi_sq, axis=(0, 1))
 
+    def _progressive_sparse_indices(spec):
+        """Generate progressively sparse indices moving outward from the peak."""
+        N = len(spec)
+        peak_idx = int(np.argmax(spec))
+        idx = [peak_idx]
+        for direction in [-1, 1]:
+            curr = peak_idx + direction
+            step = 1
+            count = 0
+            while 0 <= curr < N:
+                idx.append(curr)
+                count += 1
+                # Increase the gap between crosses every 3 plotted points
+                if count % 3 == 0:  
+                    step += 1
+                curr += direction * step
+        return np.sort(idx)
+
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(7.0, 2.2))
 
     ax1.semilogy(
@@ -164,6 +282,7 @@ def plot_spectra(
         label="gyaradax",
     )
     if ref_ky_spec is not None:
+        # idx_y = _progressive_sparse_indices(ref_ky_spec)
         ax1.semilogy(
             ky,
             ref_ky_spec,
@@ -174,29 +293,31 @@ def plot_spectra(
             markeredgewidth=1,
             label="GKW",
         )
-    ax1.set_xlabel(r"$k_y \rho_{ref}$")
-    ax1.set_ylabel(r"$\sum_{s, k_x} |\phi|^2$")
-    ax1.set_title(r"$k_y$ spectrum")
+    ax1.set_xlabel(r"$k_y \rho_{ref}$", fontsize=12)
+    ax1.set_ylabel(r"$k_y^{\text{spec}}$", fontsize=12)
+    ax1.set_title(r"$k_y$ spectrum", fontsize=12)
     ax1.grid(True, which="both")
-    ax1.legend()
+    ax1.legend(fontsize=10)
 
     ax2.semilogy(kx, kx_spec, "o-", color=JAX_COLORS["purple"], markersize=3, lw=1)
     if ref_kx_spec is not None:
+        idx_x = _progressive_sparse_indices(ref_kx_spec)
         ax2.semilogy(
-            kx,
-            ref_kx_spec,
+            kx[idx_x],
+            ref_kx_spec[idx_x],
             marker="x",
             linestyle="None",
             color="black",
             markersize=4,
             markeredgewidth=1,
         )
-        ax2.set_xlabel(r"$k_x \rho_{ref}$")
-    ax2.set_ylabel(r"$\sum_{s, k_y} |\phi|^2$")
-    ax2.set_title(r"$k_x$ spectrum")
+        ax2.set_xlabel(r"$k_x \rho_{ref}$", fontsize=12)
+    ax2.set_ylabel(r"$k_x^{\text{spec}}$", fontsize=12)
+    ax2.set_title(r"$k_x$ spectrum", fontsize=12)
     ax2.grid(True, which="both")
+    
     if len(title) > 0:
-        fig.suptitle(title, fontweight="bold")
+        fig.suptitle(title, fontweight="bold", fontsize=14)
     fig.tight_layout()
     return fig
 
@@ -246,12 +367,12 @@ def plot_growth_rates(
     elif ref_time is not None and ref_time.ndim == 2 and ref_time.shape[1] >= 2:
         ax.plot(ref_time[:, 0], ref_time[:, 1], "kx", ms=4, alpha=0.7, label="GKW (mean)")
 
-    ax.set_xlabel(r"time $[v_{th}/R]$")
-    ax.set_ylabel(r"$\gamma$")
-    ax.legend(frameon=False, ncol=3)
+    ax.set_xlabel(r"time $[v_{th}/R]$", fontsize=12)
+    ax.set_ylabel(r"$\gamma$", fontsize=12)
+    ax.legend(frameon=False, ncol=3, fontsize=10)
     ax.grid(True)
     if title:
-        ax.set_title(title)
+        ax.set_title(title, fontsize=14)
     fig.tight_layout()
     return fig
 
@@ -275,23 +396,12 @@ def plot_growth_snapshots(
     n_total = len(sim_time)
 
     # detect saturation: mean growth over ky>0 modes drops near zero
-    mean_gr = np.mean(sim_growth[:, 1:], axis=1) if sim_growth.shape[1] > 1 else sim_growth[:, 0]
-    # saturation onset: first index where a 5-window rolling mean drops below
-    # 10% of the peak growth rate
-    peak_gr = np.max(np.abs(mean_gr[: max(1, n_total // 4)]))
-    threshold = 0.1 * peak_gr if peak_gr > 0 else 0.5
-    window = min(5, n_total // 4)
-    if window > 0 and n_total > window:
-        rolling = np.convolve(np.abs(mean_gr), np.ones(window) / window, mode="valid")
-        sat_candidates = np.where(rolling < threshold)[0]
-        sat_idx = int(sat_candidates[0]) + window // 2 if len(sat_candidates) > 0 else n_total // 3
-    else:
-        sat_idx = n_total // 3
+    sat_idx = n_total // 10
     sat_idx = max(2, min(sat_idx, n_total - 3))
 
     # panels: early linear, saturation onset, half-run, time-average
     snap_indices = [
-        max(0, 1),
+        5,
         sat_idx,
         n_total // 2,
     ]
@@ -326,14 +436,14 @@ def plot_growth_snapshots(
             label="gyaradax",
         )
 
-        ax.set_title(rf"$t = {t_sim:.1f}$")
+        ax.set_title(rf"$t = {t_sim:.1f}$", fontsize=12)
         ax.grid(True)
         if i == 0:
-            ax.legend(frameon=False)
+            ax.legend(frameon=False, fontsize=10)
         if i >= 2:
-            ax.set_xlabel(r"$k_y \rho_{ref}$")
+            ax.set_xlabel(r"$k_y \rho_{ref}$", fontsize=12)
         if i % 2 == 0:
-            ax.set_ylabel(r"$\gamma$")
+            ax.set_ylabel(r"$\gamma$", fontsize=12)
 
     # 4th panel: time-averaged growth rate
     ax = axes[3]
@@ -342,12 +452,12 @@ def plot_growth_snapshots(
         ref_avg = np.mean(ref_growth, axis=0)
         ax.plot(ky[: len(ref_avg)], ref_avg, "kx", ms=5, alpha=0.9, label="GKW", zorder=100)
     ax.plot(ky, sim_avg, "o-", color=JAX_COLORS["blue"], ms=3, lw=1.2, label="gyaradax")
-    ax.set_title("time average")
-    ax.set_xlabel(r"$k_y \rho_{ref}$")
+    ax.set_title("Time average", fontsize=12)
+    ax.set_xlabel(r"$k_y \rho_{ref}$", fontsize=12)
     ax.grid(True)
 
     if title:
-        fig.suptitle(title, fontweight="bold")
+        fig.suptitle(title, fontweight="bold", fontsize=14)
     fig.tight_layout()
     return fig
 

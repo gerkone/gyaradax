@@ -93,33 +93,33 @@ def _setup_run(config_path, args):
 
     k_path = None if args.from_scratch else _find_k_file(data_dir)
 
-    if k_path is not None:
-        res = tuple(len(geometry[k]) for k in ("intvp", "intmu", "ints", "kxrh", "krho"))
-        df = load_gkw_k_dump(k_path, res, n_species=n_species)
+    # if k_path is not None:
+    #     res = tuple(len(geometry[k]) for k in ("intvp", "intmu", "ints", "kxrh", "krho"))
+    #     df = load_gkw_k_dump(k_path, res, n_species=n_species)
 
-        dat_path = k_path + ".dat"
-        t_start = read_gkw_dump_time(dat_path) if os.path.exists(dat_path) else 0.0
-        nky = len(geometry["krho"])
+    #     dat_path = k_path + ".dat"
+    #     t_start = read_gkw_dump_time(dat_path) if os.path.exists(dat_path) else 0.0
+    #     nky = len(geometry["krho"])
 
-        actual_dt = read_gkw_dump_dtim(dat_path) if os.path.exists(dat_path) else 0.0
-        if actual_dt > 0 and actual_dt < params.dt:
-            params = replace(params, dt=actual_dt)
+    #     actual_dt = read_gkw_dump_dtim(dat_path) if os.path.exists(dat_path) else 0.0
+    #     if actual_dt > 0 and actual_dt < params.dt:
+    #         params = replace(params, dt=actual_dt)
 
-        if params.adiabatic_electrons:
-            phi0 = _compute_phi_for_init(df, geometry, params)
-            amp0 = mode_amplitude(phi0, geometry, params.norm_eps)
-        else:
-            amp0 = jnp.ones(nky, dtype=jnp.float64)
+    #     if params.adiabatic_electrons:
+    #         phi0 = _compute_phi_for_init(df, geometry, params)
+    #         amp0 = mode_amplitude(phi0, geometry, params.norm_eps)
+    #     else:
+    #         amp0 = jnp.ones(nky, dtype=jnp.float64)
 
-        state = GKState(
-            time=jnp.array(t_start, dtype=jnp.float64),
-            step=jnp.array(0, dtype=jnp.int32),
-            accumulated_norm_factor=jnp.ones(nky, dtype=jnp.float64),
-            window_start_amp=amp0,
-            last_growth_rate=jnp.zeros(nky, dtype=jnp.float64),
-        )
-    else:
-        df, state = gk_init(geometry, params, n_species=n_species)
+    #     state = GKState(
+    #         time=jnp.array(t_start, dtype=jnp.float64),
+    #         step=jnp.array(0, dtype=jnp.int32),
+    #         accumulated_norm_factor=jnp.ones(nky, dtype=jnp.float64),
+    #         window_start_amp=amp0,
+    #         last_growth_rate=jnp.zeros(nky, dtype=jnp.float64),
+    #     )
+    # else:
+    df, state = gk_init(geometry, params, n_species=n_species)
 
     pre = linear_precompute(geometry, params)
 

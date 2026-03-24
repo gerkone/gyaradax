@@ -185,7 +185,7 @@ def gksimulate(
             geometry,
             save_dumps=save_snapshots,
         )
-
+        
     start_step = int(state.step)
     target_step = start_step + n_steps
     current_df = df
