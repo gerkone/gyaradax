@@ -232,7 +232,9 @@ per-step branching on the sign of $v_\parallel$.
 | `geometry.py` | analytic circular geometry + mode connectivity (primary path) |
 | `stencils.py` | finite difference coefficient tables |
 | `utils.py` | K-dump loading, checkpoint save/load, diagnostics, GKW file-loading (`load_geometry`, `parse_input_dat`) |
-| `gksimulate.py` | high-level simulation runner from YAML config |
+| `simulate.py` | high-level simulation runner from YAML config |
+| `diag.py` | spectral diagnostics, 1D projections, nonlinear term analysis |
+| `bootstrap.py` | centralized JAX configuration and device initialization |
 | `plot_utils.py` | publication-quality visualization |
 
 ### 4.2 key interfaces

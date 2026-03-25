@@ -65,6 +65,75 @@ def test_init_f_trajectory_parity(nonlin_dir, nonlin_geom, nonlin_shape):
     assert error < 1e-2
 
 
+def test_init_f_kinetic_parity(kinetic_dir, kinetic_geom, kinetic_shape):
+    """
+    Verify kinetic gk_init: correct amp_init, species-array injection, and
+    short forward integration with flux diagnostics.
+
+    Checks:
+    1. amp_init is parsed from input.dat and applied (not the default 1e-4).
+    2. geometry carries per-species arrays after gk_init.
+    3. A short gksolve (20 steps, fixed dt) runs without error and
+       produces finite df, phi, and per-species fluxes.
+    """
+    from gyaradax import gk_init, gksolve
+    from gyaradax.utils import parse_input_dat
+
+    n_species = 2
+    input_path = os.path.join(kinetic_dir, "input.dat")
+
+    params = gkparams_from_input_dat(
+        input_path,
+        non_linear=True,
+        adiabatic_electrons=False,
+    )
+
+    # amp_init must be parsed from input.dat (kinetic cases use 0.001)
+    inp = parse_input_dat(input_path)
+    expected_amp = float(
+        inp.get("spcgeneral", {}).get(
+            "amp_init", inp.get("components", {}).get("amp_init", 1e-4)
+        )
+    )
+    assert params.amp_init == pytest.approx(expected_amp), (
+        f"params.amp_init={params.amp_init} != input.dat amp_init={expected_amp}"
+    )
+
+    # gk_init should use the parsed amp_init and return 6D df
+    df_init, geom_out, state = gk_init(kinetic_geom, params, n_species=n_species)
+    assert df_init.ndim == 6
+    assert df_init.shape[0] == n_species
+
+    # init amplitude must reflect params.amp_init (max of cosine2 = 2*amp)
+    expected_max = params.amp_init * 2.0
+    actual_max = float(jnp.max(jnp.abs(df_init)))
+    assert actual_max == pytest.approx(expected_max, rel=0.02), (
+        f"init max|df|={actual_max:.4e} != 2*amp_init={expected_max:.4e}"
+    )
+
+    # geometry must carry per-species arrays
+    for k in ("mas", "signz", "de", "tmp", "vthrat", "rlt", "rln"):
+        assert jnp.asarray(geom_out[k]).shape[0] == n_species, (
+            f"geometry[{k}] should have {n_species} species"
+        )
+
+    # short forward integration with fixed dt (safe for CFL)
+    import dataclasses
+    safe_params = dataclasses.replace(params, dt=0.002, adaptive_dt=False)
+    pre = linear_precompute(geom_out, safe_params)
+    pred_df, (phi, fluxes), final_state = gksolve(
+        df_init, geom_out, safe_params, state, n_steps=20, pre=pre
+    )
+
+    assert jnp.all(jnp.isfinite(pred_df)), (
+        f"df has {int(jnp.sum(~jnp.isfinite(pred_df)))} non-finite values"
+    )
+    assert jnp.all(jnp.isfinite(phi)), "phi should be finite"
+    fluxes_arr = jnp.asarray(fluxes)
+    assert fluxes_arr.shape == (n_species, 3)
+    assert jnp.all(jnp.isfinite(fluxes_arr)), "fluxes should be finite"
+
+
 def test_runtime_params_types_and_values(nonlin_dir):
     """verify that runtime parameters are parsed with correct types."""
     runtime = load_runtime_params(os.path.join(nonlin_dir, "input.dat"))

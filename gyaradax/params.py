@@ -64,6 +64,7 @@ class GKParams:
     norm_eps: float = 1.0e-14
     non_linear: bool = False
     finit: str = "cosine2"
+    amp_init: float = 1.0e-4
     adiabatic_electrons: bool = True
     adaptive_dt: bool = False
     cfl_safety: float = 0.95
@@ -131,6 +132,7 @@ def gkparams_from_runtime(runtime: Dict[str, Any], **overrides) -> GKParams:
         "disp_y": float(runtime.get("disp_y", 0.1)),
         "non_linear": bool(runtime.get("non_linear", False)),
         "finit": str(runtime.get("finit", "cosine2")),
+        "amp_init": float(runtime.get("amp_init", 1.0e-4)),
         "adiabatic_electrons": bool(runtime.get("adiabatic_electrons", True)),
     }
     # species params may be arrays (multi-species) or scalars
@@ -266,6 +268,7 @@ def gkparams_from_config(config: Any, **overrides) -> GKParams:
         "idisp": int(getattr(solver_cfg, "idisp", 2)),
         "non_linear": bool(getattr(solver_cfg, "non_linear", False)),
         "finit": str(getattr(solver_cfg, "finit", "cosine2")),
+        "amp_init": float(getattr(solver_cfg, "amp_init", 1.0e-4)),
         "adiabatic_electrons": bool(getattr(config.grid, "adiabatic_electrons", True)),
         "adaptive_dt": bool(getattr(solver_cfg, "adaptive_dt", False)),
         "cfl_safety": float(getattr(solver_cfg, "cfl_safety", 0.95)),

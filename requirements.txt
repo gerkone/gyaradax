@@ -6,3 +6,4 @@ matplotlib
 einops
 pytest
 pillow
+scipy

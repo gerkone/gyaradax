@@ -119,7 +119,7 @@ def _setup_run(config_path, args):
     #         last_growth_rate=jnp.zeros(nky, dtype=jnp.float64),
     #     )
     # else:
-    df, state = gk_init(geometry, params, n_species=n_species)
+    df, geometry, state = gk_init(geometry, params, n_species=n_species)
 
     pre = linear_precompute(geometry, params)
 

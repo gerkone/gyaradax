@@ -80,15 +80,56 @@ def log_step(fluxes, state: GKState, wall_time: float, n_steps: int = 0):
     )
 
 
+def _ensure_species_arrays(geometry: Dict[str, jnp.ndarray], params: GKParams) -> Dict[str, jnp.ndarray]:
+    """Ensure geometry carries multi-species arrays consistent with params.
+
+    ``compute_geometry`` always creates single-element species placeholders
+    (``mas=[1.0]``, etc.).  When params describes multiple species the
+    downstream flux diagnostics (``calculate_fluxes_kinetic``) need per-species
+    arrays in the geometry dict.  This helper copies them from params when the
+    geometry arrays are too short.
+    """
+    _SPECIES_KEYS = ("mas", "signz", "de", "tmp", "vthrat", "rlt", "rln")
+    mas = jnp.asarray(params.mas, dtype=jnp.float64)
+    nsp = int(mas.shape[0]) if mas.ndim > 0 else 1
+    if nsp <= 1:
+        return geometry
+
+    geom_nsp = int(jnp.asarray(geometry.get("mas", jnp.ones(1))).shape[0])
+    if geom_nsp >= nsp:
+        return geometry
+
+    geometry = dict(geometry)  # shallow copy
+    for k in _SPECIES_KEYS:
+        val = getattr(params, k, None)
+        if val is not None:
+            geometry[k] = jnp.asarray(val, dtype=jnp.float64)
+    return geometry
+
+
 def gk_init(
     geometry: Dict[str, jnp.ndarray],
     params: GKParams,
     n_species: int = 1,
-) -> Tuple[jnp.ndarray, GKState]:
-    """Create initial (df, state) from geometry and params. No IO."""
+) -> Tuple[jnp.ndarray, Dict[str, jnp.ndarray], GKState]:
+    """Create initial (df, geometry, state) from geometry and params. No IO.
+
+    When *params* indicates kinetic electrons, the geometry dict is
+    augmented with per-species arrays from *params* if they are missing
+    (e.g. when using ``compute_geometry`` which only creates single-species
+    placeholders).  The **returned** geometry must be used for all
+    subsequent calls (``gksolve``, ``linear_precompute``, fluxes, etc.).
+    """
+    if not params.adiabatic_electrons:
+        mas = jnp.asarray(params.mas, dtype=jnp.float64)
+        n_species = max(n_species, int(mas.shape[0]) if mas.ndim > 0 else 1)
+
+    geometry = _ensure_species_arrays(geometry, params)
+
     df = init_f(
         geometry,
         finit=params.finit,
+        amp_init_real=params.amp_init,
         norm_eps=params.norm_eps,
         n_species=n_species,
     )
@@ -103,7 +144,7 @@ def gk_init(
         window_start_amp=amp0,
         last_growth_rate=state.last_growth_rate,
     )
-    return df, state
+    return df, geometry, state
 
 
 def gk_run(
@@ -253,7 +294,7 @@ def gk_from_config(
     if not params.adiabatic_electrons:
         n_species = int(jnp.asarray(params.mas).shape[0])
 
-    df, state = gk_init(geometry, params, n_species=n_species)
+    df, geometry, state = gk_init(geometry, params, n_species=n_species)
     pre = linear_precompute(geometry, params)
 
     return df, geometry, params, state, pre

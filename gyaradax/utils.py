@@ -465,6 +465,12 @@ def load_runtime_params(input_dat_path: str) -> Dict[str, Any]:
         "meth": _int("meth", 0),
         "finit": finit,
         "adiabatic_electrons": adiabatic_electrons,
+        "amp_init": float(
+            inp.get("spcgeneral", {}).get(
+                "amp_init",
+                inp.get("components", {}).get("amp_init", 1.0e-4),
+            )
+        ),
     }
 
 

@@ -379,10 +379,13 @@ def estimate_timestep(
     """Combined CFL estimate: min(nonlinear ExB, linear streaming).
 
     The nonlinear CFL uses the caller's safety_factor (typically 0.95).
-    The linear CFL uses a fixed 0.5 safety factor for RK4 stability.
+    The linear CFL uses a 1/3 safety factor for RK4 stability, matching
+    GKW's Von Neumann analysis (matdat.F90: RK4 divides the first-derivative
+    CFL by 2.4, then applies fac_dtim_est=0.95, giving ~0.95/2.4 ≈ 0.40;
+    we use 1/3 as a conservative floor).
     """
     dt_nl = estimate_nl_timestep(phi, pre, bessel, dt_input, safety_factor)
-    dt_lin = estimate_linear_timestep(pre, safety_factor=0.5)
+    dt_lin = estimate_linear_timestep(pre, safety_factor=1.0 / 3.0)
     return jnp.minimum(dt_nl, dt_lin)
 
 
@@ -1176,7 +1179,11 @@ def gksolve(
             )
             return (next_df, next_state, next_dt), None
 
-        init_dt = dt_input
+        # Cap the initial dt with the linear CFL so the very first step is safe
+        # (the one-step lag means the first step would otherwise use dt_input
+        # unconditionally, which can exceed the linear streaming CFL for kinetic
+        # electrons with vthrat >> 1).
+        init_dt = jnp.minimum(dt_input, estimate_linear_timestep(pre, safety_factor=0.5))
         (final_df, final_state, _), _ = jax.lax.scan(
             _scan_body, (df, state, init_dt), None, length=n_steps
         )
