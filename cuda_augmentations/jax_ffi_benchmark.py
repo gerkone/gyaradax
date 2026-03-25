@@ -64,11 +64,12 @@ def lto_bracket_ffi_call(df, phi, kx, ky, jind, dum_s, batch, mrad, mphi, nkx, n
     suffix = "" if version == 0 else (f"_v1" if version == 1 else "_v2")
     target_name = f"lto_fft_bracket{suffix}_ffi"
     
-    # CRITICAL: The output buffer must match the total batch size (e.g. 4096)
+    # All variants (v0, v1, v2) produce a D2Z half-spectrum output: (batch, mrad, mphi//2+1).
+    # v2 uses Z2Z internally but the final step is still D2Z.
     return ffi.ffi_call(
         target_name,
-        jax.ShapeDtypeStruct((batch, nkx, nky), jnp.complex128)
-    )(df, phi, kx, ky, jind, dum_s, 
+        jax.ShapeDtypeStruct((batch, mrad, (mphi // 2 + 1)), jnp.complex128)
+    )(df, phi, kx, ky, jind, dum_s,
       batch=np.int32(batch), mrad=np.int32(mrad), mphi=np.int32(mphi), 
       nkx=np.int32(nkx), nky=np.int32(nky))
 
@@ -117,7 +118,7 @@ def main():
     print(f"  FFI batch  : {batch_total}")
     print(f"  Grid       : mrad={mrad}, mphi={mphi}, nkx={nkx}, nky={nky}")
 
-    # 3. Define Variants
+    # 3. Reference Baselines
     @jax.jit
     def run_jax_fp64(d, p):
         return nonlinear_term_iii(d, p, geom, pre_gk, mixed_precision=False)
@@ -126,80 +127,25 @@ def main():
     def run_jax_mixed(d, p):
         return nonlinear_term_iii(d, p, geom, pre_gk, mixed_precision=True)
 
-    @jax.jit
-    def run_lto_v0(d, p):
-        return lto_bracket_ffi_call(d, p, kx_vec, ky_vec, inverse_jind, dum_s, batch_total, mrad, mphi, nkx, nky, 0)
-
-    @jax.jit
-    def run_lto_v1(d, p):
-        return lto_bracket_ffi_call(d, p, kx_vec, ky_vec, inverse_jind, dum_s, batch_total, mrad, mphi, nkx, nky, 1)
-
-    @jax.jit
-    def run_lto_v2(d, p):
-        return lto_bracket_ffi_call(d, p, kx_vec, ky_vec, inverse_jind, dum_s, batch_total, mrad, mphi, nkx, nky, 2)
-
-    # 4. Standard cuFFT Variant (Non-LTO)
-    # This variant requires Python-side packing of gradients
-    @jax.jit
-    def run_cufft_standard(d, p):
-        ikx_vec = 1j * kx_vec
-        iky_vec = 1j * ky_vec
-        # d is (4096, 85, 32), p is (16, 85, 32)
-        # nspec=16, nv_mu=256
-        ns = p.shape[0]
-        
-        # Physics: Bessel Gyro-averaging
-        # gyro_phi = bessel_s * phi_s
-        bessel = pre["bessel"] # typically (nv, nmu, ns, nkx, nky)
-        # Broadcast phi (ns, nkx, nky) to match bessel
-        ns = p.shape[0]
-        p_expanded = p.reshape(1, 1, ns, nkx, nky)
-        gyro_phi_k = bessel * p_expanded
-        
-        # Now gyro_phi_k is (nv, nmu, ns, nkx, nky) -> reshape to (-1, ns, nkx, nky)
-        gyro_phi_k_flat = gyro_phi_k.reshape(-1, ns, nkx, nky)
-        d_expanded = d.reshape(-1, ns, nkx, nky)
-        
-        # Pack Gradients
-        # We process each (nv*nmu) "velocity batch" of (ns, nkx, nky)
-        phi_y_k = (iky_vec[None, None, None, :] * gyro_phi_k_flat)
-        f_x_k   = (ikx_vec[None, None, :, None] * d_expanded)
-        phi_x_k = (ikx_vec[None, None, :, None] * gyro_phi_k_flat)
-        f_y_k   = (iky_vec[None, None, None, :] * d_expanded)
-        
-        # Dense packing (cufft_bracket.cu expects dense rows)
-        pk_phi_y = pack_half_spectrum(phi_y_k, jind, mrad, pre["nl_mphiw3"])
-        pk_f_x   = pack_half_spectrum(f_x_k,   jind, mrad, pre["nl_mphiw3"])
-        pk_phi_x = pack_half_spectrum(phi_x_k, jind, mrad, pre["nl_mphiw3"])
-        pk_f_y   = pack_half_spectrum(f_y_k,   jind, mrad, pre["nl_mphiw3"])
-        
-        # Scale: dum_s * efun_sign * fft_scale
-        # In FFI, we only use dum_s_eff for the bracket logic. 
-        # But real solver applies efun_sign * dum * irfft2(...)
-        # And then applies fft_prefactor * fft_scale to the final rfft2 output.
-        efun_sign = 1.0
-        dum_eff = efun_sign * dum_s 
-        
-        # The FFI returns (batch, mrad, mphiw3) spectral result
-        out_raw = ffi.ffi_call(
-            "cufft_bracket_ffi",
-            jax.ShapeDtypeStruct((batch_total, mrad, pre["nl_mphiw3"]), jnp.complex128)
-        )(pk_phi_y.reshape(-1, mrad, pre["nl_mphiw3"]), 
-          pk_f_x  .reshape(-1, mrad, pre["nl_mphiw3"]), 
-          pk_phi_x.reshape(-1, mrad, pre["nl_mphiw3"]), 
-          pk_f_y  .reshape(-1, mrad, pre["nl_mphiw3"]), 
-          dum_eff,
-          batch=np.int32(batch_total), mrad=np.int32(mrad), mphi=np.int32(mphi), nspec=np.int32(ns))
-        
-        # Phase Mapping and Normalization Correction
-        # The FFI already includes 1/N^2 in the real-space fused kernel.
-        # This matches the JAX irfft2(backward) 1/N scaling for each of the two factors 
-        # (resulting in 1/N^2 in real space) and the final rfft2(backward) 1.0 scaling.
+    # 4. Shared Physics & Solver Wrapper
+    def apply_physics_wrapper(out_raw, is_lto=True):
+        # Normalization and Phase Mapping
+        # JAX norm="backward" round trip is 1/N.
+        # cuFFT round trip is N.
+        # LTO v0, v1, v2 kernels are CURRENTLY unscaled (scale=1.0).
+        # Standard FFI kernel is ALREADY scaled by 1/N^2.
+        N = mrad * mphi
+        if is_lto:
+            # LTO needs 1/N^2 to match JAX 1/N (N * 1/N^2 = 1/N)
+            out_normalized = out_raw / (N * N)
+        else:
+            # Standard FFI is already 1/N (scaled by 1/N^2 in C++ kernel)
+            out_normalized = out_raw
         
         # Apply final phase mapping from solver
         fft_prefactor = pre.get("nl_fft_prefactor", 1.0 + 0.0j)
         fft_scale = pre["nl_fft_scale"]
-        nl_half = (fft_prefactor * fft_scale) * out_raw
+        nl_half = (fft_prefactor * fft_scale) * out_normalized
         
         # Unpack result back to (batch, nkx, nky)
         nl = unpack_half_spectrum(nl_half, jind, nky)
@@ -209,6 +155,66 @@ def main():
         nl_masked = nl.at[:, ixzero, iyzero].set(0.0)
         
         return nl_masked.reshape(-1, nkx, nky)
+
+    @jax.jit
+    def run_lto_v0(d, p):
+        # Physics: Bessel Gyro-averaging
+        bessel = pre["bessel"] 
+        gyro_phi_k = bessel * p.reshape(1, 1, -1, nkx, nky)
+        p_lto = gyro_phi_k.reshape(-1, nkx, nky)
+        
+        out = lto_bracket_ffi_call(d, p_lto, kx_vec, ky_vec, inverse_jind, dum_s, batch_total, mrad, mphi, nkx, nky, 0)
+        return apply_physics_wrapper(out, is_lto=True)
+
+    @jax.jit
+    def run_lto_v1(d, p):
+        # Physics: Bessel Gyro-averaging
+        bessel = pre["bessel"] 
+        gyro_phi_k = bessel * p.reshape(1, 1, -1, nkx, nky)
+        p_lto = gyro_phi_k.reshape(-1, nkx, nky)
+        
+        out = lto_bracket_ffi_call(d, p_lto, kx_vec, ky_vec, inverse_jind, dum_s, batch_total, mrad, mphi, nkx, nky, 1)
+        return apply_physics_wrapper(out, is_lto=True)
+
+    @jax.jit
+    def run_lto_v2(d, p):
+        # Physics: Bessel Gyro-averaging
+        bessel = pre["bessel"] 
+        gyro_phi_k = bessel * p.reshape(1, 1, -1, nkx, nky)
+        p_lto = gyro_phi_k.reshape(-1, nkx, nky)
+        
+        out = lto_bracket_ffi_call(d, p_lto, kx_vec, ky_vec, inverse_jind, dum_s, batch_total, mrad, mphi, nkx, nky, 2)
+        return apply_physics_wrapper(out, is_lto=True)
+
+    # 4. Standard cuFFT Variant (Non-LTO)
+    @jax.jit
+    def run_cufft_standard(d, p):
+        ikx_vec, iky_vec = 1j * kx_vec, 1j * ky_vec
+        ns = p.shape[0]
+        
+        # Physics: Bessel Gyro-averaging
+        bessel = pre["bessel"]
+        gyro_phi_k = bessel * p.reshape(1, 1, ns, nkx, nky)
+        gyro_phi_k_flat = gyro_phi_k.reshape(-1, ns, nkx, nky)
+        d_expanded = d.reshape(-1, ns, nkx, nky)
+        
+        # Pack Gradients
+        pk_phi_y = pack_half_spectrum(iky_vec[None, None, None, :] * gyro_phi_k_flat, jind, mrad, pre["nl_mphiw3"])
+        pk_f_x   = pack_half_spectrum(ikx_vec[None, None, :, None] * d_expanded,      jind, mrad, pre["nl_mphiw3"])
+        pk_phi_x = pack_half_spectrum(ikx_vec[None, None, :, None] * gyro_phi_k_flat, jind, mrad, pre["nl_mphiw3"])
+        pk_f_y   = pack_half_spectrum(iky_vec[None, None, None, :] * d_expanded,      jind, mrad, pre["nl_mphiw3"])
+        
+        out_raw = ffi.ffi_call(
+            "cufft_bracket_ffi",
+            jax.ShapeDtypeStruct((batch_total, mrad, pre["nl_mphiw3"]), jnp.complex128)
+        )(pk_phi_y.reshape(-1, mrad, pre["nl_mphiw3"]), 
+          pk_f_x  .reshape(-1, mrad, pre["nl_mphiw3"]), 
+          pk_phi_x.reshape(-1, mrad, pre["nl_mphiw3"]), 
+          pk_f_y  .reshape(-1, mrad, pre["nl_mphiw3"]), 
+          dum_s, # kernel in cufft_bracket side-loads dum_s scaling
+          batch=np.int32(batch_total), mrad=np.int32(mrad), mphi=np.int32(mphi), nspec=np.int32(ns))
+        
+        return apply_physics_wrapper(out_raw, is_lto=False)
 
     variants = [
         ("JAX FP64 baseline",  run_jax_fp64,      (df, phi)),
