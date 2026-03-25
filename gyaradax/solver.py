@@ -220,40 +220,53 @@ def nonlinear_term_iii(
     dum_s, ixzero, iyzero = pre["nl_dum_s"], pre["ixzero"], pre["iyzero"]
     nky = df.shape[-1]
 
-    df_by_s = jnp.moveaxis(df, 2, 0)
-    bessel_by_s = jnp.moveaxis(bessel, 2, 0)
+    # Pre-pack the wavenumbers once (very cheap, 2D arrays)
+    ikx_packed = 1j * pack_half_spectrum(kx2d, jind, mrad, mphiw3)
+    iky_packed = 1j * pack_half_spectrum(ky2d, jind, mrad, mphiw3)
 
     def _per_s(df_s, phi_s, bessel_s, dum):
-        gyro_phi = bessel_s * phi_s[None, None, :, :]
-        grad_phi_y_k = 1j * ky2d[None, None, :, :] * gyro_phi
-        grad_phi_x_k = 1j * kx2d[None, None, :, :] * gyro_phi
-        grad_f_x_k = 1j * kx2d[None, None, :, :] * df_s
-        grad_f_y_k = 1j * ky2d[None, None, :, :] * df_s
-
         fft_dtype = jnp.complex64 if mixed_precision else jnp.complex128
         real_dtype = jnp.float32 if mixed_precision else jnp.float64
 
-        def _to_real(spec):
-            packed = pack_half_spectrum(spec, jind, mrad, mphiw3).astype(fft_dtype)
-            return jnp.fft.irfft2(packed, s=(mrad, mphi), axes=(-2, -1), norm="backward")
+        gyro_phi = bessel_s * phi_s[None, None, :, :]
 
+        # 1. PACK FIRST: 2 massive scatters instead of 4
+        df_packed = pack_half_spectrum(df_s, jind, mrad, mphiw3).astype(fft_dtype)
+        phi_packed = pack_half_spectrum(gyro_phi, jind, mrad, mphiw3).astype(fft_dtype)
+
+        # 2. MULTIPLY AFTER: 4 elementwise multiplications on the much smaller packed arrays
+        packed_grad_phi_y = iky_packed[None, None, :] * phi_packed
+        packed_grad_phi_x = ikx_packed[None, None, :] * phi_packed
+        packed_grad_f_x   = ikx_packed[None, None, :] * df_packed
+        packed_grad_f_y   = iky_packed[None, None, :] * df_packed
+
+        def _to_real(packed_spec):
+            return jnp.fft.irfft2(packed_spec, s=(mrad, mphi), axes=(-2, -1), norm="backward")
+
+        # 3. REAL SPACE BRACKET
         nl_real = (efun_sign * dum).astype(real_dtype) * (
-            _to_real(grad_phi_y_k) * _to_real(grad_f_x_k)
-            - _to_real(grad_phi_x_k) * _to_real(grad_f_y_k)
+            _to_real(packed_grad_phi_y) * _to_real(packed_grad_f_x)
+            - _to_real(packed_grad_phi_x) * _to_real(packed_grad_f_y)
         )
+
+        # 4. FORWARD FFT (O5 Optimization)
+        if mixed_precision:
+            # Execute in FP32, then cast the smaller spectral result to FP64
+            nl_half_raw = jnp.fft.rfft2(nl_real, s=(mrad, mphi), axes=(-2, -1), norm="backward")
+            nl_half_raw = nl_half_raw.astype(jnp.complex128)
+        else:
+            nl_half_raw = jnp.fft.rfft2(nl_real, s=(mrad, mphi), axes=(-2, -1), norm="backward")
+
         nl_half = (
             jnp.asarray(fft_prefactor, dtype=jnp.complex128)
             * jnp.asarray(fft_scale, dtype=jnp.complex128)
-            * jnp.fft.rfft2(
-                nl_real.astype(jnp.float64),
-                s=(mrad, mphi),
-                axes=(-2, -1),
-                norm="backward",
-            )
+            * nl_half_raw
         )
         return unpack_half_spectrum(nl_half, jind, nky)
 
-    nl = jnp.moveaxis(jax.vmap(_per_s)(df_by_s, phi, bessel_by_s, dum_s), 0, 2)
+    # 5. Eliminate `moveaxis` overhead by mapping directly over axis 2
+    nl = jax.vmap(_per_s, in_axes=(2, 0, 2, 0), out_axes=2)(df, phi, bessel, dum_s)
+    
     return nl.at[:, :, :, ixzero, iyzero].set(0.0) if exclude_zero_mode else nl
 
 
@@ -741,20 +754,7 @@ def linear_precompute(geometry: Dict[str, jnp.ndarray], params: GKParams) -> Dic
     return GKPre(out)
 
 
-def _linear_rhs_core(
-    df: jnp.ndarray,
-    phi_b: jnp.ndarray,
-    pre: Dict[str, jnp.ndarray],
-    params_dvp: float,
-    params_disp_vp: float,
-    params_drive_scale: float,
-) -> jnp.ndarray:
-    """Core linear RHS for a single species slice (5D arrays).
-
-    All arrays in *pre* must be 5D (nv, nmu, ns, nkx, nky) — species
-    dimension has been removed by vmap or was never present.
-    """
-
+def _apply_parallel_fn(pre: GKPre):
     def _apply_parallel(field, coeffs):
         out = jnp.zeros_like(field)
         nky = field.shape[-1]
@@ -766,7 +766,10 @@ def _linear_rhs_core(
             shifted = jnp.where(valid[None, None, :, :, :], field[:, :, s_map, kx_map, ky_idx], 0.0)
             out = out + coeffs[i] * shifted
         return out
+    return _apply_parallel
 
+
+def _apply_vpar_fn(pre: GKPre):
     def _apply_vpar(field, coeffs):
         nv = field.shape[0]
         out = jnp.zeros_like(field)
@@ -776,6 +779,26 @@ def _linear_rhs_core(
             shifted = jnp.take(field, idx, axis=0)
             out = out + c * jnp.where(valid[:, None, None, None, None], shifted, 0.0)
         return out
+    return _apply_vpar
+        
+
+def _linear_rhs_core(
+    df: jnp.ndarray,
+    phi_b: jnp.ndarray,
+    pre: GKPre,
+    params_dvp: float,
+    params_disp_vp: float,
+    params_drive_scale: float,
+) -> jnp.ndarray:
+    """Core linear RHS for a single species slice (5D arrays).
+
+    All arrays in *pre* must be 5D (nv, nmu, ns, nkx, nky) — species
+    dimension has been removed by vmap or was never present.
+    """
+    _apply_parallel = _apply_parallel_fn(pre)
+    _apply_vpar = _apply_vpar_fn(pre)
+
+
 
     term_par = _apply_parallel(df, pre["s_total_upar"])
     term_iv = pre["utrap"] * _apply_vpar(df, stencils.VPAR_D1) / params_dvp

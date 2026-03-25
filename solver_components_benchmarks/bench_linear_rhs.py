@@ -18,10 +18,8 @@ jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
 
 sys.path.insert(0, str(Path(__file__).parent))
-from common import load_setup, BenchTimer, roofline_report, check_accuracy, BASELINES_DIR
-
-FLOPS_PER_SP = 635e6
-BYTES_PER_SP = 7.3e9
+from common import load_setup, BenchTimer, roofline_report, check_accuracy, analyze_cost, BASELINES_DIR
+from gyaradax.solver import _compute_linear_rhs, GKPre
 
 
 def run(config="configs/iteration_13.yaml", mixed_precision=False):
@@ -31,21 +29,28 @@ def run(config="configs/iteration_13.yaml", mixed_precision=False):
 
     df, phi, geom, params, pre = load_setup(config, mixed_precision)
 
-    from gyaradax.solver import _compute_linear_rhs
-    fn = jax.jit(lambda: _compute_linear_rhs(df, phi, geom, params, pre))
+    pre_gk = GKPre(pre)
+    baseline = BASELINES_DIR / "linear_rhs.npz"
 
-    out = fn()
-    rel_l2 = check_accuracy(out, BASELINES_DIR / "linear_rhs.npz", "output")
+    # Define the timed function with production code
+    @jax.jit
+    def fn(d, p, pr):
+        return _compute_linear_rhs(d, p, geom, params, pr)
 
-    mean_ms, std_ms = BenchTimer(fn).run()
+    out = fn(df, phi, pre_gk)
+    rel_l2 = check_accuracy(out, baseline, "output")
+ 
+    print(f"  [XLA] Analyzing cost...")
+    flops, bytes_rw = analyze_cost(fn, df, phi, pre_gk)
+    
+    mean_ms, std_ms = BenchTimer(lambda d=df, p=phi, pr=pre_gk: fn(d, p, pr).block_until_ready()).run()
     print(f"  timing: {mean_ms:.3f} ± {std_ms:.3f} ms")
 
-    n_sp = df.shape[0] if df.ndim == 6 else 1
     roofline_report(
-        f"_compute_linear_rhs ({n_sp} sp)",
+        f"_compute_linear_rhs",
         mean_ms,
-        FLOPS_PER_SP * n_sp,
-        BYTES_PER_SP * n_sp,
+        flops,
+        bytes_rw,
     )
     return {"mean_ms": mean_ms, "rel_l2": rel_l2}
 

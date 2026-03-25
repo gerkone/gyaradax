@@ -38,10 +38,18 @@ def main():
     parser.add_argument("--mp", action="store_true", help="enable mixed precision")
     args = parser.parse_args()
 
-    import importlib
+    import subprocess
     for label, module_name in COMPONENTS:
-        mod = importlib.import_module(module_name)
-        mod.run(args.config, args.mp)
+        print(f"\n>>> Running {label}...")
+        script_path = Path(__file__).parent / f"{module_name}.py"
+        cmd = [sys.executable, str(script_path), "--device", str(args.device), "--config", args.config]
+        if args.mp:
+            cmd.append("--mp")
+        
+        env = os.environ.copy()
+        env["TF_GPU_ALLOCATOR"] = "cuda_malloc_async"
+        
+        subprocess.run(cmd, check=True, env=env)
 
     print(f"\n{'='*60}")
     print("All component benchmarks complete.")

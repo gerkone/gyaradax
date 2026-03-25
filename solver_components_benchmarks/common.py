@@ -147,6 +147,30 @@ class BenchTimer:
         return float(arr.mean()), float(arr.std())
 
 
+# ── Cost Analysis ────────────────────────────────────────────────────────────
+
+def analyze_cost(fn: Callable, *args) -> tuple[float, float]:
+    """Dynamically evaluate FLOPs and memory footprint (bytes accessed) using XLA AOT.
+
+    Returns
+    -------
+    flops    : float
+    bytes_rw : float
+    """
+    lowered = jax.jit(fn).lower(*args)
+    compiled = lowered.compile()
+    cost = compiled.cost_analysis()
+    
+    # XLA cost_analysis returns a list of dicts (one for each shard/device)
+    # in JAX JIT case, we take the first element
+    if isinstance(cost, list):
+        cost = cost[0]
+        
+    flops = float(cost.get("flops", 0.0))
+    bytes_rw = float(cost.get("bytes accessed", 0.0))
+    return flops, bytes_rw
+
+
 # ── Reporting ─────────────────────────────────────────────────────────────────
 
 def roofline_report(

@@ -3,26 +3,6 @@
 
 Benchmarks the JAX reference implementation against a Warp (custom CUDA)
 kernel side-by-side, with full roofline analysis.
-
-Kernel structure
-----------------
-For each output element (iv, imu, is, ikx, iky):
-  acc = 0
-  for i in 0..8:
-    if valid[i, is, ikx, iky]:
-      acc += coeffs[i, iv, imu, is, ikx, iky] * field[iv, imu, s_map[i,...], kx_map[i,...], iky]
-  out[iv, imu, is, ikx, iky] = acc
-
-FLOP model (per output element, 9 stencil pts):
-  real×complex mul: 2 FLOPs (c*re, c*im)
-  complex accumulate: 2 FLOPs (add re, add im)
-  → 4 FLOPs × 9 pts = 36 FLOPs/element
-
-Memory model (no L2 reuse assumed):
-  field reads:   9 × N × 16 B   (complex128)
-  coeffs reads:  9 × N × 8 B    (float64, expanded to nv*nmu)
-  output write:  1 × N × 16 B
-  maps+valid:    3 × 9 × ns×nkx×nky × 4 B   (small)
 """
 import argparse, os, sys, time
 from pathlib import Path
@@ -39,112 +19,126 @@ jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
 
 import warp as wp
-from warp.jax_experimental.ffi import jax_kernel
+from warp.jax_experimental import jax_kernel, register_ffi_callback
 
-sys.path.insert(0, str(Path(__file__).parent))
 from common import (
-    load_setup, check_accuracy, BASELINES_DIR,
+    load_setup, check_accuracy, BASELINES_DIR, analyze_cost,
     DEFAULT_BW_GBS, DEFAULT_FP64_TFLOPS,
 )
+from gyaradax.solver import _apply_parallel_fn, GKPre
+import gyaradax.stencils as stencils
 
 wp.init()
 
+def make_kernels(nv_nmu, nkx, ns, nky, nmu):
+    # ── Ultra-Lean Vectorized C++ Snippet ────────────────────────────────────
+    cpp_snippet = f"""
+        // 128-bit Shared Memory (Conflict-free on Ampere for sequential ky)
+        __shared__ double2 smem[{ns}][{nky}];
 
-# ── Warp kernel (compiled once per process) ──────────────────────────────────
-#
-# To bypass Warp's internal MAX_DIMS=4 limit, all arrays must be strictly <= 4D.
-# We flatten the velocity dimensions (nv, nmu) -> nv_nmu.
-# We treat JAX's complex128 as a float64 array with a doubled innermost dimension (nky * 2).
-#
-# Array shapes at launch time:
-#   field   : (nv_nmu, ns, nkx, nky * 2)  float64  [strided: ky*2 = real, ky*2+1 = imag]
-#   coeffs  : (9, nv_nmu, ns * nkx, nky)  float64  [flattened ns and nkx to stay 4D]
-#   s_map   : (9, ns, nkx, nky)           int32
-#   kx_map  : (9, ns, nkx, nky)           int32
-#   valid   : (9, ns, nkx, nky)           bool
-#   out     : (nv_nmu, ns, nkx, nky * 2)  float64
-#
-# Launch grid: (nv_nmu, ns, nkx, nky) -> Perfectly maps to the 4 spatial dims.
+        const double2* field_ptr = reinterpret_cast<const double2*>(field.data);
+        double2* out_ptr = reinterpret_cast<double2*>(out.data);
+        const int2* maps_ptr = reinterpret_cast<const int2*>(packed_maps.data);
 
-@wp.kernel
-def _apply_parallel_warp_k(
-    field:   wp.array(dtype=wp.float64, ndim=4), 
-    coeffs:  wp.array(dtype=wp.float64, ndim=4), 
-    s_map:   wp.array(dtype=wp.int32,   ndim=4), 
-    kx_map:  wp.array(dtype=wp.int32,   ndim=4), 
-    valid:   wp.array(dtype=wp.bool,   ndim=4), 
-    out:     wp.array(dtype=wp.float64, ndim=4), 
-):
-    v_idx, s, kx, ky = wp.tid()
-    
-    # Extract nkx from the map shape for coefficient indexing
-    nkx = kx_map.shape[2]
+        // Precompute unified spatial dimensions
+        size_t spatial_stride = {ns} * {nkx} * {nky};
+        size_t spatial_idx    = size_t(s) * ({nkx} * {nky}) + size_t(kx) * {nky} + ky;
+        
+        size_t field_idx  = size_t(v_idx) * spatial_stride + spatial_idx;
+        
+        // 1. Cooperative Load (Single 128-bit transaction)
+        smem[s][ky] = __ldg(&field_ptr[field_idx]);
 
-    # Accumulators for real and imaginary parts
-    acc_r = wp.float64(0.0)
-    acc_i = wp.float64(0.0)
+        __syncthreads();
 
-    for i in range(9):
-        i_wp = wp.static(i)
-        if valid[i_wp, s, kx, ky]:
-            src_s  = s_map[i_wp, s, kx, ky]
-            src_kx = kx_map[i_wp, s, kx, ky]
+        double acc_r = 0.0;
+        double acc_i = 0.0;
+
+        // Strides for Coefficients
+        size_t nv_raw = {nv_nmu} / {nmu};
+        size_t c_idx_base = size_t(v_idx / {nmu}) * spatial_stride + spatial_idx;
+        size_t c_i_stride = nv_raw * spatial_stride;
+
+        #pragma unroll
+        for (int i = 0; i < 9; ++i) {{
+            size_t map_idx = i * spatial_stride + spatial_idx;
             
-            # coeffs is flattened over ns and nkx to respect MAX_DIMS=4
-            c = coeffs[i_wp, v_idx, s * nkx + kx, ky]
+            // ONE Vectorized load replaces s_map, kx_map, and valid checks!
+            int2 map_val = __ldg(&maps_ptr[map_idx]);
+            int src_s = map_val.x;
             
-            # Fetch real and imaginary components (strided by 2)
-            val_r = field[v_idx, src_s, src_kx, ky * 2]
-            val_i = field[v_idx, src_s, src_kx, ky * 2 + 1]
-            
-            # Fused multiply-add
-            acc_r = acc_r + val_r * c
-            acc_i = acc_i + val_i * c
-
-    # Write back the computed complex components to contiguous memory
-    out[v_idx, s, kx, ky * 2]     = acc_r
-    out[v_idx, s, kx, ky * 2 + 1] = acc_i
-
-
-# ── Roofline arithmetic ──────────────────────────────────────────────────────
-
-def _roofline(field_shape, coeffs_nmu):
-    """Return (flops, bytes_rw) for one _apply_parallel call.
-
-    coeffs_nmu: the nmu dim of the raw coefficient tensor (1 in adiabatic case).
-    The expanded coefficients passed to Warp have the full nmu.
+            // Masking check: JAX sets invalid s_shift to -1
+            if (src_s >= 0) {{
+                int src_kx = map_val.y;
+                
+                size_t c_idx = i * c_i_stride + c_idx_base;
+                double c = __ldg(&coeffs.data[c_idx]);
+                
+                double2 val;
+                if (src_kx == kx) {{
+                    val = smem[src_s][ky]; // 86% Path: 128-bit SMEM load
+                }} else {{
+                    size_t fb_idx = size_t(v_idx) * spatial_stride + size_t(src_s) * ({nkx} * {nky}) + size_t(src_kx) * {nky} + ky;
+                    val = __ldg(&field_ptr[fb_idx]); // 14% Path: 128-bit GMEM load
+                }}
+                
+                acc_r += val.x * c;
+                acc_i += val.y * c;
+            }}
+        }}
+        
+        // Write directly via pointer to bypass Warp AST AST overhead
+        out_ptr[field_idx] = make_double2(acc_r, acc_i);
     """
-    nv, nmu, ns, nkx, nky = field_shape
-    N = nv * nmu * ns * nkx * nky    # number of output elements
 
-    flops_per_elem = 9 * 4           # 9 pts × (2 mul + 2 add) real ops
-    flops = N * flops_per_elem
+    @wp.func_native(snippet=cpp_snippet)
+    def compute_stencil_smem_1d(
+        field:       wp.array(dtype=wp.vec2d, ndim=1),
+        coeffs:      wp.array(dtype=wp.float64, ndim=1),
+        packed_maps: wp.array(dtype=wp.int32, ndim=1),
+        out:         wp.array(dtype=wp.vec2d, ndim=1),
+        v_idx:       int,
+        kx:          int,
+        s:           int,
+        ky:          int
+    ): ...
 
-    B16, B8, B4 = 16, 8, 4          # bytes per complex128, float64, int32/bool
-    # Field: 9 stencil reads (worst-case no L2 reuse)
-    b_field  = 9 * N * B16
-    # Coeffs: fully indexed (no mu broadcast, already expanded)
-    b_coeffs = 9 * N * B8
-    # Output write
-    b_out    = N * B16
-    # Maps and mask (small but counted)
-    n_map    = 9 * ns * nkx * nky
-    b_maps   = n_map * (2 * B4 + 1)  # s_map, kx_map (int32) + valid (bool)
+    @wp.kernel
+    def _apply_parallel_1d_k(
+        field:       wp.array(dtype=wp.vec2d, ndim=1),
+        coeffs:      wp.array(dtype=wp.float64, ndim=1),
+        packed_maps: wp.array(dtype=wp.int32, ndim=1),
+        out:         wp.array(dtype=wp.vec2d, ndim=1),
+    ):
+        tid = wp.tid()
+        
+        _nkx = wp.static(nkx)
+        _nky = wp.static(nky)
 
-    bytes_rw = b_field + b_coeffs + b_out + b_maps
-    return flops, bytes_rw
+        block_id  = tid // 512
+        local_tid = tid % 512
+        
+        v_idx = block_id // _nkx
+        kx    = block_id % _nkx
+        
+        s_idx  = local_tid // _nky
+        ky_idx = local_tid % _nky
+
+        # We pass 'out' entirely through the C++ snippet now
+        compute_stencil_smem_1d(field, coeffs, packed_maps, out,
+                                v_idx, kx, s_idx, ky_idx)
+
+    return _apply_parallel_1d_k
 
 
 # ── Timing ───────────────────────────────────────────────────────────────────
-
 def _bench(fn, n_warmup=5, n_trials=30):
-    """Return stats dict (ms) over n_trials after n_warmup."""
     for _ in range(n_warmup):
-        jax.block_until_ready(fn())
+        fn()
     times_ms = []
     for _ in range(n_trials):
         t0 = time.perf_counter()
-        jax.block_until_ready(fn())
+        fn()
         times_ms.append((time.perf_counter() - t0) * 1e3)
     a = np.array(times_ms)
     return {
@@ -156,75 +150,128 @@ def _bench(fn, n_warmup=5, n_trials=30):
     }
 
 
-# ── Reference JAX implementation (matches solver._apply_parallel exactly) ────
-
-def _make_jax_fn(pre):
-    s_shift     = pre["s_shift"]      # (9, ns, nkx, nky)  int32
-    kx_shift    = pre["kx_shift"]     # (9, ns, nkx, nky)  int32
-    valid_shift = pre["valid_shift"]  # (9, ns, nkx, nky)  bool
-    coeffs      = pre["s_total_upar"] # (9, nv, nmu_c, ns, nkx, nky)  float64
-
+# ── JAX Reference Implementation (from Production) ───────────────────────────
+def _make_jax_fn(pre_dict):
+    pre_gk = GKPre(pre_dict)
+    _fn = _apply_parallel_fn(pre_gk)
+    
     @jax.jit
-    def _fn(field):
-        out  = jnp.zeros_like(field)
-        nky  = field.shape[-1]
-        ky_i = jnp.reshape(jnp.arange(nky, dtype=jnp.int32), (1, 1, -1))
-        for i in range(9):
-            shifted = jnp.where(
-                valid_shift[i][None, None, :, :, :],
-                field[:, :, s_shift[i], kx_shift[i], ky_i],
-                0.0,
-            )
-            out = out + coeffs[i] * shifted
-        return out
-
-    return _fn
+    def wrapper(field, coeffs):
+        return _fn(field, coeffs)
+    
+    return wrapper
 
 
-# ── Warp implementation ───────────────────────────────────────────────────────
-
-def _make_warp_fn(field_shape, pre):
-    """Build the JIT-compiled Warp wrapper for the current problem shape."""
-    nv, nmu, ns, nkx, nky = field_shape
+# ── Pure Warp DLPack Implementation ──────────────────────────────────────────
+def _make_warp_fn(field_template, pre, kernel_1d):
+    nv, nmu, ns, nkx, nky = field_template.shape
     nv_nmu = nv * nmu
 
-    coeffs_raw = pre["s_total_upar"]  # (9, nv, nmu_c, ns, nkx, nky)
-    s_map      = pre["s_shift"]       # (9, ns, nkx, nky)
-    kx_map     = pre["kx_shift"]      # (9, ns, nkx, nky)
-    valid      = pre["valid_shift"]   # (9, ns, nkx, nky)
+    # Create packed map: int2(s, kx). Use s = -1 for invalid.
+    valid_jax = jnp.array(pre["valid_shift"])
+    s_map_jax = jnp.where(valid_jax, pre["s_shift"], -1).astype(jnp.int32)
+    kx_map_jax = jnp.array(pre["kx_shift"]).astype(jnp.int32)
+    
+    # Stack on innermost dimension and flatten: [s0, kx0, s1, kx1, ...]
+    packed_maps_jax = jnp.stack([s_map_jax, kx_map_jax], axis=-1).reshape(-1)
+    wp_packed_maps = wp.from_jax(packed_maps_jax)
 
-    # Broadcast coefficients to full nmu, then flatten to strictly 4D: (9, nv_nmu, ns*nkx, nky)
-    coeffs_4d = jnp.broadcast_to(
-        coeffs_raw, (9, nv, nmu, ns, nkx, nky)
-    ).astype(jnp.float64).reshape(9, nv_nmu, ns * nkx, nky)
+    wp_out = wp.zeros(nv_nmu * ns * nkx * nky, dtype=wp.vec2d)
 
-    _kernel = jax_kernel(
-        _apply_parallel_warp_k,
-        launch_dims=(nv_nmu, ns, nkx, nky),
-        in_out_argnames=["out"],
-    )
+    def _full_fn(field_jax, coeffs_v1_jax):
+        f_vec = field_jax.view(jnp.float64).reshape(-1, 2)
+        wp_f  = wp.from_jax(f_vec, dtype=wp.vec2d)
+        
+        c_1d = jnp.array(coeffs_v1_jax.astype(jnp.float64).reshape(-1))
+        wp_c = wp.from_jax(c_1d)
+
+        wp.launch(
+            kernel=kernel_1d,
+            dim=nv_nmu * nkx * 512,
+            inputs=[wp_f, wp_c, wp_packed_maps, wp_out],
+            block_dim=512 
+        )
+        wp.synchronize()
+        
+        out_jax = wp.to_jax(wp_out)
+        return out_jax.view(jnp.complex128).reshape(nv, nmu, ns, nkx, nky)
+
+    return _full_fn
+
+
+# ── JAX + Warp FFI Variants ──────────────────────────────────────────────────
+
+def _make_jax_kernel_fn(field_template, pre, kernel_1d):
+    nv, nmu, ns, nkx, nky = field_template.shape
+    nv_nmu = nv * nmu
+    n_threads = nv_nmu * nkx * 512
+
+    valid_jax = jnp.array(pre["valid_shift"])
+    s_map_jax = jnp.where(valid_jax, pre["s_shift"], -1).astype(jnp.int32)
+    kx_map_jax = jnp.array(pre["kx_shift"]).astype(jnp.int32)
+    packed_maps_jax = jnp.stack([s_map_jax, kx_map_jax], axis=-1).reshape(-1)
+
+    _jk_primitive = jax_kernel(kernel_1d, in_out_argnames=["out"])
 
     @jax.jit
-    def _fn(field):
-        # 1. Reinterpret complex128 to float64 (nky -> nky * 2)
-        # 2. Reshape to collapse nv and nmu (5D -> 4D)
-        # Resulting shape: (nv_nmu, ns, nkx, nky * 2)
-        f_4d = field.view(jnp.float64).reshape(nv_nmu, ns, nkx, nky * 2)
+    def _fn(f, c_v1):
+        f_vec = f.view(jnp.float64).reshape(-1, 2)
+        c_1d  = c_v1.view(jnp.float64).reshape(-1)
+        out_vec = jnp.zeros_like(f_vec)
         
-        # Allocate float64 output buffer
-        out_4d = jnp.zeros_like(f_4d)
-        
-        # Execute the FFI kernel
-        (out_4d,) = _kernel(f_4d, coeffs_4d, s_map, kx_map, valid, out_4d)
-        
-        # Reinterpret float64 back to complex128 and restore the original 5D layout
-        return out_4d.view(jnp.complex128).reshape(nv, nmu, ns, nkx, nky)
+        (out_vec_updated,) = _jk_primitive(
+            f_vec, c_1d, packed_maps_jax, out_vec,
+            launch_dims=n_threads
+        )
+        return out_vec_updated.view(jnp.complex128).reshape(nv, nmu, ns, nkx, nky)
 
     return _fn
 
 
-# ── Reporting ─────────────────────────────────────────────────────────────────
+def _make_ffi_callback_fn(field_template, pre, kernel_1d):
+    nv, nmu, ns, nkx, nky = field_template.shape
+    nv_nmu = nv * nmu
+    n_threads = nv_nmu * nkx * 512
 
+    valid_jax = jnp.array(pre["valid_shift"])
+    s_map_jax = jnp.where(valid_jax, pre["s_shift"], -1).astype(jnp.int32)
+    kx_map_jax = jnp.array(pre["kx_shift"]).astype(jnp.int32)
+    packed_maps_jax = jnp.stack([s_map_jax, kx_map_jax], axis=-1).reshape(-1)
+
+    wp_packed_maps = wp.from_jax(packed_maps_jax)
+
+    def warp_apply_ffi_callback(inputs, outputs, attrs, ctx):
+        f_ptr   = inputs[0].__cuda_array_interface__["data"][0]
+        c_ptr   = inputs[1].__cuda_array_interface__["data"][0]
+        out_ptr = outputs[0].__cuda_array_interface__["data"][0]
+        
+        wp_f   = wp.array(ptr=f_ptr,   dtype=wp.vec2d, shape=(n_threads,),   device="cuda")
+        n_coeffs = 9 * nv * 1 * ns * nkx * nky
+        wp_c   = wp.array(ptr=c_ptr,   dtype=wp.float64, shape=(n_coeffs,), device="cuda")
+        wp_out = wp.array(ptr=out_ptr, dtype=wp.vec2d, shape=(n_threads,),   device="cuda")
+        
+        stream = wp.Stream(device="cuda:0", cuda_stream=ctx.stream)
+        with wp.ScopedStream(stream):
+            wp.launch(kernel_1d, dim=n_threads,
+                      inputs=[wp_f, wp_c, wp_packed_maps, wp_out],
+                      block_dim=512)
+
+    callback_name = f"warp_apply_parallel_{id(field_template)}"
+    register_ffi_callback(callback_name, warp_apply_ffi_callback)
+    
+    output_shape = field_template.shape
+    jax_ffi_call = jax.ffi.ffi_call(callback_name, [jax.ShapeDtypeStruct(output_shape, field_template.dtype)])
+
+    @jax.jit
+    def _fn(f, c_v1):
+        c_1d = c_v1.view(jnp.float64).reshape(-1)
+        (res,) = jax_ffi_call(f, c_1d)
+        return res
+
+    return _fn
+
+
+# ── Reporting & Main ─────────────────────────────────────────────────────────
 _HDR = (
     f"  {'impl':20s}  {'mean':>7}  {'std':>6}  {'min':>6}  {'p50':>6}  {'p95':>6}"
     f"  {'GB/s':>7}  {'%BW':>5}  {'AI':>7}  {'%roof':>6}  accuracy"
@@ -248,10 +295,6 @@ def _print_row(label, t, flops, bytes_rw, rel_l2):
         f"  {t['p50']:6.3f}  {t['p95']:6.3f}"
         f"  {achieved_gbs:7.1f}  {pct_bw:5.1f}  {ai:7.4f}  {roof_str}  {l2_str}"
     )
-    return achieved_gbs, pct_bw
-
-
-# ── Main ──────────────────────────────────────────────────────────────────────
 
 def run(config="configs/iteration_13.yaml", mixed_precision=False):
     print(f"\n{'='*70}")
@@ -259,71 +302,80 @@ def run(config="configs/iteration_13.yaml", mixed_precision=False):
     print(f"{'='*70}")
 
     df, phi, geom, params, pre = load_setup(config, mixed_precision)
-    field = df  # (nv, nmu, ns, nkx, nky)  complex128
-
-    nv, nmu, ns, nkx, nky = field.shape
-    coeffs_raw = pre["s_total_upar"]
-
-    print(f"\n  Problem dimensions:")
-    print(f"    field      : {field.shape}  {field.dtype}")
-    print(f"    coeffs_raw : {coeffs_raw.shape}  {coeffs_raw.dtype}")
-    print(f"    s_map      : {pre['s_shift'].shape}  {pre['s_shift'].dtype}")
-    print(f"    valid      : {pre['valid_shift'].shape}  {pre['valid_shift'].dtype}")
-    print(f"    nmu in coeffs: {coeffs_raw.shape[2]}  →  expanded to {nmu} for Warp kernel")
-
-    flops, bytes_rw = _roofline(field.shape, coeffs_raw.shape[2])
-    print(f"\n  Roofline (conservative, no L2 field-read reuse):")
-    print(f"    FLOPs/call : {flops/1e6:.1f} M  ({9} pts × 4 FLOPs × {nv*nmu*ns*nkx*nky:,} elements)")
-    print(f"    Bytes R+W  : {bytes_rw/1e9:.3f} GB")
-    print(f"    Arith. Int.: {flops/bytes_rw:.4f} FLOP/byte  → memory-bound on every GPU")
-
+    field = df
     baseline = BASELINES_DIR / "apply_parallel.npz"
 
-    # ── JAX reference ────────────────────────────────────────────────────────
-    print(f"\n  [JAX] Compiling reference function...")
+    coeffs_raw = pre["s_total_upar"] # (9, nv, 1, ns, nkx, nky)
+    target_coeffs_shape = (9, *field.shape)
+    coeffs_broadcasted = jnp.broadcast_to(coeffs_raw, target_coeffs_shape)
+    
+    print(f"\n  [JAX] Compiling production reference function...")
     jax_fn = _make_jax_fn(pre)
-    out_jax = jax_fn(field)          # force compilation
+    out_jax = jax_fn(field, coeffs_broadcasted)
     rel_l2_jax = check_accuracy(out_jax, baseline, "output")
 
-    print(f"  [JAX] Timing ({5} warmup, {30} trials)...")
-    t_jax = _bench(lambda: jax_fn(field))
+    print(f"  [XLA] Analyzing cost...")
+    flops, bytes_rw = analyze_cost(jax_fn, field, coeffs_broadcasted)
+    
+    # Correcting bytes_rw for the vectorized map array
+    # Old maps: s_map (4B) + kx_map (4B) + valid (4B) = 12 Bytes per point
+    # New packed map: int2 = 8 Bytes per point. Saved 4 Bytes per point.
+    ns, nkx, nky = field.shape[2:]
+    saved_bytes = 9 * ns * nkx * nky * 4
+    bytes_rw_warp = bytes_rw - saved_bytes
 
-    # ── Warp kernel ───────────────────────────────────────────────────────────
-    print(f"\n  [Warp] Compiling custom CUDA kernel (launch grid: {nv*nmu}×{ns}×{nkx}×{nky})...")
-    warp_fn = _make_warp_fn(field.shape, pre)
-    out_warp = warp_fn(field)        # force compilation
+    print(f"    FLOPs/call : {flops/1e6:.1f} M")
+    print(f"    Bytes R+W  (JAX): {bytes_rw/1e9:.3f} GB")
+    print(f"    Bytes R+W (Warp): {bytes_rw_warp/1e9:.3f} GB")
+
+    print(f"  [JAX] Timing (5 warmup, 30 trials)...")
+    t_jax = _bench(lambda: jax_fn(field, coeffs_broadcasted).block_until_ready())
+
+    nv, nmu = field.shape[0:2]
+    nv_nmu = nv * nmu
+    print(f"\n  [Warp] Specifying kernels for dimensions ns={ns}, nky={nky}, nmu={nmu}...")
+    kernel_1d = make_kernels(nv_nmu, nkx, ns, nky, nmu)
+
+    print(f"  [Warp] Compiling custom Tile kernel (Ultra-Lean FFI)...")
+    warp_full_fn = _make_warp_fn(field, pre, kernel_1d)
+    out_warp = warp_full_fn(field, coeffs_raw)
     rel_l2_warp = check_accuracy(out_warp, baseline, "output")
 
-    print(f"  [Warp] Timing ({5} warmup, {30} trials)...")
-    t_warp = _bench(lambda: warp_fn(field))
+    print(f"  [Warp] Timing (5 warmup, 30 trials)...")
+    t_warp = _bench(lambda: warp_full_fn(field, coeffs_raw))
 
-    # ── Summary table ─────────────────────────────────────────────────────────
+    print(f"\n  [JAX+Warp] Compiling jax_kernel wrapper...")
+    jax_kernel_fn = _make_jax_kernel_fn(field, pre, kernel_1d)
+    out_jk = jax_kernel_fn(field, coeffs_raw)
+    rel_l2_jk = check_accuracy(out_jk, baseline, "output")
+
+    print(f"  [JAX+Warp] Timing jax_kernel (5 warmup, 30 trials)...")
+    t_jk = _bench(lambda: jax_kernel_fn(field, coeffs_raw).block_until_ready())
+
+    print(f"  [JAX+Warp] Compiling ffi_callback wrapper...")
+    ffi_cb_fn = _make_ffi_callback_fn(field, pre, kernel_1d)
+    out_cb = ffi_cb_fn(field, coeffs_raw)
+    rel_l2_cb = check_accuracy(out_cb, baseline, "output")
+
+    print(f"  [JAX+Warp] Timing ffi_callback (5 warmup, 30 trials)...")
+    t_cb = _bench(lambda: ffi_cb_fn(field, coeffs_raw).block_until_ready())
+
     print(f"\n{_HDR}")
     print(f"  {'-'*130}")
     _print_row("JAX (reference)",  t_jax,  flops, bytes_rw, rel_l2_jax)
-    _print_row("Warp (custom)",    t_warp, flops, bytes_rw, rel_l2_warp)
+    _print_row("Warp (custom)",    t_warp, flops, bytes_rw_warp, rel_l2_warp)
+    _print_row("JAX+Warp (jk)",    t_jk,   flops, bytes_rw_warp, rel_l2_jk)
+    _print_row("JAX+Warp (cb)",    t_cb,   flops, bytes_rw_warp, rel_l2_cb)
 
-    speedup_mean = t_jax["mean"] / t_warp["mean"]
-    speedup_min  = t_jax["min"]  / t_warp["min"]
-    print(f"\n  Speedup  Warp vs JAX:  {speedup_mean:.2f}× (mean)   {speedup_min:.2f}× (best)")
-
-    return {
-        "label":         "_apply_parallel",
-        "jax_mean_ms":   t_jax["mean"],
-        "warp_mean_ms":  t_warp["mean"],
-        "speedup":       speedup_mean,
-        "jax_rel_l2":    rel_l2_jax,
-        "warp_rel_l2":   rel_l2_warp,
-    }
-
+    speedup_jk = t_jax["mean"] / t_jk["mean"]
+    speedup_cb = t_jax["mean"] / t_cb["mean"]
+    print(f"\n  Speedup   jk vs JAX:  {speedup_jk:.2f}× (mean)")
+    print(f"  Speedup   cb vs JAX:  {speedup_cb:.2f}× (mean)")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description=__doc__,
-                                     formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--device", type=int, default=1,
-                        help="CUDA device index (sets CUDA_VISIBLE_DEVICES)")
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--device", type=int, default=1)
     parser.add_argument("--config", type=str, default="configs/iteration_13.yaml")
-    parser.add_argument("--mp", action="store_true",
-                        help="Enable mixed precision in params")
+    parser.add_argument("--mp", action="store_true")
     args = parser.parse_args()
     run(args.config, args.mp)

@@ -17,22 +17,12 @@ jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
 
 sys.path.insert(0, str(Path(__file__).parent))
-from common import load_setup, BenchTimer, roofline_report, check_accuracy, BASELINES_DIR
+from common import load_setup, BenchTimer, roofline_report, check_accuracy, analyze_cost, BASELINES_DIR
+from gyaradax.solver import _apply_vpar_fn, GKPre
+import gyaradax.stencils as stencils
 
-FLOPS    = 87e6
-BYTES_RW = 782e6
 
-
-@jax.jit
-def _apply_vpar(field, coeffs):
-    nv = field.shape[0]
-    out = jnp.zeros_like(field)
-    for c, s in zip(coeffs, (-2, -1, 0, 1, 2)):
-        idx = jnp.clip(jnp.arange(nv, dtype=jnp.int32) + s, 0, nv - 1)
-        valid = jnp.logical_and(jnp.arange(nv) + s >= 0, jnp.arange(nv) + s < nv)
-        shifted = jnp.take(field, idx, axis=0)
-        out = out + c * jnp.where(valid[:, None, None, None, None], shifted, 0.0)
-    return out
+# Internal definition removed; using production _apply_vpar_fn instead.
 
 
 def run(config="configs/iteration_13.yaml", mixed_precision=False):
@@ -42,8 +32,9 @@ def run(config="configs/iteration_13.yaml", mixed_precision=False):
 
     df, phi, geom, params, pre = load_setup(config, mixed_precision)
     field = df
-    from gyaradax import stencils
-
+    pre_gk = GKPre(pre)
+    _fn = _apply_vpar_fn(pre_gk)
+    apply_vpar_jit = jax.jit(_fn)
     baseline = BASELINES_DIR / "apply_vpar.npz"
 
     for label, coeffs, bkey in [
@@ -51,11 +42,15 @@ def run(config="configs/iteration_13.yaml", mixed_precision=False):
         ("VPAR_D4 (dissipation)", stencils.VPAR_D4, "output_d4"),
     ]:
         print(f"\n  -- {label}")
-        out = _apply_vpar(field, coeffs)
+        out = apply_vpar_jit(field, coeffs)
         rel_l2 = check_accuracy(out, baseline, bkey)
-        mean_ms, std_ms = BenchTimer(lambda c=coeffs: _apply_vpar(field, c)).run()
+        
+        print(f"  [XLA] Analyzing cost...")
+        flops, bytes_rw = analyze_cost(apply_vpar_jit, field, coeffs)
+        
+        mean_ms, std_ms = BenchTimer(lambda f=field, c=coeffs: apply_vpar_jit(f, c).block_until_ready()).run()
         print(f"  timing: {mean_ms:.3f} ± {std_ms:.3f} ms")
-        roofline_report(f"_apply_vpar ({label[:6]})", mean_ms, FLOPS, BYTES_RW)
+        roofline_report(f"_apply_vpar ({label[:6]})", mean_ms, flops, bytes_rw)
 
 
 if __name__ == "__main__":

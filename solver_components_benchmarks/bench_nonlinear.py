@@ -18,10 +18,8 @@ jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
 
 sys.path.insert(0, str(Path(__file__).parent))
-from common import load_setup, BenchTimer, roofline_report, check_accuracy, BASELINES_DIR
-
-FLOPS    = 9.8e9
-BYTES_RW = 5.3e9
+from common import load_setup, BenchTimer, roofline_report, check_accuracy, analyze_cost, BASELINES_DIR
+from gyaradax.solver import nonlinear_term_iii, GKPre
 
 
 def run(config="configs/iteration_13.yaml", mixed_precision=False):
@@ -30,9 +28,8 @@ def run(config="configs/iteration_13.yaml", mixed_precision=False):
     print(f"{'='*60}")
 
     df, phi, geom, params, pre = load_setup(config, mixed_precision)
+    pre_gk = GKPre(pre)
     field = df  # 5D adiabatic
-
-    from gyaradax.solver import nonlinear_term_iii
     baseline = BASELINES_DIR / "nonlinear.npz"
 
     results = {}
@@ -41,12 +38,18 @@ def run(config="configs/iteration_13.yaml", mixed_precision=False):
         ("mixed_precision=False (full FP64)", False, "output_fp64"),
     ]:
         print(f"\n  -- {label}")
-        fn = jax.jit(lambda m=mp: nonlinear_term_iii(field, phi, geom, pre, mixed_precision=m))
-        out = fn()
+        @jax.jit
+        def fn(f, p, pr, m=mp):
+            return nonlinear_term_iii(f, p, geom, pr, mixed_precision=m)
+
+        out = fn(field, phi, pre_gk)
         rel_l2 = check_accuracy(out, baseline, bkey)
-        mean_ms, std_ms = BenchTimer(fn).run()
+        print(f"  [XLA] Analyzing cost...")
+        flops, bytes_rw = analyze_cost(fn, field, phi, pre_gk)
+        
+        mean_ms, std_ms = BenchTimer(lambda f=field, p=phi, pr=pre_gk: fn(f, p, pr).block_until_ready()).run()
         print(f"  timing: {mean_ms:.3f} ± {std_ms:.3f} ms")
-        r = roofline_report(f"nonlinear_term_iii ({('mp' if mp else 'fp64')})", mean_ms, FLOPS, BYTES_RW)
+        r = roofline_report(f"nonlinear_term_iii ({('mp' if mp else 'fp64')})", mean_ms, flops, bytes_rw)
         r["rel_l2"] = rel_l2
         results[label] = r
 
