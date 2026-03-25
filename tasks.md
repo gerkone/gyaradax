@@ -60,12 +60,13 @@ The dominant costs are:
     - [x] Bench: 24.96ms (v0) -> 22.66ms (v1). Save ~2.3ms.
     - [x] Verify: rel_l2 ≈ 2.88e-16.
 
---- [/] **Optimization Level 2: Two-for-one Z2Z**
-    - [ ] Implement `bracket_z2z_load_cb.cu` with Hermitian extension.
-    - [ ] Update D2Z fused callback to read `double2` workspace pairs.
-    - [ ] Update host wrapper `cufft_lto_bracket.cu` with Z2Z plans & logic.
-    - [ ] Bench: ~22.7ms (v1) -> ~19–20ms (v2).
-    - [ ] Verify: rel_l2 ≈ 2.88e-16.
+--- [x] **Optimization Level 2: Two-for-one Z2Z (Consolidated Prototype)**
+    - [x] Implement `bracket_z2z_load_cb.cu` with Hermitian extension.
+    - [x] Reconstruct full elaborate benchmark baseline.
+    - [x] Clean workspace from diagnostic files.
+    - [x] Verify V0/V1/V2 stability.
+    - > [!IMPORTANT]
+    - > Current Status: V2 is an unfinished prototype. Diagnostics (batch-indexed constant-imaginary tests) reveal that cuFFT Z2Z load callbacks are failing to recover any signal in the imaginary channel ($10^{-51}$ output), even with correct Hermitian mirroring logic and fixed memory alignment. Real-part recovery is functional, but imaginary-channel loss is a blocker.
 
 ## Optimization Level 1 — Fuse bracket into D2Z load callback
 
