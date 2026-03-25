@@ -52,9 +52,10 @@ set(LTO_HEADERS
     ${CMAKE_BINARY_DIR}/bracket_d2z_load_v2_cb_fatbin.h
     ${CMAKE_BINARY_DIR}/bracket_store_cb_fatbin.h)
 
-# Add shared library target for the JAX FFI (LTO v0, v1, v2)
+# Add shared library target for the JAX FFI (LTO v0, v1, v2 + Standard cuFFT)
 add_library(lto_bracket SHARED
             ${PROJECT_SOURCE_DIR}/cufft_lto_bracket.cu
+            ${PROJECT_SOURCE_DIR}/cufft_bracket.cu
             ${LTO_HEADERS})
 
 set_target_properties(lto_bracket PROPERTIES 
