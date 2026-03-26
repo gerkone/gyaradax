@@ -349,24 +349,60 @@ def estimate_nl_timestep(
 
 def estimate_linear_timestep(
     pre: GKPre,
-    safety_factor: float = 0.5,
+    params: "GKParams" = None,
+    fac_dtim_est: float = 0.95,
+    safety_factor: float = None,
 ) -> jnp.ndarray:
-    """CFL estimate from linear parallel streaming and trapping.
+    """Von Neumann stability timestep estimate (matdat.F90:1440-1510).
 
-    Computes dt_parallel = sgr_dist / max|upar| and
-    dt_trapping = dvp / max|utrap|, returns the tighter constraint.
-    The precomputed upar and utrap already include per-species vthrat scaling.
+    Separates CFL by derivative order with RK4 stability factors:
+      tmax = max(tmax1/2.4, tmax4/2.4, 40)
+      dt   = fac_dtim_est / tmax
+
+    When *safety_factor* is given, falls back to safety_factor * dx / max|u|.
     """
+    sgr_dist = jnp.asarray(pre["sgr_dist"], dtype=jnp.float64)
+    dvp = jnp.asarray(pre["dvp"], dtype=jnp.float64)
     max_upar = jnp.max(jnp.abs(pre["upar"]))
     max_utrap = jnp.max(jnp.abs(pre["utrap"]))
 
-    sgr_dist = pre["sgr_dist"]
-    dvp = pre["dvp"]
+    if safety_factor is not None:
+        dt_par = jnp.where(max_upar > 1e-30, safety_factor * sgr_dist / max_upar, 1e10)
+        dt_trap = jnp.where(max_utrap > 1e-30, safety_factor * dvp / max_utrap, 1e10)
+        return jnp.minimum(dt_par, dt_trap)
 
-    dt_par = jnp.where(max_upar > 1e-30, safety_factor * sgr_dist / max_upar, 1e10)
-    dt_trap = jnp.where(max_utrap > 1e-30, safety_factor * dvp / max_utrap, 1e10)
+    # max stencil coefficients: boundary D1/D4 = 24/12 = 2.0,
+    # interior VPAR_D1 = 8/12, VPAR_D4 = 6/12
+    _D1S = jnp.asarray(2.0, dtype=jnp.float64)
+    _D4S = jnp.asarray(2.0, dtype=jnp.float64)
+    _D1V = jnp.asarray(8.0 / 12.0, dtype=jnp.float64)
+    _D4V = jnp.asarray(6.0 / 12.0, dtype=jnp.float64)
 
-    return jnp.minimum(dt_par, dt_trap)
+    # ideriv=1: streaming + trapping
+    tmax1 = jnp.maximum(
+        jnp.where(max_upar > 1e-30, max_upar * _D1S / sgr_dist, 0.0),
+        jnp.where(max_utrap > 1e-30, max_utrap * _D1V / dvp, 0.0),
+    )
+
+    # ideriv=4: parallel and velocity dissipation
+    disp_par_val = jnp.abs(jnp.asarray(params.disp_par if params is not None else 1.0, dtype=jnp.float64))
+    disp_vp_val = jnp.abs(jnp.asarray(params.disp_vp if params is not None else 0.2, dtype=jnp.float64))
+    max_abs_par = jnp.max(jnp.abs(pre["abs_dum2_par"]))
+    max_abs_vp = jnp.max(jnp.abs(pre["abs_dum2_vp"]))
+    tmax4 = jnp.maximum(
+        disp_par_val * jnp.where(max_abs_par > 1e-30, max_abs_par * _D4S / sgr_dist, 0.0),
+        disp_vp_val * jnp.where(max_abs_vp > 1e-30, max_abs_vp * _D4V / dvp, 0.0),
+    )
+
+    # field CFL: ES mode frequency (time_est_field), kinetic only
+    tmax1 = jnp.maximum(tmax1, jnp.asarray(pre.get("tmax_field", 0.0), dtype=jnp.float64))
+
+    # RK4 von Neumann (meth=2): divide by stability boundary, floor at 40
+    rk4 = jnp.asarray(2.4, dtype=jnp.float64)
+    tmax = jnp.maximum(jnp.maximum(tmax1 / rk4, tmax4 / rk4), jnp.asarray(40.0, dtype=jnp.float64))
+
+    fac = jnp.asarray(fac_dtim_est, dtype=jnp.float64)
+    return jnp.where(tmax > 1e-30, fac / tmax, jnp.asarray(1e10, dtype=jnp.float64))
 
 
 def estimate_timestep(
@@ -375,17 +411,14 @@ def estimate_timestep(
     bessel: jnp.ndarray,
     dt_input: float,
     safety_factor: float = 0.95,
+    params: "GKParams" = None,
 ) -> jnp.ndarray:
-    """Combined CFL estimate: min(nonlinear ExB, linear streaming).
-
-    The nonlinear CFL uses the caller's safety_factor (typically 0.95).
-    The linear CFL uses a 1/3 safety factor for RK4 stability, matching
-    GKW's Von Neumann analysis (matdat.F90: RK4 divides the first-derivative
-    CFL by 2.4, then applies fac_dtim_est=0.95, giving ~0.95/2.4 ≈ 0.40;
-    we use 1/3 as a conservative floor).
-    """
+    """Combined CFL: min(nonlinear ExB, linear von Neumann)."""
     dt_nl = estimate_nl_timestep(phi, pre, bessel, dt_input, safety_factor)
-    dt_lin = estimate_linear_timestep(pre, safety_factor=1.0 / 3.0)
+    if params is not None:
+        dt_lin = estimate_linear_timestep(pre, params=params)
+    else:
+        dt_lin = estimate_linear_timestep(pre, safety_factor=1.0 / 3.0)
     return jnp.minimum(dt_nl, dt_lin)
 
 
@@ -713,6 +746,20 @@ def linear_precompute(geometry: Dict[str, jnp.ndarray], params: GKParams) -> Dic
         phi_w, phi_d = precompute_phi_kinetic(geometry)
         out["phi_weight"] = phi_w
         out["phi_diag"] = phi_d
+
+        # field CFL: ES limit of Alfvén wave (time_est_field, matdat.F90:1859)
+        signz_arr = jnp.asarray(params.signz, dtype=jnp.float64)
+        de_arr = jnp.asarray(params.de, dtype=jnp.float64)
+        mir = jnp.sum(jnp.where(signz_arr > 0, mas_arr * de_arr, 0.0))
+        mer = jnp.sum(jnp.where(signz_arr < 0, mas_arr / jnp.maximum(de_arr, 1e-30), 0.0))
+        ky_min = jnp.where(nky > 1, ky[1], ky[0])
+        kmin2 = ky_min**2 * little_g[:, 0]
+        q_val = jnp.asarray(geometry.get("q", getattr(params, "q", 1.0)), dtype=jnp.float64)
+        field_period = 2.0 * jnp.pi * q_val * params.sgr_dist * bn * jnp.sqrt(
+            jnp.maximum(mir * kmin2 * mer, 0.0)
+        )
+        time_field = jnp.min(jnp.where(field_period > 1e-30, field_period, 1e30))
+        out["tmax_field"] = jnp.where(time_field < 1e20, 1.0 / time_field, 0.0)
     else:
         # Adiabatic: scalar species params, 5D arrays
         sp = _compute_species_coeffs(
@@ -1176,13 +1223,11 @@ def gksolve(
                 bessel_for_cfl,
                 dt_input=dt_input,
                 safety_factor=cfl_safety,
+                params=params,
             )
             return (next_df, next_state, next_dt), None
 
-        # Cap the initial dt with the linear CFL so the very first step is safe
-        # (the one-step lag means the first step would otherwise use dt_input
-        # unconditionally, which can exceed the linear streaming CFL for kinetic
-        # electrons with vthrat >> 1).
+        # conservative cap for the first step (one-step lag has no phi CFL yet)
         init_dt = jnp.minimum(dt_input, estimate_linear_timestep(pre, safety_factor=0.5))
         (final_df, final_state, _), _ = jax.lax.scan(
             _scan_body, (df, state, init_dt), None, length=n_steps

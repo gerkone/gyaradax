@@ -290,13 +290,13 @@ def test_combined_cfl_tighter_than_nl_alone(kinetic_dir, kinetic_geom, kinetic_s
     dt_input = float(params.dt)
 
     dt_nl = float(estimate_nl_timestep(phi, pre, bessel, dt_input, 0.95))
-    dt_combined = float(estimate_timestep(phi, pre, bessel, dt_input, 0.95))
+    dt_combined = float(estimate_timestep(phi, pre, bessel, dt_input, 0.95, params=params))
 
     assert dt_combined <= dt_nl + 1e-15, (
         f"combined CFL {dt_combined:.6e} should not exceed " f"nonlinear-only CFL {dt_nl:.6e}"
     )
     # For kinetic, linear CFL should actually be the binding constraint
-    dt_lin = float(estimate_linear_timestep(pre, safety_factor=0.5))
+    dt_lin = float(estimate_linear_timestep(pre, params=params))
     assert dt_combined <= dt_lin + 1e-15, (
         f"combined CFL {dt_combined:.6e} should be at most " f"linear CFL {dt_lin:.6e}"
     )
@@ -330,7 +330,7 @@ def test_combined_cfl_matches_gkw_adaptive_dt(kinetic_dir, kinetic_geom, kinetic
     phi = calculate_phi_kinetic(kinetic_geom, df)
     bessel = pre["bessel"][0]
 
-    dt_combined = float(estimate_timestep(phi, pre, bessel, float(params.dt), 0.95))
+    dt_combined = float(estimate_timestep(phi, pre, bessel, float(params.dt), 0.95, params=params))
 
     # Our estimate should be within a factor of 3 of GKW's adaptive dtim
     ratio = dt_combined / gkw_dtim

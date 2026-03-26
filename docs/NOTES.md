@@ -181,19 +181,46 @@ The large-step cadence `naverage` groups small steps for diagnostic output.
 In linear mode, per-$k_y$ normalization is applied at large-step boundaries.
 
 **CFL-adaptive timestep** (`adaptive_dt=True`, default for kinetic electrons):
-the timestep is adjusted each step to satisfy two CFL constraints:
+the timestep is adjusted each step to satisfy CFL constraints derived from
+von Neumann stability analysis, matching GKW's `get_estimated_timestep`
+(`matdat.F90:1356-1512`).
 
-1. **Nonlinear ExB CFL**: $\Delta t_{NL} = \sigma \times 2 / \max|\nabla\phi|$,
+The analysis separates RHS terms by derivative order and applies
+RK4-specific stability factors:
+
+1. **ideriv=1 — first-derivative terms** (streaming, trapping):
+   $$t_{max,1} = \max\!\left(\frac{|u_\parallel|_\infty \cdot c_{D1}}{\Delta s},\;
+   \frac{|u_{trap}|_\infty \cdot c_{V1}}{\Delta v_\parallel}\right)$$
+   where $c_{D1} = 2$ and $c_{V1} = 2/3$ are the maximum finite-difference
+   stencil coefficients (boundary row for the parallel 4th-order upwinded
+   scheme; interior central stencil for velocity).
+
+2. **Field CFL — electrostatic mode frequency** (kinetic electrons only,
+   `time_est_field` in `matdat.F90:1859-1940`):
+   $$t_{max,\text{field}} = \frac{1}{\min_s\left[2\pi q\,\Delta s\, B(s)
+   \sqrt{m_{ir}\, k_{\perp,\min}^2\, m_{er}}\right]}$$
+   where $m_{ir} = \sum_\text{ion} m_s n_s$, $m_{er} = m_e / n_e$, and
+   $k_{\perp,\min}^2 = k_{y,1}^2 g_{\zeta\zeta}(s)$.  For kinetic electrons
+   this is typically the **dominant constraint** ($t_{max,\text{field}} \approx 3.4
+   \times t_{max,1}$ for the standard kinetic grid).
+
+3. **ideriv=4 — fourth-derivative dissipation** (parallel and velocity):
+   $$t_{max,4} = \max\!\left(\frac{\nu_\parallel\, |u_\parallel|_\infty \cdot c_{D4}}{\Delta s},\;
+   \frac{\nu_v\, |u_{trap}|_\infty \cdot c_{V4}}{\Delta v_\parallel}\right)$$
+
+4. **Nonlinear ExB CFL**: $\Delta t_{NL} = \sigma \times 2 / \max|\nabla\phi|$,
    computed from the dealiased real-space potential gradient. Safety factor
    $\sigma = 0.95$ by default (`cfl_safety` parameter).
 
-2. **Linear parallel streaming CFL**: $\Delta t_{par} = 0.5 \times \Delta s / \max|v_{\parallel,s}|$
-   and $\Delta t_{trap} = 0.5 \times \Delta v_\parallel / \max|v_{trap,s}|$,
-   where the characteristic speeds include the per-species $v_{th,s}/v_{th,ref}$
-   scaling. For kinetic electrons with $v_{th,e}/v_{th,i} \approx 60$, this is
-   the binding constraint (dt ~ 0.002 vs input dt = 0.004).
+The combined constraint for RK4 (`meth=2` in GKW):
+$$t_{max} = \max\!\left(\frac{\max(t_{max,1},\, t_{max,\text{field}})}{2.4},\;
+\frac{t_{max,4}}{2.4},\; 40\right)$$
+$$\Delta t_\text{lin} = \frac{f_\text{dtim}}{t_{max}}, \qquad f_\text{dtim} = 0.95$$
 
-The effective timestep is $\Delta t = \min(\Delta t_{NL}, \Delta t_{par}, \Delta t_{trap}, \Delta t_{input})$.
+The factor 2.4 is the RK4 stability boundary; the floor of 40 prevents
+unreasonably large $\Delta t$ when linear terms are weak
+(`matdat.F90:1507`).  The effective timestep is
+$\Delta t = \min(\Delta t_{NL}, \Delta t_\text{lin}, \Delta t_\text{input})$.
 Uses one-step lag: each step's dt is estimated from the previous step's $\phi$.
 
 ### 3.2 spatial discretization
@@ -377,6 +404,17 @@ order. Species is the outermost (slowest) index.
 
 - adaptive CFL uses one-step lag (current step uses previous step's CFL estimate)
 - no multi-species output in `save_dumps` (fluxes are summed over species)
+- **kinetic init from scratch**: starting a kinetic simulation from `init_f`
+  (cosine2) produces modes that grow 6-12x slower than GKW over the first
+  ~300 steps.  The solver is correct (K100→K101 parity is excellent at
+  `rel_l2 < 1e-6` per species), but the cosine2 initial perturbation
+  projects poorly onto the fastest-growing eigenfunction.  Additionally,
+  the GKW reference data contains no K00 dump, making it impossible to
+  confirm that GKW started from the same cold cosine2 init.  Diagnostics
+  show that `max|phi|` at t=0 is comparable to the evolved state (no
+  species cancellation in the phi solve), so the issue is eigenfunction
+  projection, not drive amplitude.  **Recommended workflow**: resume kinetic
+  runs from GKW K-files rather than starting from scratch.
 
 ### 7.4 growth rate convention
 

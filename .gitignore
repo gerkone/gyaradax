@@ -14,5 +14,6 @@ gkw_ref/
 .gemini
 .claude
 notebooks/figs/
-validation_*
+validation_*/
 figs/
+*egg-info/

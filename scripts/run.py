@@ -42,6 +42,7 @@ from gyaradax.simulate import (
     gk_run_batched,
     _geometry_from_config,
     _compute_phi_for_init,
+    _ensure_species_arrays,
 )
 from gyaradax.solver import GKState, linear_precompute, mode_amplitude
 from gyaradax.utils import (
@@ -93,33 +94,34 @@ def _setup_run(config_path, args):
 
     k_path = None if args.from_scratch else _find_k_file(data_dir)
 
-    # if k_path is not None:
-    #     res = tuple(len(geometry[k]) for k in ("intvp", "intmu", "ints", "kxrh", "krho"))
-    #     df = load_gkw_k_dump(k_path, res, n_species=n_species)
+    if k_path is not None:
+        res = tuple(len(geometry[k]) for k in ("intvp", "intmu", "ints", "kxrh", "krho"))
+        df = load_gkw_k_dump(k_path, res, n_species=n_species)
 
-    #     dat_path = k_path + ".dat"
-    #     t_start = read_gkw_dump_time(dat_path) if os.path.exists(dat_path) else 0.0
-    #     nky = len(geometry["krho"])
+        dat_path = k_path + ".dat"
+        t_start = read_gkw_dump_time(dat_path) if os.path.exists(dat_path) else 0.0
 
-    #     actual_dt = read_gkw_dump_dtim(dat_path) if os.path.exists(dat_path) else 0.0
-    #     if actual_dt > 0 and actual_dt < params.dt:
-    #         params = replace(params, dt=actual_dt)
+        actual_dt = read_gkw_dump_dtim(dat_path) if os.path.exists(dat_path) else 0.0
+        if actual_dt > 0 and actual_dt < params.dt:
+            params = replace(params, dt=actual_dt)
 
-    #     if params.adiabatic_electrons:
-    #         phi0 = _compute_phi_for_init(df, geometry, params)
-    #         amp0 = mode_amplitude(phi0, geometry, params.norm_eps)
-    #     else:
-    #         amp0 = jnp.ones(nky, dtype=jnp.float64)
+        # ensure geometry has per-species arrays for kinetic runs
+        geometry = _ensure_species_arrays(geometry, params)
 
-    #     state = GKState(
-    #         time=jnp.array(t_start, dtype=jnp.float64),
-    #         step=jnp.array(0, dtype=jnp.int32),
-    #         accumulated_norm_factor=jnp.ones(nky, dtype=jnp.float64),
-    #         window_start_amp=amp0,
-    #         last_growth_rate=jnp.zeros(nky, dtype=jnp.float64),
-    #     )
-    # else:
-    df, geometry, state = gk_init(geometry, params, n_species=n_species)
+        phi0 = _compute_phi_for_init(df, geometry, params)
+        amp0 = mode_amplitude(phi0, geometry, params.norm_eps)
+        nky = len(geometry["krho"])
+
+        state = GKState(
+            time=jnp.array(t_start, dtype=jnp.float64),
+            step=jnp.array(0, dtype=jnp.int32),
+            accumulated_norm_factor=jnp.ones(nky, dtype=jnp.float64),
+            window_start_amp=amp0,
+            last_growth_rate=jnp.zeros(nky, dtype=jnp.float64),
+        )
+        print(f"  resumed from {os.path.basename(k_path)} (t={t_start:.4f}, dt={float(params.dt):.4e})")
+    else:
+        df, geometry, state = gk_init(geometry, params, n_species=n_species)
 
     pre = linear_precompute(geometry, params)
 
@@ -339,7 +341,7 @@ def main():
     parser.add_argument("--kinetic", action="store_true")
     parser.add_argument("--mp", action="store_true", help="mixed precision")
     parser.add_argument("--device", type=int, default=0)
-    parser.add_argument("--block-size", type=int, default=300)
+    parser.add_argument("--block-size", type=int, default=120)
     parser.add_argument("--n-blocks", type=int, default=None)
     parser.add_argument("--from-scratch", action="store_true", help="ignore K-files, use init_f")
 

@@ -24,6 +24,9 @@ dev = [
     "black",
 ]
 
+[tool.setuptools.packages.find]
+include = ["gyaradax*"]
+
 [tool.ruff]
 line-length = 100
 
