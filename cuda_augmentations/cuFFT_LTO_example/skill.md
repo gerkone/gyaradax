@@ -29,7 +29,7 @@ Activate with `source /system/apps/userenv/mambaforge/bashrc && mamba run -n jax
 
 ## 3. Writing the Device Callback
 
-The callback is a normal `__device__` function in a `.cu` file. You name it whatever you like — you pass the name as a string to the API. One file = one callback function per type.
+The callback is a normal `__device__` function in a `.cu` file. The string you pass to `cufftXtSetJITCallback` must match the **function name** exactly. One file = one callback function per type.
 
 ### Load callback signature (intercepts cuFFT reading input)
 
@@ -52,7 +52,14 @@ __device__ cufftDoubleComplex my_load_cb(
     // compute and return the value cuFFT should see at this index
     return info->data[offset];
 }
+
+// Convention in this project: also declare a typed device pointer variable.
+// cuFFT JIT uses the function name above; this variable is for documentation
+// and potential use with the legacy non-JIT API.
+__device__ cufftJITCallbackLoadZ my_load_cb_addr = my_load_cb;
 ```
+
+The `cufftJITCallbackLoadZ` / `cufftJITCallbackLoadD` types are the correct typed function pointer types for use in this declaration. Match the type to the callback direction and precision (see table below).
 
 ### Store callback signature (intercepts cuFFT writing output)
 
@@ -89,8 +96,11 @@ __device__ void my_store_cb(
 ### Option A — Offline (nvcc → fatbin, then embed with xxd)
 
 **Step 1: compile to fatbin**
+
+`-dc` (relocatable device code) and `code=lto_80` (not `sm_80`) are both required. Missing either causes `CUFFT_INTERNAL_ERROR (5)` at plan creation.
+
 ```makefile
-LTO_FLAGS := --generate-code arch=compute_80,code=lto_80 -fatbin
+LTO_FLAGS := --generate-code arch=compute_80,code=lto_80 -dc -fatbin
 
 my_callback.fatbin: my_callback.cu
     nvcc $(LTO_FLAGS) -O3 $< -o $@
@@ -98,30 +108,25 @@ my_callback.fatbin: my_callback.cu
 
 **Step 2: embed as a C byte array — two tools**
 
-*Option A: `xxd -i` (used in this project's Makefile)*
+*Option A: `bin2c` (NVIDIA CUDA SDK tool — preferred)*
+```makefile
+my_callback_fatbin.h: my_callback.fatbin
+    bin2c --name my_callback_fatbin --type longlong $< > $@
+```
+Generates `unsigned long long[]` (8-byte aligned). Pass the array pointer directly to `cufftXtSetJITCallback` — **no `posix_memalign` staging needed**. Verified working on A100/CUDA 12.9.
+
+*Option B: `xxd -i`*
 ```makefile
 my_callback_fatbin.h: my_callback.fatbin
     xxd -i $< > $@
 ```
-Generates a `unsigned char` array + `unsigned int` length:
-```c
-unsigned char my_callback_fatbin[]  = { 0x7f, 0x45, ... };
-unsigned int  my_callback_fatbin_len = 1234;
-```
-**Requires the alignment fix** in §5 because `unsigned char` has 1-byte alignment.
-
-*Option B: `bin2c` (NVIDIA CUDA SDK tool, used in the NVIDIA sample)*
-```makefile
-my_callback_fatbin.h: my_callback.fatbin
-    bin2c --name my_callback --type longlong $< > $@
-```
-Generates a `long long` array, which carries 8-byte alignment — still below nvJitLink's 16-byte requirement, so **the alignment fix in §5 is still required**.
+Generates `unsigned char[]` (1-byte aligned). **Requires `posix_memalign(16)` + `memcpy` staging** before passing to `cufftXtSetJITCallback` — see §5.
 
 **Step 3: include in the host `.cu` file**
 ```cpp
 #include "my_callback_fatbin.h"
-// xxd:   provides my_callback_fatbin[]  (unsigned char) and my_callback_fatbin_len (unsigned int)
-// bin2c: provides my_callback[]         (long long)     and sizeof(my_callback)
+// bin2c: provides my_callback_fatbin[] (unsigned long long) and sizeof(my_callback_fatbin)
+// xxd:   provides my_callback_fatbin[] (unsigned char)     and my_callback_fatbin_len
 ```
 
 ### Option B — NVRTC at runtime
@@ -185,40 +190,40 @@ cudaMalloc(&d_info, sizeof(MyInfo));
 cufftHandle plan;
 cufftCreate(&plan);
 
-// 3. ⚠ ALIGNMENT FIX for xxd-embedded fatbins:
-//    xxd -i produces a 1-byte-aligned array; nvJitLink requires 16-byte alignment.
-//    Skipping this causes CUFFT_INTERNAL_ERROR (5) with no other diagnostic.
-void* aligned_fatbin = nullptr;
-posix_memalign(&aligned_fatbin, 16, (size_t)my_callback_fatbin_len);
-memcpy(aligned_fatbin, my_callback_fatbin, (size_t)my_callback_fatbin_len);
-
-// 4. Register callback — MUST be before cufftMakePlan*
+// 3. Register callback — MUST be before cufftMakePlan*
+//    bin2c path: pass the unsigned long long[] array directly (8-byte aligned, sufficient)
 void* d_info_void = (void*)d_info;
 cufftResult res = cufftXtSetJITCallback(
     plan,
-    "my_load_cb",                        // matches __device__ function name exactly
-    aligned_fatbin,
-    (size_t)my_callback_fatbin_len,
+    "my_load_cb",                             // exact __device__ function name
+    (void*)my_callback_fatbin,                // bin2c array — pass directly
+    sizeof(my_callback_fatbin),
     CUFFT_CB_LD_COMPLEX_DOUBLE,
-    &d_info_void                         // single-GPU: address of single device pointer
+    &d_info_void                              // single-GPU: address of device pointer
 );
-free(aligned_fatbin);
 // check res != CUFFT_SUCCESS before proceeding
 
-// 5. Make plan — JIT-linking happens here (50–500 ms first time)
+//    xxd path only — xxd produces 1-byte-aligned unsigned char[]; must realign:
+//    void* aligned = nullptr;
+//    posix_memalign(&aligned, 16, my_callback_fatbin_len);
+//    memcpy(aligned, my_callback_fatbin, my_callback_fatbin_len);
+//    cufftXtSetJITCallback(plan, "my_load_cb", aligned, my_callback_fatbin_len, ...);
+//    free(aligned);  // safe — cuFFT copies the IR before MakePlan returns
+
+// 4. Make plan — JIT-linking happens here (50–500 ms first time)
 size_t ws;
 cufftMakePlanMany(plan, rank, n, ...);
 
-// 6. Update callerInfo and execute
+// 5. Update callerInfo and execute
 cudaMemcpy(d_info, &h_info, sizeof(MyInfo), cudaMemcpyHostToDevice);
 cufftExecZ2D(plan, d_in, d_out);
 
-// 7. Destroy
+// 6. Destroy
 cufftDestroy(plan);
 cudaFree(d_info);
 ```
 
-> **NVRTC path**: pass `lto_ir.data()` and `lto_ir.size()` directly — no alignment fix needed.
+> **NVRTC path**: pass `lto_ir.data()` and `lto_ir.size()` directly — no alignment concern.
 
 ---
 
@@ -266,13 +271,13 @@ ARCH  := -arch=sm_80
 OPT   := -O3 -lineinfo
 CUDA_INC := /system/apps/userenv/volkmann/jax_env/targets/x86_64-linux/include
 CUDA_LIB := /system/apps/userenv/volkmann/jax_env/targets/x86_64-linux/lib
-LTO_FLAGS := --generate-code arch=compute_80,code=lto_80 -fatbin
+LTO_FLAGS := --generate-code arch=compute_80,code=lto_80 -dc -fatbin
 
 my_callback.fatbin: my_callback.cu
     $(NVCC) $(LTO_FLAGS) $(OPT) $< -o $@
 
 my_callback_fatbin.h: my_callback.fatbin
-    xxd -i $< > $@
+    bin2c --name my_callback_fatbin --type longlong $< > $@
 
 libmy.so: host.cu my_callback_fatbin.h
     $(NVCC) -shared -Xcompiler -fPIC $(ARCH) $(OPT) -I$(CUDA_INC) \
@@ -287,7 +292,7 @@ my_exe: host.o reference.o
 
 | What | Flags |
 |------|-------|
-| Compile device callback to LTO-IR | `--generate-code arch=compute_80,code=lto_80 -fatbin` |
+| Compile device callback to LTO-IR | `--generate-code arch=compute_80,code=lto_80 -dc -fatbin` |
 | Compile host `.cpp` with g++ | `g++ -I$(CUDA_INC) -c host.cpp -o host.o` |
 | Link host executable | `g++ -L$(CUDA_LIB) ... -lcufft -lcudart -lm` |
 | Link shared library (nvcc) | `nvcc -shared -Xcompiler -fPIC -arch=sm_80 ... -lcufft` |
@@ -302,11 +307,13 @@ my_exe: host.o reference.o
 | 1 | **SetJITCallback before MakePlan.** Calling `cufftMakePlan*` before `cufftXtSetJITCallback` silently produces a plan with no callback. |
 | 2 | **Callbacks cannot be unset.** `cufftXtClearCallback` is not supported for LTO. To change a callback, destroy and recreate the plan. |
 | 3 | **One callback function per type per compilation unit.** You cannot have two load-double-complex callbacks in the same `.cu` file. |
-| 4 | **Fatbin alignment.** `xxd -i` output is 1-byte-aligned. `nvJitLink` requires 16-byte alignment. Always `posix_memalign` + `memcpy` before passing to `cufftXtSetJITCallback`. NVRTC output is pre-aligned. |
-| 5 | **Do not use `cufftXtSetCallback` (legacy).** The old function-pointer API causes `CUFFT_INTERNAL_ERROR` in CUDA 12 and has no performance benefit. |
-| 6 | **`libcufft_static` is not in jax_env.** Link with `-lcufft` (dynamic) only. Do not attempt `nvcc ... -lcufft_static -lculibos`. |
-| 7 | **"TODO: nvvm input without LTO" error.** Means the compiler emitted standard NVVM instead of LTO-IR. Check that `code=lto_80` (not `sm_80`) is in the fatbin compile flags. |
-| 8 | **`callback_name` must match exactly.** The string passed to `cufftXtSetJITCallback` must be the exact identifier of the `__device__` function in the compiled `.cu`. |
+| 4 | **Fatbin alignment.** `xxd -i` produces 1-byte-aligned `unsigned char[]` — requires `posix_memalign(16)` + `memcpy` before passing to `cufftXtSetJITCallback`. `bin2c --type longlong` produces 8-byte-aligned `unsigned long long[]` — pass the array pointer directly, no staging needed (verified A100/CUDA 12.9). |
+| 5 | **`-dc` is required in fatbin compile flags.** Use `--generate-code arch=compute_80,code=lto_80 -dc -fatbin`. Missing `-dc` or using `code=sm_80` instead of `code=lto_80` both cause `CUFFT_INTERNAL_ERROR (5)` at `cufftMakePlan*` with no further diagnostic. |
+| 6 | **Do not use `cufftXtSetCallback` (legacy).** The old function-pointer API causes `CUFFT_INTERNAL_ERROR` in CUDA 12 and has no performance benefit. |
+| 7 | **`libcufft_static` is not in jax_env.** Link with `-lcufft` (dynamic) only. Do not attempt `nvcc ... -lcufft_static -lculibos`. |
+| 8 | **"TODO: nvvm input without LTO" error.** Means the compiler emitted standard NVVM instead of LTO-IR. Check that `code=lto_80` (not `sm_80`) and `-dc` are in the fatbin compile flags. |
+| 9 | **`callback_name` must match the `__device__` function name exactly.** Pass the function name as a string — not the name of any `_addr` pointer variable. Verified: this project's callbacks and the NVIDIA sample both pass the function name. |
+| 10 | **Z2Z `CUFFT_CB_LD_COMPLEX_DOUBLE` propagates imaginary correctly** on A100/CUDA 12.9. A constant-return callback returning `{1.0, 2.0}` on a 1024-element FFT gives DC mode `{1024, 2048}` — both channels live. |
 
 ---
 

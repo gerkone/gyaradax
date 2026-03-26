@@ -166,19 +166,28 @@ xla_ffi::Error LtoFftBracketV1Impl(cudaStream_t stream, xla_ffi::Buffer<xla_ffi:
     return xla_ffi::Error::Success();
 }
 
+struct BracketD2zInfo {
+    const double *py, *fx, *px, *fy;
+    const double* dum_s;
+    int nspec, mrad, mphi;
+    double scale;
+};
+
 // -----------------------------------------------------------------------------
-// Version 2: Unfinished complex-packed LTO
-// Uses Z2Z callbacks + D2Z callback. Still in isolation/debug stage.
+// Version 2: Fixed D2Z-Bracket-Fusion LTO
+// Uses Z2D load callbacks for derivatives, then fused D2Z load callback for bracket.
 // -----------------------------------------------------------------------------
 static struct {
-    cufftHandle p0=0, p1=0, d2z=0;
-    int batch=-1;
-    CallbackInfoZ2Z *d_cb0=nullptr, *d_cb1=nullptr;
-    BracketD2zV2Info *d_d2z_cb=nullptr;
-    void *d_cb0_ptr=nullptr, *d_cb1_ptr=nullptr, *d_d2z_ptr=nullptr;
-    double *d_dum=nullptr;
-    cufftDoubleComplex *d_in=nullptr, *d_ws0=nullptr, *d_ws1=nullptr;
-    cufftDoubleReal* d_d2z_in = nullptr;
+    cufftHandle z2d = 0, d2z = 0;
+    int batch = -1;
+    CallbackInfo*    d_cb      = nullptr;   // Z2D load callback info
+    void*            d_cb_ptr  = nullptr;
+    BracketD2zInfo*  d_d2z_cb  = nullptr;   // D2Z bracket-fusion callback info
+    void*            d_d2z_ptr = nullptr;
+    double*          d_dum     = nullptr;
+    cufftDoubleComplex* d_in   = nullptr;   // Z2D dummy input (half-spectrum)
+    double *d_py = nullptr, *d_fx = nullptr,
+           *d_px = nullptr, *d_fy = nullptr;  // real-space workspaces (no d_nl)
 } v2;
 
 xla_ffi::Error LtoFftBracketV2Impl(cudaStream_t stream, xla_ffi::Buffer<xla_ffi::DataType::C128> df, xla_ffi::Buffer<xla_ffi::DataType::C128> phi,
@@ -186,48 +195,65 @@ xla_ffi::Error LtoFftBracketV2Impl(cudaStream_t stream, xla_ffi::Buffer<xla_ffi:
     xla_ffi::Buffer<xla_ffi::DataType::F64> dum_s,
     xla_ffi::Result<xla_ffi::Buffer<xla_ffi::DataType::C128>> out, int32_t batch, int32_t mrad, int32_t mphi, int32_t nkx, int32_t nky) {
     
-    if (v2.p0 == 0 || v2.batch != batch) {
+    int mphi_half = mphi/2 + 1;
+    size_t r_dist = (size_t)mrad * mphi, c_dist = (size_t)mrad * mphi_half;
+
+    if (v2.batch != -1 && v2.batch != batch) {
+        cufftDestroy(v2.z2d); cufftDestroy(v2.d2z);
+        cudaFree(v2.d_cb);    cudaFree(v2.d_d2z_cb);
+        cudaFree(v2.d_dum);   cudaFree(v2.d_in);
+        cudaFree(v2.d_py);    cudaFree(v2.d_fx);
+        cudaFree(v2.d_px);    cudaFree(v2.d_fy);
+        v2.z2d = v2.d2z = 0;
+        v2.d_cb = nullptr; v2.d_d2z_cb = nullptr;
+        v2.d_dum = nullptr; v2.d_in = nullptr;
+        v2.d_py = v2.d_fx = v2.d_px = v2.d_fy = nullptr;
+        v2.batch = -1;
+    }
+
+    if (v2.z2d == 0) {
         long long int n_ll[2] = {mrad, mphi};
-        size_t r_dist = (size_t)mrad * mphi;
-        CHECK_CUDA(cudaMalloc(&v2.d_cb0, sizeof(CallbackInfoZ2Z))); v2.d_cb0_ptr = (void*)v2.d_cb0;
-        CHECK_CUDA(cudaMalloc(&v2.d_cb1, sizeof(CallbackInfoZ2Z))); v2.d_cb1_ptr = (void*)v2.d_cb1;
-        CHECK_CUDA(cudaMalloc(&v2.d_d2z_cb, sizeof(BracketD2zV2Info))); v2.d_d2z_ptr = (void*)v2.d_d2z_cb;
+        CHECK_CUDA(cudaMalloc(&v2.d_cb, sizeof(CallbackInfo))); v2.d_cb_ptr = (void*)v2.d_cb;
+        CHECK_CUDA(cudaMalloc(&v2.d_d2z_cb, sizeof(BracketD2zInfo))); v2.d_d2z_ptr = (void*)v2.d_d2z_cb;
         CHECK_CUDA(cudaMalloc(&v2.d_dum, dum_s.dimensions()[0]*8));
-        CHECK_CUDA(cudaMalloc(&v2.d_in, (size_t)batch * r_dist * 16));
-        CHECK_CUDA(cudaMalloc(&v2.d_ws0, (size_t)batch * r_dist * 16));
-        CHECK_CUDA(cudaMalloc(&v2.d_ws1, (size_t)batch * r_dist * 16));
-        CHECK_CUDA(cudaMalloc(&v2.d_d2z_in, (size_t)batch * r_dist * 8));
+        CHECK_CUDA(cudaMalloc(&v2.d_in, (size_t)batch * c_dist * 16));
+        CHECK_CUDA(cudaMalloc(&v2.d_py, (size_t)batch * r_dist * 8));
+        CHECK_CUDA(cudaMalloc(&v2.d_fx, (size_t)batch * r_dist * 8));
+        CHECK_CUDA(cudaMalloc(&v2.d_px, (size_t)batch * r_dist * 8));
+        CHECK_CUDA(cudaMalloc(&v2.d_fy, (size_t)batch * r_dist * 8));
         
-        CHECK_CUFFT(cufftCreate(&v2.p0)); 
-        CHECK_CUFFT(cufftXtSetJITCallback(v2.p0, "d_z2z_load_cb_ptr", (void*)bracket_z2z_load_cb_fatbin, sizeof(bracket_z2z_load_cb_fatbin), CUFFT_CB_LD_COMPLEX_DOUBLE, &v2.d_cb0_ptr));
-        size_t ws=0; CHECK_CUFFT(cufftXtMakePlanMany(v2.p0, 2, n_ll, NULL,1, (long long)r_dist, CUDA_C_64F, NULL,1, (long long)r_dist, CUDA_C_64F, batch, &ws, CUDA_C_64F));
+        // Z2D plan — identical to V1
+        CHECK_CUFFT(cufftCreate(&v2.z2d));
+        CHECK_CUFFT(cufftXtSetJITCallback(v2.z2d, "d_load_cb_ptr", (void*)bracket_load_cb_fatbin, sizeof(bracket_load_cb_fatbin), CUFFT_CB_LD_COMPLEX_DOUBLE, &v2.d_cb_ptr));
+        size_t ws=0;
+        CHECK_CUFFT(cufftXtMakePlanMany(v2.z2d, 2, n_ll, NULL,1, (long long)c_dist, CUDA_C_64F, NULL,1, (long long)r_dist, CUDA_R_64F, batch, &ws, CUDA_C_64F));
         
-        CHECK_CUFFT(cufftCreate(&v2.p1)); 
-        CHECK_CUFFT(cufftXtSetJITCallback(v2.p1, "d_z2z_load_cb_ptr", (void*)bracket_z2z_load_cb_fatbin, sizeof(bracket_z2z_load_cb_fatbin), CUFFT_CB_LD_COMPLEX_DOUBLE, &v2.d_cb1_ptr));
-        CHECK_CUFFT(cufftXtMakePlanMany(v2.p1, 2, n_ll, NULL,1, (long long)r_dist, CUDA_C_64F, NULL,1, (long long)r_dist, CUDA_C_64F, batch, &ws, CUDA_C_64F));
-        
-        CHECK_CUFFT(cufftCreate(&v2.d2z)); 
-        CHECK_CUFFT(cufftXtSetJITCallback(v2.d2z, "d_bracket_d2z_v2_load", (void*)bracket_d2z_load_v2_cb_fatbin, sizeof(bracket_d2z_load_v2_cb_fatbin), CUFFT_CB_LD_REAL_DOUBLE, &v2.d_d2z_ptr));
-        CHECK_CUFFT(cufftXtMakePlanMany(v2.d2z, 2, n_ll, NULL,1, (long long)r_dist, CUDA_R_64F, NULL,1, (long long)(mrad*(mphi/2+1)), CUDA_C_64F, batch, &ws, CUDA_R_64F));
+        // D2Z plan with bracket-fusion LTO load callback
+        CHECK_CUFFT(cufftCreate(&v2.d2z));
+        CHECK_CUFFT(cufftXtSetJITCallback(v2.d2z, "d_bracket_d2z_load", (void*)bracket_d2z_load_cb_fatbin, sizeof(bracket_d2z_load_cb_fatbin), CUFFT_CB_LD_REAL_DOUBLE, &v2.d_d2z_ptr));
+        CHECK_CUFFT(cufftXtMakePlanMany(v2.d2z, 2, n_ll, NULL,1, (long long)r_dist, CUDA_R_64F, NULL,1, (long long)c_dist, CUDA_C_64F, batch, &ws, CUDA_R_64F));
         v2.batch = batch;
     }
     
-    CHECK_CUFFT(cufftSetStream(v2.p0, stream)); CHECK_CUFFT(cufftSetStream(v2.p1, stream)); CHECK_CUFFT(cufftSetStream(v2.d2z, stream));
+    CHECK_CUFFT(cufftSetStream(v2.z2d, stream)); CHECK_CUFFT(v2.d2z != 0 ? cufftSetStream(v2.d2z, stream) : CUFFT_SUCCESS);
     CHECK_CUDA(cudaMemcpyAsync(v2.d_dum, dum_s.typed_data(), dum_s.dimensions()[0]*8, cudaMemcpyHostToDevice, stream));
     
-    CallbackInfoZ2Z h_ci0 = {(const double2*)df.typed_data(), (const double2*)phi.typed_data(), kx.typed_data(), ky.typed_data(), jind.typed_data(), mrad, mphi, nkx, nky, 0, (int)df.dimensions()[0], (int)phi.dimensions()[0]};
-    CallbackInfoZ2Z h_ci1 = {(const double2*)df.typed_data(), (const double2*)phi.typed_data(), kx.typed_data(), ky.typed_data(), jind.typed_data(), mrad, mphi, nkx, nky, 1, (int)df.dimensions()[0], (int)phi.dimensions()[0]};
+    static const int grad_types[4] = {0, 1, 2, 3};
+    double* const ws_v2[4] = {v2.d_py, v2.d_fx, v2.d_px, v2.d_fy};
+    CallbackInfo h_ci = {(const double2*)df.typed_data(), (const double2*)phi.typed_data(), kx.typed_data(), ky.typed_data(), jind.typed_data(), mrad, mphi_half, nkx, nky, 0, (int)df.dimensions()[0], (int)phi.dimensions()[0]};
+    CHECK_CUDA(cudaMemcpyAsync(v2.d_cb, &h_ci, sizeof(CallbackInfo), cudaMemcpyHostToDevice, stream));
+    CHECK_CUFFT(cufftExecZ2D(v2.z2d, v2.d_in, v2.d_py));
+    for (int i=1; i<4; ++i) {
+        CHECK_CUDA(cudaMemcpyAsync((char*)v2.d_cb + offsetof(CallbackInfo, gradient_type), &grad_types[i], sizeof(int), cudaMemcpyHostToDevice, stream));
+        CHECK_CUFFT(cufftExecZ2D(v2.z2d, v2.d_in, ws_v2[i]));
+    }
 
-    double scale = 1.0 / (double)mrad / (double)mphi / (double)mrad / (double)mphi;
-    BracketD2zV2Info h_dci = {v2.d_ws0, v2.d_ws1, v2.d_dum, (int)dum_s.dimensions()[0], mrad, mphi, scale};
-    
-    CHECK_CUDA(cudaMemcpyAsync(v2.d_cb0, &h_ci0, sizeof(CallbackInfoZ2Z), cudaMemcpyHostToDevice, stream));
-    CHECK_CUDA(cudaMemcpyAsync(v2.d_cb1, &h_ci1, sizeof(CallbackInfoZ2Z), cudaMemcpyHostToDevice, stream));
-    CHECK_CUDA(cudaMemcpyAsync(v2.d_d2z_cb, &h_dci, sizeof(BracketD2zV2Info), cudaMemcpyHostToDevice, stream));
-    
-    CHECK_CUFFT(cufftExecZ2Z(v2.p0, v2.d_in, v2.d_ws0, CUFFT_INVERSE));
-    CHECK_CUFFT(cufftExecZ2Z(v2.p1, v2.d_in, v2.d_ws1, CUFFT_INVERSE));
-    CHECK_CUFFT(cufftExecD2Z(v2.d2z, (double*)v2.d_d2z_in, (double2*)out->typed_data()));
+    // Populate D2Z bracket-fusion callback struct
+    BracketD2zInfo h_dci = { v2.d_py, v2.d_fx, v2.d_px, v2.d_fy, v2.d_dum, (int)dum_s.dimensions()[0], mrad, mphi, 1.0 };
+    CHECK_CUDA(cudaMemcpyAsync(v2.d_d2z_cb, &h_dci, sizeof(BracketD2zInfo), cudaMemcpyHostToDevice, stream));
+
+    // D2Z with bracket fusion — pass v2.d_py as the non-null dummy; callback overrides the read
+    CHECK_CUFFT(cufftExecD2Z(v2.d2z, v2.d_py, (double2*)out->typed_data()));
     
     return xla_ffi::Error::Success();
 }

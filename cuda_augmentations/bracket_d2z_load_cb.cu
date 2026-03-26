@@ -17,7 +17,7 @@ __device__ double d_bracket_d2z_load(void *dataIn, unsigned long long offset, vo
     // JAX norm="backward" on irfft2 gives 1/N. Two of them give 1/N^2.
     // cuFFT Z2D is 1.0. So to match JAX, we need 1/N^2.
     // BUT JAX finally multiplies by N. So Total = 1/N.
-    double factor = dum;
+    double factor = dum * ci->scale;
     
     return factor * (ci->py[offset] * ci->fx[offset] - ci->px[offset] * ci->fy[offset]);
 }
