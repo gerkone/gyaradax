@@ -7,9 +7,10 @@ import ctypes
 from pathlib import Path
 
 # --- Argument Parsing ---
+root = Path(__file__).parent.parent
 parser = argparse.ArgumentParser()
 parser.add_argument("--device", type=int, default=0)
-parser.add_argument("--config", type=str, default="configs/iteration_13.yaml")
+parser.add_argument("--config", type=str, default=str(root / "configs" / "iteration_13.yaml"))
 parser.add_argument("--debug", action="store_true", help="Print debug slices and accuracy metrics")
 args, _ = parser.parse_known_args()
 
@@ -49,6 +50,7 @@ def register_ffi():
         "lto_fft_bracket_ffi": _lib.lto_fft_bracket_ffi,
         "lto_fft_bracket_v1_ffi": _lib.lto_fft_bracket_v1_ffi,
         "lto_fft_bracket_v2_ffi": _lib.lto_fft_bracket_v2_ffi,
+        "lto_fft_bracket_vexp_ffi": _lib.lto_fft_bracket_vexp_ffi,
         "cufft_bracket_ffi": _lib.cufft_bracket_ffi,
     }
     
@@ -61,7 +63,8 @@ def register_ffi():
 
 # --- FFI Call Wrapper ---
 def lto_bracket_ffi_call(df, phi, kx, ky, jind, dum_s, batch, mrad, mphi, nkx, nky, version=0):
-    suffix = "" if version == 0 else (f"_v1" if version == 1 else "_v2")
+    suffixes = {0: "", 1: "_v1", 2: "_v2", "exp": "_vexp"}
+    suffix = suffixes.get(version, "")
     target_name = f"lto_fft_bracket{suffix}_ffi"
     
     # All variants (v0, v1, v2) produce a D2Z half-spectrum output: (batch, mrad, mphi//2+1).
@@ -186,6 +189,16 @@ def main():
         out = lto_bracket_ffi_call(d, p_lto, kx_vec, ky_vec, inverse_jind, dum_s, batch_total, mrad, mphi, nkx, nky, 2)
         return apply_physics_wrapper(out, is_lto=True)
 
+    @jax.jit
+    def run_lto_vexp(d, p):
+        # Physics: Bessel Gyro-averaging
+        bessel = pre["bessel"] 
+        gyro_phi_k = bessel * p.reshape(1, 1, -1, nkx, nky)
+        p_lto = gyro_phi_k.reshape(-1, nkx, nky)
+        
+        out = lto_bracket_ffi_call(d, p_lto, kx_vec, ky_vec, inverse_jind, dum_s, batch_total, mrad, mphi, nkx, nky, "exp")
+        return apply_physics_wrapper(out, is_lto=True)
+
     # 4. Standard cuFFT Variant (Non-LTO)
     @jax.jit
     def run_cufft_standard(d, p):
@@ -222,7 +235,8 @@ def main():
         ("cuFFT FFI (std)",    run_cufft_standard,(df_lto, phi_lto)),
         ("LTO cuFFT v0",       run_lto_v0,        (df_lto, phi_lto)),
         ("LTO cuFFT v1",       run_lto_v1,        (df_lto, phi_lto)),
-        ("LTO cuFFT v2",       run_lto_v2,        (df_lto, phi_lto)),
+        ("LTO cuFFT v2 (Fused)",run_lto_v2,       (df_lto, phi_lto)),
+        ("LTO exp (Z2Z)",      run_lto_vexp,      (df_lto, phi_lto)),
     ]
 
     results = {}
