@@ -310,6 +310,24 @@ on `params.adiabatic_electrons` (a static pytree field resolved at trace time).
 
 ## 5. GKW Fortran reference
 
+### 5.0 running GKW
+
+The GKW binary is at `/system/user/publicwork/galletti/gkw.x`. Run it with
+MPI from a directory containing `input.dat`:
+
+```bash
+cd /path/to/run_dir   # must contain input.dat
+/usr/lib64/openmpi/bin/mpirun -np 64 /system/user/publicwork/galletti/gkw.x
+```
+
+GKW creates output files (`time.dat`, `fluxes.dat`, `FDS`, K-dumps, etc.)
+in the same directory. Notes:
+- Do not include `ndump_ts` or `keep_dumps` in `input.dat` (unsupported
+  by this binary version).
+- Reference input files are in `gkw_ref/benchmarks/`.
+- Benchmark cases from the manual are in `gkw_ref/benchmarks/{cyclone,
+  zonal_flow, ETG, beta, geom_miller, ...}/`.
+
 ### 5.1 source code mapping
 
 | physics | Fortran file | key subroutine |
@@ -404,17 +422,13 @@ order. Species is the outermost (slowest) index.
 
 - adaptive CFL uses one-step lag (current step uses previous step's CFL estimate)
 - no multi-species output in `save_dumps` (fluxes are summed over species)
-- **kinetic init from scratch**: starting a kinetic simulation from `init_f`
-  (cosine2) produces modes that grow 6-12x slower than GKW over the first
-  ~300 steps.  The solver is correct (K100→K101 parity is excellent at
-  `rel_l2 < 1e-6` per species), but the cosine2 initial perturbation
-  projects poorly onto the fastest-growing eigenfunction.  Additionally,
-  the GKW reference data contains no K00 dump, making it impossible to
-  confirm that GKW started from the same cold cosine2 init.  Diagnostics
-  show that `max|phi|` at t=0 is comparable to the evolved state (no
-  species cancellation in the phi solve), so the issue is eigenfunction
-  projection, not drive amplitude.  **Recommended workflow**: resume kinetic
-  runs from GKW K-files rather than starting from scratch.
+- **kinetic init from scratch vs GKW reference**: all three kinetic
+  reference cases (`half_rlt`, `ntsks128`, `double_rlt`) were produced
+  with `read_file = .true.` in GKW, meaning they warm-restarted from a
+  previous simulation's output — they did **not** cold-start from cosine2.
+  This explains why no K00 dump exists and why from-scratch runs show much
+  smaller fluxes at early times.  The solver itself is correct: resuming
+  from K-files reproduces GKW fluxes to `rel_err ~ 1e-5`.
 
 ### 7.4 growth rate convention
 

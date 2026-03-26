@@ -104,70 +104,118 @@ def _circular_geometry(theta, q, shat, eps, signB=1.0, signJ=1.0, geom_type="cir
     """Compute all geometry quantities for circular/s-alpha models.
 
     For circ: full Lapillonne model with delta correction and nonlinear theta.
+        finite_epsilon = True (geom.f90:1608 → calc_geom_tensors(.true., .true.))
     For s-alpha: simplified B = 1/(1+eps*cos(theta)), delta=1.
+        finite_epsilon = False (geom.f90:1143 → calc_geom_tensors(.false., .true.))
 
-    Translated from ``geom_circ`` / ``geom_s_alpha`` in geom.f90.
+    Translated from geom_circ / geom_s_alpha in geom.f90.
     """
     ns = len(theta)
+    finite_epsilon = geom_type != "s-alpha"
     R = 1 + eps * np.cos(theta)
 
     if geom_type == "s-alpha":
         dum = 1.0
+        bups = signJ / (2 * np.pi * q)
+        dpfdpsi = eps / q
     else:
         dum = np.sqrt(1 + eps**2 / q**2 / (1 - eps**2))
+        bups = 1.0 / (2 * np.pi * q * np.sqrt(1 - eps**2))
+        dpfdpsi = eps / (q * np.sqrt(1 - eps**2))
     bn = dum / R
-    bups = 1.0 / (2 * np.pi * q * np.sqrt(1 - eps**2))
-    dpfdpsi = eps / (q * np.sqrt(1 - eps**2))
 
-    dzde = _dzetadeps(theta, q, shat, eps, signB, signJ)
+    # ffun: F tensor = bups, or bups/bn when finite_epsilon (geom.f90:3507-3508)
+    ffun = bups / bn if finite_epsilon else np.full(ns, bups)
+    # gfun: G tensor = ffun * dBds / bn (geom.f90:3510-3511)
+    # Note: for both models, gfun uses the actual ffun value
 
-    metric = np.zeros((ns, 3, 3))
-    metric[:, 0, 0] = 1.0
-    metric[:, 0, 1] = metric[:, 1, 0] = dzde
-    metric[:, 0, 2] = metric[:, 2, 0] = np.sin(theta) / (2 * np.pi)
-    metric[:, 1, 1] = (1 / (2 * np.pi * R)) ** 2 * (1 + (1 - eps**2) * (q / eps) ** 2) + dzde**2
-    metric[:, 1, 2] = metric[:, 2, 1] = q * np.sqrt(1 - eps**2) / (
-        2 * np.pi * eps
-    ) ** 2 * signB * signJ + dzde * np.sin(theta) / (2 * np.pi)
-    metric[:, 2, 2] = (1 / (2 * np.pi)) ** 2 * ((1 / eps + np.cos(theta)) ** 2 + np.sin(theta) ** 2)
+    if geom_type == "s-alpha":
+        # s-alpha metric (geom.f90:1375-1392)
+        sgrid = theta / (2 * np.pi)
+        dzde = _dzetadeps(theta, q, shat, eps, signB, signJ)
+        metric = np.zeros((ns, 3, 3))
+        metric[:, 0, 0] = 1.0
+        metric[:, 0, 1] = metric[:, 1, 0] = q * shat * sgrid / eps * signB * signJ
+        metric[:, 0, 2] = metric[:, 2, 0] = 0.0
+        metric[:, 1, 1] = (q / (2 * np.pi * eps)) ** 2 * (1 + (2 * np.pi * shat * sgrid) ** 2)
+        metric[:, 1, 2] = metric[:, 2, 1] = q / (2 * np.pi * eps) ** 2 * signB * signJ
+        metric[:, 2, 2] = 1.0 / (2 * np.pi * eps) ** 2
 
-    dBdpsi_pt = bn * (
-        -np.cos(theta) / R
-        + eps * (1 - shat + eps**2 / (1 - eps**2)) / (eps**2 + q**2 * (1 - eps**2))
-    )
-    dBds_pt = bn * eps * np.sin(theta) / R
-    dBdpsi, dBds = _psi_theta_to_psi_s(dBdpsi_pt, dBds_pt, theta, eps)
+        # s-alpha field derivatives (geom.f90:1361-1370)
+        # GKW convention: these are NOT d(B_N)/d{psi,s} but rather derivatives
+        # of the denominator (1+eps*cos(theta)), matching what calc_geom_tensors
+        # expects for computing gfun, dfun, etc.
+        dBdpsi = -np.cos(theta)
+        dBds = 2 * np.pi * eps * np.sin(theta)
+        # R = 1 + eps*cos(theta)
+        dRdpsi = np.cos(theta)
+        dRds = -2 * np.pi * eps * np.sin(theta)
+        dZdpsi = np.sin(theta)
+        dZds = 2 * np.pi * eps * np.cos(theta)
+    else:
+        # circular metric (geom.f90:1543-1579)
+        dzde = _dzetadeps(theta, q, shat, eps, signB, signJ)
+        metric = np.zeros((ns, 3, 3))
+        metric[:, 0, 0] = 1.0
+        metric[:, 0, 1] = metric[:, 1, 0] = dzde
+        metric[:, 0, 2] = metric[:, 2, 0] = np.sin(theta) / (2 * np.pi)
+        metric[:, 1, 1] = (1 / (2 * np.pi * R)) ** 2 * (
+            1 + (1 - eps**2) * (q / eps) ** 2
+        ) + dzde**2
+        metric[:, 1, 2] = metric[:, 2, 1] = q * np.sqrt(1 - eps**2) / (
+            2 * np.pi * eps
+        ) ** 2 * signB * signJ + dzde * np.sin(theta) / (2 * np.pi)
+        metric[:, 2, 2] = (1 / (2 * np.pi)) ** 2 * (
+            (1 / eps + np.cos(theta)) ** 2 + np.sin(theta) ** 2
+        )
 
-    dRdpsi, dRds = _psi_theta_to_psi_s(np.cos(theta), -eps * np.sin(theta), theta, eps)
-    dZdpsi, dZds = _psi_theta_to_psi_s(np.sin(theta), eps * np.cos(theta), theta, eps)
+        # circular field derivatives (geom.f90:1525-1541)
+        dBdpsi_pt = bn * (
+            -np.cos(theta) / R
+            + eps * (1 - shat + eps**2 / (1 - eps**2)) / (eps**2 + q**2 * (1 - eps**2))
+        )
+        dBds_pt = bn * eps * np.sin(theta) / R
+        dBdpsi, dBds = _psi_theta_to_psi_s(dBdpsi_pt, dBds_pt, theta, eps)
+        dRdpsi, dRds = _psi_theta_to_psi_s(np.cos(theta), -eps * np.sin(theta), theta, eps)
+        dZdpsi, dZds = _psi_theta_to_psi_s(np.sin(theta), eps * np.cos(theta), theta, eps)
+
+    # gfun = ffun * (1/B)(dB/ds). For s-alpha, GKW uses numerical d(ln B)/ds
+    # (gfun_num=true). The raw dBds is d(1+eps*cos)/ds, so
+    # d(B_N)/ds = B_N^2 * dBds_raw and (1/B)(dB/ds) = B_N * dBds_raw.
+    if finite_epsilon:
+        gfun = ffun * dBds / bn
+    else:
+        gfun = ffun * bn * dBds
 
     return {
         "bn": bn,
         "dum": dum,
         "R": R,
-        "ffun": bups / bn,
-        "gfun": bups / bn * dBds / bn,
+        "ffun": ffun,
+        "gfun": gfun,
         "bt_frac": np.full(ns, 1 / dum),
         "bups": bups,
         "dpfdpsi": dpfdpsi,
         "metric": metric,
-        "dzetadeps": dzde,
+        "dzetadeps": dzde if geom_type != "s-alpha" else metric[:, 0, 1],
         "dBdpsi": dBdpsi,
         "dBds": dBds,
         "dRdpsi": dRdpsi,
         "dRds": dRds,
         "dZdpsi": dZdpsi,
         "dZds": dZds,
+        "finite_epsilon": finite_epsilon,
     }
 
 
 def _calc_geom_tensors(cg, signJ=1.0, signB=1.0):
     """Compute E, D, H, I drift tensors from the circular geometry.
 
-    Translated from ``calc_geom_tensors`` in geom.f90 lines 3487-3634.
+    Translated from calc_geom_tensors in geom.f90 lines 3487-3634.
 
     E-tensor (ExB): antisymmetric cofactors of metric rows 0/1,
-        scaled by pi * dpfdpsi / bn^2.
+        scaled by signJ * pi * dpfdpsi.  For finite_epsilon (circular),
+        additionally divided by bn^2 (geom.f90:3544).
     D-tensor (curvature + grad-B drift):
         D_j = (-2*E_{j,psi}*dB/dpsi - 2*E_{j,s}*dB/ds) / B
     H-tensor (Coriolis drift): from dZ/dpsi, dZ/ds with metric coupling
@@ -178,6 +226,7 @@ def _calc_geom_tensors(cg, signJ=1.0, signB=1.0):
     metric = cg["metric"]
     R = cg["R"]
     bups = cg["bups"]
+    finite_epsilon = cg.get("finite_epsilon", True)
     dBdpsi, dBds = cg["dBdpsi"], cg["dBds"]
     dRdpsi, dRds = cg["dRdpsi"], cg["dRds"]
     dZdpsi, dZds = cg["dZdpsi"], cg["dZds"]
@@ -185,14 +234,21 @@ def _calc_geom_tensors(cg, signJ=1.0, signB=1.0):
     m0 = metric[:, 0, :]
     m1 = metric[:, 1, :]
     efun = m0[:, :, None] * m1[:, None, :] - m1[:, :, None] * m0[:, None, :]
-    efun *= signJ * np.pi * cg["dpfdpsi"] / bn[:, None, None] ** 2
+    efun *= signJ * np.pi * cg["dpfdpsi"]
+    if finite_epsilon:
+        efun /= bn[:, None, None] ** 2
 
     e0, e2 = efun[:, :, 0], efun[:, :, 2]
 
-    dfun = (-2 * e0 * dBdpsi[:, None] - 2 * e2 * dBds[:, None]) / bn[:, None]
+    # D-tensor: dfun = -2*(E_{j,psi}*dBdpsi + E_{j,s}*dBds)
+    # for finite_epsilon (circ): additionally divide by bn (geom.f90:3572-3575)
+    dfun = -2 * e0 * dBdpsi[:, None] - 2 * e2 * dBds[:, None]
+    if finite_epsilon:
+        dfun /= bn[:, None]
 
     hfun = -signB * (metric[:, :, 0] * dZdpsi[:, None] + metric[:, :, 2] * dZds[:, None])
-    hfun[:, 2] += signB * bups**2 * dZds / bn**2
+    if finite_epsilon:
+        hfun[:, 2] += signB * bups**2 * dZds / bn**2
     hfun /= bn[:, None]
 
     ifun = 2 * R[:, None] * (e0 * dRdpsi[:, None] + e2 * dRds[:, None])
@@ -400,7 +456,11 @@ def compute_geometry(
     bn, R = cg["bn"], cg["R"]
     little_g = np.stack([cg["metric"][:, 1, 1], cg["dzetadeps"], np.ones(ns)], axis=-1)
 
-    g_zz_mid = (1 / (2 * np.pi * (1 + eps))) ** 2 * (1 + (1 - eps**2) * (q / eps) ** 2)
+    if geom_type == "s-alpha":
+        # g^{ζζ}(s=0) = (q/(2πε))^2 for s-alpha (no shear term at midplane)
+        g_zz_mid = (q / (2 * np.pi * eps)) ** 2
+    else:
+        g_zz_mid = (1 / (2 * np.pi * (1 + eps))) ** 2 * (1 + (1 - eps**2) * (q / eps) ** 2)
     kthnorm = np.sqrt(g_zz_mid)
 
     vpgr, mugr, intvp, intmu = _build_velocity_grids(nvpar, nmu, vpar_max)

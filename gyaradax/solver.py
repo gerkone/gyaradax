@@ -917,6 +917,7 @@ def init_f(
         sine:    amp * de(is) * (sin(2*pi*s) + 1), density-weighted
         noise:   uniform random on [-1, 1] (real + imag)
         gnoise:  gaussian random (Box-Muller transform)
+        zonal:   Rosenbluth-Hinton test — only ky=0, kx=±1 with Maxwellian weight
     """
     nv, nmu, ns, nkx, nky = (
         len(geometry["intvp"]),
@@ -981,12 +982,48 @@ def init_f(
             prof_s = prof_s * de_val
             df = _broadcast_profile(prof_s, None, n_species, nv, nmu, ns, nkx, nky)
 
+    elif finit == "zonal":
+        # Rosenbluth-Hinton test: only the zonal mode (ky=0) is initialized.
+        # In spectral space, set kx = ±1 around kx=0 with ±i*amp*fmaxwl/2
+        # to produce a sin(kx*x) radial density perturbation.  Only ions
+        # (signz > 0) are initialized.  (GKW init.f90:1471-1514)
+        kxrh = jnp.asarray(geometry["kxrh"], dtype=jnp.float64)
+        ixzero = int(jnp.argmin(jnp.abs(kxrh)).item())
+        iy0 = int(jnp.asarray(
+            geometry.get("iyzero", jnp.argmin(jnp.abs(jnp.asarray(geometry["krho"]))))
+        ).item())
+
+        df = jnp.zeros(full_shape, dtype=jnp.complex128)
+
+        if n_species > 1:
+            signz = jnp.asarray(geometry.get("signz", jnp.ones(n_species)), dtype=jnp.float64)
+            for isp in range(n_species):
+                if float(signz[isp]) > 0:
+                    if ixzero > 0:
+                        df = df.at[isp, :, :, :, ixzero - 1, iy0].set(
+                            -1j * amp * maxwellian_env / 2.0
+                        )
+                    if ixzero < nkx - 1:
+                        df = df.at[isp, :, :, :, ixzero + 1, iy0].set(
+                            1j * amp * maxwellian_env / 2.0
+                        )
+        else:
+            if ixzero > 0:
+                df = df.at[:, :, :, ixzero - 1, iy0].set(
+                    -1j * amp * maxwellian_env / 2.0
+                )
+            if ixzero < nkx - 1:
+                df = df.at[:, :, :, ixzero + 1, iy0].set(
+                    1j * amp * maxwellian_env / 2.0
+                )
+        return df.astype(jnp.complex128)
+
     else:
         raise ValueError(f"unknown finit: {finit}")
 
     df = df.astype(jnp.complex128)
 
-    # zero out the zonal mode (ky=0)
+    # zero out the zonal mode (ky=0) — not for zonal init which IS the zonal mode
     if nky > 1:
         iy0 = int(
             jnp.asarray(

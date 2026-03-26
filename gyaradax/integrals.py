@@ -73,10 +73,14 @@ def geom_tensors(geometry: Dict[str, jnp.ndarray], params: Any = None) -> Dict[s
     gamma_arg = jnp.clip(gamma_arg, 0.0, 500.0)
     geom_["gamma"] = i0(gamma_arg) * jnp.exp(-gamma_arg)
 
-    # zonal mode detection: ky-index 0 is only the zonal mode if krho[0] ≈ 0
+    # zonal mode detection
     krho_flat = jnp.asarray(geometry["krho"], dtype=jnp.float64)
+    kxrh_flat = jnp.asarray(geometry["kxrh"], dtype=jnp.float64)
     iyzero = jnp.argmin(jnp.abs(krho_flat))
+    ixzero = jnp.argmin(jnp.abs(kxrh_flat))
     geom_["has_zonal"] = jnp.where(jnp.abs(krho_flat[iyzero]) < 1e-10, 1.0, 0.0)
+    geom_["ixzero"] = ixzero
+    geom_["iyzero"] = iyzero
 
     return geom_
 
@@ -103,14 +107,17 @@ def _phi_adiabatic(geom: Dict[str, jnp.ndarray], df: jnp.ndarray) -> jnp.ndarray
     matz = -ints / (signz * de * denom)
     # flux-surface averaging only applies to the zonal mode (ky=0)
     has_zonal = geom["has_zonal"]
-    matz = matz.at[..., 1:].set(0.0)
-    matz = matz * has_zonal
+    ixzero, iyzero = geom["ixzero"], geom["iyzero"]
+
+    # zero matz for all ky except the zonal mode
+    ky_is_zonal = jnp.arange(matz.shape[-1]) == iyzero
+    matz = matz * ky_is_zonal * has_zonal
 
     phi = poisson_int * df
     phi = jnp.sum(phi, axis=(1, 2), keepdims=True)
 
     y_mask = jnp.zeros_like(phi)
-    y_mask = y_mask.at[..., 0].set(has_zonal)
+    y_mask = y_mask.at[..., iyzero].set(has_zonal)
 
     bufphi = matz * phi
     bufphi = jnp.sum(bufphi, axis=3, keepdims=True)
@@ -118,17 +125,18 @@ def _phi_adiabatic(geom: Dict[str, jnp.ndarray], df: jnp.ndarray) -> jnp.ndarray
     maty_sum = jnp.sum(-matz * jnp.exp(-cfen), axis=3, keepdims=True)
     maty = tmp / (de * jnp.exp(-cfen)) + maty_sum / jnp.exp(-cfen)
 
-    x_mask = jnp.zeros_like(phi)
-    x_mask = x_mask.at[..., 0, :].set(1.0)
-    maty_val = jnp.where(x_mask > 0, 1.0 + 0j, maty)
+    # at kx=0 (ixzero), set maty=1 to skip the correction (GKW: if ix==ixzero, val=1)
+    x_is_zero = jnp.arange(phi.shape[-2]) == ixzero
+    x_mask = jnp.broadcast_to(x_is_zero[None, None, None, None, :, None], phi.shape)
+    maty_val = jnp.where(x_mask, 1.0 + 0j, maty)
     maty_val = jnp.where(jnp.abs(maty_val) < 1e-15, 1.0, maty_val)
     maty_val = 1.0 / maty_val
     phi = phi + maty_val * bufphi * y_mask
 
     poisson_diag = jnp.exp(-cfen) * (signz**2) * de * (gamma - 1.0) / tmp
-    # only zero phi at (kx=0, ky=0) when a real zonal mode exists
+    # zero phi at (kx=0, ky=0) when a real zonal mode exists
     norm_mask = jnp.ones_like(phi)
-    norm_mask = norm_mask.at[..., 0, 0].set(1.0 - has_zonal)
+    norm_mask = norm_mask.at[..., ixzero, iyzero].set(1.0 - has_zonal)
 
     pdiag = poisson_diag * norm_mask - signz * jnp.exp(-cfen) * de / tmp
     pdiag = jnp.where(jnp.abs(pdiag) < 1e-15, -1.0, pdiag)
