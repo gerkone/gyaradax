@@ -1,6 +1,6 @@
 import jax
 import jax.numpy as jnp
-from jax.scipy.special import i0, bessel_jn
+from jax.scipy.special import i0e, bessel_jn
 from einops import rearrange
 from typing import Dict, Tuple, Any
 
@@ -71,7 +71,7 @@ def geom_tensors(geometry: Dict[str, jnp.ndarray], params: Any = None) -> Dict[s
     gamma_arg = geom_["mas"] * vthrat * krloc
     gamma_arg = 0.5 * (gamma_arg / (sz * geom_["bn"])) ** 2
     gamma_arg = jnp.clip(gamma_arg, 0.0, 500.0)
-    geom_["gamma"] = i0(gamma_arg) * jnp.exp(-gamma_arg)
+    geom_["gamma"] = i0e(gamma_arg)
 
     # zonal mode detection
     krho_flat = jnp.asarray(geometry["krho"], dtype=jnp.float64)
@@ -178,7 +178,7 @@ def _species_bessel_gamma(geometry):
     gamma_arg = 0.5 * (mas_6d * vthrat_6d * krloc / (sz * bn)) ** 2
     gamma_arg = jnp.clip(gamma_arg, 0.0, 500.0)
     gamma_arg_nommu = gamma_arg[:, :, 0:1, :, :, :]
-    gamma = i0(gamma_arg_nommu) * jnp.exp(-gamma_arg_nommu)
+    gamma = i0e(gamma_arg_nommu)
 
     return bessel, gamma
 

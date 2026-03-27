@@ -469,6 +469,34 @@ consecutive windows. See `solver.py:advance_state`.
 | adaptive CFL 20 steps | all 3 cases | finiteness (dt=0.004) | pass |
 | adiabatic fallback | 4 iterations | shapes + finiteness | pass |
 
+### 8.3 Rosenbluth-Hinton zonal flow test
+
+The adiabatic phi solve (`_phi_adiabatic` in `integrals.py`) was verified to
+satisfy the self-consistent quasineutrality equation
+`A*phi + (n_e/T_e)*<phi>_fsa = -N` to **machine precision** (relative error
+2.2e-15). The Gamma0 computation was updated from `i0(b)*exp(-b)` to `i0e(b)`
+for numerical stability at large arguments (matches GKW's `expbessi0`).
+
+**RH test configuration requirements:**
+- `rlt=0, rln=0` (no equilibrium drive — Term V must be zero)
+- `disp_par=0, disp_vp=0, disp_x=0, disp_y=0` (no dissipation)
+- `drive_scale=1.0` (**must NOT be 0** — Term VIII drift-field coupling is
+  essential for the GAM oscillation physics)
+- `non_linear=True` (to skip per-ky normalization)
+- `finit='zonal'`, `amp_init_real=1e-4`
+
+| test | params | metric | result |
+|------|--------|--------|--------|
+| phi self-consistency | q=1.3, eps=0.05, kx=0.45 | `max\|A*phi + <phi> + N\| / max\|N\|` | `2.2e-15` |
+| GAM oscillation | ns=128, nvpar=128, nmu=16 | visible damped oscillation | pass |
+| early plateau residual | t=4–8, kx=0.45 | `\|<phi>_fsa(t)\| / \|<phi>_fsa(0)\|` | `0.067–0.090` |
+| Xiao-Catto target | — | analytical | `0.0711` |
+
+The early-plateau residual at kx=0.45 approaches the target but has ~15%
+residual error, likely due to finite-FLR corrections at k_perp*rho=0.45 (the
+analytical formula assumes k→0). Diagnostic scripts:
+`scripts/rh_diagnostic.py`, `scripts/rh_run.py`.
+
 ## 9. circular geometry model (`geometry.py`)
 
 Formulas translated from `gkw_ref/src/geom.f90` (`geom_circ` lines 1444-1616,

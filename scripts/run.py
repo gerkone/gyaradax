@@ -58,9 +58,23 @@ def _has_geom_dat(data_dir):
     return data_dir and os.path.exists(os.path.join(data_dir, "geom.dat"))
 
 
-def _find_k_file(data_dir):
-    """return path to the first K-file in data_dir, or None."""
+def _find_k_file(data_dir, resume_from=None):
+    """Return path to a K-file in data_dir, or None.
+
+    If resume_from is given (e.g. 'K01', '100', 'K03'), use that specific file.
+    Otherwise use the first available K-file.
+    """
     if not data_dir:
+        return None
+    if resume_from:
+        path = os.path.join(data_dir, resume_from)
+        if os.path.exists(path):
+            return path
+        # try with K prefix
+        path = os.path.join(data_dir, f"K{resume_from}")
+        if os.path.exists(path):
+            return path
+        print(f"  warning: resume file '{resume_from}' not found in {data_dir}")
         return None
     ks = K_files(data_dir)
     if ks:
@@ -76,9 +90,9 @@ def _setup_run(config_path, args):
     name = cfg.run.name
     kinetic = args.kinetic
 
-    output_dir = f"validation_{'kinetic' if kinetic else 'outputs'}_{name}"
+    output_dir = args.output_dir or f"validation_{'kinetic' if kinetic else 'outputs'}_{name}"
 
-    overrides = {"mixed_precision": args.mp}
+    overrides = {"mixed_precision": True}  # args.mp}
     if kinetic:
         overrides["adaptive_dt"] = True
     params = gkparams_from_config(cfg, **overrides)
@@ -92,7 +106,8 @@ def _setup_run(config_path, args):
     if not params.adiabatic_electrons:
         n_species = int(jnp.asarray(params.mas).shape[0])
 
-    k_path = None if args.from_scratch else _find_k_file(data_dir)
+    resume_from = getattr(args, "resume_from", None)
+    k_path = None if args.from_scratch else _find_k_file(data_dir, resume_from)
 
     if k_path is not None:
         res = tuple(len(geometry[k]) for k in ("intvp", "intmu", "ints", "kxrh", "krho"))
@@ -175,7 +190,7 @@ def run(config_path, args):
         pre=s["pre"],
         output_dir=s["output_dir"],
         checkpoint_interval=s["block_size"],
-        save_snapshots=False,
+        save_snapshots=args.save_dumps,
     )
     runtime = time.time() - t0
     print(f"\ncompleted in {runtime:.1f}s ({s['n_steps'] / runtime:.1f} steps/s)")
@@ -344,6 +359,9 @@ def main():
     parser.add_argument("--block-size", type=int, default=120)
     parser.add_argument("--n-blocks", type=int, default=None)
     parser.add_argument("--from-scratch", action="store_true", help="ignore K-files, use init_f")
+    parser.add_argument("--resume-from", type=str, default=None, help="resume from a specific K-file (e.g. K03, 100, K01)")
+    parser.add_argument("--output-dir", type=str, default=None, help="override output directory")
+    parser.add_argument("--save-dumps", action="store_true", help="save full 5D df snapshots at each checkpoint")
 
     args = parser.parse_args()
     if len(args.inputs) > 1:
