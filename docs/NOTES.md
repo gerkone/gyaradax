@@ -181,19 +181,46 @@ The large-step cadence `naverage` groups small steps for diagnostic output.
 In linear mode, per-$k_y$ normalization is applied at large-step boundaries.
 
 **CFL-adaptive timestep** (`adaptive_dt=True`, default for kinetic electrons):
-the timestep is adjusted each step to satisfy two CFL constraints:
+the timestep is adjusted each step to satisfy CFL constraints derived from
+von Neumann stability analysis, matching GKW's `get_estimated_timestep`
+(`matdat.F90:1356-1512`).
 
-1. **Nonlinear ExB CFL**: $\Delta t_{NL} = \sigma \times 2 / \max|\nabla\phi|$,
+The analysis separates RHS terms by derivative order and applies
+RK4-specific stability factors:
+
+1. **ideriv=1 — first-derivative terms** (streaming, trapping):
+   $$t_{max,1} = \max\!\left(\frac{|u_\parallel|_\infty \cdot c_{D1}}{\Delta s},\;
+   \frac{|u_{trap}|_\infty \cdot c_{V1}}{\Delta v_\parallel}\right)$$
+   where $c_{D1} = 2$ and $c_{V1} = 2/3$ are the maximum finite-difference
+   stencil coefficients (boundary row for the parallel 4th-order upwinded
+   scheme; interior central stencil for velocity).
+
+2. **Field CFL — electrostatic mode frequency** (kinetic electrons only,
+   `time_est_field` in `matdat.F90:1859-1940`):
+   $$t_{max,\text{field}} = \frac{1}{\min_s\left[2\pi q\,\Delta s\, B(s)
+   \sqrt{m_{ir}\, k_{\perp,\min}^2\, m_{er}}\right]}$$
+   where $m_{ir} = \sum_\text{ion} m_s n_s$, $m_{er} = m_e / n_e$, and
+   $k_{\perp,\min}^2 = k_{y,1}^2 g_{\zeta\zeta}(s)$.  For kinetic electrons
+   this is typically the **dominant constraint** ($t_{max,\text{field}} \approx 3.4
+   \times t_{max,1}$ for the standard kinetic grid).
+
+3. **ideriv=4 — fourth-derivative dissipation** (parallel and velocity):
+   $$t_{max,4} = \max\!\left(\frac{\nu_\parallel\, |u_\parallel|_\infty \cdot c_{D4}}{\Delta s},\;
+   \frac{\nu_v\, |u_{trap}|_\infty \cdot c_{V4}}{\Delta v_\parallel}\right)$$
+
+4. **Nonlinear ExB CFL**: $\Delta t_{NL} = \sigma \times 2 / \max|\nabla\phi|$,
    computed from the dealiased real-space potential gradient. Safety factor
    $\sigma = 0.95$ by default (`cfl_safety` parameter).
 
-2. **Linear parallel streaming CFL**: $\Delta t_{par} = 0.5 \times \Delta s / \max|v_{\parallel,s}|$
-   and $\Delta t_{trap} = 0.5 \times \Delta v_\parallel / \max|v_{trap,s}|$,
-   where the characteristic speeds include the per-species $v_{th,s}/v_{th,ref}$
-   scaling. For kinetic electrons with $v_{th,e}/v_{th,i} \approx 60$, this is
-   the binding constraint (dt ~ 0.002 vs input dt = 0.004).
+The combined constraint for RK4 (`meth=2` in GKW):
+$$t_{max} = \max\!\left(\frac{\max(t_{max,1},\, t_{max,\text{field}})}{2.4},\;
+\frac{t_{max,4}}{2.4},\; 40\right)$$
+$$\Delta t_\text{lin} = \frac{f_\text{dtim}}{t_{max}}, \qquad f_\text{dtim} = 0.95$$
 
-The effective timestep is $\Delta t = \min(\Delta t_{NL}, \Delta t_{par}, \Delta t_{trap}, \Delta t_{input})$.
+The factor 2.4 is the RK4 stability boundary; the floor of 40 prevents
+unreasonably large $\Delta t$ when linear terms are weak
+(`matdat.F90:1507`).  The effective timestep is
+$\Delta t = \min(\Delta t_{NL}, \Delta t_\text{lin}, \Delta t_\text{input})$.
 Uses one-step lag: each step's dt is estimated from the previous step's $\phi$.
 
 ### 3.2 spatial discretization
@@ -232,7 +259,9 @@ per-step branching on the sign of $v_\parallel$.
 | `geometry.py` | analytic circular geometry + mode connectivity (primary path) |
 | `stencils.py` | finite difference coefficient tables |
 | `utils.py` | K-dump loading, checkpoint save/load, diagnostics, GKW file-loading (`load_geometry`, `parse_input_dat`) |
-| `gksimulate.py` | high-level simulation runner from YAML config |
+| `simulate.py` | high-level simulation runner from YAML config |
+| `diag.py` | spectral diagnostics, 1D projections, nonlinear term analysis |
+| `bootstrap.py` | centralized JAX configuration and device initialization |
 | `plot_utils.py` | publication-quality visualization |
 
 ### 4.2 key interfaces
@@ -280,6 +309,24 @@ The adiabatic path is completely untouched — branching is via Python `if/else`
 on `params.adiabatic_electrons` (a static pytree field resolved at trace time).
 
 ## 5. GKW Fortran reference
+
+### 5.0 running GKW
+
+The GKW binary is at `/system/user/publicwork/galletti/gkw.x`. Run it with
+MPI from a directory containing `input.dat`:
+
+```bash
+cd /path/to/run_dir   # must contain input.dat
+/usr/lib64/openmpi/bin/mpirun -np 64 /system/user/publicwork/galletti/gkw.x
+```
+
+GKW creates output files (`time.dat`, `fluxes.dat`, `FDS`, K-dumps, etc.)
+in the same directory. Notes:
+- Do not include `ndump_ts` or `keep_dumps` in `input.dat` (unsupported
+  by this binary version).
+- Reference input files are in `gkw_ref/benchmarks/`.
+- Benchmark cases from the manual are in `gkw_ref/benchmarks/{cyclone,
+  zonal_flow, ETG, beta, geom_miller, ...}/`.
 
 ### 5.1 source code mapping
 
@@ -375,6 +422,13 @@ order. Species is the outermost (slowest) index.
 
 - adaptive CFL uses one-step lag (current step uses previous step's CFL estimate)
 - no multi-species output in `save_dumps` (fluxes are summed over species)
+- **kinetic init from scratch vs GKW reference**: all three kinetic
+  reference cases (`half_rlt`, `ntsks128`, `double_rlt`) were produced
+  with `read_file = .true.` in GKW, meaning they warm-restarted from a
+  previous simulation's output — they did **not** cold-start from cosine2.
+  This explains why no K00 dump exists and why from-scratch runs show much
+  smaller fluxes at early times.  The solver itself is correct: resuming
+  from K-files reproduces GKW fluxes to `rel_err ~ 1e-5`.
 
 ### 7.4 growth rate convention
 
@@ -414,6 +468,34 @@ consecutive windows. See `solver.py:advance_state`.
 | CFL vs GKW dtim | all 3 cases | `ratio(dt_est, dtim)` | `0.3 – 3.0` |
 | adaptive CFL 20 steps | all 3 cases | finiteness (dt=0.004) | pass |
 | adiabatic fallback | 4 iterations | shapes + finiteness | pass |
+
+### 8.3 Rosenbluth-Hinton zonal flow test
+
+The adiabatic phi solve (`_phi_adiabatic` in `integrals.py`) was verified to
+satisfy the self-consistent quasineutrality equation
+`A*phi + (n_e/T_e)*<phi>_fsa = -N` to **machine precision** (relative error
+2.2e-15). The Gamma0 computation was updated from `i0(b)*exp(-b)` to `i0e(b)`
+for numerical stability at large arguments (matches GKW's `expbessi0`).
+
+**RH test configuration requirements:**
+- `rlt=0, rln=0` (no equilibrium drive — Term V must be zero)
+- `disp_par=0, disp_vp=0, disp_x=0, disp_y=0` (no dissipation)
+- `drive_scale=1.0` (**must NOT be 0** — Term VIII drift-field coupling is
+  essential for the GAM oscillation physics)
+- `non_linear=True` (to skip per-ky normalization)
+- `finit='zonal'`, `amp_init_real=1e-4`
+
+| test | params | metric | result |
+|------|--------|--------|--------|
+| phi self-consistency | q=1.3, eps=0.05, kx=0.45 | `max\|A*phi + <phi> + N\| / max\|N\|` | `2.2e-15` |
+| GAM oscillation | ns=128, nvpar=128, nmu=16 | visible damped oscillation | pass |
+| early plateau residual | t=4–8, kx=0.45 | `\|<phi>_fsa(t)\| / \|<phi>_fsa(0)\|` | `0.067–0.090` |
+| Xiao-Catto target | — | analytical | `0.0711` |
+
+The early-plateau residual at kx=0.45 approaches the target but has ~15%
+residual error, likely due to finite-FLR corrections at k_perp*rho=0.45 (the
+analytical formula assumes k→0). Diagnostic scripts:
+`scripts/rh_diagnostic.py`, `scripts/rh_run.py`.
 
 ## 9. circular geometry model (`geometry.py`)
 

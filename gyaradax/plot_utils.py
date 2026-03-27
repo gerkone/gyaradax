@@ -237,9 +237,17 @@ def plot_spectra(
     ref_phi: Optional[jnp.ndarray] = None,
     ref_kx_spec: Optional[np.ndarray] = None,
     ref_ky_spec: Optional[np.ndarray] = None,
+    kx_spec_std: Optional[np.ndarray] = None,
+    ky_spec_std: Optional[np.ndarray] = None,
+    ref_kx_spec_std: Optional[np.ndarray] = None,
+    ref_ky_spec_std: Optional[np.ndarray] = None,
     title: str = "",
+    shade_alpha: float = 0.25,
 ) -> plt.Figure:
-    """Plot radial and binormal spectra. Accepts either phi or pre-computed 1D spectra."""
+    """Plot radial and binormal spectra. Accepts either phi or pre-computed 1D spectra.
+
+    Optional std arrays add shaded error bounds around the mean lines.
+    """
     if kx_spec is None or ky_spec is None:
         if phi is None:
             raise ValueError("provide either phi or both (kx_spec, ky_spec)")
@@ -264,11 +272,15 @@ def plot_spectra(
             while 0 <= curr < N:
                 idx.append(curr)
                 count += 1
-                # Increase the gap between crosses every 3 plotted points
-                if count % 3 == 0:  
+                if count % 3 == 0:
                     step += 1
                 curr += direction * step
         return np.sort(idx)
+
+    def _shade(ax, x, mean, std, color):
+        lo = np.maximum(mean - std, 1e-30)
+        hi = mean + std
+        ax.fill_between(x, lo, hi, color=color, alpha=shade_alpha, lw=0)
 
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(7.0, 2.2))
 
@@ -281,8 +293,9 @@ def plot_spectra(
         lw=1,
         label="gyaradax",
     )
+    if ky_spec_std is not None:
+        _shade(ax1, ky, ky_spec, ky_spec_std, JAX_COLORS["purple"])
     if ref_ky_spec is not None:
-        # idx_y = _progressive_sparse_indices(ref_ky_spec)
         ax1.semilogy(
             ky,
             ref_ky_spec,
@@ -293,6 +306,8 @@ def plot_spectra(
             markeredgewidth=1,
             label="GKW",
         )
+        if ref_ky_spec_std is not None:
+            _shade(ax1, ky, ref_ky_spec, ref_ky_spec_std, "black")
     ax1.set_xlabel(r"$k_y \rho_{ref}$", fontsize=12)
     ax1.set_ylabel(r"$k_y^{\text{spec}}$", fontsize=12)
     ax1.set_title(r"$k_y$ spectrum", fontsize=12)
@@ -300,6 +315,8 @@ def plot_spectra(
     ax1.legend(fontsize=10)
 
     ax2.semilogy(kx, kx_spec, "o-", color=JAX_COLORS["purple"], markersize=3, lw=1)
+    if kx_spec_std is not None:
+        _shade(ax2, kx, kx_spec, kx_spec_std, JAX_COLORS["purple"])
     if ref_kx_spec is not None:
         idx_x = _progressive_sparse_indices(ref_kx_spec)
         ax2.semilogy(
@@ -311,11 +328,13 @@ def plot_spectra(
             markersize=4,
             markeredgewidth=1,
         )
+        if ref_kx_spec_std is not None:
+            _shade(ax2, kx, ref_kx_spec, ref_kx_spec_std, "black")
         ax2.set_xlabel(r"$k_x \rho_{ref}$", fontsize=12)
     ax2.set_ylabel(r"$k_x^{\text{spec}}$", fontsize=12)
     ax2.set_title(r"$k_x$ spectrum", fontsize=12)
     ax2.grid(True, which="both")
-    
+
     if len(title) > 0:
         fig.suptitle(title, fontweight="bold", fontsize=14)
     fig.tight_layout()

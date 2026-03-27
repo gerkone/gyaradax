@@ -14,6 +14,7 @@ dependencies = [
     "einops",
     "matplotlib",
     "pillow",
+    "scipy",
 ]
 
 [project.optional-dependencies]
@@ -22,6 +23,9 @@ dev = [
     "ruff",
     "black",
 ]
+
+[tool.setuptools.packages.find]
+include = ["gyaradax*"]
 
 [tool.ruff]
 line-length = 100

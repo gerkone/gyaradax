@@ -14,8 +14,8 @@ solver:
   adaptive_dt: false
   finit: sine
 physics:
-  rlt: 10.173595669502436
-  rln: 2.6087803694867335
+  rlt: 7.366463312621599
+  rln: 1.5940168155580587
   mas: 1.0
   tmp: 1.0
   de: 1.0

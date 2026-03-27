@@ -80,15 +80,58 @@ def log_step(fluxes, state: GKState, wall_time: float, n_steps: int = 0):
     )
 
 
+def _ensure_species_arrays(
+    geometry: Dict[str, jnp.ndarray], params: GKParams
+) -> Dict[str, jnp.ndarray]:
+    """Ensure geometry carries multi-species arrays consistent with params.
+
+    ``compute_geometry`` always creates single-element species placeholders
+    (``mas=[1.0]``, etc.).  When params describes multiple species the
+    downstream flux diagnostics (``calculate_fluxes_kinetic``) need per-species
+    arrays in the geometry dict.  This helper copies them from params when the
+    geometry arrays are too short.
+    """
+    _SPECIES_KEYS = ("mas", "signz", "de", "tmp", "vthrat", "rlt", "rln")
+    mas = jnp.asarray(params.mas, dtype=jnp.float64)
+    nsp = int(mas.shape[0]) if mas.ndim > 0 else 1
+    if nsp <= 1:
+        return geometry
+
+    geom_nsp = int(jnp.asarray(geometry.get("mas", jnp.ones(1))).shape[0])
+    if geom_nsp >= nsp:
+        return geometry
+
+    geometry = dict(geometry)  # shallow copy
+    for k in _SPECIES_KEYS:
+        val = getattr(params, k, None)
+        if val is not None:
+            geometry[k] = jnp.asarray(val, dtype=jnp.float64)
+    return geometry
+
+
 def gk_init(
     geometry: Dict[str, jnp.ndarray],
     params: GKParams,
     n_species: int = 1,
-) -> Tuple[jnp.ndarray, GKState]:
-    """Create initial (df, state) from geometry and params. No IO."""
+) -> Tuple[jnp.ndarray, Dict[str, jnp.ndarray], GKState]:
+    """Create initial (df, geometry, state) from geometry and params. No IO.
+
+    When *params* indicates kinetic electrons, the geometry dict is
+    augmented with per-species arrays from *params* if they are missing
+    (e.g. when using ``compute_geometry`` which only creates single-species
+    placeholders).  The **returned** geometry must be used for all
+    subsequent calls (``gksolve``, ``linear_precompute``, fluxes, etc.).
+    """
+    if not params.adiabatic_electrons:
+        mas = jnp.asarray(params.mas, dtype=jnp.float64)
+        n_species = max(n_species, int(mas.shape[0]) if mas.ndim > 0 else 1)
+
+    geometry = _ensure_species_arrays(geometry, params)
+
     df = init_f(
         geometry,
         finit=params.finit,
+        amp_init_real=params.amp_init,
         norm_eps=params.norm_eps,
         n_species=n_species,
     )
@@ -103,7 +146,7 @@ def gk_init(
         window_start_amp=amp0,
         last_growth_rate=state.last_growth_rate,
     )
-    return df, state
+    return df, geometry, state
 
 
 def gk_run(
@@ -185,7 +228,7 @@ def gksimulate(
             geometry,
             save_dumps=save_snapshots,
         )
-        
+
     start_step = int(state.step)
     target_step = start_step + n_steps
     current_df = df
@@ -230,6 +273,52 @@ def gksimulate(
     return current_df, current_phi, current_fluxes, current_state
 
 
+def gk_from_gkw_dir(
+    gkw_dir: str,
+    **overrides,
+) -> Tuple[jnp.ndarray, Dict[str, jnp.ndarray], GKParams, GKState, GKPre]:
+    """Load a GKW run directory -> (df, geometry, params, state, pre).
+
+    Builds params from input.dat, loads geometry from geom.dat,
+    and resumes from the last K-file. No YAML config needed.
+    """
+    from gyaradax.params import gkparams_from_input_and_geometry
+    from gyaradax.utils import K_files, load_gkw_k_dump, read_gkw_dump_time
+
+    input_dat = os.path.join(gkw_dir, "input.dat")
+    geometry = load_geometry(gkw_dir)
+    params = gkparams_from_input_and_geometry(input_dat, geometry, **overrides)
+    geometry = _ensure_species_arrays(geometry, params)
+
+    n_species = 1
+    if not params.adiabatic_electrons:
+        n_species = int(jnp.asarray(params.mas).shape[0])
+
+    res = tuple(len(geometry[k]) for k in ("intvp", "intmu", "ints", "kxrh", "krho"))
+    k_files = K_files(gkw_dir)
+    if k_files:
+        k_path = os.path.join(gkw_dir, k_files[-1])
+        df = jnp.asarray(load_gkw_k_dump(k_path, res, n_species=n_species), dtype=jnp.complex128)
+        dat_path = k_path + ".dat"
+        t_start = read_gkw_dump_time(dat_path) if os.path.exists(dat_path) else 0.0
+    else:
+        df, geometry, _ = gk_init(geometry, params, n_species=n_species)
+        t_start = 0.0
+
+    phi0 = _compute_phi_for_init(df, geometry, params)
+    amp0 = mode_amplitude(phi0, geometry, params.norm_eps)
+    nky = len(geometry["krho"])
+    state = GKState(
+        time=jnp.array(t_start, dtype=jnp.float64),
+        step=jnp.array(0, dtype=jnp.int32),
+        accumulated_norm_factor=jnp.ones(nky, dtype=jnp.float64),
+        window_start_amp=amp0,
+        last_growth_rate=jnp.zeros(nky, dtype=jnp.float64),
+    )
+    pre = linear_precompute(geometry, params)
+    return df, geometry, params, state, pre
+
+
 def gk_from_config(
     config_path: str,
     **overrides,
@@ -253,7 +342,7 @@ def gk_from_config(
     if not params.adiabatic_electrons:
         n_species = int(jnp.asarray(params.mas).shape[0])
 
-    df, state = gk_init(geometry, params, n_species=n_species)
+    df, geometry, state = gk_init(geometry, params, n_species=n_species)
     pre = linear_precompute(geometry, params)
 
     return df, geometry, params, state, pre

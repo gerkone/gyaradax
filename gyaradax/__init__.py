@@ -15,7 +15,7 @@ from gyaradax.solver import (
     gkstep_single,
     init_f,
 )
-from gyaradax.simulate import gksimulate, gk_init, gk_run, gk_from_config
+from gyaradax.simulate import gksimulate, gk_init, gk_run, gk_from_config, gk_from_gkw_dir
 from gyaradax.utils import load_geometry
 from gyaradax.geometry import (
     compute_geometry,
@@ -35,6 +35,7 @@ __all__ = [
     "gk_init",
     "gk_run",
     "gk_from_config",
+    "gk_from_gkw_dir",
     "init_f",
     "load_config",
     "gkparams_from_config",

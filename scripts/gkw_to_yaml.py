@@ -1,7 +1,17 @@
 import os
 import argparse
+import numpy as np
 from omegaconf import OmegaConf
 from gyaradax.utils import parse_input_dat, load_scalars
+
+
+def _to_native(v):
+    """Convert numpy scalars/arrays to plain Python types for OmegaConf."""
+    if isinstance(v, np.ndarray):
+        return v.tolist()
+    if isinstance(v, (np.integer, np.floating)):
+        return v.item()
+    return v
 
 
 def gkw_to_yaml(gkw_dir, output_yaml):
@@ -11,7 +21,7 @@ def gkw_to_yaml(gkw_dir, output_yaml):
         return
 
     # 1. extract all scalars using the library helper
-    scalars = load_scalars(gkw_dir)
+    scalars = {k: _to_native(v) for k, v in load_scalars(gkw_dir).items()}
 
     # 2. extract grid resolution for metadata
     input_dat_path = os.path.join(gkw_dir, "input.dat")

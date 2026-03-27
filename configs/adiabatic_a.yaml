@@ -14,8 +14,8 @@ solver:
   adaptive_dt: false
   finit: cosine2
 physics:
-  rlt: 10.2
-  rln: 2.6
+  rlt: 10.173595669502436
+  rln: 2.6087803694867335
   mas: 1.0
   tmp: 1.0
   de: 1.0
