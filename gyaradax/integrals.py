@@ -188,7 +188,7 @@ def precompute_phi_kinetic(geometry: Dict[str, jnp.ndarray]):
     Precompute static arrays for the kinetic phi solve.
 
     returns (phi_weight, phi_diag) where:
-        phi_weight: (nsp, 1, nmu, ns, nkx, nky) — poisson integral weight
+        phi_weight: (nsp, nvpar, nmu, ns, nkx, nky) — poisson integral weight
         phi_diag: (ns, nkx, nky) — poisson diagonal (with zonal mode set to 1)
     """
     bessel, gamma = _species_bessel_gamma(geometry)

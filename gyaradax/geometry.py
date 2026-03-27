@@ -159,9 +159,7 @@ def _circular_geometry(theta, q, shat, eps, signB=1.0, signJ=1.0, geom_type="cir
         metric[:, 0, 0] = 1.0
         metric[:, 0, 1] = metric[:, 1, 0] = dzde
         metric[:, 0, 2] = metric[:, 2, 0] = np.sin(theta) / (2 * np.pi)
-        metric[:, 1, 1] = (1 / (2 * np.pi * R)) ** 2 * (
-            1 + (1 - eps**2) * (q / eps) ** 2
-        ) + dzde**2
+        metric[:, 1, 1] = (1 / (2 * np.pi * R)) ** 2 * (1 + (1 - eps**2) * (q / eps) ** 2) + dzde**2
         metric[:, 1, 2] = metric[:, 2, 1] = q * np.sqrt(1 - eps**2) / (
             2 * np.pi * eps
         ) ** 2 * signB * signJ + dzde * np.sin(theta) / (2 * np.pi)

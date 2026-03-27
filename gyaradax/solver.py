@@ -385,8 +385,12 @@ def estimate_linear_timestep(
     )
 
     # ideriv=4: parallel and velocity dissipation
-    disp_par_val = jnp.abs(jnp.asarray(params.disp_par if params is not None else 1.0, dtype=jnp.float64))
-    disp_vp_val = jnp.abs(jnp.asarray(params.disp_vp if params is not None else 0.2, dtype=jnp.float64))
+    disp_par_val = jnp.abs(
+        jnp.asarray(params.disp_par if params is not None else 1.0, dtype=jnp.float64)
+    )
+    disp_vp_val = jnp.abs(
+        jnp.asarray(params.disp_vp if params is not None else 0.2, dtype=jnp.float64)
+    )
     max_abs_par = jnp.max(jnp.abs(pre["abs_dum2_par"]))
     max_abs_vp = jnp.max(jnp.abs(pre["abs_dum2_vp"]))
     tmax4 = jnp.maximum(
@@ -661,7 +665,7 @@ def _compute_species_coeffs(
     }
 
 
-def linear_precompute(geometry: Dict[str, jnp.ndarray], params: GKParams) -> Dict[str, jnp.ndarray]:
+def linear_precompute(geometry: Dict[str, jnp.ndarray], params: GKParams) -> "GKPre":
     """Precompute static geometry-dependent coefficients and Bessel terms."""
     kx, ky = kx_ky_grids(geometry)
     ns, nkx, nky = len(geometry["ints"]), int(kx.shape[0]), int(ky.shape[0])
@@ -755,8 +759,13 @@ def linear_precompute(geometry: Dict[str, jnp.ndarray], params: GKParams) -> Dic
         ky_min = jnp.where(nky > 1, ky[1], ky[0])
         kmin2 = ky_min**2 * little_g[:, 0]
         q_val = jnp.asarray(geometry.get("q", getattr(params, "q", 1.0)), dtype=jnp.float64)
-        field_period = 2.0 * jnp.pi * q_val * params.sgr_dist * bn * jnp.sqrt(
-            jnp.maximum(mir * kmin2 * mer, 0.0)
+        field_period = (
+            2.0
+            * jnp.pi
+            * q_val
+            * params.sgr_dist
+            * bn
+            * jnp.sqrt(jnp.maximum(mir * kmin2 * mer, 0.0))
         )
         time_field = jnp.min(jnp.where(field_period > 1e-30, field_period, 1e30))
         out["tmax_field"] = jnp.where(time_field < 1e20, 1.0 / time_field, 0.0)
@@ -989,9 +998,11 @@ def init_f(
         # (signz > 0) are initialized.  (GKW init.f90:1471-1514)
         kxrh = jnp.asarray(geometry["kxrh"], dtype=jnp.float64)
         ixzero = int(jnp.argmin(jnp.abs(kxrh)).item())
-        iy0 = int(jnp.asarray(
-            geometry.get("iyzero", jnp.argmin(jnp.abs(jnp.asarray(geometry["krho"]))))
-        ).item())
+        iy0 = int(
+            jnp.asarray(
+                geometry.get("iyzero", jnp.argmin(jnp.abs(jnp.asarray(geometry["krho"]))))
+            ).item()
+        )
 
         df = jnp.zeros(full_shape, dtype=jnp.complex128)
 
@@ -1009,13 +1020,9 @@ def init_f(
                         )
         else:
             if ixzero > 0:
-                df = df.at[:, :, :, ixzero - 1, iy0].set(
-                    -1j * amp * maxwellian_env / 2.0
-                )
+                df = df.at[:, :, :, ixzero - 1, iy0].set(-1j * amp * maxwellian_env / 2.0)
             if ixzero < nkx - 1:
-                df = df.at[:, :, :, ixzero + 1, iy0].set(
-                    1j * amp * maxwellian_env / 2.0
-                )
+                df = df.at[:, :, :, ixzero + 1, iy0].set(1j * amp * maxwellian_env / 2.0)
         return df.astype(jnp.complex128)
 
     else:
