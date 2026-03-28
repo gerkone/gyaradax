@@ -105,7 +105,8 @@ python -m scripts.gkw_to_yaml /path/to/gkw_run configs/my_sim.yaml
 
 **Verification**:
 - [x] Empirical validation against reference GKW trajectories.
-- [ ] Anaytical validation on Cyclone Base Case, GKW tests and benchmarks (see [the gkw paper](docs/gkw.pdf) and Chapter 11 in the manual).
+- [x] Anaytical validation on RH and Cyclone Base Case.
+- [ ] GKW tests and benchmarks (see [the gkw paper](docs/gkw.pdf) and Chapter 11 in the manual).
 - [ ] Solver-in-the-Loop and PINNs as an ML showcase.
 
 **Physics and solver extensions**:
