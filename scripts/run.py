@@ -134,7 +134,10 @@ def _setup_run(config_path, args):
             window_start_amp=amp0,
             last_growth_rate=jnp.zeros(nky, dtype=jnp.float64),
         )
-        print(f"  resumed from {os.path.basename(k_path)} (t={t_start:.4f}, dt={float(params.dt):.4e})")
+        print(
+            f"  resumed from {os.path.basename(k_path)} "
+            f"(t={t_start:.4f}, dt={float(params.dt):.4e})"
+        )
     else:
         df, geometry, state = gk_init(geometry, params, n_species=n_species)
 
@@ -149,7 +152,7 @@ def _setup_run(config_path, args):
     elif kinetic and data_dir:
         try:
             ref_times = np.loadtxt(os.path.join(data_dir, "time.dat"))
-            n_steps = max(block_size, int((ref_times[-1] - float(state.time)) * 0.8 / params.dt))
+            n_steps = max(block_size, int((ref_times[-1] - float(state.time)) * 1.0 / params.dt))
         except FileNotFoundError:
             n_steps = 100 * block_size
     else:
@@ -229,7 +232,7 @@ def run_multi(args):
         stacked_leaves = [jnp.stack(leaf_group) for leaf_group in zip(*leaves_list)]
         treedef = jax.tree_util.tree_structure(trees[0])
         return jax.tree_util.tree_unflatten(treedef, stacked_leaves)
-    
+
     df_batch = jnp.stack([s["df"] for s in setups])
     geometry_batch = _stack_pytrees([s["geometry"] for s in setups])
     params_batch = _stack_pytrees([s["params"] for s in setups])
@@ -258,16 +261,16 @@ def run_multi(args):
         # log summary
         step = int(state_batch.step[0])
         t_sim = float(state_batch.time[0])
-        
+
         heat_fluxes = np.asarray(fluxes_batch[1])
         growths = np.asarray(state_batch.last_growth_rate)
-        
+
         traj_logs = []
         for i, name in enumerate(names):
             eflux_i = float(np.mean(heat_fluxes[i]))
             growth_i = float(np.mean(growths[i]))
             traj_logs.append(f"{name} [flx {eflux_i:.4f}, gr {growth_i:.4f}]")
-            
+
         print(
             f"[{step:>8d}] t {t_sim:>8.2f} | "
             f"{' | '.join(traj_logs)} | "
@@ -359,9 +362,16 @@ def main():
     parser.add_argument("--block-size", type=int, default=120)
     parser.add_argument("--n-blocks", type=int, default=None)
     parser.add_argument("--from-scratch", action="store_true", help="ignore K-files, use init_f")
-    parser.add_argument("--resume-from", type=str, default=None, help="resume from a specific K-file (e.g. K03, 100, K01)")
+    parser.add_argument(
+        "--resume-from",
+        type=str,
+        default=None,
+        help="resume from a specific K-file (e.g. K03, 100, K01)",
+    )
     parser.add_argument("--output-dir", type=str, default=None, help="override output directory")
-    parser.add_argument("--save-dumps", action="store_true", help="save full 5D df snapshots at each checkpoint")
+    parser.add_argument(
+        "--save-dumps", action="store_true", help="save full 5D df snapshots at each checkpoint"
+    )
 
     args = parser.parse_args()
     if len(args.inputs) > 1:

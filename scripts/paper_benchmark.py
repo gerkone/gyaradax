@@ -21,14 +21,12 @@ import numpy as np
 os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
 
 import jax
-import jax.numpy as jnp
 
 jax.config.update("jax_enable_x64", True)
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from gyaradax import load_geometry, GKParams, gk_init, gksolve
-from gyaradax.geometry import compute_geometry_from_input
 from gyaradax.solver import (
     linear_precompute,
     _compute_phi,
@@ -217,16 +215,19 @@ def benchmark_gyaradax(config_path, n_steps=120, n_blocks=5, device=None):
     params = gkparams_from_config(cfg)
 
     # force nonlinear for fair comparison
-    params = GKParams(**{
-        **{k: getattr(params, k) for k in params.__dataclass_fields__},
-        "non_linear": True,
-    })
+    params = GKParams(
+        **{
+            **{k: getattr(params, k) for k in params.__dataclass_fields__},
+            "non_linear": True,
+        }
+    )
 
     # geometry
     if hasattr(cfg.run, "data_dir") and os.path.exists(cfg.run.data_dir):
         geometry = load_geometry(cfg.run.data_dir)
     else:
         from gyaradax.simulate import _geometry_from_config
+
         geometry = _geometry_from_config(cfg)
 
     df, geometry, state = gk_init(geometry, params)
@@ -260,7 +261,7 @@ def benchmark_gyaradax(config_path, n_steps=120, n_blocks=5, device=None):
         results["memory_after_precompute_mb"] = mem["current_mb"]
 
     # component benchmarks
-    print(f"\ncomponent benchmarks:")
+    print("\ncomponent benchmarks:")
     phi = _compute_phi(df, geometry, params, pre)
 
     phi_ms, phi_std = bench_fn(
@@ -295,7 +296,9 @@ def benchmark_gyaradax(config_path, n_steps=120, n_blocks=5, device=None):
     # memory after compilation
     mem = get_memory_usage()
     if mem:
-        print(f"memory after compilation: {mem['peak_mb']:.0f} MB peak / {mem['limit_mb']:.0f} MB limit")
+        print(
+            f"memory after compilation: {mem['peak_mb']:.0f} MB peak / {mem['limit_mb']:.0f} MB limit"
+        )
         results["peak_memory_mb"] = mem["peak_mb"]
         results["memory_limit_mb"] = mem["limit_mb"]
 
@@ -312,7 +315,9 @@ def benchmark_gyaradax(config_path, n_steps=120, n_blocks=5, device=None):
         block_times.append(dt_block)
         sps = n_steps / dt_block
         ms_per_step = dt_block * 1000 / n_steps
-        print(f"  block {i+1}/{n_blocks}: {dt_block:.3f}s ({sps:.1f} steps/s, {ms_per_step:.2f} ms/step)")
+        print(
+            f"  block {i+1}/{n_blocks}: {dt_block:.3f}s ({sps:.1f} steps/s, {ms_per_step:.2f} ms/step)"
+        )
 
     times = np.array(block_times)
     mean_sps = n_steps / np.mean(times)
@@ -372,9 +377,13 @@ def print_gkw_summary(data_dir, label="GKW"):
             print(f"  throughput: {sps:.2f} steps/s ({ms_step:.2f} ms/step)")
 
         # component breakdown
-        print(f"  breakdown:")
-        for key in ["Non linear terms: FFT, No MPI", "Linear terms matmul, No MPI",
-                     "Calc Fields", "Copy fdis vector to tmp"]:
+        print("  breakdown:")
+        for key in [
+            "Non linear terms: FFT, No MPI",
+            "Linear terms matmul, No MPI",
+            "Calc Fields",
+            "Copy fdis vector to tmp",
+        ]:
             if key in perf:
                 p = perf[key]
                 print(f"    {key:40s}: {p['total_sec']:.1f}s ({p['pct']:.1f}%)")
@@ -391,13 +400,20 @@ def main():
     parser = argparse.ArgumentParser(description="Paper benchmark: gyaradax vs GKW")
     parser.add_argument("--config", type=str, required=True, help="gyaradax config yaml")
     parser.add_argument("--kinetic-config", type=str, default=None, help="optional kinetic config")
-    parser.add_argument("--gkw-dir", type=str, action="append", default=[],
-                        help="additional GKW data dirs to parse timing from (repeatable)")
+    parser.add_argument(
+        "--gkw-dir",
+        type=str,
+        action="append",
+        default=[],
+        help="additional GKW data dirs to parse timing from (repeatable)",
+    )
     parser.add_argument("--steps", type=int, default=120, help="steps per block")
     parser.add_argument("--blocks", type=int, default=5, help="number of timed blocks")
     parser.add_argument("--device", type=int, default=None, help="GPU device index")
     parser.add_argument("--output", type=str, default=None, help="save results JSON")
-    parser.add_argument("--gkw-only", action="store_true", help="only print GKW timing, skip gyaradax")
+    parser.add_argument(
+        "--gkw-only", action="store_true", help="only print GKW timing, skip gyaradax"
+    )
     args = parser.parse_args()
 
     all_results = {}
@@ -448,8 +464,10 @@ def main():
     print(f"{'':30s} {'gyaradax':>15s} {'GKW':>15s} {'speedup':>10s}")
     print("-" * 72)
 
-    for mode_key, gkw_key in [("gyaradax_adiabatic", "gkw_adiabatic"),
-                                ("gyaradax_kinetic", "gkw_kinetic")]:
+    for mode_key, gkw_key in [
+        ("gyaradax_adiabatic", "gkw_adiabatic"),
+        ("gyaradax_kinetic", "gkw_kinetic"),
+    ]:
         if mode_key not in all_results:
             continue
         gr = all_results[mode_key]

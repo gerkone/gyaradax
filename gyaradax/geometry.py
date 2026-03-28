@@ -263,18 +263,40 @@ def _build_velocity_grids(nvpar, nmu, vpar_max):
     return vpgr, vperp**2 / 2, np.full(nvpar, dvp), 2 * np.pi * vperp * dvperp
 
 
-def _build_wavevector_grids(nkx, nky, kxmax, krhomax):
+def _build_wavevector_grids(
+    nkx, nky, kxmax, krhomax, q=1.0, shat=0.0, eps=0.1, ikxspace=5, kthnorm=1.0
+):
     """Centered kx grid and uniform ky grid.
 
-    for nky=1 the single mode is placed at krhomax (not zero),
+    For nky=1 the single mode is placed at krhomax (not zero),
     matching GKW single-mode eigenvalue convention.
+
+    For nky>1 and nkx>1 (mode_box), the kx spacing is computed from the
+    magnetic shear connectivity (GKW mode.f90:698):
+        kxspace = |q * shat * krho[1] / (eps * ikxspace)|
+    where krho[1] is the first nonzero ky mode (already normalized by kthnorm).
     """
-    half = (nkx - 1) // 2
-    dkx = kxmax / half if half > 0 else 0.0
     if nky == 1:
+        half = (nkx - 1) // 2
+        dkx = kxmax / half if half > 0 else 0.0
         return np.arange(-half, half + 1) * dkx, np.array([krhomax])
+
     dky = krhomax / (nky - 1)
-    return np.arange(-half, half + 1) * dkx, np.arange(nky) * dky
+    # krho normalized by kthnorm (same as GKW's krho array)
+    krho_norm = np.arange(nky) * dky / kthnorm
+
+    half = (nkx - 1) // 2
+    if half > 0 and nky > 1 and abs(shat) > 1e-10 and eps > 1e-10:
+        # mode-box kx spacing from magnetic shear connectivity (mode.f90:698)
+        kxspace = abs(q * shat * krho_norm[1] / (eps * ikxspace))
+    elif half > 0:
+        kxspace = kxmax / half
+    else:
+        kxspace = 0.0
+
+    kxrh = np.arange(-half, half + 1) * kxspace
+    # return RAW (unnormalized) ky grid — caller divides by kthnorm
+    return kxrh, np.arange(nky) * dky
 
 
 def _build_mode_label(nkx, nky, ikxspace):
@@ -462,7 +484,9 @@ def compute_geometry(
     kthnorm = np.sqrt(g_zz_mid)
 
     vpgr, mugr, intvp, intmu = _build_velocity_grids(nvpar, nmu, vpar_max)
-    kxrh, krho_raw = _build_wavevector_grids(nkx, nky, kxmax, krhomax)
+    kxrh, krho_raw = _build_wavevector_grids(
+        nkx, nky, kxmax, krhomax, q=q, shat=shat, eps=eps, ikxspace=ikxspace, kthnorm=kthnorm
+    )
     krho = krho_raw / kthnorm
 
     # use actual grid length (may differ from input nkx for even nx)
@@ -479,7 +503,7 @@ def compute_geometry(
         "eps": _f64(eps),
         "kxrh": _f64(kxrh),
         "krho": _f64(krho),
-        "parseval": _f64([1.0] + [float(nky)] * (nky - 1)),
+        "parseval": _f64([1.0] + [2.0] * (nky - 1)),
         "intvp": _f64(intvp),
         "vpgr": _f64(vpgr),
         "vpgr_rms": _f64(np.sqrt(np.mean(vpgr**2))),
@@ -686,7 +710,7 @@ def geometry_from_geom_dat_and_input(input_dat_path: str) -> Dict[str, Any]:
         "eps": _f64(eps),
         "kxrh": _f64(kxrh),
         "krho": _f64(krho),
-        "parseval": _f64([1.0] + [float(nky)] * (nky - 1)),
+        "parseval": _f64([1.0] + [2.0] * (nky - 1)),
         "intvp": _f64(intvp),
         "vpgr": _f64(vpgr),
         "vpgr_rms": _f64(np.sqrt(np.mean(vpgr**2))),
