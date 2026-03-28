@@ -275,12 +275,16 @@ def gksimulate(
 
 def gk_from_gkw_dir(
     gkw_dir: str,
+    k_index: int = -1,
     **overrides,
 ) -> Tuple[jnp.ndarray, Dict[str, jnp.ndarray], GKParams, GKState, GKPre]:
     """Load a GKW run directory -> (df, geometry, params, state, pre).
 
     Builds params from input.dat, loads geometry from geom.dat,
-    and resumes from the last K-file. No YAML config needed.
+    and resumes from a K-file. No YAML config needed.
+
+    Args:
+        k_index: which K-file to load (default -1, i.e. the last one).
     """
     from gyaradax.params import gkparams_from_input_and_geometry
     from gyaradax.utils import K_files, load_gkw_k_dump, read_gkw_dump_time
@@ -297,7 +301,7 @@ def gk_from_gkw_dir(
     res = tuple(len(geometry[k]) for k in ("intvp", "intmu", "ints", "kxrh", "krho"))
     k_files = K_files(gkw_dir)
     if k_files:
-        k_path = os.path.join(gkw_dir, k_files[-1])
+        k_path = os.path.join(gkw_dir, k_files[k_index])
         df = jnp.asarray(load_gkw_k_dump(k_path, res, n_species=n_species), dtype=jnp.complex128)
         dat_path = k_path + ".dat"
         t_start = read_gkw_dump_time(dat_path) if os.path.exists(dat_path) else 0.0

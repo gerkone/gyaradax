@@ -276,14 +276,12 @@ geometry = load_geometry("/path/to/gkw_run")
 # single/multi-step solver
 next_df, (phi, fluxes), state = gksolve(df, geometry, params, state, n_steps)
 
-# phi only (adiabatic)
-phi = calculate_phi(geom_tensors(geometry, params=params), df)
-
-# phi only (kinetic)
-phi = calculate_phi_kinetic(geometry, df)
+# phi (adiabatic/kinetic based on df.ndim)
+phi = calculate_phi(geometry, df, params=params, pre=pre)
 
 # phi + fluxes
-phi, (pflux, eflux, vflux) = get_integrals(df, geometry, params=params)
+phi, fluxes = get_integrals(df, geometry, params=params)
+# fluxes is (pflux, eflux, vflux) for adiabatic, (nsp, 3) array for kinetic
 
 # per-species kinetic fluxes
 per_sp_fluxes = calculate_fluxes_kinetic(geometry, df, phi)  # (nsp, 3)
@@ -296,8 +294,8 @@ When `adiabatic_electrons=False`, the solver:
 1. `linear_precompute`: computes per-species coefficients with shape
    `(nsp, nvpar, nmu, ns, nkx, nky)` from geometry arrays.
 
-2. `_compute_phi`: calls `calculate_phi_kinetic` which sums the Poisson
-   integral over all species.
+2. `_compute_phi`: calls the unified `calculate_phi` which dispatches to
+   `_phi_kinetic`, summing the Poisson integral over all species.
 
 3. `_compute_linear_rhs`: uses `jax.vmap` over the species axis. Each species
    gets its own precomputed coefficients; all share the same $\phi$.

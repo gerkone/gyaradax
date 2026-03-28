@@ -672,7 +672,7 @@ def _compute_species_coeffs(
     }
 
 
-def linear_precompute(geometry: Dict[str, jnp.ndarray], params: GKParams) -> Dict[str, jnp.ndarray]:
+def linear_precompute(geometry: Dict[str, jnp.ndarray], params: GKParams) -> "GKPre":
     """Precompute static geometry-dependent coefficients and Bessel terms."""
     kx, ky = kx_ky_grids(geometry)
     ns, nkx, nky = len(geometry["ints"]), int(kx.shape[0]), int(ky.shape[0])

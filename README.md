@@ -62,37 +62,13 @@ df, phi, fluxes, state = gksimulate(
 ```
 
 #### Resume from GKW checkpoints
-`gyaradax` can resume from GKW binary `K` files.
+`gyaradax` can resume from GKW binary `K` files. The simplest way is `gk_from_gkw_dir`, which loads geometry, params, and the last K-file automatically:
 ```python
-import jax.numpy as jnp
+from gyaradax.simulate import gk_from_gkw_dir, gksimulate
 
-from gyaradax.utils import load_gkw_k_dump, load_geometry, read_gkw_dump_time
-from gyaradax.params import gkparams_from_input_and_geometry
-from gyaradax.solver import GKState, mode_amplitude
-from gyaradax.simulate import gksimulate, _compute_phi_for_init
-
-# resume from GKW dump K01
-geometry = load_geometry("/path/to/gkw/run/")
-params = gkparams_from_input_and_geometry("/path/to/gkw/run/input.dat", geometry)
-
-res = tuple(len(geometry[k]) for k in ("intvp", "intmu", "ints", "kxrh", "krho"))
-df_k = load_gkw_k_dump("/path/to/gkw/run/K01", res, n_species=1)
-
-t_start = read_gkw_dump_time("/path/to/gkw/run/K01.dat")
-nky = len(geometry["krho"])
-
-phi0 = _compute_phi_for_init(df, geometry, params)
-amp0 = mode_amplitude(phi0, geometry, params.norm_eps)
-
-state_k = GKState(
-    time=jnp.array(t_start, dtype=jnp.float64),
-    step=jnp.array(0, dtype=jnp.int32),
-    accumulated_norm_factor=jnp.ones(nky, dtype=jnp.float64),
-    window_start_amp=amp0,
-    last_growth_rate=jnp.zeros(nky, dtype=jnp.float64),
-)
-
-df, phi, fluxes, state = gksimulate(df_k, geometry, params, state_k, 120)
+# loads input.dat, geometry, and resumes from the last K-file
+df, geometry, params, state, pre = gk_from_gkw_dir("/path/to/gkw/run/")
+df, phi, fluxes, state = gksimulate(df, geometry, params, state, 120, pre=pre)
 ```
 
 #### Configuration from GKW
@@ -105,16 +81,19 @@ python -m scripts.gkw_to_yaml /path/to/gkw_run configs/my_sim.yaml
 
 **Verification**:
 - [x] Empirical validation against reference GKW trajectories.
+<<<<<<< README.md
 - [x] Anaytical validation on RH and Cyclone Base Case.
+- [x] Differentiable programming: inverse problem and sensitivity analysis.
 - [ ] GKW tests and benchmarks (see [the gkw paper](docs/gkw.pdf) and Chapter 11 in the manual).
 - [ ] Solver-in-the-Loop and PINNs as an ML showcase.
+- [ ] Portable unit tests
 
 **Physics and solver extensions**:
 - [x] Linear solver.
 - [x] Adiabatic electrons corrections and cases (ion only, single species).
 - [x] Kinetic electrons (multi-species).
 - [ ] Electromagnetic effects.
-- [ ] Collisoinality.
+- [ ] Collisionality.
 
 **Optimization**:
 - [x] JAX-based improvements.
