@@ -105,7 +105,6 @@ def _phi_adiabatic(geom: Dict[str, jnp.ndarray], df: jnp.ndarray) -> jnp.ndarray
     denom = diagz - jnp.exp(-cfen) / tmp
     denom = jnp.where(jnp.abs(denom) < 1e-15, 1.0, denom)
     matz = -ints / (signz * de * denom)
-    # flux-surface averaging only applies to the zonal mode (ky=0)
     has_zonal = geom["has_zonal"]
     ixzero, iyzero = geom["ixzero"], geom["iyzero"]
 
@@ -125,7 +124,7 @@ def _phi_adiabatic(geom: Dict[str, jnp.ndarray], df: jnp.ndarray) -> jnp.ndarray
     maty_sum = jnp.sum(-matz * jnp.exp(-cfen), axis=3, keepdims=True)
     maty = tmp / (de * jnp.exp(-cfen)) + maty_sum / jnp.exp(-cfen)
 
-    # at kx=0 (ixzero), set maty=1 to skip the correction (GKW: if ix==ixzero, val=1)
+    # at kx=0 (ixzero), set maty=1 to skip the correction
     x_is_zero = jnp.arange(phi.shape[-2]) == ixzero
     x_mask = jnp.broadcast_to(x_is_zero[None, None, None, None, :, None], phi.shape)
     maty_val = jnp.where(x_mask, 1.0 + 0j, maty)
@@ -134,7 +133,6 @@ def _phi_adiabatic(geom: Dict[str, jnp.ndarray], df: jnp.ndarray) -> jnp.ndarray
     phi = phi + maty_val * bufphi * y_mask
 
     poisson_diag = jnp.exp(-cfen) * (signz**2) * de * (gamma - 1.0) / tmp
-    # zero phi at (kx=0, ky=0) when a real zonal mode exists
     norm_mask = jnp.ones_like(phi)
     norm_mask = norm_mask.at[..., ixzero, iyzero].set(1.0 - has_zonal)
 
@@ -142,7 +140,6 @@ def _phi_adiabatic(geom: Dict[str, jnp.ndarray], df: jnp.ndarray) -> jnp.ndarray
     pdiag = jnp.where(jnp.abs(pdiag) < 1e-15, -1.0, pdiag)
 
     phi = phi * (-1.0 / pdiag)
-    # squeeze species + summed velocity axes, keep (ns, nkx, nky)
     return jnp.squeeze(phi, axis=(0, 1, 2))
 
 
@@ -303,7 +300,7 @@ def calculate_fluxes(
     dum = parseval * ints * (efun * krho) * df
     dum1 = dum * jnp.conj(phi_gyro)
     dum2 = dum1 * bn
-    d3v = ints * d2X * intmu * bn * intvp
+    d3v = d2X * intmu * bn * intvp
 
     pflux = d3v * jnp.imag(dum1)
     eflux = d3v * (vpgr**2 * jnp.imag(dum1) + 2 * mugr * jnp.imag(dum2))

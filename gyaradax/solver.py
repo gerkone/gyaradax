@@ -170,10 +170,11 @@ def normalize_per_ky(
 ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     phi = calculate_phi(geometry, df, params=params, pre=pre)
     amp_per_ky = mode_amplitude(phi, geometry, params.norm_eps)
-    safe_amp = jnp.where(amp_per_ky < params.norm_eps, 1.0, amp_per_ky)
-    inv = 1.0 / safe_amp
+    # only normalize modes with meaningful amplitude; leave dormant modes unchanged
+    active = amp_per_ky > jnp.sqrt(params.norm_eps)
+    inv = jnp.where(active, 1.0 / amp_per_ky, 1.0)
     inv_shape = (1,) * (df.ndim - 1) + (-1,)
-    return df * jnp.reshape(inv, inv_shape), inv, safe_amp
+    return df * jnp.reshape(inv, inv_shape), inv, amp_per_ky
 
 
 def prime_factors_smallereq_than(number: int, max_prime: int) -> bool:
@@ -635,9 +636,11 @@ def _compute_species_coeffs(
     upar = -ffun_b * vthrat * vp
     utrap = vthrat * mu * bn_b * gfun_b
 
-    # Dissipation speeds
-    vp_rms = jnp.asarray(params.dvp, dtype=jnp.float64)
-    mu_rms = jnp.asarray(1.0, dtype=jnp.float64)
+    # Dissipation speeds for idisp=2: RMS velocity (matches GKW linear_terms.f90:643,911)
+    vp_rms = jnp.asarray(params.vpgr_rms if hasattr(params, 'vpgr_rms') else
+                          jnp.sqrt(jnp.mean(vpgr**2)), dtype=jnp.float64)
+    mu_rms = jnp.asarray(params.mugr_rms if hasattr(params, 'mugr_rms') else
+                          jnp.sqrt(jnp.mean(mugr**2)), dtype=jnp.float64)
     idisp = jnp.asarray(params.idisp, dtype=jnp.int32)
     use_abs = jnp.logical_or(jnp.equal(idisp, 1), jnp.equal(idisp, -1))
     abs_par = jnp.where(use_abs, jnp.abs(upar), jnp.abs(ffun_b * vthrat * vp_rms))
@@ -939,10 +942,18 @@ def init_f(
     shape_6d = (n_species, nv, nmu, ns, nkx, nky)
     full_shape = shape_6d if n_species > 1 else shape_5d
 
-    # velocity-space Maxwellian envelope: exp(-(vpar^2 + 2*mu*B))
+    # velocity-space Maxwellian: (n/n_grid) * exp(-(vpar^2 + 2*mu*B)/T) / (sqrt(T*pi))^3
+    # Matches GKW's fmaxwl in components.f90 (with dens=dref=tref=1).
     vp2 = vpgr**2  # (nv,)
+    tmp_val = jnp.asarray(geometry.get("tmp", jnp.ones(1)), dtype=jnp.float64)
+    if tmp_val.ndim > 0:
+        tmp_val = tmp_val[0]
+    tgrid_val = jnp.asarray(geometry.get("tgrid", jnp.ones(1)), dtype=jnp.float64)
+    if tgrid_val.ndim > 0:
+        tgrid_val = tgrid_val[0]
+    t_rat = tmp_val / tgrid_val
     energy = vp2[:, None, None] + 2.0 * mugr[None, :, None] * bn[None, None, :]
-    maxwellian_env = jnp.exp(-energy)  # (nv, nmu, ns)
+    maxwellian_env = jnp.exp(-energy / t_rat) / (jnp.sqrt(t_rat * jnp.pi) ** 3)  # (nv, nmu, ns)
 
     if finit in ("noise", "gnoise"):
         key = jax.random.PRNGKey(seed)

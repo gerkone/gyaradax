@@ -457,8 +457,8 @@ def load_runtime_params(input_dat_path: str) -> Dict[str, Any]:
         "naverage": _int("naverage", 40),
         "disp_par": _flt("disp_par", 1.0),
         "disp_vp": _flt("disp_vp", 0.2),
-        "disp_x": _flt("disp_x", 0.1),
-        "disp_y": _flt("disp_y", 0.1),
+        "disp_x": _flt("disp_x", 0.0),
+        "disp_y": _flt("disp_y", 0.0),
         "non_linear": _bool("non_linear", False),
         "nlapar": _bool("nlapar", False),
         "method": method,
@@ -620,7 +620,7 @@ def load_geometry(directory):
     geometry["krho"] = jnp.array(krho / kthnorm, dtype=jnp.float64)
 
     geometry["parseval"] = jnp.array(
-        [1.0] + [float(len(geometry["krho"]))] * (len(geometry["krho"]) - 1),
+        [1.0] + [2.0] * (len(geometry["krho"]) - 1),
         dtype=jnp.float64,
     )
 

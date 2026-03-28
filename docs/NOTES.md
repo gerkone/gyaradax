@@ -166,7 +166,7 @@ The heat flux for species $s$ is:
 
 $$Q_s = \text{Im} \sum_{s, k_x, k_y, v_\parallel, \mu} P_{k_y} \Delta s \cdot k_y E_\alpha \left(v_\parallel^2 + 2\mu B\right) \delta f_s (J_0 \phi)^* B \Delta\mu \Delta v_\parallel \Delta s \cdot d^2 X$$
 
-where $P_{k_y}$ is the Parseval factor (1 for $k_y=0$, $2N_{ky}$ otherwise)
+where $P_{k_y}$ is the Parseval factor (1 for $k_y=0$, 2 otherwise)
 and $d^2 X$ is the velocity-space volume element.
 
 ## 3. numerical methods
@@ -422,13 +422,46 @@ order. Species is the outermost (slowest) index.
 
 - adaptive CFL uses one-step lag (current step uses previous step's CFL estimate)
 - no multi-species output in `save_dumps` (fluxes are summed over species)
-- **kinetic init from scratch vs GKW reference**: all three kinetic
-  reference cases (`half_rlt`, `ntsks128`, `double_rlt`) were produced
-  with `read_file = .true.` in GKW, meaning they warm-restarted from a
-  previous simulation's output — they did **not** cold-start from cosine2.
-  This explains why no K00 dump exists and why from-scratch runs show much
-  smaller fluxes at early times.  The solver itself is correct: resuming
-  from K-files reproduces GKW fluxes to `rel_err ~ 1e-5`.
+- **kinetic init from scratch**: the reference cases ARE cold-started
+  (confirmed by reproducing with `read_file=.false.`; output is
+  bit-identical). The earlier 6-12× amplitude deficit was caused by
+  using `configs/kinetic.yaml` parameters (wrong electron mass 0.0003
+  vs 0.000272, wrong rln 3.0 vs 3.031, wrong amp_init 1e-4 vs 0.001).
+  With correct parameters from `parse_input_dat` + adaptive dt:
+  electron max|df| matches within 0.3%, ion within 11%.
+- **NL CFL estimator**: GKW's nonlinear timestep estimator reduces dt
+  from 2.13e-3 to 1.01e-3 mid-run. gyaradax's `estimate_nl_timestep`
+  never triggers (returns dt_input for all 300 steps). The NL gradient
+  computed by gyaradax is too small. Causes flux trajectory divergence
+  (1.5-3.4× by window 3).
+
+### 7.4 bugs fixed (2026-03-28)
+
+1. **Parseval factor** (`geometry.py:507,714`, `utils.py:622`): was
+   `[1, nky, nky, ...]`, now `[1, 2, 2, ...]` (standard half-spectrum,
+   confirmed from GKW `diagnos_generic.f90:572-576`).
+
+2. **Duplicate `ints` in flux d3v** (`integrals.py:303`): was
+   `d3v = ints * d2X * intmu * bn * intvp` (double-counted with `ints`
+   in `dum`), now `d3v = d2X * intmu * bn * intvp` (confirmed from
+   GKW `diagnos_fluxes_vspace.F90:414-517`). Bugs 1 and 2 were
+   compensating: `ints × (nky/2) = 1` for the standard grid.
+
+3. **Init Maxwellian normalization** (`solver.py:946`): the zonal init
+   used `exp(-E)` instead of `exp(-E/T) / (sqrt(T*pi))^3`. Now matches
+   GKW's `fmaxwl` from `components.f90`.
+
+4. **idisp=2 dissipation speed** (`solver.py:640`): used `params.dvp`
+   (grid spacing ≈ 0.047) instead of `vpgr_rms` (RMS velocity ≈ 1.73).
+   Similarly `mu_rms=1.0` → `mugr_rms`. 37× error. Confirmed from GKW
+   `linear_terms.f90:643,911`.
+
+5. **disp_x/disp_y defaults** (`utils.py:460-461`): defaulted to 0.1
+   when GKW input.dat omits them, but GKW defaults to 0.0. Caused
+   spurious perpendicular hyper-dissipation. At `kx=kxmax`: dissipation
+   rate = `0.1 * (kx/kxmax)^4 = 0.1` per unit time. **Root cause of
+   the Rosenbluth-Hinton 38% residual error.** After fix: RH residual
+   converges to Xiao-Catto 0.0711 within 0.1% at t>80.
 
 ### 7.4 growth rate convention
 
@@ -469,33 +502,51 @@ consecutive windows. See `solver.py:advance_state`.
 | adaptive CFL 20 steps | all 3 cases | finiteness (dt=0.004) | pass |
 | adiabatic fallback | 4 iterations | shapes + finiteness | pass |
 
-### 8.3 Rosenbluth-Hinton zonal flow test
+### 8.3 analytical benchmarks
 
-The adiabatic phi solve (`_phi_adiabatic` in `integrals.py`) was verified to
-satisfy the self-consistent quasineutrality equation
-`A*phi + (n_e/T_e)*<phi>_fsa = -N` to **machine precision** (relative error
-2.2e-15). The Gamma0 computation was updated from `i0(b)*exp(-b)` to `i0e(b)`
-for numerical stability at large arguments (matches GKW's `expbessi0`).
+Two analytical benchmarks are verified and included as unit tests in
+`tests/unit/test_gk_cases.py`. Figures in `notebooks/analytical_benchmarks.ipynb`.
 
-**RH test configuration requirements:**
-- `rlt=0, rln=0` (no equilibrium drive — Term V must be zero)
-- `disp_par=0, disp_vp=0, disp_x=0, disp_y=0` (no dissipation)
-- `drive_scale=1.0` (**must NOT be 0** — Term VIII drift-field coupling is
-  essential for the GAM oscillation physics)
-- `non_linear=True` (to skip per-ky normalization)
-- `finit='zonal'`, `amp_init_real=1e-4`
+#### 8.3.1 Rosenbluth-Hinton zonal flow test
 
-| test | params | metric | result |
-|------|--------|--------|--------|
-| phi self-consistency | q=1.3, eps=0.05, kx=0.45 | `max\|A*phi + <phi> + N\| / max\|N\|` | `2.2e-15` |
-| GAM oscillation | ns=128, nvpar=128, nmu=16 | visible damped oscillation | pass |
-| early plateau residual | t=4–8, kx=0.45 | `\|<phi>_fsa(t)\| / \|<phi>_fsa(0)\|` | `0.067–0.090` |
-| Xiao-Catto target | — | analytical | `0.0711` |
+Uses the GKW benchmark parameters from `gkw_ref/benchmarks/zonal_flow/zonal01`:
+q=1.3, shat=0.1592, eps=0.05, s-alpha geometry, ns=128, nvpar=128, nmu=16,
+krhomax=0.025, ikxspace=1, disp_par=0.01, dt=0.01, finit='zonal'.
 
-The early-plateau residual at kx=0.45 approaches the target but has ~15%
-residual error, likely due to finite-FLR corrections at k_perp*rho=0.45 (the
-analytical formula assumes k→0). Diagnostic scripts:
-`scripts/rh_diagnostic.py`, `scripts/rh_run.py`.
+The phi solve (`_phi_adiabatic`) satisfies quasineutrality to machine precision
+(rel err 2.2e-15). The Gamma0 uses `i0e(b)` for stability (matches GKW `expbessi0`).
+
+| test | metric | result |
+|------|--------|--------|
+| residual at t>80 | `sqrt(mean(kxspec/kxspec_0))` | **0.0711** |
+| Xiao-Catto target | analytical | **0.0711** |
+| match | relative error | **< 0.1%** |
+| eps scan (5 values) | residual vs eps | traces analytical curve |
+
+**Key requirements:** `disp_par > 0` (damps velocity-space recurrence),
+`drive_scale=1.0` (Term VIII needed for GAM), `disp_x=disp_y=0` (no spurious
+hyper-dissipation). Use `non_linear=False` with large naverage to avoid
+per-ky normalization without computing the NL FFT.
+
+#### 8.3.2 Cyclone Base Case linear ITG
+
+Uses the GKW benchmark parameters from `gkw_ref/benchmarks/cyclone/linear`:
+q=1.4, shat=0.78, eps=0.19, rlt=6.9, rln=2.2, **s-alpha geometry**, ns=160,
+nvpar=64, nmu=16, nperiod=5, disp_par=1.0, dt=0.003, naverage=100.
+
+| test | metric | result |
+|------|--------|--------|
+| gamma at kt=0.5 | growth rate | **0.179** |
+| GKW/GS2 reference | — | **0.18** |
+| match | relative error | **< 1%** |
+| kt scan (8 values) | gamma spectrum shape | matches GKW |
+| R/LT scan (5 values) | gamma vs gradient | matches GKW |
+
+**Key requirements:**
+- **s-alpha geometry** (circ gives ~50% higher growth rates)
+- **ns=160, nperiod=5** (low ns underresolves Landau damping → lifted spectrum)
+- **naverage ≥ 10** (naverage=1 gives spurious negative growth from mode phase
+  rotation within a single step)
 
 ## 9. circular geometry model (`geometry.py`)
 

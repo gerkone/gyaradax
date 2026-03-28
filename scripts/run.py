@@ -149,7 +149,7 @@ def _setup_run(config_path, args):
     elif kinetic and data_dir:
         try:
             ref_times = np.loadtxt(os.path.join(data_dir, "time.dat"))
-            n_steps = max(block_size, int((ref_times[-1] - float(state.time)) * 0.8 / params.dt))
+            n_steps = max(block_size, int((ref_times[-1] - float(state.time)) * 1.0 / params.dt))
         except FileNotFoundError:
             n_steps = 100 * block_size
     else:

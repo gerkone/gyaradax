@@ -12,8 +12,13 @@ upload_changed_py.sh
 cache/
 gkw_ref/
 .gemini
-.claude
+.claude/settings.local.json
+.claude/projects/
+.claude/plans/
+.claude/shell-snapshots/
 notebooks/figs/
 validation_*/
 figs/
 *egg-info/
+.nfs*
+configs/sweep
