@@ -97,12 +97,12 @@ def test_cbc_linear_itg_peak_growth():
 
     Uses GKW benchmark parameters (gkw_ref/benchmarks/cyclone/linear):
     q=1.4, shat=0.78, eps=0.19, R/LT=6.9, R/Ln=2.2, s-alpha geometry,
-    ns=160, nperiod=5, nvpar=64, nmu=16, disp_par=1.0.
-    GKW/GS2 reference: gamma ≈ 0.18 at kt=0.5.
+    ns=144, nperiod=5, nvpar=64, nmu=16, disp_par=1.0.
+    GKW reference (exact, identical params): gamma=0.1785 at kt=0.5.
     """
     geom = compute_geometry(
         q=1.4, shat=0.78, eps=0.19,
-        ns=160, nvpar=64, nmu=16, vpar_max=3.0,
+        ns=144, nvpar=64, nmu=16, vpar_max=3.0,
         nkx=1, nky=1, nperiod=5,
         kxmax=0.5, signB=1.0, Rref=1.0, krhomax=0.5,
         geom_type="s-alpha",
@@ -127,9 +127,9 @@ def test_cbc_linear_itg_peak_growth():
         df, phi, _, state = gk_run(df, geom, params, state, params.naverage, pre=pre)
 
     gamma = float(state.last_growth_rate[0])
-    gamma_ref = 0.18  # GKW/GS2 reference
+    gamma_ref = 0.1785  # GKW (exact, identical parameters and grid)
 
-    assert abs(gamma - gamma_ref) / gamma_ref < 0.10, (
+    assert abs(gamma - gamma_ref) / gamma_ref < 0.05, (
         f"CBC growth rate {gamma:.4f} deviates from GKW {gamma_ref} "
         f"by {abs(gamma - gamma_ref) / gamma_ref * 100:.1f}%"
     )
