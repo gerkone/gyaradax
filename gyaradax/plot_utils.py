@@ -61,7 +61,7 @@ def plot_flux_trace(
         min_len = min(f.shape[-1] for f in fluxes)
         fluxes = np.stack([f[..., :min_len] for f in fluxes])
         time = time[:min_len]
-        
+
     if ref_fluxes is not None:
         if isinstance(ref_fluxes, (tuple, list)):
             ref_min_len = min(f.shape[-1] for f in ref_fluxes)
@@ -105,9 +105,25 @@ def plot_flux_trace(
 
             if fluxes.ndim == 3:
                 for run_idx in range(fluxes.shape[0]):
-                    ax.plot(time, fluxes[run_idx, flux_idx], color=color, alpha=0.15, lw=1.0, linestyle="-", zorder=1)
+                    ax.plot(
+                        time,
+                        fluxes[run_idx, flux_idx],
+                        color=color,
+                        alpha=0.15,
+                        lw=1.0,
+                        linestyle="-",
+                        zorder=1,
+                    )
 
-            ax.plot(time, fluxes_mean[flux_idx], label="gyaradax", color=color, lw=1.5, alpha=1.0, zorder=3)
+            ax.plot(
+                time,
+                fluxes_mean[flux_idx],
+                label="gyaradax",
+                color=color,
+                lw=1.5,
+                alpha=1.0,
+                zorder=3,
+            )
 
             if fluxes_std is not None:
                 ax.fill_between(
@@ -117,34 +133,34 @@ def plot_flux_trace(
                     color=color,
                     alpha=0.3,
                     lw=0,
-                    zorder=2
+                    zorder=2,
                 )
 
             if show_average and len(fluxes_mean[flux_idx]) >= avg_window:
                 avg_val = np.mean(fluxes_mean[flux_idx][-avg_window:])
                 t_start = time[-avg_window]
                 t_end = time[-1]
-                
+
                 ax.plot(
-                    [t_start, t_end], 
-                    [avg_val, avg_val], 
-                    color=color, 
-                    linestyle="-", 
-                    lw=2.0, 
-                    zorder=4
+                    [t_start, t_end],
+                    [avg_val, avg_val],
+                    color=color,
+                    linestyle="-",
+                    lw=2.0,
+                    zorder=4,
                 )
-                
+
                 ax.text(
-                    t_end, 
-                    avg_val, 
-                    f"{avg_val:.4g}", 
-                    color=color, 
-                    va="bottom", 
-                    ha="right", 
+                    t_end,
+                    avg_val,
+                    f"{avg_val:.4g}",
+                    color=color,
+                    va="bottom",
+                    ha="right",
                     fontweight="bold",
                     fontsize=9,
                     zorder=5,
-                    bbox=dict(facecolor="white", alpha=0.8, edgecolor="none", pad=0.2)
+                    bbox=dict(facecolor="white", alpha=0.8, edgecolor="none", pad=0.2),
                 )
 
             if ref_fluxes_mean is not None and ref_time is not None:
@@ -159,7 +175,7 @@ def plot_flux_trace(
                                 alpha=0.15,
                                 lw=1.0,
                                 linestyle="--",
-                                zorder=0
+                                zorder=0,
                             )
 
                     ax.plot(
@@ -181,34 +197,34 @@ def plot_flux_trace(
                             color="black",
                             alpha=0.2,
                             lw=0,
-                            zorder=1
+                            zorder=1,
                         )
 
                     if show_average and len(ref_fluxes_mean[ref_idx]) >= avg_window:
-                        ref_avg_val = np.mean(ref_fluxes_mean[ref_idx][-3 * avg_window:])
+                        ref_avg_val = np.mean(ref_fluxes_mean[ref_idx][-3 * avg_window :])
                         ref_t_start = ref_time[-3 * avg_window]
                         ref_t_end = ref_time[-1]
-                        
+
                         ax.plot(
-                            [ref_t_start, ref_t_end], 
-                            [ref_avg_val, ref_avg_val], 
-                            color="black", 
-                            linestyle="-", 
-                            lw=2.0, 
-                            zorder=4
+                            [ref_t_start, ref_t_end],
+                            [ref_avg_val, ref_avg_val],
+                            color="black",
+                            linestyle="-",
+                            lw=2.0,
+                            zorder=4,
                         )
-                        
+
                         ax.text(
-                            ref_t_end, 
-                            ref_avg_val, 
-                            f"{ref_avg_val:.4g}", 
-                            color="black", 
-                            va="top", 
-                            ha="right", 
+                            ref_t_end,
+                            ref_avg_val,
+                            f"{ref_avg_val:.4g}",
+                            color="black",
+                            va="top",
+                            ha="right",
                             fontweight="bold",
                             fontsize=9,
                             zorder=5,
-                            bbox=dict(facecolor="white", alpha=0.8, edgecolor="none", pad=0.2)
+                            bbox=dict(facecolor="white", alpha=0.8, edgecolor="none", pad=0.2),
                         )
 
             if isp == 0:

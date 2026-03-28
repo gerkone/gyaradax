@@ -53,8 +53,8 @@ def extract_frames(snapshots, quantity="phi"):
     Returns: list of (n_theta, n_zeta) arrays, list of times,
              and (ns, nkx, nky) shapes for info display.
     """
-    frames_phi_real = []   # real-space phi(x, y) for torus coloring
-    frames_s_kx_ky = []    # velocity-averaged |df|(s, kx, ky)
+    frames_phi_real = []  # real-space phi(x, y) for torus coloring
+    frames_s_kx_ky = []  # velocity-averaged |df|(s, kx, ky)
     times = []
     info = {}
 
@@ -312,9 +312,11 @@ def generate_mp4(snapshots, output_path, R0=3.0, a=1.0, fps=12, dpi=150, dry_run
     ns, nkx, nky = info["ns"], info["nkx"], info["nky"]
 
     vmax_phi = max(np.max(np.abs(f)) for f in frames_phi)
-    if vmax_phi < 1e-30: vmax_phi = 1.0
+    if vmax_phi < 1e-30:
+        vmax_phi = 1.0
     vmax_skk = max(np.max(f) for f in frames_skk)
-    if vmax_skk < 1e-30: vmax_skk = 1.0
+    if vmax_skk < 1e-30:
+        vmax_skk = 1.0
 
     # torus mesh — higher resolution for smooth rendering
     n_t, n_z = max(nx, 80), max(ny, 160)
@@ -328,6 +330,7 @@ def generate_mp4(snapshots, output_path, R0=3.0, a=1.0, fps=12, dpi=150, dry_run
 
     # interpolate phi frames to torus resolution
     from scipy.ndimage import zoom
+
     frames_torus = []
     for f in frames_phi:
         zf = zoom(f, (n_t / f.shape[0], n_z / f.shape[1]), order=1)
@@ -335,24 +338,53 @@ def generate_mp4(snapshots, output_path, R0=3.0, a=1.0, fps=12, dpi=150, dry_run
 
     fig = plt.figure(figsize=(14, 5), facecolor="white")
     ax3d = fig.add_axes([-0.18, -0.1, 0.85, 1.2], projection="3d", facecolor="white")
-    gs_r = fig.add_gridspec(3, 2, height_ratios=[1, 1, 1.1],
-                            hspace=0.2, wspace=0.06,
-                            left=0.50, right=0.96, top=0.93, bottom=0.02)
+    gs_r = fig.add_gridspec(
+        3,
+        2,
+        height_ratios=[1, 1, 1.1],
+        hspace=0.2,
+        wspace=0.06,
+        left=0.50,
+        right=0.96,
+        top=0.93,
+        bottom=0.02,
+    )
     ax_skx = fig.add_subplot(gs_r[0:2, 0])
     ax_sky = fig.add_subplot(gs_r[0:2, 1])
     ax_phi = fig.add_subplot(gs_r[2, :])
 
     norm_phi = Normalize(-vmax_phi, vmax_phi)
-    norm_df = Normalize(0, vmax_skk)
+    _ = Normalize(0, vmax_skk)  # norm_df reserved for future use
     lim = R0 + a
     z_lim = a
 
-    im_skx = ax_skx.imshow(np.zeros((ns, nkx)), aspect="auto", cmap="RdBu_r",
-                            vmin=0, vmax=vmax_skk, origin="lower", interpolation="bilinear")
-    im_sky = ax_sky.imshow(np.zeros((ns, nky)), aspect="auto", cmap="RdBu_r",
-                            vmin=0, vmax=vmax_skk, origin="lower", interpolation="bilinear")
-    im_phi = ax_phi.imshow(np.zeros((ny, nx)), aspect="auto", cmap="plasma",
-                            vmin=-vmax_phi, vmax=vmax_phi, origin="lower", interpolation="bilinear")
+    im_skx = ax_skx.imshow(
+        np.zeros((ns, nkx)),
+        aspect="auto",
+        cmap="RdBu_r",
+        vmin=0,
+        vmax=vmax_skk,
+        origin="lower",
+        interpolation="bilinear",
+    )
+    im_sky = ax_sky.imshow(
+        np.zeros((ns, nky)),
+        aspect="auto",
+        cmap="RdBu_r",
+        vmin=0,
+        vmax=vmax_skk,
+        origin="lower",
+        interpolation="bilinear",
+    )
+    im_phi = ax_phi.imshow(
+        np.zeros((ny, nx)),
+        aspect="auto",
+        cmap="plasma",
+        vmin=-vmax_phi,
+        vmax=vmax_phi,
+        origin="lower",
+        interpolation="bilinear",
+    )
 
     for ax, title in [
         (ax_skx, r"$|\delta f|\;(s,\,k_x)$"),
@@ -360,8 +392,9 @@ def generate_mp4(snapshots, output_path, R0=3.0, a=1.0, fps=12, dpi=150, dry_run
         (ax_phi, r"$\phi\;(x,\,y)$"),
     ]:
         ax.set_title(title, fontsize=11, pad=3)
-        ax.tick_params(axis="both", which="both", length=0, labelsize=0,
-                       labelbottom=False, labelleft=False)
+        ax.tick_params(
+            axis="both", which="both", length=0, labelsize=0, labelbottom=False, labelleft=False
+        )
 
     # build torus with a wedge cutout (remove 60 degrees to show cross-section)
     cutout_start, cutout_end = 0, int(n_z * 0.83)  # keep 300 of 360 degrees
@@ -375,9 +408,18 @@ def generate_mp4(snapshots, output_path, R0=3.0, a=1.0, fps=12, dpi=150, dry_run
         # torus with cutout
         torus_data = frames_torus[fi][:, cutout_start:cutout_end]
         colors = plt.cm.plasma(norm_phi(torus_data))
-        ax3d.plot_surface(X_cut, Y_cut, Zc_cut, facecolors=colors, shade=True,
-                          lightsource=LightSource(azdeg=315, altdeg=50),
-                          rstride=1, cstride=2, antialiased=False, alpha=0.95)
+        ax3d.plot_surface(
+            X_cut,
+            Y_cut,
+            Zc_cut,
+            facecolors=colors,
+            shade=True,
+            lightsource=LightSource(azdeg=315, altdeg=50),
+            rstride=1,
+            cstride=2,
+            antialiased=False,
+            alpha=0.95,
+        )
 
         # cross-section disk at the cutout edge
         theta_cs = np.linspace(0, 2 * np.pi, n_t)
@@ -391,8 +433,13 @@ def generate_mp4(snapshots, output_path, R0=3.0, a=1.0, fps=12, dpi=150, dry_run
         phi_cs = frames_torus[fi][:, cutout_end % n_z]
         cs_colors = plt.cm.plasma(norm_phi(phi_cs))
         for j in range(len(theta_cs) - 1):
-            ax3d.plot([x_cs[j], x_cs[j+1]], [y_cs[j], y_cs[j+1]],
-                      [z_cs[j], z_cs[j+1]], color=cs_colors[j % len(cs_colors)], lw=2.5)
+            ax3d.plot(
+                [x_cs[j], x_cs[j + 1]],
+                [y_cs[j], y_cs[j + 1]],
+                [z_cs[j], z_cs[j + 1]],
+                color=cs_colors[j % len(cs_colors)],
+                lw=2.5,
+            )
 
         ax3d.set_xlim(-lim, lim)
         ax3d.set_ylim(-lim, lim)
@@ -402,9 +449,15 @@ def generate_mp4(snapshots, output_path, R0=3.0, a=1.0, fps=12, dpi=150, dry_run
         ax3d.dist = 5.0  # zoom in (default ~10)
         ax3d.axis("off")
         fig.texts.clear()
-        fig.text(0.02, 0.93, f"t = {times[fi]:.2f}", fontsize=13,
-                 fontfamily="monospace", color="#444444",
-                 bbox=dict(facecolor="#eeeeee", edgecolor="none", pad=3, alpha=0.8))
+        fig.text(
+            0.02,
+            0.93,
+            f"t = {times[fi]:.2f}",
+            fontsize=13,
+            fontfamily="monospace",
+            color="#444444",
+            bbox=dict(facecolor="#eeeeee", edgecolor="none", pad=3, alpha=0.8),
+        )
 
         im_skx.set_data(np.sum(frames_skk[fi], axis=-1))
         im_sky.set_data(np.sum(frames_skk[fi], axis=-2))
@@ -421,16 +474,19 @@ def generate_mp4(snapshots, output_path, R0=3.0, a=1.0, fps=12, dpi=150, dry_run
         return
 
     print(f"Rendering {len(times)} frames at {dpi} dpi...")
-    anim = animation.FuncAnimation(fig, draw, frames=len(times),
-                                   interval=1000 // fps, blit=False)
+    anim = animation.FuncAnimation(fig, draw, frames=len(times), interval=1000 // fps, blit=False)
 
     ext = os.path.splitext(output_path)[1].lower()
     if ext == ".gif":
         anim.save(output_path, writer=animation.PillowWriter(fps=fps), dpi=dpi)
     else:
-        anim.save(output_path, writer=animation.FFMpegWriter(
-            fps=fps, bitrate=6000,
-            extra_args=["-pix_fmt", "yuv420p"]), dpi=dpi)
+        anim.save(
+            output_path,
+            writer=animation.FFMpegWriter(
+                fps=fps, bitrate=6000, extra_args=["-pix_fmt", "yuv420p"]
+            ),
+            dpi=dpi,
+        )
     size_mb = os.path.getsize(output_path) / 1e6
     print(f"Saved {output_path} ({size_mb:.1f} MB)")
     plt.close(fig)
@@ -450,8 +506,15 @@ def main():
     snapshots = load_snapshots(args.output_dir, last_only=args.dry_run)
     ext = os.path.splitext(args.output)[1].lower()
     if args.dry_run or ext in (".mp4", ".gif", ".png"):
-        generate_mp4(snapshots, args.output, R0=args.R0, a=args.a,
-                     fps=args.fps, dpi=args.dpi, dry_run=args.dry_run)
+        generate_mp4(
+            snapshots,
+            args.output,
+            R0=args.R0,
+            a=args.a,
+            fps=args.fps,
+            dpi=args.dpi,
+            dry_run=args.dry_run,
+        )
     else:
         generate_html(snapshots, args.output, R0=args.R0, a=args.a)
 

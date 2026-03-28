@@ -159,9 +159,7 @@ def _circular_geometry(theta, q, shat, eps, signB=1.0, signJ=1.0, geom_type="cir
         metric[:, 0, 0] = 1.0
         metric[:, 0, 1] = metric[:, 1, 0] = dzde
         metric[:, 0, 2] = metric[:, 2, 0] = np.sin(theta) / (2 * np.pi)
-        metric[:, 1, 1] = (1 / (2 * np.pi * R)) ** 2 * (
-            1 + (1 - eps**2) * (q / eps) ** 2
-        ) + dzde**2
+        metric[:, 1, 1] = (1 / (2 * np.pi * R)) ** 2 * (1 + (1 - eps**2) * (q / eps) ** 2) + dzde**2
         metric[:, 1, 2] = metric[:, 2, 1] = q * np.sqrt(1 - eps**2) / (
             2 * np.pi * eps
         ) ** 2 * signB * signJ + dzde * np.sin(theta) / (2 * np.pi)
@@ -265,8 +263,9 @@ def _build_velocity_grids(nvpar, nmu, vpar_max):
     return vpgr, vperp**2 / 2, np.full(nvpar, dvp), 2 * np.pi * vperp * dvperp
 
 
-def _build_wavevector_grids(nkx, nky, kxmax, krhomax, q=1.0, shat=0.0, eps=0.1,
-                            ikxspace=5, kthnorm=1.0):
+def _build_wavevector_grids(
+    nkx, nky, kxmax, krhomax, q=1.0, shat=0.0, eps=0.1, ikxspace=5, kthnorm=1.0
+):
     """Centered kx grid and uniform ky grid.
 
     For nky=1 the single mode is placed at krhomax (not zero),
@@ -485,9 +484,9 @@ def compute_geometry(
     kthnorm = np.sqrt(g_zz_mid)
 
     vpgr, mugr, intvp, intmu = _build_velocity_grids(nvpar, nmu, vpar_max)
-    kxrh, krho_raw = _build_wavevector_grids(nkx, nky, kxmax, krhomax,
-                                              q=q, shat=shat, eps=eps,
-                                              ikxspace=ikxspace, kthnorm=kthnorm)
+    kxrh, krho_raw = _build_wavevector_grids(
+        nkx, nky, kxmax, krhomax, q=q, shat=shat, eps=eps, ikxspace=ikxspace, kthnorm=kthnorm
+    )
     krho = krho_raw / kthnorm
 
     # use actual grid length (may differ from input nkx for even nx)
