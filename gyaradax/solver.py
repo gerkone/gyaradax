@@ -42,70 +42,13 @@ from gyaradax.integrals import (
     geom_tensors,
     calculate_phi,
     calculate_phi_kinetic,
+    precompute_phi_adiabatic,
+    calculate_phi_adiabatic,
 )
 from gyaradax import stencils
 from gyaradax.params import GKParams
+from gyaradax.types import GKPre, GKState
 from einops import rearrange
-
-
-@jax.tree_util.register_pytree_node_class
-class GKPre:
-    """precomputed terms container. separates dynamic arrays (leaves) from
-    static metadata (auxiliary) so FFT sizes stay concrete under JIT."""
-
-    def __init__(self, items: Dict[str, Any]):
-        self._items = items
-
-    def tree_flatten(self):
-        leaves = []
-        leaf_keys = []
-        aux = {}
-        for k, v in self._items.items():
-            if k.startswith("nl_m") or k in ("ixzero", "iyzero", "nsp"):
-                aux[k] = v
-            elif isinstance(v, (jnp.ndarray, float, int, bool)):
-                leaves.append(v)
-                leaf_keys.append(k)
-            else:
-                aux[k] = v
-        return tuple(leaves), {"leaf_keys": tuple(leaf_keys), "aux": aux}
-
-    @classmethod
-    def tree_unflatten(cls, metadata, leaves):
-        items = dict(zip(metadata["leaf_keys"], leaves))
-        items.update(metadata["aux"])
-        return cls(items)
-
-    def __getitem__(self, key):
-        return self._items[key]
-
-    def get(self, key, default=None):
-        return self._items.get(key, default)
-
-    def items(self):
-        return self._items.items()
-
-    def keys(self):
-        return self._items.keys()
-
-
-@jax.tree_util.register_pytree_node_class
-@dataclass(frozen=True)
-class GKState:
-    """Diagnostic state for large-step growth tracking and normalization."""
-
-    time: jnp.ndarray
-    step: jnp.ndarray
-    accumulated_norm_factor: jnp.ndarray
-    window_start_amp: jnp.ndarray
-    last_growth_rate: jnp.ndarray
-
-    def tree_flatten(self):
-        return tuple(vars(self).values()), None
-
-    @classmethod
-    def tree_unflatten(cls, aux_data, leaves):
-        return cls(*leaves)
 
 
 def default_state(nky: int = 1) -> GKState:
@@ -751,6 +694,16 @@ def linear_precompute(geometry: Dict[str, jnp.ndarray], params: GKParams) -> Dic
         out.update(sp)
         out["geom_tensors"] = geom_tensors(geometry, params=params)
 
+        # Precompute adiabatic phi solve arrays
+        pw, pcw, tmp, de, signz, gamma, ints = precompute_phi_adiabatic(geometry, params)
+        out["phi_weight"] = pw
+        out["phi_corr_weight"] = pcw
+        out["phi_tmp"] = tmp
+        out["phi_de"] = de
+        out["phi_signz"] = signz
+        out["phi_gamma"] = gamma
+        out["phi_ints"] = ints
+
     return GKPre(out)
 
 
@@ -780,7 +733,7 @@ def _apply_vpar_fn(pre: GKPre):
             out = out + c * jnp.where(valid[:, None, None, None, None], shifted, 0.0)
         return out
     return _apply_vpar
-        
+
 
 def _linear_rhs_core(
     df: jnp.ndarray,
@@ -838,7 +791,7 @@ def linear_rhs(
 ) -> jnp.ndarray:
     """Adiabatic linear RHS (5D df). Delegates to _linear_rhs_core."""
     if phi is None:
-        phi = calculate_phi(pre["geom_tensors"], df)
+        phi = _compute_phi(df, geometry, params, pre)
     phi_b = jnp.reshape(phi, (1, 1, phi.shape[0], phi.shape[1], phi.shape[2]))
     return _linear_rhs_core(df, phi_b, pre, params.dvp, params.disp_vp, params.drive_scale)
 
@@ -1003,7 +956,16 @@ def advance_state(
 def _compute_phi(df, geometry, params, pre):
     """compute phi via the appropriate solver."""
     if params.adiabatic_electrons:
-        return calculate_phi(pre["geom_tensors"], df)
+        return calculate_phi_adiabatic(
+            df,
+            phi_weight=pre["phi_weight"],
+            phi_corr_weight=pre["phi_corr_weight"],
+            tmp=pre["phi_tmp"],
+            de=pre["phi_de"],
+            signz=pre["phi_signz"],
+            gamma=pre["phi_gamma"],
+            ints=pre["phi_ints"],
+        )
     else:
         return calculate_phi_kinetic(
             geometry,

@@ -180,6 +180,29 @@ def main():
          output_packed=out_packed,
          output_unpacked=out_unpacked)
 
+    # ── C7: gkstep_single (full RK4 step) ───────────────────────────────────
+    print("\nC7: gkstep_single")
+    from gyaradax.solver import gkstep_single, default_state, GKPre
+    from dataclasses import replace
+
+    state = default_state(nky=df.shape[-1])
+    pre_gk = GKPre(pre)
+
+    @jax.jit
+    def _rk4_linear(d, s):
+        return gkstep_single(d, geom, replace(params, non_linear=False), s, pre_gk)
+
+    @jax.jit
+    def _rk4_nonlinear(d, s):
+        return gkstep_single(d, geom, replace(params, non_linear=True), s, pre_gk)
+
+    out_df_lin, (out_phi_lin, _), _ = _rk4_linear(df, state)
+    out_df_nl,  (out_phi_nl,  _), _ = _rk4_nonlinear(df, state)
+    save("rk4_step",
+         df=df,
+         out_df_linear=out_df_lin,    out_phi_linear=out_phi_lin,
+         out_df_nonlinear=out_df_nl,  out_phi_nonlinear=out_phi_nl)
+
     print("\nAll baselines written to", BASELINES_DIR)
 
 

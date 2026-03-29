@@ -1,30 +1,17 @@
-**Role:** Expert HPC CUDA C++ and JAX engineer.
-
-**Skill reference:** `cuda_augmentations/cuFFT_LTO_example/skill.md` — read it before writing any LTO callback code. It covers the correct `cufftXtSetJITCallback` 6-argument signature, fatbin alignment fix, build flags, pitfalls, and environment paths. Also read `cuda_augmentations/skill.md` for JAX FFI integration patterns and the fatbin alignment fix.
-
-**Build system:** `cuda_augmentations/CMakeLists.txt` — use CMake, not Makefile. Build commands:
-```bash
-source /system/apps/userenv/mambaforge/bashrc
-mamba run -n jax_env bash -c "cd cuda_augmentations/build && cmake .. && make -j"
-```
-
-**Benchmark command:**
-```bash
-mamba run -n jax_env python cuda_augmentations/jax_ffi_benchmark.py
-```
-
----
-
 # LTO Bracket Optimization Plan
 
-## Baseline performance (A100 MIG 3g.20gb, batch=4096)
+## Baseline performance (measured on full A100, batch=4096)
 
-| Variant              | Time     | vs JAX FP64 |
-|----------------------|----------|-------------|
-| JAX FP64             | 31.6 ms  | baseline    |
-| JAX mixed            | 29.0 ms  | −8%         |
-| cuFFT FFI FP64       | 35.1 ms  | +11%        |
-| **LTO cuFFT v0**     | **24.9 ms** | **−21%** |
+| Variant               | Time (ms) | Speedup vs FP64 | Rel L2     | Notes                          |
+|-----------------------|-----------|-----------------|------------|--------------------------------|
+| JAX FP64              | 29.34     | 1.00×           | 0          | reference                      |
+| JAX Mixed             | 28.990    | 1.08×           | 3.05e-08   |                                |
+| cuFFT FFI (std)       | 32.967    | 0.95×           | 5.98e-16   | slower than JAX due to FFI overhead |
+| LTO cuFFT v0          | 24.464    | 1.28×           | 6.60e-16   | Z2D gather callbacks           |
+| LTO cuFFT v1          | 24.497    | 1.27×           | 6.60e-16   | same as v0 (Level 1 negligible on A100) |
+| **LTO cuFFT v2**      | **22.470**| **1.32×**       | 6.60e-16   | + D2Z bracket fusion (Level 1) |
+| **LTO v3 (v1+store)** | **22.612**| **1.38×**       | 6.60e-16   | + sparse store CB (Level 3)    |
+| **LTO vZ2Z**          | **19.780**| **1.48×**       | 2.58e-15   | + same-field Z2Z (Level 2)     |
 
 ## Grid dimensions (configs/iteration_13.yaml)
 
@@ -34,311 +21,428 @@ mrad=135  mphi=96  mphiw3=49
 Sparsity: nkx×nky / (mrad×mphiw3) = 2720/6615 = 0.41
 ```
 
-## Current LTO v0 data flow and HBM traffic
+## Current vZ2Z data flow and HBM traffic
 
 ```
 Step                             Kernel launches   HBM traffic
 ─────────────────────────────────────────────────────────────
-Z2D ×4 (load CB reads df+phi)   4 launches        1.43 GB read (gather) + 1.70 GB write
-Bracket kernel                   1 launch          1.70 GB read + 0.42 GB write
-D2Z                              1 launch          0.42 GB read + 0.43 GB write
+Sym+Reduce                       1 launch          ~43 KB (negligible)
+Z2Z #0 (ϕ, load CB gathers)     1 launch          178 MB read + 849 MB write
+Z2Z #1 (f, load CB gathers)     1 launch          178 MB read + 849 MB write
+D2Z (bracket load CB + sparse)   1 launch          1698 MB read + 178 MB write
 ─────────────────────────────────────────────────────────────
-Total                            6 launches        6.11 GB
-Effective bandwidth at 24.9ms:   245 GB/s (31% of ~800 GB/s MIG peak)
+Total                            4 launches        3.93 GB
+Effective bandwidth at 19.78ms:  199 GB/s (10% of ~2 TB/s A100 peak)
 ```
 
-Workspace: 5 real-space buffers × 424.7 MB = 2.12 GB + 433.5 MB dummy input = 2.55 GB total.
+**Key observation:** External I/O (3.93 GB) at 19.78ms = 199 GB/s. A100 peak
+is ~1555 GB/s. The FFTs' internal butterfly traffic dominates — cuFFT does
+~10 internal passes over the data. External I/O is no longer the primary
+bottleneck. This changes which optimizations matter.
 
-The dominant costs are:
-1. **4 gather passes** over df+phi (1.43 GB) — these are random-access reads through `inverse_jind` indirection, which miss L2 because the packed arrays (356 MB) >> L2 cache (~13 MB on MIG 3g)
-2. **Z2D writes + bracket reads** of the 4 real-space arrays (3.40 GB) — sequential but two full passes over the same data (write then read)
-3. **Bracket write + D2Z read** of nl_real (0.85 GB) — another write-then-read materialization
+Workspace: 2 complex buffers × 849 MB = 1.70 GB.
 
---- [x] **Optimization Level 1: Bracket Fusion**
-    - [x] Devise D2Z load callback signature for in-flight bracket.
-    - [x] Update FFI wrapper to manage dual callbacks & workspaces.
-    - [x] Bench: 24.96ms (v0) -> 22.66ms (v1). Save ~2.3ms.
-    - [x] Verify: rel_l2 ≈ 2.88e-16.
+---
 
---- [x] **Optimization Level 2: Two-for-one Z2Z (Consolidated Prototype)**
-    - [x] Implement `bracket_z2z_load_cb.cu` with Hermitian extension.
-    - [x] Reconstruct full elaborate benchmark baseline.
-    - [x] Clean workspace from diagnostic files.
-    - [x] Verify V0/V1/V2 stability.
-    - > [!IMPORTANT]
-    - > Current Status: V2 is an unfinished prototype. Diagnostics (batch-indexed constant-imaginary tests) reveal that cuFFT Z2Z load callbacks are failing to recover any signal in the imaginary channel ($10^{-51}$ output), even with correct Hermitian mirroring logic and fixed memory alignment. Real-part recovery is functional, but imaginary-channel loss is a blocker.
+## [x] Optimization Level 1 — Fuse bracket into D2Z load callback
 
-## Optimization Level 1 — Fuse bracket into D2Z load callback
+- [x] Bench: v2 = 22.470ms → **saves 1.8ms (7.3%)** vs v1.
+- [x] Verify: rel_l2 ≈ 6.60e-16.
 
-**Idea:** Replace the separate bracket kernel with a `CUFFT_CB_LD_REAL_DOUBLE` load callback on the D2Z plan. The callback reads the 4 real-space gradient arrays at position `n`, computes `inv_n2 * (φ_y·f_x − φ_x·f_y)`, and returns the real value to cuFFT.
+---
 
-**What it eliminates:**
-- The `lto_bracket_kernel` launch
-- The `d_ws_nl` buffer (0.42 GB allocation)
-- 1 HBM write (bracket output) + 1 HBM read (D2Z input) = **0.85 GB saved (14%)**
+## [x] Optimization Level 3 — D2Z store callback (sparse output)
 
-**Expected speedup:** ~10–12% → **~22 ms**
+- [x] Bench: v3 = 22.612ms, gain ~0.09ms (noise). Worth keeping for correctness.
 
-**Kernel launches:** 6 → 5
+---
+
+## [x] Optimization Level 2 — Same-field paired Z2Z (halve FFT count)
+
+### ✅ VALIDATED — Python rel_l2 = 4.414e-16, CUDA rel_l2 = 2.58e-15
+
+- [x] Step 2.0: Confirmed Z2Z LTO load callback invocation.
+- [x] Step 2.1: Implemented symmetrize + reduce kernel.
+- [x] Step 2.2: Implemented `bracket_z2z_load_cb.cu` with 2D Hermitian extension + j=0 symmetrization.
+- [x] Step 2.3: Implemented `bracket_d2z_load_cb_v2.cu` (complex inputs, α/β rescaling).
+- [x] Step 2.4: Host wrapper `cufft_lto_bracket_vz2z.cu`.
+- [x] Step 2.5: Benchmark integration in `jax_ffi_benchmark.py`.
+- [x] Step 2.6: Validated rel_l2 = 2.58e-15. Runtime = 19.78ms (1.48× vs JAX FP64).
+
+### Core Design
+
+Pack both spatial derivatives of the **same physical field** into one complex signal:
+
+```
+Z2Z #0:  Z_k = (ikx · ϕ_k)/α₀ + i·(iky · ϕ_k)/β₀   →  IFFT  →  Re = ∂xϕ/α₀,  Im = ∂yϕ/β₀
+Z2Z #1:  Z_k = (ikx · f_k)/α₁ + i·(iky · f_k)/β₁    →  IFFT  →  Re = ∂xf/α₁,   Im = ∂yf/β₁
+```
+
+### Bugs Found and Fixed
+
+**Bug 1 — Cross-field leakage (~1e-2):** Original packed (ϕ, f) cross-field.
+|ϕ| ≫ |f| causes machine-epsilon leakage at catastrophic relative magnitude.
+Fixed by same-field pairing.
+
+**Bug 2 — Hermitian asymmetry at j=0 (~3.5e-4):** Gyro-averaging breaks
+Hermitian symmetry at ky=0 column of phi (14% relative asymmetry). Invisible
+to irfft2, fatal to Z2Z packing. Fixed by inline symmetrization in callback.
+
+---
+
+## [ ] Optimization Level 2a — Merge Z2Z Calls (Tier 1: cross 1.5×)
+
+**Idea:** Merge the two separate Z2Z calls into a **single batched Z2Z with
+batch=8192**. The first 4096 batches process ϕ, the next 4096 process f.
+The load callback discriminates via batch index.
+
+**What it gains:**
+- One fewer kernel launch + one fewer cuFFT plan
+- Better GPU occupancy from doubled batch parallelism
+- cuFFT scheduler has more work to hide latency
+
+**Expected speedup:** 0.3–0.8ms → **~19.0ms (1.54×)**
 
 ### Implementation
 
-#### 1. New device callback: `bracket_d2z_load_cb.cu`
+#### 1. Merged callback struct
 
 ```cpp
-#include <cufftXt.h>
+struct CallbackInfoZ2Z_Merged {
+    const double2* phi_packed;   // field 0
+    const double2* df_packed;    // field 1
+    double alpha0, beta0;        // scale factors for ϕ
+    double alpha1, beta1;        // scale factors for f
+    int field_boundary;          // = 4096 (original batch size)
+    const double*  kx;
+    const double*  ky;
+    const int*     inverse_jind;
+    int mrad, mphi, nkx, nky;
+};
+```
 
-struct BracketD2zInfo {
-    const double* phi_y;     // [batch, mrad, mphi]
-    const double* f_x;
-    const double* phi_x;
-    const double* f_y;
+#### 2. Callback discrimination logic
+
+```cpp
+__device__ cufftDoubleComplex d_z2z_merged_load(
+    void* dataIn, unsigned long long offset,
+    void* callerInfo, void* sharedMem)
+{
+    const auto* info = (const CallbackInfoZ2Z_Merged*)callerInfo;
+    long long elems_per_batch = info->mrad * info->mphi;
+    int batch_idx = (int)(offset / elems_per_batch);
+
+    // Select field and scale factors based on batch index
+    const double2* field;
+    double alpha, beta;
+    int local_batch;
+    if (batch_idx < info->field_boundary) {
+        field = info->phi_packed;
+        alpha = info->alpha0;  beta = info->beta0;
+        local_batch = batch_idx;
+    } else {
+        field = info->df_packed;
+        alpha = info->alpha1;  beta = info->beta1;
+        local_batch = batch_idx - info->field_boundary;
+    }
+
+    // Remap offset to local batch for field lookup
+    long long local_offset = (long long)local_batch * elems_per_batch
+                           + (offset % elems_per_batch);
+
+    // ... rest of gather + Hermitian extension + j=0 symmetrize (unchanged)
+}
+```
+
+#### 3. Workspace layout
+
+Single contiguous buffer: `ws[8192, mrad, mphi]` complex.
+- `ws[0..4095, :, :]` = ϕ gradients (∂xϕ/α₀ in real, ∂yϕ/β₀ in imag)
+- `ws[4096..8191, :, :]` = f gradients (∂xf/α₁ in real, ∂yf/β₁ in imag)
+
+#### 4. Updated D2Z bracket callback
+
+```cpp
+struct BracketD2zInfoMerged {
+    const double2* ws;           // [8192, mrad, mphi] — merged workspace
+    int phi_offset;              // = 0 (batch offset for ϕ gradients)
+    int df_offset;               // = 4096 * mrad * mphi (batch offset for f)
+    double alpha0, beta0;
+    double alpha1, beta1;
     double inv_n2;
 };
 
-__device__ cufftDoubleReal d_bracket_d2z_load(
-    void*              dataIn,
-    unsigned long long offset,
-    void*              callerInfo,
-    void*              sharedMem)
+__device__ cufftDoubleReal d_bracket_d2z_load_merged(
+    void* dataIn, unsigned long long offset,
+    void* callerInfo, void* sharedMem)
 {
-    const BracketD2zInfo* bi = (const BracketD2zInfo*)callerInfo;
-    return bi->inv_n2 * (bi->phi_y[offset] * bi->f_x[offset]
-                       - bi->phi_x[offset] * bi->f_y[offset]);
+    const auto* bi = (const BracketD2zInfoMerged*)callerInfo;
+
+    // D2Z offset is into [4096, mrad, mphi] real.
+    // Read phi gradients from ws[offset] and f gradients from ws[offset + df_offset]
+    double2 z0 = bi->ws[offset + bi->phi_offset];
+    double2 z1 = bi->ws[offset + bi->df_offset];
+
+    double dxphi = z0.x * bi->alpha0;
+    double dyphi = z0.y * bi->beta0;
+    double dxf   = z1.x * bi->alpha1;
+    double dyf   = z1.y * bi->beta1;
+
+    return bi->inv_n2 * (dyphi * dxf - dxphi * dyf);
 }
 ```
 
-- Compile to `bracket_d2z_load_cb.fatbin` with same LTO flags
-- Embed via `bin2c --name bracket_d2z_load_cb_fatbin --type longlong`
+#### 5. Steps
 
-#### 2. Host changes in `cufft_lto_bracket.cu`
+- [ ] **Step 2a.1:** Create merged Z2Z load callback `bracket_z2z_merged_load_cb.cu`.
+- [ ] **Step 2a.2:** Create merged D2Z bracket callback `bracket_d2z_load_cb_merged.cu`.
+- [ ] **Step 2a.3:** New host wrapper `cufft_lto_bracket_vz2z_merged.cu`.
+    - Single Z2Z plan with batch=8192.
+    - Workspace: `[8192, mrad, mphi]` complex = 3.40 GB.
+    - Execution: sym+reduce → Z2Z (batch=8192) → D2Z.
+    - 3 kernel launches (down from 4).
+- [ ] **Step 2a.4:** Benchmark variant `LTO vZ2Z-merged`.
+- [ ] **Step 2a.5:** Validate rel_l2 ≈ 2.58e-15 vs fp64 baseline.
 
-- Add `#include "bracket_d2z_load_cb_fatbin.h"`
-- Allocate `BracketD2zInfo* d_bracket_info` on device
-- On the D2Z plan: call `cufftXtSetJITCallback(lto_plan_d2z, "d_bracket_d2z_load", ..., CUFFT_CB_LD_REAL_DOUBLE, &d_bracket_info_void)` **before** `cufftMakePlanMany`
-- Replace `cufftPlanMany` for D2Z with `cufftCreate` + `cufftXtSetJITCallback` + `cufftMakePlanMany`
-- Before `cufftExecD2Z`: update `d_bracket_info` with the 4 workspace pointers + `inv_n2`
-- Remove: `lto_bracket_kernel`, `d_ws_nl`
+#### 6. Memory note
 
-#### 3. CMake changes
-
-Add the new fatbin build rule (same pattern as `bracket_load_cb`).
-
-#### 4. Validation
-
-Benchmark must still produce `rel_l2 ≈ 2.9e-16` vs `output_fp64`.
-
----
-
-## Optimization Level 2 — Two-for-one Z2Z (halve FFT count)
-
-**Idea:** The FFT is linear, so `IFFT(A + iB) = IFFT(A) + i·IFFT(B)`. Pack gradient pairs into complex signals and use Z2Z (complex-to-complex) instead of Z2D:
-- Z2Z #0: `IFFT(i·ky·φ + i·(i·kx·f))` → `Re = φ_y`, `Im = f_x`
-- Z2Z #1: `IFFT(i·kx·φ + i·(i·ky·f))` → `Re = φ_x`, `Im = f_y`
-
-This halves the FFT launches from 4 → 2 and halves the callback gather passes over df+phi.
-
-**What it eliminates:**
-- 2 of 4 callback gather passes: **0.71 GB saved**
-- Combined with Level 1: **1.57 GB total saved (26%)**
-
-**Expected speedup:** ~20–24% → **~19–20 ms**
-
-**Kernel launches:** 5 → 3 (with Level 1)
-
-### Complications
-
-Z2Z operates on the **full spectrum** `[mrad, mphi]` (not the half-spectrum `[mrad, mphiw3]`). The load callback must provide Hermitian-extended values for `j > mphi/2`:
-
-```
-For j in [0, mphi/2]: compute gradient directly (same as current Z2D callback)
-For j in (mphi/2, mphi-1]:
-    j' = mphi - j
-    i' = (mrad - i_dense) % mrad
-    A_conj = conj(gradient_A(i', j'))   // Hermitian extension of first field
-    B_conj = conj(gradient_B(i', j'))   // Hermitian extension of second field
-    return A_conj + i * B_conj          // combined two-for-one value
-```
-
-The conjugate half doubles callback computation (2 gradients per element), but only for ~half the positions. Net callback work: ~1.5× per Z2Z call, 2 calls → 3.0× total vs 4.0× for 4 Z2D = **25% less callback compute**.
-
-### Implementation
-
-#### 1. New device callback: `bracket_z2z_load_cb.cu`
-
-New `CallbackInfoZ2Z` struct:
-```cpp
-struct CallbackInfoZ2Z {
-    const double2* df_packed;     // [batch, nkx, nky]
-    const double2* phi_packed;    // [batch, nkx, nky]
-    const double*  kx;            // [nkx]
-    const double*  ky;            // [nky]
-    const int*     inverse_jind;  // [mrad]
-    int mrad;
-    int mphi;           // full size (not half!)
-    int nkx;
-    int nky;
-    int pair_type;      // 0 = (phi_y, f_x), 1 = (phi_x, f_y)
-};
-```
-
-Callback `d_z2z_load_cb_ptr`:
-- Offset is flat into `[batch, mrad, mphi]` complex
-- `j = local % mphi`
-- If `j <= mphi/2`: compute as in current Z2D callback but return `A + i*B`
-- If `j > mphi/2`: compute Hermitian conjugate pair at `(i', j')`, return `conj(A) + i*conj(B)`
-- `pair_type` selects which gradient pair: 0 = (i·ky·φ, i·kx·f), 1 = (i·kx·φ, i·ky·f)
-
-#### 2. Host changes
-
-- Replace `lto_plan_z2d` (Z2D) with `lto_plan_z2z` (Z2Z)
-- Z2Z output is `[batch, mrad, mphi]` complex → workspace is 2 complex arrays instead of 4 real
-- Update `gradient_type` → `pair_type`, only 1 H2D copy between Z2Z calls instead of 3
-- Bracket in D2Z load callback reads complex arrays: `inv_n2 * (Re(z0)*Im(z0) - Re(z1)*Im(z1))`
-
-#### 3. Memory savings
-
-Workspace drops from 5 × 424.7 MB = 2.12 GB to 2 × 849.3 MB = 1.70 GB. Net allocation is similar, but we avoid 2 kernel launches and 2 gather passes.
-
-#### 4. Validation
-
-Must produce `rel_l2 ≈ 2.9e-16`. The two-for-one trick is exact in IEEE 754 arithmetic.
+Workspace increases from 1.70 GB (2 × 849 MB) to 3.40 GB (1 × 8192 batches).
+The buffers are contiguous, so this is a single allocation. Verify this fits
+within A100 available memory after accounting for df/phi inputs and cuFFT
+scratch space.
 
 ---
 
-## Optimization Level 3 — D2Z store callback (sparse output)
+## [ ] Optimization Level 4 — CUDA Graphs (Tier 2: push toward 1.6×)
 
-**Idea:** The D2Z currently writes a dense `[batch, mrad, mphiw3]` output (433 MB), of which only 41% is useful (the `nkx × nky` packed modes). A `CUFFT_CB_ST_COMPLEX_DOUBLE` store callback on D2Z can write directly to the packed `[batch, nkx, nky]` output, skipping 59% of writes.
+**Idea:** Capture the entire execution sequence as a CUDA Graph and replay it.
 
-**What it eliminates:**
-- 59% of D2Z output bandwidth: **255 MB saved**
-- Python-side `unpack_half_spectrum` call (a gather op on XLA side)
-- Changes FFI output shape from `[batch, mrad, mphiw3]` to `[batch, nkx, nky]`
+**What it gains:**
+- Eliminates per-launch host overhead (~50μs × 3 launches = 150μs)
+- Driver can optimize inter-kernel scheduling
+- Zero code changes to callbacks
 
-**Expected additional speedup:** ~2–4% (D2Z output is a small fraction of total traffic)
+**Expected speedup:** 0.2–0.5ms → **~18.5ms (1.59×)**
 
 ### Implementation
-
-#### 1. New device callback: `bracket_d2z_store_cb.cu`
 
 ```cpp
-struct D2zStoreInfo {
-    double2*   packed_out;     // [batch, nkx, nky] — the actual FFI output
-    const int* jind;           // [nkx] → dense kx index for each packed kx
-    int mrad;
-    int mphiw3;
-    int nkx;
-    int nky;
-};
+// First call: capture
+cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal);
+  compute_scale_factors<<<...>>>(phi, df, kx, ky, &scales);
+  cufftExecZ2Z(merged_z2z_plan, ws_in, ws_out, CUFFT_INVERSE);
+  cufftExecD2Z(d2z_plan, dummy_in, packed_out);
+cudaStreamEndCapture(stream, &graph);
+cudaGraphInstantiate(&graph_exec, graph, 0);
 
-__device__ void d_d2z_store_cb(
-    void*              dataOut,
-    unsigned long long offset,
-    cufftDoubleComplex element,
-    void*              callerInfo,
-    void*              sharedMem)
-{
-    const D2zStoreInfo* si = (const D2zStoreInfo*)callerInfo;
-    long long dense_stride = (long long)si->mrad * si->mphiw3;
-    long long batch_idx = (long long)offset / dense_stride;
-    long long local     = (long long)offset % dense_stride;
-    int i_dense = (int)(local / si->mphiw3);
-    int j       = (int)(local % si->mphiw3);
-
-    if (j >= si->nky) return;  // dealiased mode — skip
-
-    // Linear search through jind to find packed index for this i_dense
-    // (or use a reverse lookup table passed via callerInfo)
-    // If i_dense is not in jind: skip
-    // If found at i_packed: write to packed_out[batch_idx, i_packed, j]
-}
+// Subsequent calls: replay
+cudaGraphLaunch(graph_exec, stream);
 ```
 
-Note: the reverse lookup requires `inverse_jind` (dense → packed), which is already available. Add it to the struct.
+**Requirements:**
+- All buffer pointers must remain stable between replays (they do with reused plans).
+- CallbackInfo updates (scale factors change per call) can be handled by
+  writing to device memory before graph launch — the graph captures the
+  pointer, not the value.
 
-#### 2. Dual callback on D2Z plan
+### Steps
 
-The D2Z plan needs BOTH a load callback (Level 1 bracket fusion) and a store callback. cuFFT supports registering multiple callback types on the same plan — call `cufftXtSetJITCallback` twice with different `cufftXtCallbackType` values before `cufftMakePlanMany`. Each callback must be in a separate `.cu` fatbin.
-
-#### 3. Python changes
-
-- FFI output shape changes from `(batch, mrad, mphiw3)` to `(batch, nkx, nky)`
-- Remove `unpack_half_spectrum` call in `nonlinear_term_lto`
-- Add `jind` as an additional FFI input (int32 array, shape `[nkx]`)
-
----
-
-## Optimization Level 4 — CUDA Graphs
-
-**Idea:** Capture the entire execution sequence (2 Z2Z + 1 D2Z, or whatever Level 1–3 produces) as a CUDA Graph. Replay the graph on subsequent calls, avoiding per-call host overhead (plan lookup, kernel launch API, stream synchronization).
-
-**Expected speedup:** ~2–5% (reduces ~5 kernel launches of host overhead)
-
-### Implementation
-
-- On first call: `cudaStreamBeginCapture` → execute all kernels → `cudaStreamEndCapture` → `cudaGraphInstantiate`
-- On subsequent calls: update input pointers via `cudaGraphExecKernelNodeSetParams` or use `cudaGraphExecUpdate`
-- Requires careful handling: cuFFT internal workspace pointers must remain stable between replays (they do if the plan is reused)
-- The CallbackInfo H2D copies and cuFFT exec calls are all on the same stream, so the graph captures the full dependency chain
+- [ ] **Step 4.1:** Prototype graph capture with the merged 3-kernel sequence.
+- [ ] **Step 4.2:** Verify cuFFT kernels are graph-compatible (some cuFFT versions
+      use graph-incompatible operations internally — test empirically).
+- [ ] **Step 4.3:** Handle scale factor updates: write ScaleFactors to device
+      memory before `cudaGraphLaunch`. The callback reads from the pointer
+      (captured in the graph), which now points to updated values.
+- [ ] **Step 4.4:** Benchmark variant `LTO vZ2Z-graph`.
 
 ### Risks
 
-- cuFFT may use internal graph-incompatible operations
-- Pointer update API may not cover all node types cuFFT uses internally
-- Test feasibility with a minimal prototype before committing
+- cuFFT may use internal graph-incompatible operations.
+- If graph capture fails, this level is skipped — no fallback needed,
+  the non-graph path is the current working code.
 
 ---
 
-## Optimization Level 5 — cuFFTDx fully fused kernel (stretch goal)
+## [ ] Optimization Level 4a — L2 Persistence Policy (Tier 2 addendum)
 
-**Idea:** Use [cuFFTDx](https://docs.nvidia.com/cuda/cufftdx/) (device-level FFT library) to embed the entire bracket computation in a single custom kernel:
+**Idea:** Hint the L2 cache controller to keep workspace data resident between
+the Z2Z write and D2Z read. Zero code changes to kernels or callbacks.
 
-1. Load `df[k]` and `phi[k]` once from HBM (packed spectral)
-2. Compute 4 gradient spectral values
-3. Run 4 independent 2D IFFTs via cuFFTDx (register + shared memory)
-4. Multiply pointwise for Poisson bracket
-5. Run 1 forward 2D FFT via cuFFTDx
-6. Store result directly to packed output
+**What it gains:**
+- The tail batches of Z2Z are still warm in L2 when D2Z starts reading them.
+- A100 has up to 40 MB of configurable persistent L2.
 
-**What it eliminates:** ALL intermediate HBM traffic. Reads `df + phi` exactly once (356 MB), writes output once (178 MB). Total: 534 MB vs current 6.11 GB = **91% reduction**.
+**Expected speedup:** 0.2–0.8ms (depends on temporal overlap).
 
-**Expected speedup:** 3–5× over LTO v0 → potential **~5–7 ms**
+### Implementation
+
+```cpp
+cudaDeviceProp prop;
+cudaGetDeviceProperties(&prop, 0);
+
+cudaStreamAttrValue attr = {};
+attr.accessPolicyWindow.base_ptr = ws_buffer;
+attr.accessPolicyWindow.num_bytes = min(ws_size, (size_t)prop.persistingL2CacheMaxSize);
+attr.accessPolicyWindow.hitRatio = 1.0f;
+attr.accessPolicyWindow.hitProp = cudaAccessPropertyPersisting;
+attr.accessPolicyWindow.missProp = cudaAccessPropertyStreaming;
+cudaStreamSetAttribute(stream, cudaStreamAttributeAccessPolicyWindow, &attr);
+```
+
+### Steps
+
+- [ ] **Step 4a.1:** Add L2 persistence hints for workspace buffers.
+- [ ] **Step 4a.2:** Benchmark with and without — measure actual L2 hit rate
+      via `ncu` profiler (`l2_hit_rate` metric).
+- [ ] **Step 4a.3:** Can be combined with CUDA Graphs (set policy before capture).
+
+---
+
+## [ ] Optimization Level 5 — Tiled Execution with L2-Resident Workspace (Tier 3: reach 1.8×+)
+
+**Idea:** Instead of processing all 8192 batches at once, tile into chunks of
+~96 batches so the workspace per tile (~40 MB) fits in L2.
+
+**What it gains:**
+- The 1.70 GB workspace HBM read (D2Z side) becomes L2 hits
+- Total external HBM traffic drops from 3.93 GB to ~2.23 GB
+- At 199 GB/s effective: ~11ms theoretical floor
+
+**Realistic estimate:** cuFFT efficiency drops with smaller batch sizes,
+so **~15–16ms (1.8–1.9×)**.
+
+### Design
+
+```
+for each tile of ~96 batches:
+    Z2Z (batch=192, both fields merged)   → ws stays in L2
+    D2Z (batch=96)                        → reads ws from L2, not HBM
+```
+
+4096 / 96 = 43 tiles × 2 launches = 86 kernel launches. This **requires**
+CUDA Graphs to be practical — capture the tiled loop as a graph, replay it.
+
+### HBM Traffic Analysis
+
+```
+Per tile:
+  Z2Z load CB: read phi+df      2 × (96 × 85 × 32 × 16B) = 8.4 MB
+  Z2Z store: write ws            192 × 135 × 96 × 16B = 39.8 MB → L2!
+  D2Z load CB: read ws           96 × 135 × 96 × 32B = 39.8 MB → L2 hit!
+  D2Z store CB: write output     96 × 85 × 32 × 16B = 4.2 MB
+
+43 tiles total:
+  Z2Z reads:   43 × 8.4 MB = 361 MB  (gather, same as current)
+  Z2Z writes:  L2 (not HBM)
+  D2Z reads:   L2 (not HBM)
+  D2Z writes:  43 × 4.2 MB = 181 MB  (sparse output)
+  Total HBM:   ~542 MB (vs 3.93 GB current = 7.2× reduction)
+```
 
 ### Complications
 
-- cuFFTDx handles FFTs of **fixed, compile-time sizes**. Our sizes (mrad=135, mphi=96) must be known at compile time — feasible for this config but not general.
-- 2D FFTs in cuFFTDx require careful tiling: 1D FFTs along mphi (size 96 = 2^5 × 3) in shared memory, then 1D FFTs along mrad (size 135 = 3^3 × 5) with transpose.
-- Each thread block must hold enough shared memory for the FFT + working data. For FP64 complex: 135 × 96 × 16 = 207 KB per 2D slice — exceeds shared memory (164 KB on A100). Would need to tile the batch dimension and process sub-slices.
-- Not available via conda — requires manual CUDA Toolkit integration.
+- cuFFT plan efficiency drops significantly for small batch sizes.
+  Need to benchmark the crossover point.
+- 86 launches require CUDA Graph capture of the entire loop.
+- Workspace per tile is exactly ~40 MB — tight fit for A100 L2.
+  Profile with `ncu` to verify actual residency.
+- The loop structure may not be capturable as a single CUDA Graph
+  (variable kernel parameters per tile). May need one graph per tile
+  with pointer arithmetic, or a single graph with fixed pointers
+  and batch-offset logic in the callbacks.
 
-This is a research-level optimization. Only pursue after Levels 1–3 are validated.
+### Steps
+
+- [ ] **Step 5.1:** Benchmark cuFFT Z2Z throughput vs batch size (96, 192, 384, 768)
+      to find the efficiency knee.
+- [ ] **Step 5.2:** Prototype single-tile execution (batch=192 Z2Z + batch=96 D2Z)
+      with L2 persistence. Measure D2Z L2 hit rate.
+- [ ] **Step 5.3:** Implement tiled loop with CUDA Graph capture.
+- [ ] **Step 5.4:** Full benchmark `LTO vZ2Z-tiled`.
+- [ ] **Step 5.5:** Validate rel_l2 across all tiles.
+
+---
+
+## [ ] Optimization Level 6 — cuFFTDx fully fused kernel (stretch goal)
+
+**Idea:** Use cuFFTDx to embed the entire bracket computation in a single
+custom kernel: load spectral data, compute gradients, run IFFTs in
+register/shared memory, multiply for bracket, run forward FFT, store output.
+
+**HBM reduction caveat:** 2D IFFT on [135, 96] = 207 KB > 164 KB shared memory
+limit. Row/column FFTs require global-memory transpose. Realistic HBM
+reduction: ~40–60%.
+
+**Expected speedup:** ~2–3× over LTO v0 → **~8–12 ms** best case.
+
+Research-level optimization. Only pursue after Levels 2a–5 are exhausted.
 
 ---
 
 ## Implementation order and testing strategy
 
 ```
-Level 1 (bracket fusion)   ← start here, easiest win
-  ↓ validate rel_l2 ≈ 2.9e-16, benchmark
-Level 2 (two-for-one Z2Z)  ← biggest architectural change
-  ↓ validate, benchmark
-Level 3 (sparse output)    ← small incremental gain
-  ↓ validate, benchmark
-Level 4 (CUDA Graphs)      ← only if host overhead is visible in profiling
-Level 5 (cuFFTDx)          ← stretch goal, research-level
+Level 1 (bracket fusion)        ✅ DONE — v2: 22.470ms, rel_l2=6.60e-16
+Level 3 (sparse output)         ✅ DONE — v3: 22.612ms, rel_l2=6.60e-16
+Level 2 (same-field Z2Z)        ✅ DONE — vZ2Z: 19.780ms, rel_l2=2.58e-15
+  ↓
+Level 2a (merge Z2Z calls)      ← NEXT (Tier 1: cross 1.5×)
+  |   Merge 2× Z2Z → 1× batch=8192
+  |   Target: ~19.0ms (1.54×)
+  ↓
+Level 4 (CUDA Graphs)           ← Tier 2: push toward 1.6×
+  |   Capture reduce → Z2Z → D2Z as graph
+  |   Target: ~18.5ms (1.59×)
+  ↓
+Level 4a (L2 persistence)       ← Tier 2 addendum
+  |   Hint L2 to keep ws resident between Z2Z and D2Z
+  |   Target: ~18.0ms (1.63×)
+  ↓
+Level 5 (tiled execution)       ← Tier 3: reach 1.8×
+  |   Tile to ~96 batches, ws fits in L2
+  |   Requires CUDA Graphs for 86 launches
+  |   Target: ~15-16ms (1.8-1.9×)
+  ↓
+Level 6 (cuFFTDx)               ← stretch goal; ~8-12ms best case
 ```
 
-Each level adds a new benchmark variant in `jax_ffi_benchmark.py`. Keep all previous variants for comparison. Use the naming convention `LTO v1`, `LTO v2`, etc.
+**Current best:** vZ2Z at 19.78ms (1.48× over JAX FP64).
 
-For each level, create a **separate `.cu` host wrapper** (e.g., `cufft_lto_bracket_v1.cu`) rather than modifying the working v0. This keeps the baseline intact for A/B comparison.
+Each level adds a new benchmark variant. Keep all previous variants for
+A/B comparison. Create separate `.cu` host wrappers for each level.
 
 ---
 
 ## ⚠️ Fatbin alignment — root cause of CUFFT_INTERNAL_ERROR (5)
-`xxd -i` generates `unsigned char[]` (1-byte aligned). nvJitLink internally casts the pointer to an
-ELF/fatbin struct requiring ≥8-byte alignment, causing `CUFFT_INTERNAL_ERROR (5)` at `cufftMakePlan*`.
 
-**Fix:** use `bin2c --type longlong` which generates `unsigned long long[]` (8-byte aligned). Pass the
-array pointer directly to `cufftXtSetJITCallback` — no `posix_memalign` staging needed.
+`xxd -i` generates `unsigned char[]` (1-byte aligned). nvJitLink requires
+≥8-byte alignment.
 
-LTO callbacks work correctly on A100 MIG 3g.20gb with the bin2c-generated header.
+**Fix:** `bin2c --type longlong` → `unsigned long long[]` (8-byte aligned).
+
+---
+
+## 📋 Bugs found during Level 2 development
+
+### Bug 1: Cross-field pairing leakage (rel_l2 ~ 1e-2)
+
+**Symptom:** Z2Z packing of (iky·ϕ, ikx·f) produced ~1% error.
+**Cause:** |ϕ| ≫ |f|. Machine-epsilon errors in ϕ channel leak into f
+channel at catastrophic relative magnitudes.
+**Fix:** Same-field pairing. Pack (ikx·ϕ, iky·ϕ) and (ikx·f, iky·f).
+
+### Bug 2: Hermitian asymmetry at j=0 (rel_l2 ~ 3.5e-4)
+
+**Symptom:** Same-field Z2Z still had 3.5e-4 error, unaffected by scaling.
+**Cause:** Gyro-averaging (Bessel multiplication) breaks Hermitian symmetry
+at j=0 (ky=0) column of phi. Measured: **14% relative asymmetry**.
+Invisible to irfft2 (outputs real by construction). Fatal to Z2Z packing
+(leaks parasitic imaginary into other channel).
+**Proof:** dxphi imag residual = 1.292e-5 (kx≠0 at j=0).
+dyphi imag residual = 9.858e-17 (ky[0]=0).
+max|dyphi_error| = 1.565e-6 = exactly max|dxphi| × 1.292e-5.
+**Fix:** Symmetrize j=0 inline in callback:
+`src = (src + conj(src_mirror)) / 2` when `j_src == 0`.
+Cost: 85 complex averages per field = negligible.
+**Result:** rel_l2 drops from 3.548e-4 to **4.414e-16** (Python),
+**2.58e-15** (CUDA).

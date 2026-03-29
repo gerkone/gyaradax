@@ -28,6 +28,7 @@ COMPONENTS = [
     ("C4 nonlinear_term_iii",     "bench_nonlinear"),
     ("C5 _compute_phi",           "bench_phi_solve"),
     ("C6 pack/unpack_spectrum",   "bench_pack_spectrum"),
+    ("C7 gkstep_single",          "bench_rk4_step"),
 ]
 
 

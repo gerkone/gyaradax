@@ -33,9 +33,25 @@ __global__ void fused_bracket_scale(
     size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < n) {
         int spec_idx = (int)(idx / real_stride) % nspec;
-        double phi_y = ws_a[idx];
-        ws_a[idx] = inv_n2 * dum_s_eff[spec_idx]
-                    * (phi_y * ws_b[idx] - ws_c[idx] * ws_d[idx]);
+        double2 v0 = ((const double2*)ws_a)[idx];
+        double2 v1 = ((const double2*)ws_b)[idx];
+        ws_a[idx] = inv_n2 * dum_s_eff[spec_idx] * (v0.x * v0.y - v1.x * v1.y);
+    }
+}
+
+// vZ2Z Path A bracket (direction-based pairing):
+// ws0 = phi_y + i*f_y, ws1 = f_x + i*phi_x
+// bracket = phi_y*f_x - phi_x*f_y = v0.x*v1.x - v1.y*v0.y
+__global__ void vz2z_bracket_kernel(
+    double* ws_out, const double* ws_a, const double* ws_b, const double* dum_s,
+    size_t n, int real_stride, int nspec, double scale
+) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        int spec_idx = (int)(idx / real_stride) % nspec;
+        double2 v0 = ((const double2*)ws_a)[idx];
+        double2 v1 = ((const double2*)ws_b)[idx];
+        ws_out[idx] = scale * dum_s[spec_idx] * (v0.x * v1.x - v1.y * v0.y);
     }
 }
 

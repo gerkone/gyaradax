@@ -42,21 +42,33 @@ add_lto_fatbin_target(bracket_load_cb          bracket_load_cb.cu)
 add_lto_fatbin_target(bracket_d2z_load_cb      bracket_d2z_load_cb.cu)      # v1
 add_lto_fatbin_target(bracket_z2z_load_cb      bracket_z2z_load_cb.cu)      # v2-packing
 add_lto_fatbin_target(bracket_d2z_load_v2_cb   bracket_d2z_load_v2_cb.cu)   # v2-bracket
-add_lto_fatbin_target(bracket_store_cb          bracket_store_cb.cu)
+add_lto_fatbin_target(bracket_store_cb         bracket_store_cb.cu)
+add_lto_fatbin_target(bracket_d2z_z2z_load_cb  bracket_d2z_z2z_load_cb.cu)  # vz2z-bracket
+add_lto_fatbin_target(bracket_z2z_merged_load_cb  bracket_z2z_merged_load_cb.cu) # vz2z-merged
+add_lto_fatbin_target(bracket_d2z_load_cb_merged  bracket_d2z_load_cb_merged.cu) # vz2z-merged
 
 # Ensure headers are generated
-set(LTO_HEADERS 
+set(LTO_HEADERS
     ${CMAKE_BINARY_DIR}/bracket_load_cb_fatbin.h
     ${CMAKE_BINARY_DIR}/bracket_d2z_load_cb_fatbin.h
     ${CMAKE_BINARY_DIR}/bracket_z2z_load_cb_fatbin.h
     ${CMAKE_BINARY_DIR}/bracket_d2z_load_v2_cb_fatbin.h
-    ${CMAKE_BINARY_DIR}/bracket_store_cb_fatbin.h)
+    ${CMAKE_BINARY_DIR}/bracket_store_cb_fatbin.h
+    ${CMAKE_BINARY_DIR}/bracket_d2z_z2z_load_cb_fatbin.h
+    ${CMAKE_BINARY_DIR}/bracket_z2z_merged_load_cb_fatbin.h
+    ${CMAKE_BINARY_DIR}/bracket_d2z_load_cb_merged_fatbin.h)
 
-# Add shared library target for the JAX FFI (LTO v0, v1, v2 + Standard cuFFT)
+# Add shared library target for the JAX FFI (LTO v0, v1, v2 + Standard cuFFT + Vpar Stencils)
 add_library(lto_bracket SHARED
             ${PROJECT_SOURCE_DIR}/cufft_lto_bracket.cu
             ${PROJECT_SOURCE_DIR}/cufft_bracket.cu
+            ${PROJECT_SOURCE_DIR}/apply_parallel.cu
+            ${PROJECT_SOURCE_DIR}/apply_parallel_dual.cu
+            ${PROJECT_SOURCE_DIR}/apply_vpar_stencil.cu
+            ${PROJECT_SOURCE_DIR}/apply_vpar_dual_stencil.cu
+            ${PROJECT_SOURCE_DIR}/compute_scale_factors.cu
             ${LTO_HEADERS})
+
 
 set_target_properties(lto_bracket PROPERTIES 
                       LIBRARY_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}"
