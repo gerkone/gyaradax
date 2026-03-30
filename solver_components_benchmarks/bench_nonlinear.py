@@ -32,26 +32,52 @@ def run(config="configs/iteration_13.yaml", mixed_precision=False):
     field = df  # 5D adiabatic
     baseline = BASELINES_DIR / "nonlinear.npz"
 
+    from gyaradax.backends import create_ops
+    
     results = {}
-    for label, mp, bkey in [
-        ("mixed_precision=True  (default)", True,  "output_mp"),
-        ("mixed_precision=False (full FP64)", False, "output_fp64"),
-    ]:
-        print(f"\n  -- {label}")
-        @jax.jit
-        def fn(f, p, pr, m=mp):
-            return nonlinear_term_iii(f, p, geom, pr, mixed_precision=m)
-
-        out = fn(field, phi, pre_gk)
-        rel_l2 = check_accuracy(out, baseline, bkey)
-        print(f"  [XLA] Analyzing cost...")
-        flops, bytes_rw = analyze_cost(fn, field, phi, pre_gk)
+    for backend in ["jax", "cuda"]:
+        print(f"\n{'='*40}")
+        print(f"Backend: {backend.upper()}")
+        print(f"{'='*40}")
         
-        mean_ms, std_ms = BenchTimer(lambda f=field, p=phi, pr=pre_gk: fn(f, p, pr).block_until_ready()).run()
-        print(f"  timing: {mean_ms:.3f} ± {std_ms:.3f} ms")
-        r = roofline_report(f"nonlinear_term_iii ({('mp' if mp else 'fp64')})", mean_ms, flops, bytes_rw)
-        r["rel_l2"] = rel_l2
-        results[label] = r
+        try:
+            ops = create_ops(pre_gk, field, backend=backend)
+        except Exception as e:
+            print(f"  [SKIP] {backend} not available: {e}")
+            continue
+
+        backend_results = {}
+        for label, mp, bkey in [
+            ("mixed_precision=True  (default)", True,  "output_mp"),
+            ("mixed_precision=False (full FP64)", False, "output_fp64"),
+        ]:
+            print(f"\n  -- {label}")
+            @jax.jit
+            def fn(f, p, m=mp):
+                return ops.nonlinear_term_iii(f, p, geom, mixed_precision=m)
+
+            out = fn(field, phi)
+
+            rel_l2 = check_accuracy(out, baseline, bkey)
+            print(f"  [XLA] Analyzing cost...")
+            flops, bytes_rw = analyze_cost(fn, field, phi)
+            
+            mean_ms, std_ms = BenchTimer(lambda f=field, p=phi: fn(f, p).block_until_ready()).run()
+
+            print(f"  timing: {mean_ms:.3f} ± {std_ms:.3f} ms")
+            r = roofline_report(f"nonlinear ({backend}, {('mp' if mp else 'fp64')})", mean_ms, flops, bytes_rw)
+            r["rel_l2"] = rel_l2
+            backend_results[mp] = r
+        
+        results[backend] = backend_results
+
+    if "jax" in results and "cuda" in results:
+        print(f"\nSpeedups (CUDA vs JAX):")
+        for mp_val in [True, False]:
+            label = "MP" if mp_val else "FP64"
+            t_jax = results["jax"][mp_val]["mean_ms"]
+            t_cuda = results["cuda"][mp_val]["mean_ms"]
+            print(f"  {label:6s}: {t_jax / t_cuda:.2f}x")
 
     return results
 

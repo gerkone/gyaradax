@@ -28,31 +28,42 @@ def run(config="configs/iteration_13.yaml", mixed_precision=False):
     print(f"{'='*60}")
 
     df, phi, geom, params, pre = load_setup(config, mixed_precision)
-
     pre_gk = GKPre(pre)
     baseline = BASELINES_DIR / "linear_rhs.npz"
 
-    # Define the timed function with production code
-    @jax.jit
-    def fn(d, p, pr):
-        return _compute_linear_rhs(d, p, geom, params, pr)
-
-    out = fn(df, phi, pre_gk)
-    rel_l2 = check_accuracy(out, baseline, "output")
- 
-    print(f"  [XLA] Analyzing cost...")
-    flops, bytes_rw = analyze_cost(fn, df, phi, pre_gk)
+    from gyaradax.backends import create_ops
     
-    mean_ms, std_ms = BenchTimer(lambda d=df, p=phi, pr=pre_gk: fn(d, p, pr).block_until_ready()).run()
-    print(f"  timing: {mean_ms:.3f} ± {std_ms:.3f} ms")
+    results = {}
+    for backend in ["jax", "cuda"]:
+        print(f"\n  -- Backend: {backend.upper()}")
+        try:
+            ops = create_ops(pre_gk, df, backend=backend)
+        except Exception as e:
+            print(f"     [SKIP] {backend} not available: {e}")
+            continue
 
-    roofline_report(
-        f"_compute_linear_rhs",
-        mean_ms,
-        flops,
-        bytes_rw,
-    )
-    return {"mean_ms": mean_ms, "rel_l2": rel_l2}
+        @jax.jit
+        def fn(d, p):
+            return _compute_linear_rhs(d, p, geom, params, pre_gk, ops)
+
+        out = fn(df, phi)
+        rel_l2 = check_accuracy(out, baseline, "output")
+        
+        print(f"     [XLA] Analyzing cost...")
+        flops, bytes_rw = analyze_cost(fn, df, phi)
+        
+        mean_ms, std_ms = BenchTimer(lambda d=df, p=phi: fn(d, p).block_until_ready()).run()
+        print(f"     timing: {mean_ms:.3f} ± {std_ms:.3f} ms")
+        
+        r = roofline_report(f"_compute_linear_rhs ({backend})", mean_ms, flops, bytes_rw)
+        r["rel_l2"] = rel_l2
+        results[backend] = r
+
+    if "jax" in results and "cuda" in results:
+        speedup = results["jax"]["mean_ms"] / results["cuda"]["mean_ms"]
+        print(f"\n  Final Speedup (CUDA vs JAX): {speedup:.2f}x")
+
+    return results
 
 
 if __name__ == "__main__":

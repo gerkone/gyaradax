@@ -21,155 +21,114 @@ import jax.numpy as jnp
 LIB_PATH = Path(__file__).parent.parent / "cuda_augmentations" / "liblto_bracket.so"
 
 from common import (
-    load_setup, check_accuracy, BASELINES_DIR, analyze_cost,
-    DEFAULT_BW_GBS, DEFAULT_FP64_TFLOPS,
+    load_setup, check_accuracy, BASELINES_DIR, analyze_cost, BenchTimer,
+    roofline_report, DEFAULT_BW_GBS, DEFAULT_FP64_TFLOPS,
 )
-from gyaradax.solver import _apply_parallel_fn, GKPre
+from gyaradax.solver import GKPre
 import gyaradax.stencils as stencils
 
 
-# ── Timing ───────────────────────────────────────────────────────────────────
-def _bench(fn, n_warmup=5, n_trials=30):
-    for _ in range(n_warmup):
-        fn()
-    times_ms = []
-    for _ in range(n_trials):
-        t0 = time.perf_counter()
-        fn()
-        times_ms.append((time.perf_counter() - t0) * 1e3)
-    a = np.array(times_ms)
-    return {
-        "mean": float(a.mean()),
-        "std":  float(a.std()),
-        "min":  float(a.min()),
-        "p50":  float(np.percentile(a, 50)),
-        "p95":  float(np.percentile(a, 95)),
-    }
-
-
-# ── JAX Reference Implementation (from Production) ───────────────────────────
-def _make_jax_fn(pre_dict):
-    pre_gk = GKPre(pre_dict)
-    _fn = _apply_parallel_fn(pre_gk)
-    
-    @jax.jit
-    def wrapper(field, coeffs):
-        return _fn(field, coeffs)
-    
-    return wrapper
-
-
-def _make_opt_cuda_ffi_fn(field_template, pre):
-    nv, nmu, ns, nkx, nky = field_template.shape
-    nv_nmu = nv * nmu
-
-    valid_jax = jnp.array(pre["valid_shift"])
-    s_map_jax = jnp.where(valid_jax, pre["s_shift"], -1).astype(jnp.int32)
-    kx_map_jax = jnp.array(pre["kx_shift"]).astype(jnp.int32)
-    packed_maps_jax = jnp.stack([s_map_jax, kx_map_jax], axis=-1)
-
-    # Register the FFI target
-    name = "apply_parallel_ffi"
-    try:
-        _lib = ctypes.cdll.LoadLibrary(str(LIB_PATH))
-        symbol = getattr(_lib, name)
-        jax.ffi.register_ffi_target(name, jax.ffi.pycapsule(symbol), platform="CUDA")
-    except Exception as e:
-        if "already registered" not in str(e).lower():
-            print(f"  [DEBUG] FFI registration failed for {name}: {e}")
-
-    output_shape = field_template.shape
-
-    @jax.jit
-    def _fn(f, c_v1):
-        c_1d = c_v1.view(jnp.float64).reshape(-1)
-        res = jax.ffi.ffi_call(
-            "apply_parallel_ffi",
-            [jax.ShapeDtypeStruct(output_shape, field_template.dtype)]
-        )(f, c_1d, packed_maps_jax,
-          nv_nmu=np.int32(nv_nmu), nkx=np.int32(nkx), ns=np.int32(ns), 
-          nky=np.int32(nky), nmu=np.int32(nmu))
-        return res[0]
-
-    return _fn
+# Reporters and Main removed; now integrated into run()
 
 
 
 # ── Reporting & Main ─────────────────────────────────────────────────────────
-_HDR = (
-    f"  {'impl':22s}  {'mean':>7}  {'std':>6}  {'min':>6}  {'p50':>6}  {'p95':>6}"
-    f"  {'GB/s':>7}  {'%BW':>5}  {'AI':>7}  {'%roof':>6}  accuracy"
-)
-
-def _print_row(label, t, flops, bytes_rw, rel_l2):
-    mean_ms = t["mean"]
-    achieved_gbs = bytes_rw / 1e9 / (mean_ms / 1e3)
-    pct_bw   = 100.0 * achieved_gbs / DEFAULT_BW_GBS if DEFAULT_BW_GBS > 0 else float("nan")
-    ai       = flops / bytes_rw
-    if DEFAULT_BW_GBS > 0 and DEFAULT_FP64_TFLOPS > 0:
-        roof_tf  = min(ai * DEFAULT_BW_GBS / 1024, DEFAULT_FP64_TFLOPS)
-        pct_roof = 100.0 * (flops / (mean_ms / 1e3)) / (roof_tf * 1e12)
-        roof_str = f"{pct_roof:6.1f}"
-    else:
-        roof_str = "   N/A"
-
-    l2_str = f"{rel_l2:.2e}" if not np.isnan(rel_l2) else "  (no baseline)"
-    print(
-        f"  {label:22s}  {mean_ms:7.3f}  {t['std']:6.3f}  {t['min']:6.3f}"
-        f"  {t['p50']:6.3f}  {t['p95']:6.3f}"
-        f"  {achieved_gbs:7.1f}  {pct_bw:5.1f}  {ai:7.4f}  {roof_str}  {l2_str}"
-    )
 
 def run(config="configs/iteration_13.yaml", mixed_precision=False):
-    print(f"\n{'='*70}")
-    print("C1: _apply_parallel  (Template Specialized CUDA Stencil)")
-    print(f"{'='*70}")
+    print(f"\n{'='*75}")
+    print("C1: _apply_parallel  (9-point parallel stencil)")
+    print(f"{'='*75}")
 
     df, phi, geom, params, pre = load_setup(config, mixed_precision)
     field = df
+    pre_gk = GKPre(pre)
     baseline = BASELINES_DIR / "apply_parallel.npz"
+
+    from gyaradax.backends import create_ops
+    
+    results = {}
+    backends = []
+    for b in ["jax", "cuda"]:
+        try:
+            ops = create_ops(pre_gk, field, backend=b)
+            backends.append((b, ops))
+        except Exception as e:
+            print(f"  [SKIP] {b} backend not available: {e}")
 
     coeffs_raw = pre["s_total_upar"] # (9, nv, 1, ns, nkx, nky)
     target_coeffs_shape = (9, *field.shape)
     coeffs_broadcasted = jnp.broadcast_to(coeffs_raw, target_coeffs_shape)
+
+    # 1. Individual Stencil
+    print(f"\n  -- Single Stencil (_apply_parallel)")
+    backend_times = {}
     
-    print(f"\n  [JAX] Compiling production reference function...")
-    jax_fn = _make_jax_fn(pre)
-    out_jax = jax_fn(field, coeffs_broadcasted)
-    rel_l2_jax = check_accuracy(out_jax, baseline, "output")
+    for bname, ops in backends:
+        @jax.jit
+        def fn(f, c): return ops._apply_parallel(f, c)
 
-    print(f"  [XLA] Analyzing cost...")
-    flops, bytes_rw = analyze_cost(jax_fn, field, coeffs_broadcasted)
+        # Accuracy check
+        out = fn(field, coeffs_broadcasted)
+        rel_l2 = check_accuracy(out, baseline, "output")
+        
+        # Performance timing
+        mean_ms, _ = BenchTimer(lambda f=field, c=coeffs_broadcasted: fn(f, c).block_until_ready()).run()
+        backend_times[bname] = mean_ms
+        
+        print(f"     [{bname.upper():4s}] {mean_ms:7.3f} ms  (rel_l2={rel_l2:.2e})")
+        
+        if bname == "cuda":
+            flops, bytes_rw = analyze_cost(fn, field, coeffs_broadcasted)
+            # Adjust bytes_rw for expected FFI behavior (as in original script)
+            ns, nkx, nky = field.shape[2:]
+            saved_bytes = 9 * ns * nkx * nky * 4
+            bytes_rw_ffi = bytes_rw - saved_bytes
+            roofline_report(f"_apply_parallel ({bname})", mean_ms, flops, bytes_rw_ffi)
+
+    if "jax" in backend_times and "cuda" in backend_times:
+        print(f"     Speedup: {backend_times['jax']/backend_times['cuda']:.2f}x")
+
+    # 2. Dual Fused Stencil (Merge from bench_apply_parallel_cuda.py)
+    print(f"\n  -- Dual Stencil Fusion (_apply_parallel_dual)")
     
-    # Correcting bytes_rw for the vectorized map array
-    # Old maps (JAX): s_map (4B) + kx_map (4B) + valid (4B) = 12 Bytes per point
-    # FFI maps: int2 = 8 Bytes per point.
-    ns, nkx, nky = field.shape[2:]
-    saved_bytes = 9 * ns * nkx * nky * 4
-    bytes_rw_ffi = bytes_rw - saved_bytes
+    # Setup inputs for dual stencil
+    key = jax.random.PRNGKey(42)
+    gyro_phi = jax.random.normal(key, df.shape).astype(df.dtype)
+    coeffs1 = pre["s_total_upar"]
+    coeffs2 = pre["s_total_t7"]
+    
+    dual_times = {}
+    for bname, ops in backends:
+        @jax.jit
+        def fn_dual(f1, f2, c1, c2):
+            return ops._apply_parallel_dual(f1, f2, c1, c2)
 
-    print(f"    FLOPs/call : {flops/1e6:.1f} M")
-    print(f"    Bytes R+W  (JAX):    {bytes_rw/1e9:.3f} GB")
-    print(f"    Bytes R+W  (CUDA):   {bytes_rw_ffi/1e9:.3f} GB")
+        out_dual = fn_dual(df, gyro_phi, coeffs1, coeffs2)
+        
+        # Accuracy check matches bench_apply_parallel_cuda logic
+        @jax.jit
+        def ref_two_calls(f1, f2, c1, c2):
+            from gyaradax.backends import create_ops
+            ops_ref = create_ops(pre_gk, df, backend="jax")
+            return ops_ref._apply_parallel(f1, c1), ops_ref._apply_parallel(f2, c2)
+        
+        o_ref1, o_ref2 = ref_two_calls(df, gyro_phi, coeffs1, coeffs2)
+        err1 = float(jnp.linalg.norm(out_dual[0] - o_ref1) / jnp.linalg.norm(o_ref1))
+        err2 = float(jnp.linalg.norm(out_dual[1] - o_ref2) / jnp.linalg.norm(o_ref2))
+        l2_str = f"err1={err1:.1e}, err2={err2:.1e}"
 
-    print(f"  [JAX] Timing (5 warmup, 30 trials)...")
-    t_jax = _bench(lambda: jax_fn(field, coeffs_broadcasted).block_until_ready())
+        mean_ms, _ = BenchTimer(lambda: jax.block_until_ready(fn_dual(df, gyro_phi, coeffs1, coeffs2))).run()
+        dual_times[bname] = mean_ms
+        print(f"     [{bname.upper():4s}] {mean_ms:7.3f} ms  ({l2_str})")
 
-    print(f"  [CUDA] Compiling Refined FFI (Templates)...")
-    cuda_opt_fn = _make_opt_cuda_ffi_fn(field, pre)
-    out_cuda = cuda_opt_fn(field, coeffs_raw)
-    rel_l2_cuda = check_accuracy(out_cuda, baseline, "output")
+        if bname == "cuda":
+            flops, bytes_rw = analyze_cost(fn_dual, df, gyro_phi, coeffs1, coeffs2)
+            roofline_report(f"_apply_parallel_dual ({bname})", mean_ms, flops, bytes_rw)
 
-    print(f"  [CUDA] Timing Refined FFI (5 warmup, 30 trials)...")
-    t_cuda = _bench(lambda: cuda_opt_fn(field, coeffs_raw).block_until_ready())
+    if "jax" in dual_times and "cuda" in dual_times:
+        print(f"     Speedup: {dual_times['jax']/dual_times['cuda']:.2f}x")
 
-    print(f"\n{_HDR}")
-    print(f"  {'-'*130}")
-    _print_row("JAX (reference)",  t_jax,  flops, bytes_rw, rel_l2_jax)
-    _print_row("CUDA (FFI)",        t_cuda, flops, bytes_rw_ffi, rel_l2_cuda)
-
-    speedup = t_jax["mean"] / t_cuda["mean"]
-    print(f"\n  Final Speedup vs JAX:    {speedup:.2f}×")
+    return results
 
 
 if __name__ == "__main__":
