@@ -64,19 +64,13 @@ def main():
     kx_shift  = pre["kx_shift"]
     valid_shift = pre["valid_shift"]
 
+    from gyaradax.backends import create_ops
+    ops = create_ops(pre, field5d, backend="jax")
+
     @jax.jit
     def _apply_parallel(field, coeffs):
-        out = jnp.zeros_like(field)
-        nky = field.shape[-1]
-        ky_idx = jnp.reshape(jnp.arange(nky, dtype=jnp.int32), (1, 1, -1))
-        for i in range(9):
-            shifted = jnp.where(
-                valid_shift[i][None, None, :, :, :],
-                field[:, :, s_shift[i], kx_shift[i], ky_idx],
-                0.0,
-            )
-            out = out + coeffs[i] * shifted
-        return out
+        return ops._apply_parallel(field, coeffs)
+
 
     out_c1 = _apply_parallel(field5d, pre["s_total_upar"])
     save("apply_parallel",
@@ -89,14 +83,8 @@ def main():
 
     @jax.jit
     def _apply_vpar(field, coeffs):
-        nv = field.shape[0]
-        out = jnp.zeros_like(field)
-        for c, s in zip(coeffs, (-2, -1, 0, 1, 2)):
-            idx = jnp.clip(jnp.arange(nv, dtype=jnp.int32) + s, 0, nv - 1)
-            valid = jnp.logical_and(jnp.arange(nv) + s >= 0, jnp.arange(nv) + s < nv)
-            shifted = jnp.take(field, idx, axis=0)
-            out = out + c * jnp.where(valid[:, None, None, None, None], shifted, 0.0)
-        return out
+        return ops._apply_vpar(field, coeffs)
+
 
     out_c2_d1 = _apply_vpar(field5d, stencils.VPAR_D1)
     out_c2_d4 = _apply_vpar(field5d, stencils.VPAR_D4)
@@ -110,7 +98,8 @@ def main():
 
     @jax.jit
     def _lin_rhs():
-        return _compute_linear_rhs(df, phi, geom, params, pre)
+        return _compute_linear_rhs(df, phi, geom, params, pre, ops)
+
 
     out_c3 = _lin_rhs()
     save("linear_rhs",
@@ -125,11 +114,12 @@ def main():
 
     @jax.jit
     def _nl_mp():
-        return nonlinear_term_iii(field5d, phi, geom, pre, mixed_precision=True)
+        return ops.nonlinear_term_iii(field5d, phi, geom, mixed_precision=True)
 
     @jax.jit
     def _nl_fp64():
-        return nonlinear_term_iii(field5d, phi, geom, pre, mixed_precision=False)
+        return ops.nonlinear_term_iii(field5d, phi, geom, mixed_precision=False)
+
 
     out_c4_mp   = _nl_mp()
     out_c4_fp64 = _nl_fp64()
@@ -190,11 +180,12 @@ def main():
 
     @jax.jit
     def _rk4_linear(d, s):
-        return gkstep_single(d, geom, replace(params, non_linear=False), s, pre_gk)
+        return gkstep_single(d, geom, replace(params, non_linear=False), s, pre_gk, ops=ops)
 
     @jax.jit
     def _rk4_nonlinear(d, s):
-        return gkstep_single(d, geom, replace(params, non_linear=True), s, pre_gk)
+        return gkstep_single(d, geom, replace(params, non_linear=True), s, pre_gk, ops=ops)
+
 
     out_df_lin, (out_phi_lin, _), _ = _rk4_linear(df, state)
     out_df_nl,  (out_phi_nl,  _), _ = _rk4_nonlinear(df, state)
