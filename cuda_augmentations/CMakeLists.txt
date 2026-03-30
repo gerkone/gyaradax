@@ -16,9 +16,10 @@ if("${CMAKE_BUILD_TYPE}" STREQUAL "")
   set(CMAKE_BUILD_TYPE Release)
 endif()
 
-# Explicitly target A100 (sm_80) for LTO compilation
+# Explicitly target A100 (sm_80)
+set(CMAKE_CUDA_ARCHITECTURES 80)
 set(CUDA_LTO_ARCHITECTURE 80)
-set(GENCODE_FLAGS_LTO --generate-code arch=compute_${CUDA_LTO_ARCHITECTURE},code=lto_${CUDA_LTO_ARCHITECTURE})
+set(GENCODE_FLAGS_LTO --generate-code arch=compute_${CUDA_LTO_ARCHITECTURE},code=lto_${CUDA_LTO_ARCHITECTURE} --ptxas-options=-v)
 
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
@@ -66,6 +67,9 @@ add_library(lto_bracket SHARED
             ${PROJECT_SOURCE_DIR}/apply_parallel_dual.cu
             ${PROJECT_SOURCE_DIR}/apply_vpar_stencil.cu
             ${PROJECT_SOURCE_DIR}/apply_vpar_dual_stencil.cu
+            ${PROJECT_SOURCE_DIR}/linear_rhs_fused.cu
+            ${PROJECT_SOURCE_DIR}/linear_rhs_vtiled.cu
+
             ${PROJECT_SOURCE_DIR}/compute_scale_factors.cu
             ${LTO_HEADERS})
 
@@ -73,6 +77,8 @@ add_library(lto_bracket SHARED
 set_target_properties(lto_bracket PROPERTIES 
                       LIBRARY_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}"
                       PREFIX "lib")
+
+target_compile_options(lto_bracket PRIVATE $<$<COMPILE_LANGUAGE:CUDA>: -Xptxas -v>)
 
 # Set JAX FFI headers path (detected via probe)
 set(JAX_INCLUDE_DIR "/system/apps/userenv/volkmann/jax_env/lib/python3.14/site-packages/jaxlib/include")

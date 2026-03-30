@@ -8,7 +8,7 @@ instance from precomputed data.
  
 from abc import ABC, abstractmethod
 import jax.numpy as jnp
-from typing import Tuple
+from typing import Tuple, Optional
 from gyaradax.types import GKPre
  
  
@@ -36,9 +36,22 @@ class SolverOps(ABC):
 
     @abstractmethod
     def _apply_parallel(self, field: jnp.ndarray, coeffs: jnp.ndarray) -> jnp.ndarray:
+        """Apply the parallel stencil to a single field."""
+        ...
+
+    @abstractmethod
+    def _apply_parallel_dual(
+        self, field1: jnp.ndarray, field2: jnp.ndarray, coeffs1: jnp.ndarray, coeffs2: jnp.ndarray
+    ) -> Tuple[jnp.ndarray, jnp.ndarray]:
+        """Apply parallel stencils to two fields simultaneously (fused)."""
+        ...
+
+    @abstractmethod
+    def nonlinear_term_iii(
+        self, df, phi, geometry, **kwargs
+    ) -> jnp.ndarray:
         raise NotImplementedError
 
-    
-    @abstractmethod
-    def nonlinear_term_iii(self, df, phi, geometry, pre, **kwargs) -> jnp.ndarray:
-        raise NotImplementedError
+    def linear_rhs(self, df, phi, geometry, params, pre) -> Optional[jnp.ndarray]:
+        """ Optional unified linear RHS override. Returns None if not implemented. """
+        return None

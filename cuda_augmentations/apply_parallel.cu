@@ -33,9 +33,8 @@ void apply_parallel_kernel(
     smem[local_tid] = __ldg(&field[field_idx]);
     __syncthreads();
 
-    const int    nv_raw     = nv_nmu / nmu;
-    const size_t c_idx_base = (size_t)(v_idx / nmu) * spatial_stride + spatial_idx;
-    const size_t c_i_stride = (size_t)nv_raw * spatial_stride;
+    const size_t c_idx_base   = (size_t)v_idx * spatial_stride + spatial_idx;
+    const size_t c_i_stride   = (size_t)nv_nmu * spatial_stride;
 
     double acc_r = 0.0, acc_i = 0.0;
 
@@ -50,9 +49,10 @@ void apply_parallel_kernel(
             if (src_kx == kx) {
                 val = smem[src_s * NKY + ky];
             } else {
-                val = __ldg(&field[(size_t)v_idx * spatial_stride
-                                   + (size_t)src_s * (nkx * NKY)
-                                   + (size_t)src_kx * NKY + ky]);
+                const size_t src_idx = (size_t)v_idx * spatial_stride
+                                     + (size_t)src_s * (nkx * NKY)
+                                     + (size_t)src_kx * NKY + ky;
+                val = __ldg(&field[src_idx]);
             }
             acc_r += val.x * c;
             acc_i += val.y * c;
@@ -80,12 +80,8 @@ __global__ void apply_parallel_dynamic_kernel(
     const size_t spatial_idx    = (size_t)s * (nkx * nky) + (size_t)kx * nky + ky;
     const size_t field_idx      = (size_t)v_idx * spatial_stride + spatial_idx;
 
-    smem[local_tid] = __ldg(&field[field_idx]);
-    __syncthreads();
-
-    const int    nv_raw     = nv_nmu / nmu;
-    const size_t c_idx_base = (size_t)(v_idx / nmu) * spatial_stride + spatial_idx;
-    const size_t c_i_stride = (size_t)nv_raw * spatial_stride;
+    const size_t c_idx_base   = (size_t)v_idx * spatial_stride + spatial_idx;
+    const size_t c_i_stride   = (size_t)nv_nmu * spatial_stride;
 
     double acc_r = 0.0, acc_i = 0.0;
 
@@ -100,9 +96,10 @@ __global__ void apply_parallel_dynamic_kernel(
             if (src_kx == kx) {
                 val = smem[src_s * nky + ky];
             } else {
-                val = __ldg(&field[(size_t)v_idx * spatial_stride
-                                   + (size_t)src_s * (nkx * nky)
-                                   + (size_t)src_kx * nky + ky]);
+                const size_t src_idx = (size_t)v_idx * spatial_stride
+                                     + (size_t)src_s * (nkx * nky)
+                                     + (size_t)src_kx * nky + ky;
+                val = __ldg(&field[src_idx]);
             }
             acc_r += val.x * c;
             acc_i += val.y * c;

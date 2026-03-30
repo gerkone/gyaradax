@@ -1,17 +1,33 @@
 import jax
 import jax.numpy as jnp
-from typing import Dict, Tuple
+from typing import Dict, Tuple, Optional
 
 from gyaradax.types import GKPre
-from gyaradax.solver import pack_half_spectrum, unpack_half_spectrum
+from gyaradax.utils import pack_half_spectrum, unpack_half_spectrum
 from gyaradax.backends.ops import SolverOps
 
 
+@jax.tree_util.register_pytree_node_class
 class JAXOps(SolverOps):
     """ JAX backend for solver operations """
 
-    def __init__(self, pre: GKPre, field_template: jnp.ndarray):
+    def __init__(self, pre: GKPre, field_template: Optional[jnp.ndarray] = None):
         self.pre = pre
+        if field_template is not None:
+            self.template_meta = (field_template.shape, field_template.dtype)
+        else:
+            self.template_meta = (None, None)
+
+    def tree_flatten(self):
+        return (self.pre,), self.template_meta
+
+    @classmethod
+    def tree_unflatten(cls, aux_data, children):
+        pre, = children
+        obj = cls(pre, None)
+        obj.template_meta = aux_data
+        return obj
+
 
     def _apply_vpar(self, field: jnp.ndarray, coeffs) -> jnp.ndarray:
         nv = field.shape[0]
@@ -42,13 +58,18 @@ class JAXOps(SolverOps):
             out = out + coeffs[i] * shifted
         return out
 
+    def _apply_parallel_dual(
+        self, field1: jnp.ndarray, field2: jnp.ndarray, coeffs1: jnp.ndarray, coeffs2: jnp.ndarray
+    ) -> Tuple[jnp.ndarray, jnp.ndarray]:
+        return self._apply_parallel(field1, coeffs1), self._apply_parallel(field2, coeffs2)
+
+
 
     def nonlinear_term_iii(
         self,
         df: jnp.ndarray,
         phi: jnp.ndarray,
         geometry: Dict[str, jnp.ndarray],
-        pre: Dict[str, jnp.ndarray],
         *,
         efun_sign: float = 1.0,
         fft_prefactor: complex = 1.0 + 0.0j,
@@ -56,7 +77,9 @@ class JAXOps(SolverOps):
         mixed_precision: bool = True,
     ) -> jnp.ndarray:
         """Nonlinear ExB advection via pseudospectral method. df is 5D."""
+        pre = self.pre
         mrad, mphi, mphiw3 = pre["nl_mrad"], pre["nl_mphi"], pre["nl_mphiw3"]
+
         fft_scale, jind = pre["nl_fft_scale"], pre["nl_jind"]
         kx2d, ky2d, bessel = pre["nl_kx2d"], pre["nl_ky2d"], pre["bessel"]
         dum_s, ixzero, iyzero = pre["nl_dum_s"], pre["ixzero"], pre["iyzero"]
@@ -110,3 +133,6 @@ class JAXOps(SolverOps):
         nl = jax.vmap(_per_s, in_axes=(2, 0, 2, 0), out_axes=2)(df, phi, bessel, dum_s)
         
         return nl.at[:, :, :, ixzero, iyzero].set(0.0) if exclude_zero_mode else nl
+
+    def linear_rhs(self, df, phi, geometry, params, pre) -> Optional[jnp.ndarray]:
+        return None

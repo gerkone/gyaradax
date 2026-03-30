@@ -42,12 +42,16 @@ from gyaradax.integrals import (
     geom_tensors,
     calculate_phi,
     calculate_phi_kinetic,
+    precompute_phi_kinetic,
     precompute_phi_adiabatic,
     calculate_phi_adiabatic,
 )
+from gyaradax.backends import create_ops
 from gyaradax import stencils
 from gyaradax.params import GKParams
 from gyaradax.types import GKPre, GKState
+from gyaradax.backends.ops import SolverOps
+from gyaradax.utils import pack_half_spectrum, unpack_half_spectrum
 from einops import rearrange
 
 
@@ -132,17 +136,7 @@ def build_jind(nkx: int, mrad: int, ixzero: int) -> jnp.ndarray:
     return jnp.where(ix >= ixzero, ix - ixzero, mrad + ix - ixzero)
 
 
-def pack_half_spectrum(
-    spec_kxky: jnp.ndarray, jind: jnp.ndarray, mrad: int, mphiw3: int
-) -> jnp.ndarray:
-    out_shape = spec_kxky.shape[:-2] + (mrad, mphiw3)
-    out = jnp.zeros(out_shape, dtype=jnp.complex128)
-    nky = spec_kxky.shape[-1]
-    return out.at[..., jind, :nky].set(spec_kxky)
 
-
-def unpack_half_spectrum(spec_half: jnp.ndarray, jind: jnp.ndarray, nky: int) -> jnp.ndarray:
-    return spec_half[..., jind, :nky]
 
 
 def nonlinear_term_iii(
@@ -155,62 +149,18 @@ def nonlinear_term_iii(
     fft_prefactor: complex = 1.0 + 0.0j,
     exclude_zero_mode: bool = True,
     mixed_precision: bool = True,
+    ops: Optional[SolverOps] = None,
 ) -> jnp.ndarray:
     """Nonlinear ExB advection via pseudospectral method. df is 5D."""
-    mrad, mphi, mphiw3 = pre["nl_mrad"], pre["nl_mphi"], pre["nl_mphiw3"]
-    fft_scale, jind = pre["nl_fft_scale"], pre["nl_jind"]
-    kx2d, ky2d, bessel = pre["nl_kx2d"], pre["nl_ky2d"], pre["bessel"]
-    dum_s, ixzero, iyzero = pre["nl_dum_s"], pre["ixzero"], pre["iyzero"]
-    nky = df.shape[-1]
+    if ops is None:
+        ops = create_ops(pre, df, backend="jax")
 
-    # Pre-pack the wavenumbers once (very cheap, 2D arrays)
-    ikx_packed = 1j * pack_half_spectrum(kx2d, jind, mrad, mphiw3)
-    iky_packed = 1j * pack_half_spectrum(ky2d, jind, mrad, mphiw3)
+    return ops.nonlinear_term_iii(
+        df, phi, geometry, efun_sign=efun_sign,
+        fft_prefactor=fft_prefactor, exclude_zero_mode=exclude_zero_mode,
+        mixed_precision=mixed_precision
+    )
 
-    def _per_s(df_s, phi_s, bessel_s, dum):
-        fft_dtype = jnp.complex64 if mixed_precision else jnp.complex128
-        real_dtype = jnp.float32 if mixed_precision else jnp.float64
-
-        gyro_phi = bessel_s * phi_s[None, None, :, :]
-
-        # 1. PACK FIRST: 2 massive scatters instead of 4
-        df_packed = pack_half_spectrum(df_s, jind, mrad, mphiw3).astype(fft_dtype)
-        phi_packed = pack_half_spectrum(gyro_phi, jind, mrad, mphiw3).astype(fft_dtype)
-
-        # 2. MULTIPLY AFTER: 4 elementwise multiplications on the much smaller packed arrays
-        packed_grad_phi_y = iky_packed[None, None, :] * phi_packed
-        packed_grad_phi_x = ikx_packed[None, None, :] * phi_packed
-        packed_grad_f_x   = ikx_packed[None, None, :] * df_packed
-        packed_grad_f_y   = iky_packed[None, None, :] * df_packed
-
-        def _to_real(packed_spec):
-            return jnp.fft.irfft2(packed_spec, s=(mrad, mphi), axes=(-2, -1), norm="backward")
-
-        # 3. REAL SPACE BRACKET
-        nl_real = (efun_sign * dum).astype(real_dtype) * (
-            _to_real(packed_grad_phi_y) * _to_real(packed_grad_f_x)
-            - _to_real(packed_grad_phi_x) * _to_real(packed_grad_f_y)
-        )
-
-        # 4. FORWARD FFT (O5 Optimization)
-        if mixed_precision:
-            # Execute in FP32, then cast the smaller spectral result to FP64
-            nl_half_raw = jnp.fft.rfft2(nl_real, s=(mrad, mphi), axes=(-2, -1), norm="backward")
-            nl_half_raw = nl_half_raw.astype(jnp.complex128)
-        else:
-            nl_half_raw = jnp.fft.rfft2(nl_real, s=(mrad, mphi), axes=(-2, -1), norm="backward")
-
-        nl_half = (
-            jnp.asarray(fft_prefactor, dtype=jnp.complex128)
-            * jnp.asarray(fft_scale, dtype=jnp.complex128)
-            * nl_half_raw
-        )
-        return unpack_half_spectrum(nl_half, jind, nky)
-
-    # 5. Eliminate `moveaxis` overhead by mapping directly over axis 2
-    nl = jax.vmap(_per_s, in_axes=(2, 0, 2, 0), out_axes=2)(df, phi, bessel, dum_s)
-    
-    return nl.at[:, :, :, ixzero, iyzero].set(0.0) if exclude_zero_mode else nl
 
 
 def estimate_nl_timestep(
@@ -633,7 +583,6 @@ def linear_precompute(geometry: Dict[str, jnp.ndarray], params: GKParams) -> Dic
         out["nsp"] = nsp
 
         # precompute kinetic phi solve arrays (avoids recomputing bessel/gamma per RHS call)
-        from gyaradax.integrals import precompute_phi_kinetic
 
         phi_w, phi_d = precompute_phi_kinetic(geometry)
         out["phi_weight"] = phi_w
@@ -707,32 +656,7 @@ def linear_precompute(geometry: Dict[str, jnp.ndarray], params: GKParams) -> Dic
     return GKPre(out)
 
 
-def _apply_parallel_fn(pre: GKPre):
-    def _apply_parallel(field, coeffs):
-        out = jnp.zeros_like(field)
-        nky = field.shape[-1]
-        ky_idx = jnp.reshape(jnp.arange(nky, dtype=jnp.int32), (1, 1, -1))
-        for i in range(9):
-            s_map = pre["s_shift"][i]
-            kx_map = pre["kx_shift"][i]
-            valid = pre["valid_shift"][i]
-            shifted = jnp.where(valid[None, None, :, :, :], field[:, :, s_map, kx_map, ky_idx], 0.0)
-            out = out + coeffs[i] * shifted
-        return out
-    return _apply_parallel
 
-
-def _apply_vpar_fn(pre: GKPre):
-    def _apply_vpar(field, coeffs):
-        nv = field.shape[0]
-        out = jnp.zeros_like(field)
-        for c, s in zip(coeffs, (-2, -1, 0, 1, 2)):
-            idx = jnp.clip(jnp.arange(nv, dtype=jnp.int32) + s, 0, nv - 1)
-            valid = jnp.logical_and(jnp.arange(nv) + s >= 0, jnp.arange(nv) + s < nv)
-            shifted = jnp.take(field, idx, axis=0)
-            out = out + c * jnp.where(valid[:, None, None, None, None], shifted, 0.0)
-        return out
-    return _apply_vpar
 
 
 def _linear_rhs_core(
@@ -742,28 +666,38 @@ def _linear_rhs_core(
     params_dvp: float,
     params_disp_vp: float,
     params_drive_scale: float,
+    ops: SolverOps,
 ) -> jnp.ndarray:
     """Core linear RHS for a single species slice (5D arrays).
 
     All arrays in *pre* must be 5D (nv, nmu, ns, nkx, nky) — species
     dimension has been removed by vmap or was never present.
     """
-    _apply_parallel = _apply_parallel_fn(pre)
-    _apply_vpar = _apply_vpar_fn(pre)
+    # Fused linear RHS: parallel stencil + vpar stencil + elementwise
+    if hasattr(ops, "_linear_rhs_fused"):
+        # Squeeze phi_b from (1, 1, ns, nkx, nky) to (ns, nkx, nky)
+        phi_3d = phi_b.reshape(phi_b.shape[-3], phi_b.shape[-2], phi_b.shape[-1])
+        return ops._linear_rhs_fused(
+            df, phi_3d, pre, params_dvp, params_disp_vp, params_drive_scale
+        )
 
+    # Fallback: decomposed parallel stencils for df and gyro_phi
+    gyro_phi = pre["bessel"] * phi_b
+    term_par, term_vii = ops._apply_parallel_dual(
+        df, gyro_phi, pre["s_total_upar"], pre["s_total_t7"]
+    )
 
-
-    term_par = _apply_parallel(df, pre["s_total_upar"])
-    term_iv = pre["utrap"] * _apply_vpar(df, stencils.VPAR_D1) / params_dvp
+    # Fused vpar stencils (D1 and D4)
+    out_d1, out_d4 = ops._apply_vpar_dual(df, stencils.VPAR_D1, stencils.VPAR_D4)
+    term_iv = pre["utrap"] * out_d1 / params_dvp
     term_vp_diss = (
         jnp.asarray(params_disp_vp, dtype=jnp.float64)
         * pre["abs_dum2_vp"]
-        * _apply_vpar(df, stencils.VPAR_D4)
+        * out_d4
         / params_dvp
     )
+
     kdotvd = pre["drift_x"] * pre["kx_b"] + pre["drift_y"] * pre["ky_b"]
-    gyro_phi = pre["bessel"] * phi_b
-    term_vii = _apply_parallel(gyro_phi, pre["s_total_t7"])
 
     return (
         term_par
@@ -782,18 +716,20 @@ def _linear_rhs_core(
     )
 
 
+
 def linear_rhs(
     df: jnp.ndarray,
     geometry: Dict[str, jnp.ndarray],
     params: GKParams,
     pre: Dict[str, jnp.ndarray],
+    ops: SolverOps,
     phi: Optional[jnp.ndarray] = None,
 ) -> jnp.ndarray:
     """Adiabatic linear RHS (5D df). Delegates to _linear_rhs_core."""
     if phi is None:
         phi = _compute_phi(df, geometry, params, pre)
     phi_b = jnp.reshape(phi, (1, 1, phi.shape[0], phi.shape[1], phi.shape[2]))
-    return _linear_rhs_core(df, phi_b, pre, params.dvp, params.disp_vp, params.drive_scale)
+    return _linear_rhs_core(df, phi_b, pre, params.dvp, params.disp_vp, params.drive_scale, ops)
 
 
 def init_f(
@@ -975,12 +911,19 @@ def _compute_phi(df, geometry, params, pre):
         )
 
 
-def _compute_linear_rhs(df, phi, geometry, params, pre):
+def _compute_linear_rhs(df, phi, geometry, params, pre, ops: SolverOps):
     """Compute linear RHS for adiabatic (5D) or kinetic (6D) df."""
     if params.adiabatic_electrons:
-        return linear_rhs(df, geometry, params, pre, phi=phi)
+        return linear_rhs(df, geometry, params, pre, ops, phi=phi)
     else:
+        # Unified fused path for multi-species (eliminates vmap overhead)
+        if hasattr(ops, "linear_rhs"):
+            res = ops.linear_rhs(df, phi, geometry, params, pre)
+            if res is not None:
+                return res
+
         phi_b = phi[None, None, :, :, :]
+
 
         def _per_species(
             df_sp,
@@ -1022,7 +965,7 @@ def _compute_linear_rhs(df, phi, geometry, params, pre):
                 "valid_shift": pre["valid_shift"],
             }
             return _linear_rhs_core(
-                df_sp, phi_b, sp_pre, pre["dvp"], params.disp_vp, params.drive_scale
+                df_sp, phi_b, sp_pre, pre["dvp"], params.disp_vp, params.drive_scale, ops
             )
 
         return jax.vmap(
@@ -1047,16 +990,16 @@ def _compute_linear_rhs(df, phi, geometry, params, pre):
         )
 
 
-def _compute_nonlinear_rhs(df, phi, geometry, params, pre):
+def _compute_nonlinear_rhs(df, phi, geometry, params, pre, ops: SolverOps):
     """Compute nonlinear Term III for adiabatic (5D) or kinetic (6D) df."""
     mp = params.mixed_precision
     if params.adiabatic_electrons:
-        return nonlinear_term_iii(df, phi, geometry, pre, mixed_precision=mp)
+        return ops.nonlinear_term_iii(df, phi, geometry, mixed_precision=mp)
     else:
 
         def _nl_sp(df_sp, bessel_sp):
-            pre_sp = {**pre, "bessel": bessel_sp}
-            return nonlinear_term_iii(df_sp, phi, geometry, pre_sp, mixed_precision=mp)
+            # NOTE: this vmap pattern still pass geometry but rely on ops to have correct 'pre'
+            return ops.nonlinear_term_iii(df_sp, phi, geometry, mixed_precision=mp)
 
         return jax.vmap(_nl_sp)(df, pre["bessel"])
 
@@ -1067,25 +1010,24 @@ def gkstep_single(
     params: GKParams,
     state: GKState,
     pre: GKPre,
+    ops: Optional[SolverOps] = None,
     dt_override: Optional[jnp.ndarray] = None,
 ) -> Tuple[
     jnp.ndarray,
     Tuple[jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]],
     GKState,
 ]:
-    """Single small-step RK4 time integration.
+    """ Single small-step RK4 time integration with backend dispatch. """
+    if ops is None:
+        ops = create_ops(pre, prev_df, backend=params.backend)
 
-    Args:
-        dt_override: If provided, use this dt instead of params.dt.
-            Used by the adaptive CFL path where dt varies per step.
-    """
     dt = dt_override if dt_override is not None else jnp.array(params.dt, dtype=jnp.float64)
 
     def _rhs(df):
         phi_local = _compute_phi(df, geometry, params, pre)
-        rhs = _compute_linear_rhs(df, phi_local, geometry, params, pre)
+        rhs = _compute_linear_rhs(df, phi_local, geometry, params, pre, ops)
         if params.non_linear:
-            rhs = rhs + _compute_nonlinear_rhs(df, phi_local, geometry, params, pre)
+            rhs = rhs + _compute_nonlinear_rhs(df, phi_local, geometry, params, pre, ops)
         return rhs
 
     # RK4 — expanded accumulation lets XLA read k1..k4 and prev_df in one fused kernel
@@ -1149,6 +1091,8 @@ def gksolve(
     if pre is None:
         pre = linear_precompute(geometry, params)
 
+    ops = create_ops(pre, df, backend=params.backend)
+
     if params.adaptive_dt and params.non_linear:
         # Adaptive CFL path: carry dt as part of scan state
         dt_input = jnp.array(params.dt, dtype=jnp.float64)
@@ -1157,7 +1101,7 @@ def gksolve(
         def _scan_body(carry, _):
             curr_df, curr_state, curr_dt = carry
             next_df, out, next_state = gkstep_single(
-                curr_df, geometry, params, curr_state, pre, dt_override=curr_dt
+                curr_df, geometry, params, curr_state, pre, ops, dt_override=curr_dt
             )
             # Estimate next dt from current phi (one-step lag)
             phi_for_cfl = out[0]  # phi from gkstep_single
@@ -1181,7 +1125,7 @@ def gksolve(
         # Fixed dt path
         def _scan_body(carry, _):
             curr_df, curr_state = carry
-            next_df, out, next_state = gkstep_single(curr_df, geometry, params, curr_state, pre)
+            next_df, out, next_state = gkstep_single(curr_df, geometry, params, curr_state, pre, ops)
             return (next_df, next_state), None
 
         (final_df, final_state), _ = jax.lax.scan(_scan_body, (df, state), None, length=n_steps)

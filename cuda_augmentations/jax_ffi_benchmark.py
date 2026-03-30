@@ -30,7 +30,10 @@ sys.path.insert(0, str(root))
 sys.path.insert(0, str(root / "solver_components_benchmarks"))
 
 from common import load_setup, BenchTimer, DEFAULT_BW_GBS, DEFAULT_FP64_TFLOPS, DEVICE_MODEL
-from gyaradax.solver import nonlinear_term_iii, GKPre, pack_half_spectrum, unpack_half_spectrum
+from gyaradax.solver import nonlinear_term_iii
+from gyaradax.utils import pack_half_spectrum, unpack_half_spectrum
+from gyaradax.types import GKPre
+from gyaradax.backends import create_ops
 
 # --- Enable X64 ---
 jax.config.update("jax_enable_x64", True)

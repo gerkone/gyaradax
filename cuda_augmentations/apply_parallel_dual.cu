@@ -37,9 +37,8 @@ void apply_parallel_dual_kernel(
     smem2[local_tid] = __ldg(&field2[field_idx]);
     __syncthreads();
 
-    const int    nv_raw      = nv_nmu / nmu;
-    const size_t c_idx_base  = (size_t)(v_idx / nmu) * spatial_stride + spatial_idx;
-    const size_t c_i_stride  = (size_t)nv_raw * spatial_stride;
+    const size_t c_idx_base   = (size_t)v_idx * spatial_stride + spatial_idx;
+    const size_t c_i_stride   = (size_t)nv_nmu * spatial_stride;
 
     double acc1_r = 0.0, acc1_i = 0.0;
     double acc2_r = 0.0, acc2_i = 0.0;
@@ -102,9 +101,8 @@ __global__ void apply_parallel_dual_dynamic_kernel(
     smem2[local_tid] = __ldg(&field2[field_idx]);
     __syncthreads();
 
-    const int    nv_raw      = nv_nmu / nmu;
-    const size_t c_idx_base  = (size_t)(v_idx / nmu) * spatial_stride + spatial_idx;
-    const size_t c_i_stride  = (size_t)nv_raw * spatial_stride;
+    const size_t c_idx_base   = (size_t)v_idx * spatial_stride + spatial_idx;
+    const size_t c_i_stride   = (size_t)nv_nmu * spatial_stride;
 
     double acc1_r = 0.0, acc1_i = 0.0;
     double acc2_r = 0.0, acc2_i = 0.0;

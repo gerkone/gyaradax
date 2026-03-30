@@ -46,5 +46,9 @@ def create_ops(pre, field_template, backend: str = 'auto') -> SolverOps:
                 raise RuntimeError("backend='cuda' but extensions not compiled")
             else:
                 log.info("Backend: JAX (GPU present, extensions not compiled)")
+        
+        if backend == "auto":
+            log.info("Backend: JAX (GPU not found or CUDA not available)")
+            return JAXOps(pre, field_template)
  
     raise ValueError(f"Unknown backend: {backend!r}. Use 'jax', 'cuda', or 'auto'.")
