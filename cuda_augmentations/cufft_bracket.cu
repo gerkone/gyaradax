@@ -2,6 +2,7 @@
 #include <cuda_runtime.h>
 #include <cufft.h>
 #include <cstdint>
+#include <stdio.h>
 
 // Global plan + workspace cache (4 real-space scratch buffers)
 static cufftHandle plan_z2d = 0;
@@ -33,9 +34,11 @@ __global__ void fused_bracket_scale(
     size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < n) {
         int spec_idx = (int)(idx / real_stride) % nspec;
-        double2 v0 = ((const double2*)ws_a)[idx];
-        double2 v1 = ((const double2*)ws_b)[idx];
-        ws_a[idx] = inv_n2 * dum_s_eff[spec_idx] * (v0.x * v0.y - v1.x * v1.y);
+        double a = ws_a[idx]; // phi_y
+        double b = ws_b[idx]; // f_x
+        double c = ws_c[idx]; // phi_x
+        double d = ws_d[idx]; // f_y
+        ws_a[idx] = inv_n2 * dum_s_eff[spec_idx] * (a * b - c * d);
     }
 }
 
@@ -105,7 +108,6 @@ xla_ffi::Error CufftBracketImpl(
         dum_s_eff.typed_data(),
         total, mrad * mphi, nspec, cached_inv_n2
     );
-
     // Forward FFT (D2Z) → output
     cufftExecD2Z(plan_d2z, ws_a, (cufftDoubleComplex*)out->typed_data());
 

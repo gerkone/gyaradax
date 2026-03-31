@@ -118,16 +118,25 @@ def main():
     inverse_jind = jnp.array(inverse_jind)
 
     # 2. Reshape Inputs for FFI
-    full_batch_size = df.shape[0] * df.shape[1] * df.shape[2] 
+    # If we have multiple species, we must transpose so species is the fastest batch dimension
+    # (matches indexing in CUDA: batch_idx % nspec)
+    if df.ndim == 6: # (nsp, nvpar, nmu, ns, nkx, nky)
+        df_ffi = df.transpose(1, 2, 3, 0, 4, 5)
+        phi_ffi = phi.transpose(1, 2, 3, 0, 4, 5)
+    else:
+        df_ffi = df
+        phi_ffi = phi
+
+    full_batch_size = df_ffi.shape[0] * df_ffi.shape[1] * df_ffi.shape[2] * (df_ffi.shape[3] if df_ffi.ndim == 6 else 1)
     
     if args.slice > 0:
         batch_to_run = min(full_batch_size, args.slice)
         print(f"  [DEBUG] Slicing benchmark to {batch_to_run} batches")
-        df_lto = df.reshape(-1, nkx, nky)[:batch_to_run]
-        phi_lto = phi.reshape(-1, nkx, nky)[:batch_to_run]
+        df_lto = df_ffi.reshape(-1, nkx, nky)[:batch_to_run]
+        phi_lto = phi_ffi.reshape(-1, nkx, nky)[:batch_to_run]
     else:
-        df_lto = df.reshape(-1, nkx, nky)
-        phi_lto = phi.reshape(-1, nkx, nky)
+        df_lto = df_ffi.reshape(-1, nkx, nky)
+        phi_lto = phi_ffi.reshape(-1, nkx, nky)
  
     batch_total = df_lto.shape[0]
     
@@ -243,12 +252,46 @@ def main():
         ixzero, iyzero = pre["ixzero"], pre["iyzero"]
         return nl.at[:, ixzero, iyzero].set(0.0).reshape(-1, nkx, nky)
 
+    @jax.jit
+    def run_cufft_non_lto(d, p):
+        # Match exactly the same structure as run_lto_v2:
+        # gyroaverage phi, pack 4 derivative spectra, call FFI, unpack
+        p_gyro = (pre["bessel"] * p.reshape(1, 1, -1, nkx, nky)).reshape(-1, nkx, nky)
+        d_flat = d.reshape(-1, nkx, nky)
+        
+        # Compute Fourier-space derivatives — pack first then multiply (matches JAX baseline)
+        jind_jnp = jnp.array(jind)
+        mphi_half = mphi // 2 + 1
+        ikx = 1j * pack_half_spectrum(
+            jnp.broadcast_to(kx_vec[:, None], (nkx, nky)), jind_jnp, mrad, mphi_half)
+        iky = 1j * pack_half_spectrum(
+            jnp.broadcast_to(ky_vec[None, :], (nkx, nky)), jind_jnp, mrad, mphi_half)
+        
+        phi_y_dense = iky[None, ...] * pack_half_spectrum(p_gyro, jind_jnp, mrad, mphi_half)
+        f_x_dense   = ikx[None, ...] * pack_half_spectrum(d_flat, jind_jnp, mrad, mphi_half)
+        phi_x_dense = ikx[None, ...] * pack_half_spectrum(p_gyro, jind_jnp, mrad, mphi_half)
+        f_y_dense   = iky[None, ...] * pack_half_spectrum(d_flat, jind_jnp, mrad, mphi_half)
+        
+        # dum_s is (ns,); nspec = ns; kernel cycles batch_idx % nspec → correct for (nvpar,nmu,ns) layout
+        ns_val = dum_s.shape[0]
+        out = ffi.ffi_call(
+            "cufft_bracket_ffi",
+            jax.ShapeDtypeStruct((batch_total, mrad, mphi_half), jnp.complex128)
+        )(phi_y_dense, f_x_dense, phi_x_dense, f_y_dense, dum_s,
+          batch=np.int32(batch_total), mrad=np.int32(mrad), mphi=np.int32(mphi),
+          nspec=np.int32(ns_val))
+        
+        # Kernel applied inv_n2=1/N^2; apply_physics_wrapper(is_lto=False) skips /N^2
+        # then multiplies by fft_scale=N → net = (1/N^2) * N = 1/N, matching JAX irfft norm
+        return apply_physics_wrapper(out, is_lto=False)
+
     variants = [
-        ("JAX FP64 baseline",    run_jax_fp64,       (df, phi)),
-        ("LTO v2 (Standard)",    run_lto_v2,         (df, phi)),
-        ("LTO vZ2Z (Optimized)", run_lto_vz2z,       (df, phi)),
-        ("LTO vZ2Z-merged",      run_lto_vz2z_merged,(df, phi)),
-        ("LTO v4 (Graph)",       run_lto_v4,         (df, phi)),
+        ("JAX FP64 baseline",    run_jax_fp64,        (df, phi)),
+        ("LTO v2 (Standard)",    run_lto_v2,          (df_lto, phi_lto)),
+        ("LTO vZ2Z (Optimized)", run_lto_vz2z,        (df_lto, phi_lto)),
+        ("LTO vZ2Z-merged",      run_lto_vz2z_merged, (df_lto, phi_lto)),
+        ("LTO v4 (Graph)",       run_lto_v4,          (df_lto, phi_lto)),
+        ("cuFFT (non-LTO fused)", run_cufft_non_lto,   (df_lto, phi_lto)),
     ]
 
     results = {}

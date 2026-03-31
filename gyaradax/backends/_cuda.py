@@ -8,7 +8,7 @@ from jax import ffi
 
 from gyaradax.backends.ops import SolverOps
 from gyaradax.types import GKPre
-from gyaradax.utils import pack_half_spectrum, unpack_half_spectrum
+from gyaradax.utils import pack_half_spectrum
 from gyaradax import stencils
 
 # --- FFI --
@@ -34,6 +34,7 @@ def _register_ffi():
         "apply_parallel_ffi":          _lib.apply_parallel_ffi,
         "apply_parallel_dual_ffi":     _lib.apply_parallel_dual_ffi,
         "lto_fft_bracket_v2_ffi":      _lib.lto_fft_bracket_v2_ffi,
+        "lto_fft_bracket_v4_ffi":      _lib.lto_fft_bracket_v4_ffi,
         "linear_rhs_vtiled_ffi":       _lib.linear_rhs_vtiled_ffi,
         "linear_rhs_fused_ffi":        _lib.linear_rhs_fused_ffi,
     }
@@ -378,28 +379,18 @@ class CUDAOps(SolverOps):
         p_gyro = (pre["bessel"] * p_b)
         p_lto = jnp.broadcast_to(p_gyro, (nv, nmu, ns, nkx, nky)).reshape(-1, nkx, nky)
         
+        # v4: returns (batch, nkx, nky) directly with 1/N² normalization already applied
         out_raw = ffi.ffi_call(
-            "lto_fft_bracket_v2_ffi",
-            jax.ShapeDtypeStruct((batch_total, mrad, (mphi // 2 + 1)), jnp.complex128)
+            "lto_fft_bracket_v4_ffi",
+            jax.ShapeDtypeStruct((batch_total, nkx, nky), jnp.complex128)
         )(df_lto, p_lto, kx_vec, ky_vec, inverse_jind, dum_s,
-          batch=np.int32(batch_total), mrad=np.int32(mrad), mphi=np.int32(mphi), 
+          batch=np.int32(batch_total), mrad=np.int32(mrad), mphi=np.int32(mphi),
           nkx=np.int32(nkx), nky=np.int32(nky))
-        
-        # Apply physics normalization and unpacking
-        # Note: efun_sign is applied inside the wrapper in benchmark, 
-        # but here we follow JAXOps logic if possible or check benchmark.
-        # Benchmark v2 uses: nl_half = (fft_prefactor * fft_scale) * out_normalized
-        # where out_normalized = out_raw / (N * N)
-        N = mrad * mphi
+
+        # Apply physics scale (no N² division or unpack_half_spectrum needed)
         fft_scale = pre["nl_fft_scale"]
-        
-        # Combine scales
-        total_scale = (fft_prefactor * fft_scale) / (N * N)
-        nl_half = total_scale * out_raw
-        
-        # Unpack back to 5D
-        nl = unpack_half_spectrum(nl_half, jind, nky)
-        nl_5d = nl.reshape(df.shape)
+        total_scale = fft_prefactor * fft_scale
+        nl_5d = (total_scale * out_raw).reshape(df.shape)
         
         if exclude_zero_mode:
             ixzero, iyzero = pre["ixzero"], pre["iyzero"]
