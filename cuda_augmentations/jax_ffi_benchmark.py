@@ -256,20 +256,23 @@ def main():
 
     @jax.jit
     def run_lto_v5_graph(d, p):
-        # Grid parameters from surrounding scope
-        nspec_val = df_ffi.shape[0]
-        p_lto = (pre["bessel"] * p.reshape(1, 1, -1, nkx, nky)).reshape(-1, nkx, nky)
+        # nspec = ns (field-line segments)
+        nspec_val = dum_s.shape[0]
+        # phi at natural shape: (nmu*ns, nkx, nky) — NOT duplicated across nvpar
+        # bessel is (1, nmu, ns, nkx, nky) or (nmu, ns, nkx, nky)
+        p_phi = (pre["bessel"] * p.reshape(1, 1, -1, nkx, nky)).reshape(-1, nkx, nky)
+        # p_phi shape: (nmu*ns, nkx, nky) = (128, 85, 32) — 32x smaller than d
         jind_ffi = jnp.array(jind, dtype=jnp.int32)
-        
+
         out = ffi.ffi_call(
             "cufft_graph_bracket_ffi",
             jax.ShapeDtypeStruct((batch_total, nkx, nky), jnp.complex128)
-        )(d, p_lto, kx_vec, ky_vec, jind_ffi, inverse_jind, dum_s,
+        )(d, p_phi, kx_vec, ky_vec, jind_ffi, inverse_jind, dum_s,
           batch=np.int32(batch_total // nspec_val), mrad=np.int32(mrad), mphi=np.int32(mphi),
           nkx=np.int32(nkx), nky=np.int32(nky), nspec=np.int32(nspec_val),
           ixzero=np.int32(pre["ixzero"]), iyzero=np.int32(pre["iyzero"]))
-        
-        # Scaling is already 1/N^2 inside CUDA graph assembly kernel
+
+        # Assembly kernel applies 1/N^2 and dum_s; unpack kernel applies zero-mode masking.
         fft_prefactor = pre.get("nl_fft_prefactor", 1.0 + 0.0j)
         fft_scale = pre["nl_fft_scale"]
         efun = pre.get("efun", 1.0)
