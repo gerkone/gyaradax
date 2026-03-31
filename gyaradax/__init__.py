@@ -2,6 +2,8 @@ import jax
 
 jax.config.update("jax_enable_x64", True)
 
+_EPS = 1e-30
+
 from gyaradax.params import (
     GKParams,
     load_config,
