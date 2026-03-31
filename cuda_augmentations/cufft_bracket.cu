@@ -80,8 +80,12 @@ xla_ffi::Error CufftBracketImpl(
             cudaFree(ws_a); cudaFree(ws_b); cudaFree(ws_c); cudaFree(ws_d);
         }
         int n[2] = {mrad, mphi};
-        cufftPlanMany(&plan_z2d, 2, n, NULL, 1, 0, NULL, 1, 0, CUFFT_Z2D, batch);
-        cufftPlanMany(&plan_d2z, 2, n, NULL, 1, 0, NULL, 1, 0, CUFFT_D2Z, batch);
+        int mphi_half = mphi / 2 + 1;
+        size_t c_dist = (size_t)mrad * mphi_half;
+        size_t r_dist = (size_t)mrad * mphi;
+
+        cufftPlanMany(&plan_z2d, 2, n, NULL, 1, (int)c_dist, NULL, 1, (int)r_dist, CUFFT_Z2D, batch);
+        cufftPlanMany(&plan_d2z, 2, n, NULL, 1, (int)r_dist, NULL, 1, (int)c_dist, CUFFT_D2Z, batch);
         size_t nbytes = (size_t)batch * mrad * mphi * sizeof(double);
         cudaMalloc(&ws_a, nbytes); cudaMalloc(&ws_b, nbytes);
         cudaMalloc(&ws_c, nbytes); cudaMalloc(&ws_d, nbytes);

@@ -27,7 +27,7 @@ import jax.numpy as jnp
 
 jax.config.update("jax_enable_x64", True)
 import os as _os
-_jax_cache = _os.environ.get("JAX_COMPILATION_CACHE_DIR", "/tmp/jax_cache")
+_jax_cache = _os.environ.get("JAX_COMPILATION_CACHE_DIR", "/system/user/volkmann/gyrokinetics-jax/cuda_augmentations/jax_cache")
 jax.config.update("jax_compilation_cache_dir", _jax_cache)
 
 import math

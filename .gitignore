@@ -49,3 +49,4 @@ notebooks/figs/
 figs/
 upload_changed_py.sh
 **/CUDALibrarySamples/
+**/jax_cache/

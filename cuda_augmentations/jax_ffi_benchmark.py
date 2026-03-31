@@ -60,6 +60,7 @@ def register_ffi():
         "lto_fft_bracket_v4_ffi":  _lib.lto_fft_bracket_v4_ffi,
         "lto_fft_bracket_vexp_ffi":_lib.lto_fft_bracket_vexp_ffi,
         "cufft_bracket_ffi":       _lib.cufft_bracket_ffi,
+        "cufft_graph_bracket_ffi": _lib.cufft_graph_bracket_ffi,
     }
     
     for name, symbol in targets.items():
@@ -122,7 +123,10 @@ def main():
     # (matches indexing in CUDA: batch_idx % nspec)
     if df.ndim == 6: # (nsp, nvpar, nmu, ns, nkx, nky)
         df_ffi = df.transpose(1, 2, 3, 0, 4, 5)
-        phi_ffi = phi.transpose(1, 2, 3, 0, 4, 5)
+        if phi.ndim == 6:
+            phi_ffi = phi.transpose(1, 2, 3, 0, 4, 5)
+        else:
+            phi_ffi = jnp.broadcast_to(phi[None, ...], df.shape).transpose(1, 2, 3, 0, 4, 5)
     else:
         df_ffi = df
         phi_ffi = phi
@@ -175,7 +179,12 @@ def main():
         
         fft_prefactor = pre.get("nl_fft_prefactor", 1.0 + 0.0j)
         fft_scale = pre["nl_fft_scale"]
-        nl_half = (fft_prefactor * fft_scale) * out_normalized
+        efun = pre.get("efun", 1.0)
+        efun_sign = jnp.where(efun > 0, 1.0, -1.0)
+        
+        # Match baseline real-space scaling: dum_s * fft_scale * efun_sign * np.real(fft_prefactor)
+        # Note: dum_s was already applied in CUDA, so we only need the rest
+        nl_half = (fft_scale * efun_sign * jnp.real(fft_prefactor)) * out_normalized
         nl = unpack_half_spectrum(nl_half, jind, nky)
         ixzero, iyzero = pre["ixzero"], pre["iyzero"]
         nl_masked = nl.at[:, ixzero, iyzero].set(0.0)
@@ -199,7 +208,10 @@ def main():
         out_normalized = out / (N * N)
         fft_prefactor = pre.get("nl_fft_prefactor", 1.0 + 0.0j)
         fft_scale = pre["nl_fft_scale"]
-        nl = (fft_prefactor * fft_scale) * out_normalized
+        efun = pre.get("efun", 1.0)
+        efun_sign = jnp.where(efun > 0, 1.0, -1.0)
+        
+        nl = (fft_scale * efun_sign * jnp.real(fft_prefactor)) * out_normalized
         ixzero, iyzero = pre["ixzero"], pre["iyzero"]
         return nl.at[:, ixzero, iyzero].set(0.0).reshape(-1, nkx, nky)
 
@@ -216,7 +228,10 @@ def main():
         out_normalized = out
         fft_prefactor = pre.get("nl_fft_prefactor", 1.0 + 0.0j)
         fft_scale = pre["nl_fft_scale"]
-        nl = (fft_prefactor * fft_scale) * out_normalized
+        efun = pre.get("efun", 1.0)
+        efun_sign = jnp.where(efun > 0, 1.0, -1.0)
+        
+        nl = (fft_scale * efun_sign * jnp.real(fft_prefactor)) * out_normalized
         ixzero, iyzero = pre["ixzero"], pre["iyzero"]
         return nl.at[:, ixzero, iyzero].set(0.0).reshape(-1, nkx, nky)
 
@@ -232,9 +247,34 @@ def main():
         out_normalized = out
         fft_prefactor = pre.get("nl_fft_prefactor", 1.0 + 0.0j)
         fft_scale = pre["nl_fft_scale"]
-        nl = (fft_prefactor * fft_scale) * out_normalized
+        efun = pre.get("efun", 1.0)
+        efun_sign = jnp.where(efun > 0, 1.0, -1.0)
+        
+        nl = (fft_scale * efun_sign * jnp.real(fft_prefactor)) * out_normalized
         ixzero, iyzero = pre["ixzero"], pre["iyzero"]
         return nl.at[:, ixzero, iyzero].set(0.0).reshape(-1, nkx, nky)
+
+    @jax.jit
+    def run_lto_v5_graph(d, p):
+        # Grid parameters from surrounding scope
+        nspec_val = df_ffi.shape[0]
+        p_lto = (pre["bessel"] * p.reshape(1, 1, -1, nkx, nky)).reshape(-1, nkx, nky)
+        jind_ffi = jnp.array(jind, dtype=jnp.int32)
+        
+        out = ffi.ffi_call(
+            "cufft_graph_bracket_ffi",
+            jax.ShapeDtypeStruct((batch_total, nkx, nky), jnp.complex128)
+        )(d, p_lto, kx_vec, ky_vec, jind_ffi, inverse_jind, dum_s,
+          batch=np.int32(batch_total // nspec_val), mrad=np.int32(mrad), mphi=np.int32(mphi),
+          nkx=np.int32(nkx), nky=np.int32(nky), nspec=np.int32(nspec_val),
+          ixzero=np.int32(pre["ixzero"]), iyzero=np.int32(pre["iyzero"]))
+        
+        # Scaling is already 1/N^2 inside CUDA graph assembly kernel
+        fft_prefactor = pre.get("nl_fft_prefactor", 1.0 + 0.0j)
+        fft_scale = pre["nl_fft_scale"]
+        efun = pre.get("efun", 1.0)
+        efun_sign = jnp.where(efun > 0, 1.0, -1.0)
+        return (fft_scale * efun_sign * jnp.real(fft_prefactor)) * out
 
     @jax.jit
     def run_lto_v4(d, p):
@@ -248,7 +288,10 @@ def main():
         out_normalized = out
         fft_prefactor = pre.get("nl_fft_prefactor", 1.0 + 0.0j)
         fft_scale = pre["nl_fft_scale"]
-        nl = (fft_prefactor * fft_scale) * out_normalized
+        efun = pre.get("efun", 1.0)
+        efun_sign = jnp.where(efun > 0, 1.0, -1.0)
+        
+        nl = (fft_scale * efun_sign * jnp.real(fft_prefactor)) * out_normalized
         ixzero, iyzero = pre["ixzero"], pre["iyzero"]
         return nl.at[:, ixzero, iyzero].set(0.0).reshape(-1, nkx, nky)
 
@@ -290,6 +333,7 @@ def main():
         ("LTO v2 (Standard)",    run_lto_v2,          (df_lto, phi_lto)),
         ("LTO vZ2Z (Optimized)", run_lto_vz2z,        (df_lto, phi_lto)),
         ("LTO vZ2Z-merged",      run_lto_vz2z_merged, (df_lto, phi_lto)),
+        ("LTO v5 Graph",         run_lto_v5_graph,    (df_lto, phi_lto)),
         ("LTO v4 (Graph)",       run_lto_v4,          (df_lto, phi_lto)),
         ("cuFFT (non-LTO fused)", run_cufft_non_lto,   (df_lto, phi_lto)),
     ]
@@ -298,7 +342,9 @@ def main():
     errors = {}
     try:
         ref_out = run_jax_fp64(df, phi)
-        ref_flat = ref_out.reshape(-1, nkx, nky)[:batch_total]
+        # Use batch_to_run if sliced, else full_batch_size
+        limit = batch_to_run if args.slice > 0 else full_batch_size
+        ref_flat = ref_out.reshape(-1, nkx, nky)[:limit]
         if args.debug:
             r_off, k_off = 0, 10
             print(f"  [DEBUG] Slice at rad {r_off}, k_off {k_off}:")

@@ -29,12 +29,11 @@ set(CMAKE_CUDA_ARCHITECTURES ${GPU_ARCHITECTURES})
 
 # ── LTO fatbins need per-architecture gencode flags ─────────────
 # cuFFT LTO callbacks require arch-specific lto_XX code, not just PTX.
-# We generate one fatbin per callback containing all target architectures.
+# We hardcode cuFFT 12.x supported LTO targets (sm_80 and sm_90) so that 
+# libcufft.so.12 can JIT compile them at runtime, regardless of the B300 target.
 set(GENCODE_FLAGS_LTO "")
-foreach(ARCH ${GPU_ARCHITECTURES})
-  list(APPEND GENCODE_FLAGS_LTO
-    --generate-code arch=compute_${ARCH},code=lto_${ARCH})
-endforeach()
+list(APPEND GENCODE_FLAGS_LTO --generate-code arch=compute_80,code=lto_80)
+list(APPEND GENCODE_FLAGS_LTO --generate-code arch=compute_90,code=lto_90)
 list(APPEND GENCODE_FLAGS_LTO --ptxas-options=-v)
 
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
@@ -81,6 +80,7 @@ set(LTO_HEADERS
 add_library(lto_bracket SHARED
     ${PROJECT_SOURCE_DIR}/cufft_lto_bracket.cu
     ${PROJECT_SOURCE_DIR}/cufft_bracket.cu
+    ${PROJECT_SOURCE_DIR}/cufft_graph_bracket.cu
     ${PROJECT_SOURCE_DIR}/apply_parallel.cu
     ${PROJECT_SOURCE_DIR}/apply_parallel_dual.cu
     ${PROJECT_SOURCE_DIR}/apply_vpar_stencil.cu
