@@ -169,6 +169,13 @@ def main():
     def run_jax_fp64(d, p):
         return nonlinear_term_iii(d, p, geom, pre_gk, mixed_precision=False)
 
+    from gyaradax.backends._jax import JAXOps
+    jax_ops = JAXOps(pre_gk)
+
+    @jax.jit
+    def run_jax_z2z(d, p):
+        return jax_ops.nonlinear_term_iii_z2z(d, p, geom, mixed_precision=False)
+
     # 4. Shared Physics & Solver Wrapper
     def apply_physics_wrapper(out_raw, is_lto=True):
         N = mrad * mphi
@@ -333,6 +340,7 @@ def main():
 
     variants = [
         ("JAX FP64 baseline",    run_jax_fp64,        (df, phi)),
+        ("JAX Z2Z 2-for-1",     run_jax_z2z,         (df, phi)),
         ("LTO v2 (Standard)",    run_lto_v2,          (df_lto, phi_lto)),
         ("LTO vZ2Z (Optimized)", run_lto_vz2z,        (df_lto, phi_lto)),
         ("LTO vZ2Z-merged",      run_lto_vz2z_merged, (df_lto, phi_lto)),

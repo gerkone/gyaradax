@@ -35,6 +35,7 @@ def _register_ffi():
         "apply_parallel_dual_ffi":     _lib.apply_parallel_dual_ffi,
         "lto_fft_bracket_v2_ffi":      _lib.lto_fft_bracket_v2_ffi,
         "lto_fft_bracket_v4_ffi":      _lib.lto_fft_bracket_v4_ffi,
+        "cufft_graph_bracket_ffi":     _lib.cufft_graph_bracket_ffi,
         "linear_rhs_vtiled_ffi":       _lib.linear_rhs_vtiled_ffi,
         "linear_rhs_fused_ffi":        _lib.linear_rhs_fused_ffi,
     }
@@ -349,49 +350,45 @@ class CUDAOps(SolverOps):
         exclude_zero_mode: bool = True,
         mixed_precision: bool = True,
     ) -> jnp.ndarray:
-        """ Nonlinear FFT Poisson bracket using FFI fusion. """
+        """Nonlinear bracket via v5 Z2Z 2-for-1 + phi broadcast + mixed precision.
+
+        Uses FP32 C2C inverse FFT (halves bandwidth) with FP64 bracket
+        accumulation and FP64 forward D2Z.  Phi is kept at its natural
+        (nmu*ns) batch size — not duplicated across nvpar — saving 32x FFT work.
+        """
         pre = self.pre
         mrad, mphi = pre["nl_mrad"], pre["nl_mphi"]
         nv, nmu, ns, nkx, nky = df.shape
-        
-        # Build inverse_jind for the FFI callback (JIT-compatible)
+
         jind = pre["nl_jind"]
         inverse_jind = jnp.full((mrad,), -1, dtype=jnp.int32)
         inverse_jind = inverse_jind.at[jind].set(jnp.arange(jind.shape[0], dtype=jnp.int32))
-        
-        # Prepare inputs
+
         kx_vec = pre["nl_kx2d"][:, 0]
         ky_vec = pre["nl_ky2d"][0, :]
         dum_s = pre["nl_dum_s"]
-        
-        # Reshape to 3D batches for FFI
-        batch_total = df.shape[0] * df.shape[1] * df.shape[2]
-        df_lto = df.reshape(-1, nkx, nky)
-        
-        # Apply bessel once in JAX space before FFI (mirroring benchmark)
-        # Apply efun_sign to df inside the bracket (as JAX logic)
-        # Note: applying to df only is equivalent to scaling the whole bracket since it is linear in df.
-        df_lto = df_lto * efun_sign
-        
-        # p_lto: must match df_lto (batch, nkx, nky) 
-        # pre["bessel"] is (1, nmu, ns, nkx, nky) or (nmu, ns, nkx, nky)
-        p_b = phi.reshape(1, 1, ns, nkx, nky)
-        p_gyro = (pre["bessel"] * p_b)
-        p_lto = jnp.broadcast_to(p_gyro, (nv, nmu, ns, nkx, nky)).reshape(-1, nkx, nky)
-        
-        # v4: returns (batch, nkx, nky) directly with 1/N² normalization already applied
-        out_raw = ffi.ffi_call(
-            "lto_fft_bracket_v4_ffi",
-            jax.ShapeDtypeStruct((batch_total, nkx, nky), jnp.complex128)
-        )(df_lto, p_lto, kx_vec, ky_vec, inverse_jind, dum_s,
-          batch=np.int32(batch_total), mrad=np.int32(mrad), mphi=np.int32(mphi),
-          nkx=np.int32(nkx), nky=np.int32(nky))
 
-        # Apply physics scale (no N² division or unpack_half_spectrum needed)
+        batch_total = nv * nmu * ns
+        df_flat = df.reshape(-1, nkx, nky) * efun_sign
+
+        # Phi at natural batch: (nmu*ns, nkx, nky) — NOT duplicated across nvpar
+        p_b = phi.reshape(1, 1, ns, nkx, nky)
+        p_phi = (pre["bessel"] * p_b).reshape(-1, nkx, nky)  # (nmu*ns, nkx, nky)
+
+        _register_ffi()
+        out_raw = ffi.ffi_call(
+            "cufft_graph_bracket_ffi",
+            jax.ShapeDtypeStruct((batch_total, nkx, nky), jnp.complex128)
+        )(df_flat, p_phi, kx_vec, ky_vec,
+          jnp.asarray(jind, dtype=jnp.int32), inverse_jind, dum_s,
+          batch=np.int32(batch_total // ns), mrad=np.int32(mrad), mphi=np.int32(mphi),
+          nkx=np.int32(nkx), nky=np.int32(nky), nspec=np.int32(ns),
+          ixzero=np.int32(pre["ixzero"]), iyzero=np.int32(pre["iyzero"]))
+
+        # Assembly applies 1/N² and dum_s; unpack applies zero-mode masking.
         fft_scale = pre["nl_fft_scale"]
-        total_scale = fft_prefactor * fft_scale
-        nl_5d = (total_scale * out_raw).reshape(df.shape)
-        
+        nl_5d = (fft_prefactor * fft_scale * out_raw).reshape(df.shape)
+
         if exclude_zero_mode:
             ixzero, iyzero = pre["ixzero"], pre["iyzero"]
             return nl_5d.at[:, :, :, ixzero, iyzero].set(0.0)
