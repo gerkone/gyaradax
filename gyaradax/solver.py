@@ -36,8 +36,6 @@ import math
 import functools
 from typing import Dict, Tuple, Optional
 
-import jax.random
-
 from gyaradax import _EPS
 from gyaradax.integrals import (
     get_integrals,
@@ -53,7 +51,7 @@ from gyaradax import stencils
 from gyaradax.params import GKParams
 from gyaradax.types import GKPre, GKState
 from gyaradax.backends.ops import SolverOps
-from gyaradax.utils import pack_half_spectrum
+from gyaradax.utils import pack_half_spectrum, unpack_half_spectrum
 from einops import rearrange
 
 
@@ -389,11 +387,11 @@ def _fuse_stencils(
     rearrange pattern: 5 for adiabatic, 6 for kinetic.
     """
     if stencil_ndim == 5:
-        # Adiabatic: arrays are (nv, nmu, ns, nkx, nky)
+        # adiabatic: arrays are (nv, nmu, ns, nkx, nky)
         pat_coeff = "v m s x y -> 1 v m s x y"
         pat_stencil = "i s x y -> i 1 1 s x y"
     else:
-        # Kinetic: arrays are (nsp, nv, nmu, ns, nkx, nky)
+        # kinetic: arrays are (nsp, nv, nmu, ns, nkx, nky)
         pat_coeff = "sp v m s x y -> 1 sp v m s x y"
         pat_stencil = "i s x y -> i 1 1 1 s x y"
 
@@ -448,7 +446,7 @@ def _compute_species_coeffs(
     When ndim=6, species params have shape (nsp,) and output arrays are 6D.
     """
     if ndim == 5:
-        # Adiabatic: scalar species params, 5D grid arrays
+        # adiabatic: scalar species params, 5D grid arrays
         vp2 = jnp.reshape(vpgr**2, (-1, 1, 1, 1, 1))
         vp = jnp.reshape(vpgr, (-1, 1, 1, 1, 1))
         mu = jnp.reshape(mugr, (1, -1, 1, 1, 1))
@@ -467,7 +465,7 @@ def _compute_species_coeffs(
 
         sz = jnp.where(jnp.abs(signz) < _EPS, 1.0, signz)
     else:
-        # Kinetic: per-species params, 6D arrays
+        # kinetic: per-species params, 6D arrays
         nsp = mas.shape[0]
 
         def r6(arr):
@@ -524,16 +522,16 @@ def _compute_species_coeffs(
     et = (vp2 + 2.0 * bn_b * mu) / t_rat - 1.5
     dmax_ek = (rln + rlt * et) * fmax * (efun_b * ky_b)
 
-    # Drifts
+    # drifts
     ed = vp2 + bn_b * mu
     drift_x = ed * d_shape(dfun[:, 0]) / sz
     drift_y = ed * d_shape(dfun[:, 1]) / sz
 
-    # Characteristic speeds
+    # characteristic speeds
     upar = -ffun_b * vthrat * vp
     utrap = vthrat * mu * bn_b * gfun_b
 
-    # Dissipation speeds for idisp=2: RMS velocity (matches GKW linear_terms.f90:643,911)
+    # dissipation speeds for idisp=2: RMS velocity (matches GKW linear_terms.f90:643,911)
     vp_rms = jnp.asarray(
         params.vpgr_rms if hasattr(params, "vpgr_rms") else jnp.sqrt(jnp.mean(vpgr**2)),
         dtype=jnp.float64,
@@ -581,7 +579,7 @@ def linear_precompute(geometry: Dict[str, jnp.ndarray], params: GKParams) -> "GK
     efun = jnp.asarray(geometry.get("efun", jnp.ones_like(bn)), dtype=jnp.float64)
     little_g = jnp.asarray(geometry["little_g"], dtype=jnp.float64)
 
-    # Species-independent shared quantities
+    # species-independent shared quantities
     out = _precompute_shared(
         geometry, params, kx, ky, ns, nkx, nky, vpgr, mugr, bn, ffun, gfun, dfun, efun
     )
@@ -611,7 +609,7 @@ def linear_precompute(geometry: Dict[str, jnp.ndarray], params: GKParams) -> "GK
             params,
             ndim=6,
         )
-        # Override vpgr_rms/mugr_rms if available
+        # override vpgr_rms/mugr_rms if available
         if "vpgr_rms" in geometry:
             vp_rms = jnp.asarray(geometry["vpgr_rms"], dtype=jnp.float64)
             mu_rms = jnp.asarray(geometry.get("mugr_rms", 1.0), dtype=jnp.float64)
@@ -670,7 +668,7 @@ def linear_precompute(geometry: Dict[str, jnp.ndarray], params: GKParams) -> "GK
         time_field = jnp.min(jnp.where(field_period > _EPS, field_period, 1e30))
         out["tmax_field"] = jnp.where(time_field < 1e20, 1.0 / time_field, 0.0)
     else:
-        # Adiabatic: scalar species params, 5D arrays
+        # adiabatic: scalar species params, 5D arrays
         sp = _compute_species_coeffs(
             params.mas,
             params.signz,
@@ -692,7 +690,7 @@ def linear_precompute(geometry: Dict[str, jnp.ndarray], params: GKParams) -> "GK
             params,
             ndim=5,
         )
-        # Override vpgr_rms/mugr_rms if available
+        # override vpgr_rms/mugr_rms if available
         if "vpgr_rms" in geometry:
             vp_rms = jnp.asarray(geometry["vpgr_rms"], dtype=jnp.float64)
             mu_rms = jnp.asarray(geometry.get("mugr_rms", 1.0), dtype=jnp.float64)
@@ -725,7 +723,7 @@ def linear_precompute(geometry: Dict[str, jnp.ndarray], params: GKParams) -> "GK
         out.update(sp)
         out["geom_tensors"] = geom_tensors(geometry, params=params)
 
-        # Precompute adiabatic phi solve arrays
+        # precompute adiabatic phi solve arrays
         pw, pcw, tmp, de, signz, gamma, ints, has_zonal, ixzero, iyzero = precompute_phi_adiabatic(
             geometry, params
         )
@@ -757,21 +755,21 @@ def _linear_rhs_core(
     All arrays in *pre* must be 5D (nv, nmu, ns, nkx, nky) — species
     dimension has been removed by vmap or was never present.
     """
-    # Fused linear RHS: parallel stencil + vpar stencil + elementwise
+    # fused linear RHS: parallel stencil + vpar stencil + elementwise
     if hasattr(ops, "_linear_rhs_fused"):
-        # Squeeze phi_b from (1, 1, ns, nkx, nky) to (ns, nkx, nky)
+        # squeeze phi_b from (1, 1, ns, nkx, nky) to (ns, nkx, nky)
         phi_3d = phi_b.reshape(phi_b.shape[-3], phi_b.shape[-2], phi_b.shape[-1])
         return ops._linear_rhs_fused(
             df, phi_3d, pre, params_dvp, params_disp_vp, params_drive_scale
         )
 
-    # Fallback: decomposed parallel stencils for df and gyro_phi
+    # fallback: decomposed parallel stencils for df and gyro_phi
     gyro_phi = pre["bessel"] * phi_b
     term_par, term_vii = ops._apply_parallel_dual(
         df, gyro_phi, pre["s_total_upar"], pre["s_total_t7"]
     )
 
-    # Fused vpar stencils (D1 and D4)
+    # fused vpar stencils (D1 and D4)
     out_d1, out_d4 = ops._apply_vpar_dual(df, stencils.VPAR_D1, stencils.VPAR_D4)
     term_iv = pre["utrap"] * out_d1 / params_dvp
     term_vp_diss = (
@@ -854,7 +852,7 @@ def init_f(
     full_shape = shape_6d if n_species > 1 else shape_5d
 
     # velocity-space Maxwellian: (n/n_grid) * exp(-(vpar^2 + 2*mu*B)/T) / (sqrt(T*pi))^3
-    # Matches GKW's fmaxwl in components.f90 (with dens=dref=tref=1).
+    # matches GKW's fmaxwl in components.f90 (with dens=dref=tref=1).
     vp2 = vpgr**2  # (nv,)
     tmp_val = jnp.asarray(geometry.get("tmp", jnp.ones(1)), dtype=jnp.float64)
     if tmp_val.ndim > 0:
@@ -906,7 +904,7 @@ def init_f(
 
     elif finit == "zonal":
         # Rosenbluth-Hinton test: only the zonal mode (ky=0) is initialized.
-        # In spectral space, set kx = ±1 around kx=0 with ±i*amp*fmaxwl/2
+        # in spectral space, set kx = ±1 around kx=0 with ±i*amp*fmaxwl/2
         # to produce a sin(kx*x) radial density perturbation.  Only ions
         # (signz > 0) are initialized.  (GKW init.f90:1471-1514)
         kxrh = jnp.asarray(geometry["kxrh"], dtype=jnp.float64)
@@ -1038,7 +1036,7 @@ def _compute_linear_rhs(df, phi, geometry, params, pre, ops: SolverOps):
     if params.adiabatic_electrons:
         return linear_rhs(df, geometry, params, pre, ops, phi=phi)
     else:
-        # Unified fused path for multi-species (eliminates vmap overhead)
+        # unified fused path for multi-species (eliminates vmap overhead)
         if hasattr(ops, "linear_rhs"):
             res = ops.linear_rhs(df, phi, geometry, params, pre)
             if res is not None:
@@ -1088,8 +1086,10 @@ def _compute_nonlinear_rhs(df, phi, geometry, params, pre, ops: SolverOps):
     else:
 
         def _nl_sp(df_sp, bessel_sp):
-            # NOTE: this vmap pattern still pass geometry but rely on ops to have correct 'pre'
-            return ops.nonlinear_term_iii(df_sp, phi, geometry, mixed_precision=mp, bessel=bessel_sp)
+            # NOTE: this vmap pattern still passes geometry but relies on ops having correct 'pre'
+            return ops.nonlinear_term_iii(
+                df_sp, phi, geometry, mixed_precision=mp, bessel=bessel_sp
+            )
 
         return jax.vmap(_nl_sp)(df, pre["bessel"])
 
@@ -1129,7 +1129,7 @@ def gkstep_single(
     dt3 = dt / 3.0
     next_df_raw = prev_df + dt6 * k1 + dt3 * k2 + dt3 * k3 + dt6 * k4
 
-    # Post-step: normalization and amplitude tracking
+    # post-step: normalization and amplitude tracking
     new_step = state.step + jnp.array(1, dtype=jnp.int32)
     is_window_end = jnp.equal(jnp.mod(new_step, params.naverage), 0)
 
@@ -1184,7 +1184,7 @@ def gksolve(
     ops = create_ops(pre, df, backend=params.backend)
 
     if params.adaptive_dt and params.non_linear:
-        # Adaptive CFL path: carry dt as part of scan state
+        # adaptive CFL path: carry dt as part of scan state
         dt_input = jnp.array(params.dt, dtype=jnp.float64)
         cfl_safety = jnp.array(params.cfl_safety, dtype=jnp.float64)
 
@@ -1193,7 +1193,7 @@ def gksolve(
             next_df, out, next_state = gkstep_single(
                 curr_df, geometry, params, curr_state, pre, ops, dt_override=curr_dt
             )
-            # Estimate next dt from current phi (one-step lag)
+            # estimate next dt from current phi (one-step lag)
             phi_for_cfl = out[0]  # phi from gkstep_single
             bessel_for_cfl = pre["bessel"]
             if not params.adiabatic_electrons:
@@ -1214,7 +1214,7 @@ def gksolve(
             _scan_body, (df, state, init_dt), None, length=n_steps
         )
     else:
-        # Fixed dt path
+        # fixed dt path
         def _scan_body(carry, _):
             curr_df, curr_state = carry
             next_df, out, next_state = gkstep_single(

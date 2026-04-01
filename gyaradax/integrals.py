@@ -149,7 +149,7 @@ def precompute_phi_adiabatic(geometry: Dict[str, jnp.ndarray], params: Any):
 
     geom = geom_tensors(geometry, params=params)
 
-    # Squeeze leading nsp=1 dimension to simplify to 5D: (v, mu, s, kx, ky)
+    # squeeze leading nsp=1 dimension to simplify to 5D: (v, mu, s, kx, ky)
     for k in list(geom.keys()):
         if isinstance(geom[k], jnp.ndarray) and geom[k].ndim > 0:
             geom[k] = jnp.squeeze(geom[k], axis=0)
@@ -159,7 +159,7 @@ def precompute_phi_adiabatic(geometry: Dict[str, jnp.ndarray], params: Any):
     ints, intvp, intmu = geom["ints"], geom["intvp"], geom["intmu"]
     bessel, gamma = geom["bessel"], geom["gamma"]
 
-    # Weights for the first reduction: (nv, nmu, ns, nkx, nky)
+    # weights for the first reduction: (nv, nmu, ns, nkx, nky)
     phi_weight = signz * de * intmu * intvp * bessel * bn
     phi_weight = jnp.where(jnp.abs(intvp) < 1e-9, 0.0, phi_weight)
 
@@ -176,8 +176,8 @@ def precompute_phi_adiabatic(geometry: Dict[str, jnp.ndarray], params: Any):
     ixzero = jnp.argmin(jnp.abs(kxrh_flat))
     has_zonal = jnp.where(jnp.abs(krho_flat[iyzero]) < 1e-10, 1.0, 0.0)
 
-    # Weight for the second reduction (zonal mode correction, sum over ns)
-    # Zero matz for all ky except the zonal mode
+    # weight for the second reduction (zonal mode correction, sum over ns)
+    # zero matz for all ky except the zonal mode
     ky_is_zonal = jnp.arange(matz.shape[-1]) == iyzero
     matz = matz * ky_is_zonal[None, None, None, None, :] * has_zonal
     phi_corr_weight = matz
@@ -203,38 +203,30 @@ def calculate_phi_adiabatic(
     # phi_weight: (nv, nmu, ns, nkx, nky)
     phi_raw = jnp.sum(phi_weight * df, axis=(0, 1), keepdims=True)  # (1, 1, ns, nkx, nky)
 
-    # Zonal mode correction (sum over ns)
+    # zonal mode correction (sum over ns)
     # phi_corr_weight: (1, 1, ns, 1, 1)
     bufphi = jnp.sum(phi_corr_weight * phi_raw, axis=2, keepdims=True)  # (1, 1, 1, nkx, nky)
 
     cfen = 0.0
     exp_cfen = jnp.exp(-cfen)
 
-    # Factor 1: maty_val correction (applies only to ky=0)
+    # factor 1: maty_val correction (applies only to ky=0)
     maty_sum = jnp.sum(-phi_corr_weight * exp_cfen, axis=2, keepdims=True)
     maty = tmp / (de * exp_cfen) + maty_sum / exp_cfen
 
-    ns, nkx, nky = phi_raw.shape[2], phi_raw.shape[3], phi_raw.shape[4]
+    nkx, nky = phi_raw.shape[3], phi_raw.shape[4]
 
     # zonal (ky=iyzero) mask
-    y_mask = (
-        jnp.zeros((1, 1, 1, 1, nky), dtype=phi_raw.dtype)
-        .at[..., iyzero]
-        .set(has_zonal)
-    )
+    y_mask = jnp.zeros((1, 1, 1, 1, nky), dtype=phi_raw.dtype).at[..., iyzero].set(has_zonal)
     # kx=ixzero mask
-    x_mask = (
-        jnp.zeros((1, 1, 1, nkx, 1), dtype=phi_raw.dtype)
-        .at[..., ixzero, :]
-        .set(1.0)
-    )
+    x_mask = jnp.zeros((1, 1, 1, nkx, 1), dtype=phi_raw.dtype).at[..., ixzero, :].set(1.0)
 
     maty_val = jnp.where(x_mask > 0, 1.0 + 0j, maty)
     maty_val = jnp.where(jnp.abs(maty_val) < 1e-15, 1.0, maty_val)
 
     phi_corr = phi_raw + (1.0 / maty_val) * bufphi * y_mask
 
-    # Factor 2: poisson_diag (pdiag)
+    # factor 2: poisson_diag (pdiag)
     poisson_diag = exp_cfen * (signz**2) * de * (gamma - 1.0) / tmp
     # zonal mask (kx=ixzero, ky=iyzero)
     zonal_mask = x_mask * y_mask

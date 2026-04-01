@@ -41,7 +41,7 @@ def _load_1d_array(path):
 
 
 # ---------------------------------------------------------------------------
-# Continuous geometry functions (JAX-differentiable)
+# continuous geometry functions (JAX-differentiable)
 # ---------------------------------------------------------------------------
 
 
@@ -83,21 +83,20 @@ def _dzetadeps(theta, q, shat, eps, signB, signJ):
     that propagates into all zeta-direction tensors (D_zeta, H_zeta,
     I_zeta). The radial (eps) components are unaffected.
     """
-    ns = len(theta)
     dum2 = jnp.sqrt((1 - eps) / (1 + eps))
 
-    # Vectorized atan + cumulative branch correction.
+    # vectorized atan + cumulative branch correction.
     # GKW uses a sequential while loop; we replicate the monotonicity
     # via a cumulative sum of pi jumps detected by sign changes.
     raw = jnp.arctan(dum2 * jnp.tan(theta / 2))
 
-    # Detect where raw decreases (branch cut) and accumulate pi corrections.
+    # detect where raw decreases (branch cut) and accumulate pi corrections.
     diffs = raw[1:] - raw[:-1]
     jumps = jnp.where(diffs < 0, jnp.pi, 0.0)
     corrections = jnp.concatenate([jnp.zeros(1), jnp.cumsum(jumps)])
     dzde = raw + corrections
 
-    # Align the branch: subtract the offset at s=0
+    # align the branch: subtract the offset at s=0
     dzde = dzde - jnp.pi * jnp.floor((dzde[0] - theta[0] / 2) / jnp.pi)
 
     t2 = jnp.tan(theta / 2)
@@ -315,7 +314,7 @@ def _build_wavevector_grids(
 
 
 # ---------------------------------------------------------------------------
-# Discrete topology functions (numpy, not differentiable)
+# discrete topology functions (numpy, not differentiable)
 # ---------------------------------------------------------------------------
 
 
@@ -463,7 +462,7 @@ def _build_parallel_shift_maps(ixplus, ixminus, iyzero, ns, max_shift=4):
 
 
 # ---------------------------------------------------------------------------
-# Public entry points
+# public entry points
 # ---------------------------------------------------------------------------
 
 
@@ -526,8 +525,8 @@ def compute_geometry(
     )
     krho = krho_raw / kthnorm
 
-    # Discrete topology (numpy) — stop gradient and convert to concrete arrays.
-    # Mode labels and connectivity depend only on grid shape and ikxspace,
+    # discrete topology (numpy) — stop gradient and convert to concrete arrays.
+    # mode labels and connectivity depend only on grid shape and ikxspace,
     # not on the continuous values of (q, shat, eps).
     kxrh_np = np.asarray(jax.lax.stop_gradient(kxrh))
     krho_np = np.asarray(jax.lax.stop_gradient(krho))

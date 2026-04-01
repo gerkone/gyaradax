@@ -6,7 +6,7 @@ import jax.numpy as jnp
 
 @jax.tree_util.register_pytree_node_class
 class GKPre:
-    """precomputed terms container. separates dynamic arrays (leaves) from
+    """Precomputed terms container. separates dynamic arrays (leaves) from
     static metadata (auxiliary) so FFT sizes stay concrete under JIT."""
 
     def __init__(self, items: Dict[str, Any]):
@@ -27,8 +27,6 @@ class GKPre:
             elif isinstance(v, (jnp.ndarray, float, int, bool)):
                 leaves.append(v)
                 leaf_keys.append(k)
-            elif v is None:
-                aux[k] = v
             else:
                 aux[k] = v
         return tuple(leaves), {"leaf_keys": tuple(leaf_keys), "aux": aux}

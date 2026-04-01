@@ -1,4 +1,4 @@
-"""backend selection and solver ops creation.
+"""Backend selection and solver ops creation.
 
 usage:
     from gyaradax.backends import create_ops
@@ -20,7 +20,7 @@ log = logging.getLogger(__name__)
 
 
 def create_ops(pre, field_template, backend: str = "auto") -> SolverOps:
-    """create a SolverOps instance for the given backend."""
+    """Create a SolverOps instance for the given backend."""
     if backend == "jax":
         log.info("Backend: JAX")
         return JAXOps(pre, field_template)

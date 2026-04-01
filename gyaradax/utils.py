@@ -65,9 +65,9 @@ def load_gkw_dump(
         df = jnp.array(knth[0] + 1j * knth[1], dtype=jnp.complex128)
     else:
         # GKW stores species as the outermost (slowest) Fortran index.
-        # Binary layout: (2_re_im, nvpar, nmu, ns, nkx, nky, nspecies) Fortran order.
+        # binary layout: (2_re_im, nvpar, nmu, ns, nkx, nky, nspecies) Fortran order.
         knth = np.reshape(ff, (2, nvpar, nmu, ns, nkx, nky, n_species), order="F")
-        # Combine real/imag and move species to leading axis
+        # combine real/imag and move species to leading axis
         df_np = knth[0] + 1j * knth[1]  # (nvpar, nmu, ns, nkx, nky, nspecies)
         df = jnp.array(
             np.moveaxis(df_np, -1, 0), dtype=jnp.complex128
@@ -119,7 +119,7 @@ def save_dumps(
     """
     os.makedirs(output_dir, exist_ok=True)
 
-    # Spectra use field-line-averaged |phi|^2, matching GKW conventions:
+    # spectra use field-line-averaged |phi|^2, matching GKW conventions:
     #   ky_spec: per-mode spectral density = ds * sum_{s,kx} |phi|^2
     #   kx_spec: total per kx = ds * sum_{s,ky} parseval_ky * |phi|^2
     #     where parseval_ky = [1, 2, 2, ...] (one-sided Parseval for real fields)
@@ -145,34 +145,34 @@ def save_dumps(
         "step": np.array(state.step),
     }
 
-    # Internal helper to append data to an npz file
+    # internal helper to append data to an npz file
     def _append_to_npz(filename, new_data):
         path = os.path.join(output_dir, filename)
         current_step = int(state.step)
         if os.path.exists(path):
             try:
                 with np.load(path) as data:
-                    # Use 'step' to truncate entries strictly before the current one.
-                    # This prevents overlapping history when resuming simulations.
+                    # use 'step' to truncate entries strictly before the current one.
+                    # this prevents overlapping history when resuming simulations.
                     if "step" in data.files:
                         mask = data["step"] < current_step
                         updated = {
                             k: np.append(data[k][mask], [new_data[k]], axis=0) for k in data.files
                         }
                     else:
-                        # Fallback for legacy files without 'step'
+                        # fallback for legacy files without 'step'
                         updated = {k: np.append(data[k], [new_data[k]], axis=0) for k in data.files}
             except (IOError, ValueError):
-                # If file is corrupted or incompatible, start fresh
+                # if file is corrupted or incompatible, start fresh
                 updated = {k: np.array([v]) for k, v in new_data.items()}
         else:
-            # Create new file with first entry
+            # create new file with first entry
             updated = {k: np.array([v]) for k, v in new_data.items()}
         np.savez(path, **updated)
 
-    # Note: We group these to avoid too many small files
+    # note: we group these to avoid too many small files
     # but the user requested "fluxes.npz, kyspec.npz, kxspec.npz, growth.npz"
-    # We now include step and time in every file for self-description and safe appending.
+    # we now include step and time in every file for self-description and safe appending.
     common = {"step": diags["step"], "time": diags["time"]}
 
     _append_to_npz("fluxes.npz", {"fluxes": diags["fluxes"], **common})

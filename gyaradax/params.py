@@ -1,4 +1,5 @@
 import jax
+import jax.numpy as jnp
 
 # enforce 64-bit precision
 jax.config.update("jax_enable_x64", True)
@@ -98,7 +99,7 @@ class GKParams:
     dgrid: float = 1.0
     tgrid: float = 1.0
 
-    # Fields that are not JAX-traceable (strings, booleans used for control flow)
+    # fields that are not JAX-traceable (strings, booleans used for control flow)
     # and must be stored as pytree auxiliary data rather than leaves.
     _STATIC_FIELDS = (
         "finit",
@@ -284,7 +285,6 @@ def gkparams_from_config(config: Any, **overrides) -> GKParams:
         if hasattr(physics_cfg, k):
             v = getattr(physics_cfg, k)
             if k in _SPECIES_PARAMS and hasattr(v, "__iter__") and not isinstance(v, str):
-
                 params_dict[k] = jnp.array([float(x) for x in v])
             else:
                 params_dict[k] = float(v)

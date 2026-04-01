@@ -10,6 +10,7 @@ from gyaradax.params import GKParams, gkparams_from_input_dat
 from gyaradax.utils import load_gkw_k_dump
 from gyaradax.integrals import calculate_phi_kinetic, calculate_fluxes_kinetic
 from gyaradax.backends import create_ops
+
 try:
     from gyaradax.backends._cuda import is_available as cuda_available
 except ImportError:
@@ -26,13 +27,16 @@ def _make_pre_bessel(bessel, nkx=4, nky=3, ns=4):
     kx = jnp.linspace(0.0, 1.0, nkx, dtype=jnp.float64)
     ky = jnp.linspace(0.0, 1.0, nky, dtype=jnp.float64)
     items = {
-        "nl_mrad": mrad, "nl_mphi": mphi, "nl_mphiw3": mphi // 2 + 1,
+        "nl_mrad": mrad,
+        "nl_mphi": mphi,
+        "nl_mphiw3": mphi // 2 + 1,
         "nl_fft_scale": jnp.asarray(float(mrad * mphi), dtype=jnp.float64),
         "nl_jind": build_jind(nkx, mrad, ixzero),
         "nl_kx2d": jnp.broadcast_to(kx[:, None], (nkx, nky)),
         "nl_ky2d": jnp.broadcast_to(ky[None, :], (nkx, nky)),
         "nl_dum_s": jnp.ones(ns, dtype=jnp.float64),
-        "ixzero": ixzero, "iyzero": iyzero,
+        "ixzero": ixzero,
+        "iyzero": iyzero,
         "bessel": bessel,
         "signz0": 1.0,
         "tmp0": 1.0,
@@ -50,10 +54,13 @@ def test_kinetic_nl_bessel_correct_per_species(backend):
     nkx, nky, ns, nvpar, nmu = 4, 3, 4, 4, 3
 
     key = jax.random.PRNGKey(7)
-    df = (jax.random.normal(key, (nvpar, nmu, ns, nkx, nky))
-          + 1j * jax.random.normal(key, (nvpar, nmu, ns, nkx, nky))).astype(jnp.complex128)
-    phi = (jax.random.normal(key, (ns, nkx, nky))
-           + 1j * jax.random.normal(key, (ns, nkx, nky))).astype(jnp.complex128)
+    df = (
+        jax.random.normal(key, (nvpar, nmu, ns, nkx, nky))
+        + 1j * jax.random.normal(key, (nvpar, nmu, ns, nkx, nky))
+    ).astype(jnp.complex128)
+    phi = (
+        jax.random.normal(key, (ns, nkx, nky)) + 1j * jax.random.normal(key, (ns, nkx, nky))
+    ).astype(jnp.complex128)
 
     # Species 0: J0 = 1 everywhere (no gyro-averaging)
     bessel_sp0 = jnp.ones((1, nmu, ns, nkx, nky), dtype=jnp.float64)
@@ -64,12 +71,14 @@ def test_kinetic_nl_bessel_correct_per_species(backend):
     pre1 = _make_pre_bessel(bessel_sp1)
 
     nl_sp0 = create_ops(pre0, df, backend=backend).nonlinear_term_iii(
-        df, phi, {}, mixed_precision=False)
+        df, phi, {}, mixed_precision=False
+    )
     nl_sp1 = create_ops(pre1, df, backend=backend).nonlinear_term_iii(
-        df, phi, {}, mixed_precision=False)
+        df, phi, {}, mixed_precision=False
+    )
 
     assert not jnp.allclose(nl_sp0, 0.0, atol=1e-12), "sp0 NL should be non-zero (J0=1)"
-    assert jnp.allclose(nl_sp1, 0.0, atol=1e-12),     "sp1 NL should be zero (J0=0)"
+    assert jnp.allclose(nl_sp1, 0.0, atol=1e-12), "sp1 NL should be zero (J0=0)"
     assert not jnp.allclose(nl_sp0, nl_sp1, atol=1e-12), "species should differ"
 
 
@@ -84,10 +93,13 @@ def test_kinetic_nl_bessel_full_species_bessel_support(backend):
     nkx, nky, ns, nvpar, nmu, nsp = 4, 3, 4, 4, 3, 2
 
     key = jax.random.PRNGKey(7)
-    df_sp = (jax.random.normal(key, (nvpar, nmu, ns, nkx, nky))
-             + 1j * jax.random.normal(key, (nvpar, nmu, ns, nkx, nky))).astype(jnp.complex128)
-    phi = (jax.random.normal(key, (ns, nkx, nky))
-           + 1j * jax.random.normal(key, (ns, nkx, nky))).astype(jnp.complex128)
+    df_sp = (
+        jax.random.normal(key, (nvpar, nmu, ns, nkx, nky))
+        + 1j * jax.random.normal(key, (nvpar, nmu, ns, nkx, nky))
+    ).astype(jnp.complex128)
+    phi = (
+        jax.random.normal(key, (ns, nkx, nky)) + 1j * jax.random.normal(key, (ns, nkx, nky))
+    ).astype(jnp.complex128)
 
     # Full multi-species bessel still has species axis: (nsp, 1, nmu, ns, nkx, nky)
     bessel_full = jnp.ones((nsp, 1, nmu, ns, nkx, nky), dtype=jnp.float64)
