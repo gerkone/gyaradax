@@ -1,0 +1,45 @@
+run:
+  name: iteration_164
+  data_dir: /restricteddata/ukaea/gyrokinetics/raw/iteration_164
+solver:
+  dt: 0.01
+  naverage: 40
+  n_steps: 400
+  dump_interval: 3
+  disp_par: 1.0
+  disp_vp: 0.2
+  disp_x: 0.1
+  disp_y: 0.1
+  idisp: 2
+  non_linear: true
+  adaptive_dt: false
+  finit: sine
+physics:
+  rlt: 9.076027863957766
+  rln: 0.004136662803100322
+  mas: 1.0
+  tmp: 1.0
+  de: 1.0
+  signz: 1.0
+  vthrat: 1.0
+  dgrid: 1.0
+  tgrid: 1.0
+geometry:
+  shat: 1.7796
+  q: 8.73764
+  eps: 0.19
+  kthnorm: 6.03999
+  Rref: 100.0
+  d2X: 1.0
+  signB: 1.0
+  dvp: 0.1875
+  sgr_dist: 0.0625
+  kxmax: 5.14012
+  kymax: 0.23178846322593247
+grid:
+  nvpar: 32
+  nmu: 8
+  ns: 16
+  nkx: 85
+  nky: 32
+  adiabatic_electrons: true

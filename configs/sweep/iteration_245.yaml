@@ -1,0 +1,45 @@
+run:
+  name: iteration_245
+  data_dir: /restricteddata/ukaea/gyrokinetics/raw/iteration_245
+solver:
+  dt: 0.01
+  naverage: 40
+  n_steps: 400
+  dump_interval: 3
+  disp_par: 1.0
+  disp_vp: 0.2
+  disp_x: 0.1
+  disp_y: 0.1
+  idisp: 2
+  non_linear: true
+  adaptive_dt: false
+  finit: sine
+physics:
+  rlt: 8.466301813824789
+  rln: 0.9253436500414456
+  mas: 1.0
+  tmp: 1.0
+  de: 1.0
+  signz: 1.0
+  vthrat: 1.0
+  dgrid: 1.0
+  tgrid: 1.0
+geometry:
+  shat: 0.587351
+  q: 6.95038
+  eps: 0.19
+  kthnorm: 4.80521
+  Rref: 100.0
+  d2X: 1.0
+  signB: 1.0
+  dvp: 0.1875
+  sgr_dist: 0.0625
+  kxmax: 1.69623
+  kymax: 0.2913504300540455
+grid:
+  nvpar: 32
+  nmu: 8
+  ns: 16
+  nkx: 85
+  nky: 32
+  adiabatic_electrons: true

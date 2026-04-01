@@ -1,0 +1,45 @@
+run:
+  name: iteration_126
+  data_dir: /restricteddata/ukaea/gyrokinetics/raw/iteration_126
+solver:
+  dt: 0.01
+  naverage: 40
+  n_steps: 400
+  dump_interval: 3
+  disp_par: 1.0
+  disp_vp: 0.2
+  disp_x: 0.1
+  disp_y: 0.1
+  idisp: 2
+  non_linear: true
+  adaptive_dt: false
+  finit: noise
+physics:
+  rlt: 6.710623933675417
+  rln: 1.0659903264233208
+  mas: 1.0
+  tmp: 1.0
+  de: 1.0
+  signz: 1.0
+  vthrat: 1.0
+  dgrid: 1.0
+  tgrid: 1.0
+geometry:
+  shat: 0.833195
+  q: 5.2129
+  eps: 0.19
+  kthnorm: 3.60507
+  Rref: 100.0
+  d2X: 1.0
+  signB: 1.0
+  dvp: 0.1875
+  sgr_dist: 0.0625
+  kxmax: 2.40549
+  kymax: 0.3883419739422535
+grid:
+  nvpar: 32
+  nmu: 8
+  ns: 16
+  nkx: 85
+  nky: 32
+  adiabatic_electrons: true
