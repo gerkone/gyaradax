@@ -5,15 +5,21 @@ the need for precomputed GKW geometry files. Formulas are translated directly
 from ``gkw_ref/src/geom.f90`` (``geom_circ`` lines 1444-1616 and
 ``calc_geom_tensors`` lines 3487-3634).
 
+The continuous geometry functions use JAX and are differentiable with respect
+to equilibrium parameters (q, shat, eps). The discrete topology functions
+(mode labels, connectivity maps) use numpy since they depend only on integer
+grid parameters.
+
 The public entry points are :func:`compute_geometry` (from scalar parameters)
 and :func:`compute_geometry_from_input` (from a GKW ``input.dat`` file).
 Both return a dict identical to the one produced by
-:func:`gyaradax.geometry.load_geometry`.
+:func:`gyaradax.utils.load_geometry`.
 """
 
 import os
 
 import numpy as np
+import jax
 import jax.numpy as jnp
 from typing import Dict, Any
 
@@ -34,6 +40,11 @@ def _load_1d_array(path):
     return data
 
 
+# ---------------------------------------------------------------------------
+# Continuous geometry functions (JAX-differentiable)
+# ---------------------------------------------------------------------------
+
+
 def _poloidal_angle(sgrid, eps, geom_type="circ", n_iter=10):
     """Map field-line coordinate s to poloidal angle theta.
 
@@ -41,24 +52,24 @@ def _poloidal_angle(sgrid, eps, geom_type="circ", n_iter=10):
     For s-alpha: simple linear mapping theta = 2*pi*s.
     """
     if geom_type == "s-alpha":
-        return 2 * np.pi * sgrid.copy()
-    theta = 2 * np.pi * sgrid.copy()
+        return 2 * jnp.pi * sgrid
+    theta = 2 * jnp.pi * sgrid
     for _ in range(n_iter):
-        theta = 2 * np.pi * sgrid - eps * np.sin(theta)
+        theta = 2 * jnp.pi * sgrid - eps * jnp.sin(theta)
     return theta
 
 
 def _parallel_grid(ns, nperiod):
     """Cell-centered uniform parallel grid on [-sgrmax, sgrmax]."""
     sgrmax = nperiod - 0.5
-    return np.array([-sgrmax + 2 * sgrmax * (i + 0.5) / ns for i in range(ns)])
+    return jnp.array([-sgrmax + 2 * sgrmax * (i + 0.5) / ns for i in range(ns)])
 
 
 def _parallel_weights(sgrid):
     """Uniform integration weights (cell width)."""
     if len(sgrid) < 2:
-        return np.ones(1)
-    return np.full(len(sgrid), sgrid[1] - sgrid[0])
+        return jnp.ones(1)
+    return jnp.full(len(sgrid), sgrid[1] - sgrid[0])
 
 
 def _dzetadeps(theta, q, shat, eps, signB, signJ):
@@ -73,19 +84,25 @@ def _dzetadeps(theta, q, shat, eps, signB, signJ):
     I_zeta). The radial (eps) components are unaffected.
     """
     ns = len(theta)
-    dum2 = np.sqrt((1 - eps) / (1 + eps))
+    dum2 = jnp.sqrt((1 - eps) / (1 + eps))
 
-    dzde = np.zeros(ns)
-    dzde[0] = np.arctan(dum2 * np.tan(theta[0] / 2))
-    for i in range(1, ns):
-        dzde[i] = np.arctan(dum2 * np.tan(theta[i] / 2))
-        while dzde[i] < dzde[i - 1]:
-            dzde[i] += np.pi
-    dzde -= np.pi * np.floor((dzde[0] - theta[0] / 2) / np.pi)
+    # Vectorized atan + cumulative branch correction.
+    # GKW uses a sequential while loop; we replicate the monotonicity
+    # via a cumulative sum of pi jumps detected by sign changes.
+    raw = jnp.arctan(dum2 * jnp.tan(theta / 2))
 
-    t2 = np.tan(theta / 2)
-    corr = eps / np.sqrt(1 - eps**2) * t2 / (1 + t2**2 + eps * (1 - t2**2))
-    return signB * signJ / np.pi * q / eps * (shat * dzde - corr)
+    # Detect where raw decreases (branch cut) and accumulate pi corrections.
+    diffs = raw[1:] - raw[:-1]
+    jumps = jnp.where(diffs < 0, jnp.pi, 0.0)
+    corrections = jnp.concatenate([jnp.zeros(1), jnp.cumsum(jumps)])
+    dzde = raw + corrections
+
+    # Align the branch: subtract the offset at s=0
+    dzde = dzde - jnp.pi * jnp.floor((dzde[0] - theta[0] / 2) / jnp.pi)
+
+    t2 = jnp.tan(theta / 2)
+    corr = eps / jnp.sqrt(1 - eps**2) * t2 / (1 + t2**2 + eps * (1 - t2**2))
+    return signB * signJ / jnp.pi * q / eps * (shat * dzde - corr)
 
 
 def _psi_theta_to_psi_s(f_psi, f_theta, theta, eps):
@@ -96,90 +113,100 @@ def _psi_theta_to_psi_s(f_psi, f_theta, theta, eps):
         f_s     = 2*pi/R * f_theta
     with R = 1 + eps*cos(theta).
     """
-    R = 1 + eps * np.cos(theta)
-    return f_psi - np.sin(theta) / R * f_theta, 2 * np.pi * f_theta / R
+    R = 1 + eps * jnp.cos(theta)
+    return f_psi - jnp.sin(theta) / R * f_theta, 2 * jnp.pi * f_theta / R
 
 
 def _circular_geometry(theta, q, shat, eps, signB=1.0, signJ=1.0, geom_type="circ"):
     """Compute all geometry quantities for circular/s-alpha models.
 
     For circ: full Lapillonne model with delta correction and nonlinear theta.
-        finite_epsilon = True (geom.f90:1608 → calc_geom_tensors(.true., .true.))
+        finite_epsilon = True (geom.f90:1608 -> calc_geom_tensors(.true., .true.))
     For s-alpha: simplified B = 1/(1+eps*cos(theta)), delta=1.
-        finite_epsilon = False (geom.f90:1143 → calc_geom_tensors(.false., .true.))
+        finite_epsilon = False (geom.f90:1143 -> calc_geom_tensors(.false., .true.))
 
     Translated from geom_circ / geom_s_alpha in geom.f90.
     """
     ns = len(theta)
     finite_epsilon = geom_type != "s-alpha"
-    R = 1 + eps * np.cos(theta)
+    R = 1 + eps * jnp.cos(theta)
 
     if geom_type == "s-alpha":
         dum = 1.0
-        bups = signJ / (2 * np.pi * q)
+        bups = signJ / (2 * jnp.pi * q)
         dpfdpsi = eps / q
     else:
-        dum = np.sqrt(1 + eps**2 / q**2 / (1 - eps**2))
-        bups = 1.0 / (2 * np.pi * q * np.sqrt(1 - eps**2))
-        dpfdpsi = eps / (q * np.sqrt(1 - eps**2))
+        dum = jnp.sqrt(1 + eps**2 / q**2 / (1 - eps**2))
+        bups = 1.0 / (2 * jnp.pi * q * jnp.sqrt(1 - eps**2))
+        dpfdpsi = eps / (q * jnp.sqrt(1 - eps**2))
     bn = dum / R
 
     # ffun: F tensor = bups, or bups/bn when finite_epsilon (geom.f90:3507-3508)
-    ffun = bups / bn if finite_epsilon else np.full(ns, bups)
+    ffun = bups / bn if finite_epsilon else jnp.full(ns, bups)
     # gfun: G tensor = ffun * dBds / bn (geom.f90:3510-3511)
-    # Note: for both models, gfun uses the actual ffun value
 
     if geom_type == "s-alpha":
         # s-alpha metric (geom.f90:1375-1392)
-        sgrid = theta / (2 * np.pi)
+        sgrid = theta / (2 * jnp.pi)
         dzde = _dzetadeps(theta, q, shat, eps, signB, signJ)
-        metric = np.zeros((ns, 3, 3))
-        metric[:, 0, 0] = 1.0
-        metric[:, 0, 1] = metric[:, 1, 0] = q * shat * sgrid / eps * signB * signJ
-        metric[:, 0, 2] = metric[:, 2, 0] = 0.0
-        metric[:, 1, 1] = (q / (2 * np.pi * eps)) ** 2 * (1 + (2 * np.pi * shat * sgrid) ** 2)
-        metric[:, 1, 2] = metric[:, 2, 1] = q / (2 * np.pi * eps) ** 2 * signB * signJ
-        metric[:, 2, 2] = 1.0 / (2 * np.pi * eps) ** 2
+        metric = jnp.zeros((ns, 3, 3))
+        metric = metric.at[:, 0, 0].set(1.0)
+        cross_01 = q * shat * sgrid / eps * signB * signJ
+        metric = metric.at[:, 0, 1].set(cross_01)
+        metric = metric.at[:, 1, 0].set(cross_01)
+        metric = metric.at[:, 1, 1].set(
+            (q / (2 * jnp.pi * eps)) ** 2 * (1 + (2 * jnp.pi * shat * sgrid) ** 2)
+        )
+        cross_12 = q / (2 * jnp.pi * eps) ** 2 * signB * signJ
+        metric = metric.at[:, 1, 2].set(cross_12)
+        metric = metric.at[:, 2, 1].set(cross_12)
+        metric = metric.at[:, 2, 2].set(1.0 / (2 * jnp.pi * eps) ** 2)
 
-        # s-alpha field derivatives (geom.f90:1361-1370)
-        # GKW convention: these are NOT d(B_N)/d{psi,s} but rather derivatives
-        # of the denominator (1+eps*cos(theta)), matching what calc_geom_tensors
-        # expects for computing gfun, dfun, etc.
-        dBdpsi = -np.cos(theta)
-        dBds = 2 * np.pi * eps * np.sin(theta)
-        # R = 1 + eps*cos(theta)
-        dRdpsi = np.cos(theta)
-        dRds = -2 * np.pi * eps * np.sin(theta)
-        dZdpsi = np.sin(theta)
-        dZds = 2 * np.pi * eps * np.cos(theta)
+        dBdpsi = -jnp.cos(theta)
+        dBds = 2 * jnp.pi * eps * jnp.sin(theta)
+        dRdpsi = jnp.cos(theta)
+        dRds = -2 * jnp.pi * eps * jnp.sin(theta)
+        dZdpsi = jnp.sin(theta)
+        dZds = 2 * jnp.pi * eps * jnp.cos(theta)
     else:
         # circular metric (geom.f90:1543-1579)
         dzde = _dzetadeps(theta, q, shat, eps, signB, signJ)
-        metric = np.zeros((ns, 3, 3))
-        metric[:, 0, 0] = 1.0
-        metric[:, 0, 1] = metric[:, 1, 0] = dzde
-        metric[:, 0, 2] = metric[:, 2, 0] = np.sin(theta) / (2 * np.pi)
-        metric[:, 1, 1] = (1 / (2 * np.pi * R)) ** 2 * (1 + (1 - eps**2) * (q / eps) ** 2) + dzde**2
-        metric[:, 1, 2] = metric[:, 2, 1] = q * np.sqrt(1 - eps**2) / (
-            2 * np.pi * eps
-        ) ** 2 * signB * signJ + dzde * np.sin(theta) / (2 * np.pi)
-        metric[:, 2, 2] = (1 / (2 * np.pi)) ** 2 * (
-            (1 / eps + np.cos(theta)) ** 2 + np.sin(theta) ** 2
+        metric = jnp.zeros((ns, 3, 3))
+        metric = metric.at[:, 0, 0].set(1.0)
+        metric = metric.at[:, 0, 1].set(dzde)
+        metric = metric.at[:, 1, 0].set(dzde)
+        sin_2pi = jnp.sin(theta) / (2 * jnp.pi)
+        metric = metric.at[:, 0, 2].set(sin_2pi)
+        metric = metric.at[:, 2, 0].set(sin_2pi)
+        metric = metric.at[:, 1, 1].set(
+            (1 / (2 * jnp.pi * R)) ** 2 * (1 + (1 - eps**2) * (q / eps) ** 2)
+            + dzde**2
+        )
+        cross_12 = (
+            q * jnp.sqrt(1 - eps**2) / (2 * jnp.pi * eps) ** 2 * signB * signJ
+            + dzde * sin_2pi
+        )
+        metric = metric.at[:, 1, 2].set(cross_12)
+        metric = metric.at[:, 2, 1].set(cross_12)
+        metric = metric.at[:, 2, 2].set(
+            (1 / (2 * jnp.pi)) ** 2
+            * ((1 / eps + jnp.cos(theta)) ** 2 + jnp.sin(theta) ** 2)
         )
 
         # circular field derivatives (geom.f90:1525-1541)
         dBdpsi_pt = bn * (
-            -np.cos(theta) / R
+            -jnp.cos(theta) / R
             + eps * (1 - shat + eps**2 / (1 - eps**2)) / (eps**2 + q**2 * (1 - eps**2))
         )
-        dBds_pt = bn * eps * np.sin(theta) / R
+        dBds_pt = bn * eps * jnp.sin(theta) / R
         dBdpsi, dBds = _psi_theta_to_psi_s(dBdpsi_pt, dBds_pt, theta, eps)
-        dRdpsi, dRds = _psi_theta_to_psi_s(np.cos(theta), -eps * np.sin(theta), theta, eps)
-        dZdpsi, dZds = _psi_theta_to_psi_s(np.sin(theta), eps * np.cos(theta), theta, eps)
+        dRdpsi, dRds = _psi_theta_to_psi_s(
+            jnp.cos(theta), -eps * jnp.sin(theta), theta, eps
+        )
+        dZdpsi, dZds = _psi_theta_to_psi_s(
+            jnp.sin(theta), eps * jnp.cos(theta), theta, eps
+        )
 
-    # gfun = ffun * (1/B)(dB/ds). For s-alpha, GKW uses numerical d(ln B)/ds
-    # (gfun_num=true). The raw dBds is d(1+eps*cos)/ds, so
-    # d(B_N)/ds = B_N^2 * dBds_raw and (1/B)(dB/ds) = B_N * dBds_raw.
     if finite_epsilon:
         gfun = ffun * dBds / bn
     else:
@@ -191,7 +218,7 @@ def _circular_geometry(theta, q, shat, eps, signB=1.0, signJ=1.0, geom_type="cir
         "R": R,
         "ffun": ffun,
         "gfun": gfun,
-        "bt_frac": np.full(ns, 1 / dum),
+        "bt_frac": jnp.full(ns, 1 / dum),
         "bups": bups,
         "dpfdpsi": dpfdpsi,
         "metric": metric,
@@ -232,22 +259,22 @@ def _calc_geom_tensors(cg, signJ=1.0, signB=1.0):
     m0 = metric[:, 0, :]
     m1 = metric[:, 1, :]
     efun = m0[:, :, None] * m1[:, None, :] - m1[:, :, None] * m0[:, None, :]
-    efun *= signJ * np.pi * cg["dpfdpsi"]
+    efun = efun * (signJ * jnp.pi * cg["dpfdpsi"])
     if finite_epsilon:
-        efun /= bn[:, None, None] ** 2
+        efun = efun / bn[:, None, None] ** 2
 
     e0, e2 = efun[:, :, 0], efun[:, :, 2]
 
-    # D-tensor: dfun = -2*(E_{j,psi}*dBdpsi + E_{j,s}*dBds)
-    # for finite_epsilon (circ): additionally divide by bn (geom.f90:3572-3575)
     dfun = -2 * e0 * dBdpsi[:, None] - 2 * e2 * dBds[:, None]
     if finite_epsilon:
-        dfun /= bn[:, None]
+        dfun = dfun / bn[:, None]
 
-    hfun = -signB * (metric[:, :, 0] * dZdpsi[:, None] + metric[:, :, 2] * dZds[:, None])
+    hfun = -signB * (
+        metric[:, :, 0] * dZdpsi[:, None] + metric[:, :, 2] * dZds[:, None]
+    )
     if finite_epsilon:
-        hfun[:, 2] += signB * bups**2 * dZds / bn**2
-    hfun /= bn[:, None]
+        hfun = hfun.at[:, 2].add(signB * bups**2 * dZds / bn**2)
+    hfun = hfun / bn[:, None]
 
     ifun = 2 * R[:, None] * (e0 * dRdpsi[:, None] + e2 * dRds[:, None])
 
@@ -257,10 +284,10 @@ def _calc_geom_tensors(cg, signJ=1.0, signB=1.0):
 def _build_velocity_grids(nvpar, nmu, vpar_max):
     """Uniform v_par grid and uniform-in-v_perp mu grid (GKW convention)."""
     dvp = 2 * vpar_max / nvpar
-    vpgr = np.linspace(-vpar_max + dvp / 2, vpar_max - dvp / 2, nvpar)
+    vpgr = jnp.linspace(-vpar_max + dvp / 2, vpar_max - dvp / 2, nvpar)
     dvperp = vpar_max / nmu
-    vperp = np.linspace(dvperp / 2, vpar_max - dvperp / 2, nmu)
-    return vpgr, vperp**2 / 2, np.full(nvpar, dvp), 2 * np.pi * vperp * dvperp
+    vperp = jnp.linspace(dvperp / 2, vpar_max - dvperp / 2, nmu)
+    return vpgr, vperp**2 / 2, jnp.full(nvpar, dvp), 2 * jnp.pi * vperp * dvperp
 
 
 def _build_wavevector_grids(
@@ -279,24 +306,26 @@ def _build_wavevector_grids(
     if nky == 1:
         half = (nkx - 1) // 2
         dkx = kxmax / half if half > 0 else 0.0
-        return np.arange(-half, half + 1) * dkx, np.array([krhomax])
+        return jnp.arange(-half, half + 1) * dkx, jnp.array([krhomax])
 
     dky = krhomax / (nky - 1)
-    # krho normalized by kthnorm (same as GKW's krho array)
-    krho_norm = np.arange(nky) * dky / kthnorm
+    krho_norm = jnp.arange(nky) * dky / kthnorm
 
     half = (nkx - 1) // 2
     if half > 0 and nky > 1 and abs(shat) > 1e-10 and eps > 1e-10:
-        # mode-box kx spacing from magnetic shear connectivity (mode.f90:698)
         kxspace = abs(q * shat * krho_norm[1] / (eps * ikxspace))
     elif half > 0:
         kxspace = kxmax / half
     else:
         kxspace = 0.0
 
-    kxrh = np.arange(-half, half + 1) * kxspace
-    # return RAW (unnormalized) ky grid — caller divides by kthnorm
-    return kxrh, np.arange(nky) * dky
+    kxrh = jnp.arange(-half, half + 1) * kxspace
+    return kxrh, jnp.arange(nky) * dky
+
+
+# ---------------------------------------------------------------------------
+# Discrete topology functions (numpy, not differentiable)
+# ---------------------------------------------------------------------------
 
 
 def _build_mode_label(nkx, nky, ikxspace):
@@ -331,8 +360,10 @@ def _build_mode_connectivity(mode_label, kxrh, krho):
       iyzero: int32 scalar, index of ky=0 mode
     """
     mode_label = np.asarray(mode_label, dtype=np.int32)
-    nkx = int(kxrh.shape[0])
-    nky = int(krho.shape[0])
+    kxrh_np = np.asarray(kxrh)
+    krho_np = np.asarray(krho)
+    nkx = int(kxrh_np.shape[0])
+    nky = int(krho_np.shape[0])
 
     if mode_label.shape == (nkx, nky):
         mode_label_kxky = mode_label
@@ -343,14 +374,13 @@ def _build_mode_connectivity(mode_label, kxrh, krho):
             f"mode_label shape {mode_label.shape} incompatible with nkx/nky=({nkx},{nky})"
         )
 
-    ixzero = int(np.argmin(np.abs(kxrh)))
-    iyzero = int(np.argmin(np.abs(krho)))
+    ixzero = int(np.argmin(np.abs(kxrh_np)))
+    iyzero = int(np.argmin(np.abs(krho_np)))
 
     ixplus = -np.ones((nkx, nky), dtype=np.int32)
     ixminus = -np.ones((nkx, nky), dtype=np.int32)
 
     for iy in range(nky):
-        # ky=0 mode is always periodic in spectral mode_box runs.
         if iy == iyzero:
             ix = np.arange(nkx, dtype=np.int32)
             ixplus[:, iy] = ix
@@ -441,6 +471,11 @@ def _build_parallel_shift_maps(ixplus, ixminus, iyzero, ns, max_shift=4):
     return s_shift, kx_shift, valid
 
 
+# ---------------------------------------------------------------------------
+# Public entry points
+# ---------------------------------------------------------------------------
+
+
 def compute_geometry(
     q: float,
     shat: float,
@@ -461,6 +496,10 @@ def compute_geometry(
 ) -> Dict[str, Any]:
     """Compute geometry dict from equilibrium parameters.
 
+    The continuous geometry quantities (B-field, metric, drifts) are computed
+    with JAX and are differentiable w.r.t. (q, shat, eps). The discrete
+    topology (mode labels, connectivity) uses numpy.
+
     geom_type='circ': full Lapillonne circular model (nonlinear theta, delta).
     geom_type='s-alpha': simplified model (theta=2*pi*s, B=1/(1+eps*cos(theta))).
     """
@@ -470,29 +509,46 @@ def compute_geometry(
     sgrid = _parallel_grid(ns, nperiod)
     theta = _poloidal_angle(sgrid, eps, geom_type=geom_type)
 
-    cg = _circular_geometry(theta, q, shat, eps, signB=signB, signJ=signJ, geom_type=geom_type)
+    cg = _circular_geometry(
+        theta, q, shat, eps, signB=signB, signJ=signJ, geom_type=geom_type
+    )
     efun_3x3, dfun, hfun, ifun = _calc_geom_tensors(cg, signJ=signJ, signB=signB)
 
     bn, R = cg["bn"], cg["R"]
-    little_g = np.stack([cg["metric"][:, 1, 1], cg["dzetadeps"], np.ones(ns)], axis=-1)
+    little_g = jnp.stack(
+        [cg["metric"][:, 1, 1], cg["dzetadeps"], jnp.ones(ns)], axis=-1
+    )
 
     if geom_type == "s-alpha":
-        # g^{ζζ}(s=0) = (q/(2πε))^2 for s-alpha (no shear term at midplane)
-        g_zz_mid = (q / (2 * np.pi * eps)) ** 2
+        g_zz_mid = (q / (2 * jnp.pi * eps)) ** 2
     else:
-        g_zz_mid = (1 / (2 * np.pi * (1 + eps))) ** 2 * (1 + (1 - eps**2) * (q / eps) ** 2)
-    kthnorm = np.sqrt(g_zz_mid)
+        g_zz_mid = (1 / (2 * jnp.pi * (1 + eps))) ** 2 * (
+            1 + (1 - eps**2) * (q / eps) ** 2
+        )
+    kthnorm = jnp.sqrt(g_zz_mid)
 
     vpgr, mugr, intvp, intmu = _build_velocity_grids(nvpar, nmu, vpar_max)
     kxrh, krho_raw = _build_wavevector_grids(
-        nkx, nky, kxmax, krhomax, q=q, shat=shat, eps=eps, ikxspace=ikxspace, kthnorm=kthnorm
+        nkx,
+        nky,
+        kxmax,
+        krhomax,
+        q=q,
+        shat=shat,
+        eps=eps,
+        ikxspace=ikxspace,
+        kthnorm=kthnorm,
     )
     krho = krho_raw / kthnorm
 
-    # use actual grid length (may differ from input nkx for even nx)
-    nkx_actual = len(kxrh)
+    # Discrete topology (numpy) — stop gradient and convert to concrete arrays.
+    # Mode labels and connectivity depend only on grid shape and ikxspace,
+    # not on the continuous values of (q, shat, eps).
+    kxrh_np = np.asarray(jax.lax.stop_gradient(kxrh))
+    krho_np = np.asarray(jax.lax.stop_gradient(krho))
+    nkx_actual = len(kxrh_np)
     ml = _build_mode_label(nkx_actual, nky, ikxspace)
-    ml_kxky, ixp, ixm, ixz, iyz = _build_mode_connectivity(ml, kxrh, krho)
+    ml_kxky, ixp, ixm, ixz, iyz = _build_mode_connectivity(ml, kxrh_np, krho_np)
     pos = _build_pos_par_grid_classes(ixp, ixm, ns)
     ss, ks, vs = _build_parallel_shift_maps(ixp, ixm, iyz, ns, max_shift=4)
 
@@ -506,14 +562,14 @@ def compute_geometry(
         "parseval": _f64([1.0] + [2.0] * (nky - 1)),
         "intvp": _f64(intvp),
         "vpgr": _f64(vpgr),
-        "vpgr_rms": _f64(np.sqrt(np.mean(vpgr**2))),
-        "dvp": _f64(float(np.mean(np.diff(vpgr))) if len(vpgr) > 1 else 1.0),
+        "vpgr_rms": _f64(jnp.sqrt(jnp.mean(vpgr**2))),
+        "dvp": _f64(jnp.mean(jnp.diff(vpgr)) if len(vpgr) > 1 else 1.0),
         "intmu": _f64(intmu),
         "mugr": _f64(mugr),
-        "mugr_rms": _f64(np.sqrt(np.mean(mugr**2))),
+        "mugr_rms": _f64(jnp.sqrt(jnp.mean(mugr**2))),
         "ints": _f64(_parallel_weights(sgrid)),
         "sgrid": _f64(sgrid),
-        "sgr_dist": _f64(float(np.abs(sgrid[1] - sgrid[0])) if ns > 1 else 1.0),
+        "sgr_dist": _f64(jnp.abs(sgrid[1] - sgrid[0]) if ns > 1 else 1.0),
         "bn": _f64(bn),
         "ffun": _f64(cg["ffun"]),
         "gfun": _f64(cg["gfun"]),
@@ -543,8 +599,8 @@ def compute_geometry(
         "s_shift": _i32(ss),
         "kx_shift": _i32(ks),
         "valid_shift": jnp.array(vs, dtype=jnp.bool_),
-        "kxmax": _f64(float(np.max(np.abs(kxrh)))),
-        "kymax": _f64(float(np.max(np.abs(krho)))),
+        "kxmax": _f64(jnp.max(jnp.abs(kxrh))),
+        "kymax": _f64(jnp.max(jnp.abs(krho))),
     }
 
 
@@ -569,7 +625,6 @@ def compute_geometry_from_input(input_dat_path: str) -> Dict[str, Any]:
     ikxspace = int(mode_sec.get("ikxspace", 5))
     geom_type = str(geom_sec.get("geom_type", "s-alpha")).strip("'\"").lower()
 
-    # for single-mode (non-mode_box) cases, use kthrho as the wavenumber
     mode_box = mode_sec.get("mode_box", False)
     if not mode_box and "kthrho" in mode_sec and nky == 1:
         krhomax = float(mode_sec["kthrho"])
@@ -644,7 +699,6 @@ def geometry_from_geom_dat_and_input(input_dat_path: str) -> Dict[str, Any]:
     signB = 1.0
     Rref = 100.0
 
-    # grids from input.dat params
     kxrh_path = os.path.join(data_dir, "kxrh")
     if os.path.exists(kxrh_path):
         kxmax = float(_load_1d_array(kxrh_path)[-1])
@@ -680,12 +734,10 @@ def geometry_from_geom_dat_and_input(input_dat_path: str) -> Dict[str, Any]:
     rfun = np.asarray(gd.get("R", np.ones(ns)))
     efun = np.asarray(gd.get("E_eps_zeta", np.zeros(ns)))
 
-    # metric components
     g_zz = np.asarray(gd.get("g_zeta_zeta", np.ones(ns)))
     g_ez = np.asarray(gd.get("g_eps_zeta", np.zeros(ns)))
     little_g = np.stack([g_zz, g_ez, np.ones(ns)], axis=-1)
 
-    # drift tensors
     d_eps = np.asarray(gd.get("D_eps", np.zeros(ns)))
     d_zeta = np.asarray(gd.get("D_zeta", np.zeros(ns)))
     d_s = np.asarray(gd.get("D_s", np.zeros(ns)))
@@ -713,14 +765,14 @@ def geometry_from_geom_dat_and_input(input_dat_path: str) -> Dict[str, Any]:
         "parseval": _f64([1.0] + [2.0] * (nky - 1)),
         "intvp": _f64(intvp),
         "vpgr": _f64(vpgr),
-        "vpgr_rms": _f64(np.sqrt(np.mean(vpgr**2))),
-        "dvp": _f64(float(np.mean(np.diff(vpgr))) if len(vpgr) > 1 else 1.0),
+        "vpgr_rms": _f64(jnp.sqrt(jnp.mean(vpgr**2))),
+        "dvp": _f64(jnp.mean(jnp.diff(vpgr)) if len(vpgr) > 1 else 1.0),
         "intmu": _f64(intmu),
         "mugr": _f64(mugr),
-        "mugr_rms": _f64(np.sqrt(np.mean(mugr**2))),
+        "mugr_rms": _f64(jnp.sqrt(jnp.mean(mugr**2))),
         "ints": _f64(_parallel_weights(sgrid)),
         "sgrid": _f64(sgrid),
-        "sgr_dist": _f64(float(np.abs(sgrid[1] - sgrid[0])) if ns > 1 else 1.0),
+        "sgr_dist": _f64(jnp.abs(sgrid[1] - sgrid[0]) if ns > 1 else 1.0),
         "bn": _f64(bn),
         "ffun": _f64(ffun),
         "gfun": _f64(gfun),
@@ -750,6 +802,6 @@ def geometry_from_geom_dat_and_input(input_dat_path: str) -> Dict[str, Any]:
         "s_shift": _i32(ss),
         "kx_shift": _i32(ks),
         "valid_shift": jnp.array(vs, dtype=jnp.bool_),
-        "kxmax": _f64(float(np.max(np.abs(kxrh)))),
-        "kymax": _f64(float(np.max(np.abs(krho)))),
+        "kxmax": _f64(jnp.max(jnp.abs(kxrh))),
+        "kymax": _f64(jnp.max(jnp.abs(krho))),
     }

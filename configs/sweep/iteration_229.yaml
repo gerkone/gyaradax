@@ -1,0 +1,45 @@
+run:
+  name: iteration_229
+  data_dir: /restricteddata/ukaea/gyrokinetics/raw/iteration_229
+solver:
+  dt: 0.01
+  naverage: 40
+  n_steps: 400
+  dump_interval: 3
+  disp_par: 1.0
+  disp_vp: 0.2
+  disp_x: 0.1
+  disp_y: 0.1
+  idisp: 2
+  non_linear: true
+  adaptive_dt: false
+  finit: cosine2
+physics:
+  rlt: 11.586424317892273
+  rln: 1.0897720604636993
+  mas: 1.0
+  tmp: 1.0
+  de: 1.0
+  signz: 1.0
+  vthrat: 1.0
+  dgrid: 1.0
+  tgrid: 1.0
+geometry:
+  shat: 1.0022
+  q: 6.49898
+  eps: 0.19
+  kthnorm: 4.49338
+  Rref: 100.0
+  d2X: 1.0
+  signB: 1.0
+  dvp: 0.1875
+  sgr_dist: 0.0625
+  kxmax: 2.89413
+  kymax: 0.31156946441209066
+grid:
+  nvpar: 32
+  nmu: 8
+  ns: 16
+  nkx: 85
+  nky: 32
+  adiabatic_electrons: true

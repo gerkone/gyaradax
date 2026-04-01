@@ -119,6 +119,7 @@ Add `--block-size=300` for faster checkpoint cadence.
 | command | description |
 |---------|-------------|
 | `/run-sim` | Run a simulation from a YAML config |
+| `/run-gkw` | Run the GKW Fortran reference and set up input.dat |
 | `/run-tests` | Run the pytest suite on a free GPU |
 | `/validate` | Compare output dir against GKW reference |
 | `/compare-gkw` | Compare a gyaradax function against its GKW Fortran equivalent |

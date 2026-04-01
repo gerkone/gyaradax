@@ -1,0 +1,45 @@
+run:
+  name: iteration_74
+  data_dir: /restricteddata/ukaea/gyrokinetics/raw/iteration_74
+solver:
+  dt: 0.01
+  naverage: 40
+  n_steps: 400
+  dump_interval: 3
+  disp_par: 1.0
+  disp_vp: 0.2
+  disp_x: 0.1
+  disp_y: 0.1
+  idisp: 2
+  non_linear: true
+  adaptive_dt: false
+  finit: sine
+physics:
+  rlt: 10.031383345250084
+  rln: 6.674671022039884
+  mas: 1.0
+  tmp: 1.0
+  de: 1.0
+  signz: 1.0
+  vthrat: 1.0
+  dgrid: 1.0
+  tgrid: 1.0
+geometry:
+  shat: 3.38679
+  q: 8.45734
+  eps: 0.19
+  kthnorm: 5.84633
+  Rref: 100.0
+  d2X: 1.0
+  signB: 1.0
+  dvp: 0.1875
+  sgr_dist: 0.0625
+  kxmax: 9.78208
+  kymax: 0.23946646870771918
+grid:
+  nvpar: 32
+  nmu: 8
+  ns: 16
+  nkx: 85
+  nky: 32
+  adiabatic_electrons: true

@@ -33,6 +33,8 @@ from typing import Dict, Tuple, Optional, Any
 from dataclasses import dataclass
 
 import jax.random
+
+from gyaradax import _EPS
 from gyaradax.integrals import (
     get_integrals,
     j0,
@@ -341,7 +343,7 @@ def estimate_nl_timestep(
     max_value = jnp.max(max_vals)
 
     dt_est = jnp.where(
-        max_value > 1e-30,
+        max_value > _EPS,
         jnp.asarray(safety_factor, dtype=jnp.float64) * 2.0 / max_value,
         jnp.asarray(dt_input, dtype=jnp.float64),
     )
@@ -368,8 +370,8 @@ def estimate_linear_timestep(
     max_utrap = jnp.max(jnp.abs(pre["utrap"]))
 
     if safety_factor is not None:
-        dt_par = jnp.where(max_upar > 1e-30, safety_factor * sgr_dist / max_upar, 1e10)
-        dt_trap = jnp.where(max_utrap > 1e-30, safety_factor * dvp / max_utrap, 1e10)
+        dt_par = jnp.where(max_upar > _EPS, safety_factor * sgr_dist / max_upar, 1e10)
+        dt_trap = jnp.where(max_utrap > _EPS, safety_factor * dvp / max_utrap, 1e10)
         return jnp.minimum(dt_par, dt_trap)
 
     # max stencil coefficients: boundary D1/D4 = 24/12 = 2.0,
@@ -381,8 +383,8 @@ def estimate_linear_timestep(
 
     # ideriv=1: streaming + trapping
     tmax1 = jnp.maximum(
-        jnp.where(max_upar > 1e-30, max_upar * _D1S / sgr_dist, 0.0),
-        jnp.where(max_utrap > 1e-30, max_utrap * _D1V / dvp, 0.0),
+        jnp.where(max_upar > _EPS, max_upar * _D1S / sgr_dist, 0.0),
+        jnp.where(max_utrap > _EPS, max_utrap * _D1V / dvp, 0.0),
     )
 
     # ideriv=4: parallel and velocity dissipation
@@ -395,8 +397,8 @@ def estimate_linear_timestep(
     max_abs_par = jnp.max(jnp.abs(pre["abs_dum2_par"]))
     max_abs_vp = jnp.max(jnp.abs(pre["abs_dum2_vp"]))
     tmax4 = jnp.maximum(
-        disp_par_val * jnp.where(max_abs_par > 1e-30, max_abs_par * _D4S / sgr_dist, 0.0),
-        disp_vp_val * jnp.where(max_abs_vp > 1e-30, max_abs_vp * _D4V / dvp, 0.0),
+        disp_par_val * jnp.where(max_abs_par > _EPS, max_abs_par * _D4S / sgr_dist, 0.0),
+        disp_vp_val * jnp.where(max_abs_vp > _EPS, max_abs_vp * _D4V / dvp, 0.0),
     )
 
     # field CFL: ES mode frequency (time_est_field), kinetic only
@@ -407,7 +409,7 @@ def estimate_linear_timestep(
     tmax = jnp.maximum(jnp.maximum(tmax1 / rk4, tmax4 / rk4), jnp.asarray(40.0, dtype=jnp.float64))
 
     fac = jnp.asarray(fac_dtim_est, dtype=jnp.float64)
-    return jnp.where(tmax > 1e-30, fac / tmax, jnp.asarray(1e10, dtype=jnp.float64))
+    return jnp.where(tmax > _EPS, fac / tmax, jnp.asarray(1e10, dtype=jnp.float64))
 
 
 def estimate_timestep(
@@ -446,9 +448,9 @@ def _precompute_shared(
 
     hyper = -(
         jnp.abs(params.disp_y)
-        * (ky_b / jnp.maximum(params.kymax, 1e-15)) ** jnp.where(params.disp_y < 0.0, 2.0, 4.0)
+        * (ky_b / jnp.maximum(params.kymax, _EPS)) ** jnp.where(params.disp_y < 0.0, 2.0, 4.0)
         + jnp.abs(params.disp_x)
-        * (kx_b / jnp.maximum(params.kxmax, 1e-15)) ** jnp.where(params.disp_x < 0.0, 2.0, 4.0)
+        * (kx_b / jnp.maximum(params.kxmax, _EPS)) ** jnp.where(params.disp_x < 0.0, 2.0, 4.0)
     )
 
     return {
@@ -572,7 +574,7 @@ def _compute_species_coeffs(
         def d_shape(arr):
             return jnp.reshape(arr, (1, 1, -1, 1, 1))
 
-        sz = jnp.where(jnp.abs(signz) < 1e-15, 1.0, signz)
+        sz = jnp.where(jnp.abs(signz) < _EPS, 1.0, signz)
     else:
         # Kinetic: per-species params, 6D arrays
         nsp = mas.shape[0]
@@ -605,7 +607,7 @@ def _compute_species_coeffs(
         def d_shape(arr):
             return jnp.reshape(arr, (1, 1, 1, -1, 1, 1))
 
-        sz = jnp.where(jnp.abs(signz) < 1e-15, 1.0, signz)
+        sz = jnp.where(jnp.abs(signz) < _EPS, 1.0, signz)
 
     # krloc
     krloc_sq = (
@@ -613,11 +615,11 @@ def _compute_species_coeffs(
         + 2.0 * ky_b * kx_b * g_shape(little_g[:, 1])
         + kx_b**2 * g_shape(little_g[:, 2])
     )
-    krloc = jnp.sqrt(jnp.maximum(krloc_sq, 0.0))
+    krloc = jnp.sqrt(jnp.maximum(krloc_sq, _EPS))
 
     # Bessel J0
     b_arg = (
-        mas * vthrat * krloc * jnp.sqrt(jnp.maximum(2.0 * mu / jnp.maximum(bn_b, 1e-15), 0.0)) / sz
+        mas * vthrat * krloc * jnp.sqrt(jnp.maximum(2.0 * mu / jnp.maximum(bn_b, _EPS), _EPS)) / sz
     )
     bessel = j0(b_arg)
 
@@ -762,7 +764,7 @@ def linear_precompute(geometry: Dict[str, jnp.ndarray], params: GKParams) -> "GK
         signz_arr = jnp.asarray(params.signz, dtype=jnp.float64)
         de_arr = jnp.asarray(params.de, dtype=jnp.float64)
         mir = jnp.sum(jnp.where(signz_arr > 0, mas_arr * de_arr, 0.0))
-        mer = jnp.sum(jnp.where(signz_arr < 0, mas_arr / jnp.maximum(de_arr, 1e-30), 0.0))
+        mer = jnp.sum(jnp.where(signz_arr < 0, mas_arr / jnp.maximum(de_arr, _EPS), 0.0))
         ky_min = jnp.where(nky > 1, ky[1], ky[0])
         kmin2 = ky_min**2 * little_g[:, 0]
         q_val = jnp.asarray(geometry.get("q", getattr(params, "q", 1.0)), dtype=jnp.float64)
@@ -772,9 +774,9 @@ def linear_precompute(geometry: Dict[str, jnp.ndarray], params: GKParams) -> "GK
             * q_val
             * params.sgr_dist
             * bn
-            * jnp.sqrt(jnp.maximum(mir * kmin2 * mer, 0.0))
+            * jnp.sqrt(jnp.maximum(mir * kmin2 * mer, _EPS))
         )
-        time_field = jnp.min(jnp.where(field_period > 1e-30, field_period, 1e30))
+        time_field = jnp.min(jnp.where(field_period > _EPS, field_period, 1e30))
         out["tmax_field"] = jnp.where(time_field < 1e20, 1.0 / time_field, 0.0)
     else:
         # Adiabatic: scalar species params, 5D arrays
@@ -893,7 +895,7 @@ def _linear_rhs_core(
         * jnp.asarray(params_drive_scale, dtype=jnp.float64)
         * (
             pre["dmaxwel_fm_ek"]
-            - pre["signz0"] * kdotvd * (pre["fmaxwl"] / jnp.maximum(pre["tmp0"], 1e-15))
+            - pre["signz0"] * kdotvd * (pre["fmaxwl"] / jnp.maximum(pre["tmp0"], _EPS))
         )
         * gyro_phi
         + term_vii
