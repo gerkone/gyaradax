@@ -332,7 +332,7 @@ def _precompute_shared(
 
     def _parallel_coefficients(pos_par_class, table):
         idx = jnp.clip(jnp.asarray(pos_par_class, dtype=jnp.int32) + 2, 0, 4)
-        return jnp.moveaxis(table[idx] / 12.0, -1, 0)
+        return jnp.moveaxis(jnp.asarray(table)[idx] / 12.0, -1, 0)
 
     kx_b = jnp.reshape(kx, (1, 1, 1, -1, 1))
     ky_b = jnp.reshape(ky, (1, 1, 1, 1, -1))
