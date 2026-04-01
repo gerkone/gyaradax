@@ -213,16 +213,25 @@ def test_ifun_zeta(gkw_dir_all):
 # ---------------------------------------------------------------------------
 
 _GEOM_KWARGS = dict(
-    ns=16, nkx=9, nky=8, nvpar=24, nmu=8,
-    vpar_max=3.0, nperiod=1, krhomax=1.4,
+    ns=16,
+    nkx=9,
+    nky=8,
+    nvpar=24,
+    nmu=8,
+    vpar_max=3.0,
+    nperiod=1,
+    krhomax=1.4,
 )
 
 
 def _geom_scalar(q_val, shat_val, eps_val, field="bn"):
     """Scalar loss from geometry for AD testing."""
     geom = compute_geometry(
-        q=q_val, shat=shat_val, eps=eps_val,
-        kxmax=2.0 * 9 * shat_val, **_GEOM_KWARGS,
+        q=q_val,
+        shat=shat_val,
+        eps=eps_val,
+        kxmax=2.0 * 9 * shat_val,
+        **_GEOM_KWARGS,
     )
     return jnp.sum(geom[field] ** 2)
 
@@ -234,8 +243,10 @@ def test_geometry_grad_q(field):
     grad_fn = jax.grad(lambda q: _geom_scalar(q, s0, e0, field))
     ad = float(grad_fn(q0))
     eps_fd = 1e-5
-    fd = float((_geom_scalar(q0 + eps_fd, s0, e0, field)
-                - _geom_scalar(q0 - eps_fd, s0, e0, field)) / (2 * eps_fd))
+    fd = float(
+        (_geom_scalar(q0 + eps_fd, s0, e0, field) - _geom_scalar(q0 - eps_fd, s0, e0, field))
+        / (2 * eps_fd)
+    )
     err = abs(ad - fd)
     rel = err / max(abs(ad), abs(fd), 1.0)
     assert np.isfinite(ad), f"AD gradient is not finite for {field}"
@@ -249,8 +260,10 @@ def test_geometry_grad_shat(field):
     grad_fn = jax.grad(lambda s: _geom_scalar(q0, s, e0, field))
     ad = float(grad_fn(s0))
     eps_fd = 1e-5
-    fd = float((_geom_scalar(q0, s0 + eps_fd, e0, field)
-                - _geom_scalar(q0, s0 - eps_fd, e0, field)) / (2 * eps_fd))
+    fd = float(
+        (_geom_scalar(q0, s0 + eps_fd, e0, field) - _geom_scalar(q0, s0 - eps_fd, e0, field))
+        / (2 * eps_fd)
+    )
     err = abs(ad - fd)
     rel = err / max(abs(ad), abs(fd), 1.0)
     assert np.isfinite(ad), f"AD gradient is not finite for {field}"
@@ -264,8 +277,10 @@ def test_geometry_grad_eps(field):
     grad_fn = jax.grad(lambda e: _geom_scalar(q0, s0, e, field))
     ad = float(grad_fn(e0))
     eps_fd = 1e-5
-    fd = float((_geom_scalar(q0, s0, e0 + eps_fd, field)
-                - _geom_scalar(q0, s0, e0 - eps_fd, field)) / (2 * eps_fd))
+    fd = float(
+        (_geom_scalar(q0, s0, e0 + eps_fd, field) - _geom_scalar(q0, s0, e0 - eps_fd, field))
+        / (2 * eps_fd)
+    )
     err = abs(ad - fd)
     rel = err / max(abs(ad), abs(fd), 1.0)
     assert np.isfinite(ad), f"AD gradient is not finite for {field}"
@@ -284,7 +299,9 @@ def test_geometry_grad_drift_tensors():
 
         # FD check on q only (representative)
         eps_fd = 1e-5
-        fd = float((_geom_scalar(q0 + eps_fd, s0, e0, field)
-                    - _geom_scalar(q0 - eps_fd, s0, e0, field)) / (2 * eps_fd))
+        fd = float(
+            (_geom_scalar(q0 + eps_fd, s0, e0, field) - _geom_scalar(q0 - eps_fd, s0, e0, field))
+            / (2 * eps_fd)
+        )
         rel = abs(float(dq) - fd) / (abs(float(dq)) + 1e-30)
         assert rel < 1e-4, f"AD vs FD mismatch for d({field})/dq: rel={rel:.2e}"

@@ -382,16 +382,27 @@ def generate_mp4(snapshots, output_path, R0=3.0, a=1.0, fps=12, dpi=150, dry_run
 
     # 2d projections: small bottom-left strip
     gs_proj = fig.add_gridspec(
-        1, 2, wspace=0.08,
-        left=0.03, right=0.42, top=proj_h + 0.04, bottom=0.04,
+        1,
+        2,
+        wspace=0.08,
+        left=0.03,
+        right=0.42,
+        top=proj_h + 0.04,
+        bottom=0.04,
     )
     ax_skx = fig.add_subplot(gs_proj[0])
     ax_sky = fig.add_subplot(gs_proj[1])
 
     # right column: flux (tall), spectra (tall), phi(x,y) (compact, same height as projections)
     gs_right = fig.add_gridspec(
-        3, 1, height_ratios=[1.0, 1.0, 0.5], hspace=0.40,
-        left=0.54, right=0.97, top=0.95, bottom=0.04,
+        3,
+        1,
+        height_ratios=[1.0, 1.0, 0.5],
+        hspace=0.40,
+        left=0.54,
+        right=0.97,
+        top=0.95,
+        bottom=0.04,
     )
     ax_flux = fig.add_subplot(gs_right[0])
     gs_spec = gs_right[1].subgridspec(1, 2, wspace=0.35)
@@ -405,17 +416,28 @@ def generate_mp4(snapshots, output_path, R0=3.0, a=1.0, fps=12, dpi=150, dry_run
 
     # 2d projection panels — RdBu_r colormap
     im_skx = ax_skx.imshow(
-        np.zeros((ns, nkx)), aspect="auto", cmap="RdBu_r",
-        vmin=0, vmax=vmax_skk, origin="lower", interpolation="bilinear",
+        np.zeros((ns, nkx)),
+        aspect="auto",
+        cmap="RdBu_r",
+        vmin=0,
+        vmax=vmax_skk,
+        origin="lower",
+        interpolation="bilinear",
     )
     im_sky = ax_sky.imshow(
-        np.zeros((ns, nky)), aspect="auto", cmap="RdBu_r",
-        vmin=0, vmax=vmax_skk, origin="lower", interpolation="bilinear",
+        np.zeros((ns, nky)),
+        aspect="auto",
+        cmap="RdBu_r",
+        vmin=0,
+        vmax=vmax_skk,
+        origin="lower",
+        interpolation="bilinear",
     )
     for ax, title in [(ax_skx, r"$|\delta f|\;(s, k_x)$"), (ax_sky, r"$|\delta f|\;(s, k_y)$")]:
         ax.set_title(title, fontsize=14, pad=3)
-        ax.tick_params(axis="both", which="both", length=0, labelsize=0,
-                       labelbottom=False, labelleft=False)
+        ax.tick_params(
+            axis="both", which="both", length=0, labelsize=0, labelbottom=False, labelleft=False
+        )
 
     # heat flux — axes grow with time
     (flux_line,) = ax_flux.plot([], [], "-", color="#24B6AD", lw=1.2)
@@ -441,12 +463,18 @@ def generate_mp4(snapshots, output_path, R0=3.0, a=1.0, fps=12, dpi=150, dry_run
 
     # phi(x,y) — plasma, tall
     im_phi2d = ax_phi2d.imshow(
-        np.zeros((ny, nx)), aspect="auto", cmap="plasma",
-        vmin=-vmax_phi, vmax=vmax_phi, origin="lower", interpolation="bilinear",
+        np.zeros((ny, nx)),
+        aspect="auto",
+        cmap="plasma",
+        vmin=-vmax_phi,
+        vmax=vmax_phi,
+        origin="lower",
+        interpolation="bilinear",
     )
     ax_phi2d.set_title(r"$\phi(x, y)$", fontsize=14, pad=3)
-    ax_phi2d.tick_params(axis="both", which="both", length=0, labelsize=0,
-                         labelbottom=False, labelleft=False)
+    ax_phi2d.tick_params(
+        axis="both", which="both", length=0, labelsize=0, labelbottom=False, labelleft=False
+    )
 
     def draw(fi):
         ax3d.clear()
@@ -454,10 +482,16 @@ def generate_mp4(snapshots, output_path, R0=3.0, a=1.0, fps=12, dpi=150, dry_run
         torus_data = frames_torus[fi]
         torus_colors = plt.cm.plasma(norm_phi(torus_data))
         ax3d.plot_surface(
-            X, Y, Zc,
-            facecolors=torus_colors, shade=True,
+            X,
+            Y,
+            Zc,
+            facecolors=torus_colors,
+            shade=True,
             lightsource=LightSource(azdeg=315, altdeg=50),
-            rstride=1, cstride=2, antialiased=False, alpha=0.95,
+            rstride=1,
+            cstride=2,
+            antialiased=False,
+            alpha=0.95,
         )
         ax3d.set_xlim(-lim, lim)
         ax3d.set_ylim(-lim, lim)
@@ -469,8 +503,13 @@ def generate_mp4(snapshots, output_path, R0=3.0, a=1.0, fps=12, dpi=150, dry_run
 
         fig.texts.clear()
         fig.text(
-            0.02, 0.97, f"t = {times[fi]:.1f}",
-            fontsize=20, fontfamily="monospace", fontweight="bold", color="#333",
+            0.02,
+            0.97,
+            f"t = {times[fi]:.1f}",
+            fontsize=20,
+            fontfamily="monospace",
+            fontweight="bold",
+            color="#333",
             bbox=dict(facecolor="#eeeeee", edgecolor="none", pad=4, alpha=0.85),
         )
 

@@ -13,11 +13,19 @@ os.environ["CUDA_VISIBLE_DEVICES"] = str(_early.device)
 os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
 
 import jax
+
 jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
 
 sys.path.insert(0, str(Path(__file__).parent))
-from common import load_setup, BenchTimer, roofline_report, check_accuracy, analyze_cost, BASELINES_DIR
+from common import (
+    load_setup,
+    BenchTimer,
+    roofline_report,
+    check_accuracy,
+    analyze_cost,
+    BASELINES_DIR,
+)
 from gyaradax.solver import GKPre
 from gyaradax.backends import create_ops
 import gyaradax.stencils as stencils
@@ -34,9 +42,9 @@ def run(config="configs/iteration_13.yaml", mixed_precision=False):
     df, phi, geom, params, pre = load_setup(config, mixed_precision)
     field = df
     pre_gk = GKPre(pre)
-    
+
     from gyaradax.backends import create_ops
-    
+
     results = {}
     backends = []
     for b in ["jax", "cuda"]:
@@ -55,30 +63,30 @@ def run(config="configs/iteration_13.yaml", mixed_precision=False):
     ]:
         print(f"\n  -- {label}")
         backend_times = {}
-        
+
         for bname, ops in backends:
             from functools import partial
-            
+
             # Internal function for jit/cost
             def _core(f, c, ops_in):
                 return ops_in._apply_vpar(f, c)
 
             c_tuple = tuple(coeffs.tolist())
-            
+
             # Accuracy and timing function
             run_fn = jax.jit(partial(_core, c=c_tuple, ops_in=ops))
 
             # Accuracy check
             out = run_fn(field)
             rel_l2 = check_accuracy(out, baseline, bkey)
-            
+
             # Performance timing
             mean_ms, _ = BenchTimer(lambda: run_fn(field).block_until_ready()).run()
             backend_times[bname] = mean_ms
-            
+
             # Reporting
             print(f"     [{bname.upper():4s}] {mean_ms:7.3f} ms  (rel_l2={rel_l2:.2e})")
-            
+
             if bname == "cuda":
                 # Only report roofline for CUDA/FFI
                 flops, bytes_rw = analyze_cost(run_fn, field)
@@ -91,12 +99,13 @@ def run(config="configs/iteration_13.yaml", mixed_precision=False):
     print(f"\n  -- VPAR_D1+D4 Dual Fusion")
     c1, c4 = tuple(stencils.VPAR_D1), tuple(stencils.VPAR_D4)
     dual_times = {}
-    
+
     for bname, ops in backends:
         from functools import partial
+
         def _core_dual(f, ops_in):
             return ops_in._apply_vpar_dual(f, c1, c4)
-        
+
         run_fn_dual = jax.jit(partial(_core_dual, ops_in=ops))
 
         out_dual = run_fn_dual(field)

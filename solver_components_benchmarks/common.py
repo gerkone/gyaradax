@@ -3,6 +3,7 @@
 Usage in each bench_*.py:
     from common import load_setup, BenchTimer, roofline_report, check_accuracy
 """
+
 import os
 import time
 from pathlib import Path
@@ -16,6 +17,7 @@ import jax.numpy as jnp
 
 # ── GPU Hardware Specs ────────────────────────────────────────────────────────
 
+
 def get_gpu_specs():
     """Detect current GPU and return (BW_GBS, FP64_TFLOPS, kind, name)."""
     try:
@@ -25,7 +27,7 @@ def get_gpu_specs():
 
     specs = None
     # GPU specs database: (Memory Bandwidth in TB/s, FP64 TFLOPS, Display Name)
-    # Note: Insertion order matters here. We check for more specific strings 
+    # Note: Insertion order matters here. We check for more specific strings
     # (like "H100 PCIe") before general ones (like "H100").
     # Reference Links:
     # - NVIDIA Blackwell Datasheet: https://resources.nvidia.com/en-us-blackwell-architecture
@@ -43,7 +45,7 @@ def get_gpu_specs():
         "A100-SXM4-40GB": {"bw_tbs": 1.55, "fp64_tflops": 9.7, "name": "Ampere A100 SXM4 40GB"},
         "A100": {"bw_tbs": 2.0, "fp64_tflops": 9.7, "name": "Ampere A100 80GB"},
         "V100-PCIe": {"bw_tbs": 0.9, "fp64_tflops": 7.0, "name": "Volta V100 PCIe"},
-        "V100": {"bw_tbs": 0.9, "fp64_tflops": 7.8, "name": "Volta V100 SXM"}
+        "V100": {"bw_tbs": 0.9, "fp64_tflops": 7.8, "name": "Volta V100 SXM"},
     }
 
     # Match the device kind to our database
@@ -58,12 +60,14 @@ def get_gpu_specs():
     bw_gbs = specs["bw_tbs"] * 1024
     return bw_gbs, specs["fp64_tflops"], kind, specs["name"]
 
+
 # Global defaults (can be overridden if needed)
 DEFAULT_BW_GBS, DEFAULT_FP64_TFLOPS, DEVICE_KIND, DEVICE_MODEL = get_gpu_specs()
 BASELINES_DIR = Path(__file__).parent / "baselines"
 
 
 # ── Setup ────────────────────────────────────────────────────────────────────
+
 
 def load_setup(config_path: str = "configs/iteration_13.yaml", mixed_precision: bool = False):
     """Load real solver state from config + K-file checkpoint.
@@ -108,12 +112,13 @@ def load_setup(config_path: str = "configs/iteration_13.yaml", mixed_precision: 
         t_start = read_gkw_dump_time(k_path + ".dat") if os.path.exists(k_path + ".dat") else 0.0
     else:
         from gyaradax.simulate import gk_init
+
         df, _ = gk_init(geom, params, n_species=n_species)
         t_start = 0.0
 
     pre = linear_precompute(geom, params)
     phi = _compute_phi(df, geom, params, pre)
-    
+
     print(f"  device   : {DEVICE_KIND} (detected as {DEVICE_MODEL})")
     print(f"  peak BW  : {DEFAULT_BW_GBS:.0f} GB/s")
     print(f"  peak FP64: {DEFAULT_FP64_TFLOPS:.1f} TFLOP/s")
@@ -126,6 +131,7 @@ def load_setup(config_path: str = "configs/iteration_13.yaml", mixed_precision: 
 
 
 # ── Timing ───────────────────────────────────────────────────────────────────
+
 
 class BenchTimer:
     """Warm-up then time a JIT-compiled function, returning mean ± std ms."""
@@ -149,6 +155,7 @@ class BenchTimer:
 
 # ── Cost Analysis ────────────────────────────────────────────────────────────
 
+
 def analyze_cost(fn: Callable, *args) -> tuple[float, float]:
     """Dynamically evaluate FLOPs and memory footprint (bytes accessed) using XLA AOT.
 
@@ -160,18 +167,19 @@ def analyze_cost(fn: Callable, *args) -> tuple[float, float]:
     lowered = jax.jit(fn).lower(*args)
     compiled = lowered.compile()
     cost = compiled.cost_analysis()
-    
+
     # XLA cost_analysis returns a list of dicts (one for each shard/device)
     # in JAX JIT case, we take the first element
     if isinstance(cost, list):
         cost = cost[0]
-        
+
     flops = float(cost.get("flops", 0.0))
     bytes_rw = float(cost.get("bytes accessed", 0.0))
     return flops, bytes_rw
 
 
 # ── Reporting ─────────────────────────────────────────────────────────────────
+
 
 def roofline_report(
     label: str,

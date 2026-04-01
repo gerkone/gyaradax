@@ -23,6 +23,7 @@ os.environ["CUDA_VISIBLE_DEVICES"] = str(_early.device)
 os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
 
 import jax
+
 jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
 import numpy as np
@@ -60,22 +61,20 @@ def main():
     from gyaradax.solver import _compute_linear_rhs
 
     # replicate closure logic from solver.py:758-768
-    s_shift   = pre["s_shift"]
-    kx_shift  = pre["kx_shift"]
+    s_shift = pre["s_shift"]
+    kx_shift = pre["kx_shift"]
     valid_shift = pre["valid_shift"]
 
     from gyaradax.backends import create_ops
+
     ops = create_ops(pre, field5d, backend="jax")
 
     @jax.jit
     def _apply_parallel(field, coeffs):
         return ops._apply_parallel(field, coeffs)
 
-
     out_c1 = _apply_parallel(field5d, pre["s_total_upar"])
-    save("apply_parallel",
-         field=field5d, coeffs=pre["s_total_upar"],
-         output=out_c1)
+    save("apply_parallel", field=field5d, coeffs=pre["s_total_upar"], output=out_c1)
 
     # ── C2: _apply_vpar ───────────────────────────────────────────────────
     print("\nC2: _apply_vpar")
@@ -85,13 +84,16 @@ def main():
     def _apply_vpar(field, coeffs):
         return ops._apply_vpar(field, coeffs)
 
-
     out_c2_d1 = _apply_vpar(field5d, stencils.VPAR_D1)
     out_c2_d4 = _apply_vpar(field5d, stencils.VPAR_D4)
-    save("apply_vpar",
-         field=field5d,
-         coeffs_d1=stencils.VPAR_D1, output_d1=out_c2_d1,
-         coeffs_d4=stencils.VPAR_D4, output_d4=out_c2_d4)
+    save(
+        "apply_vpar",
+        field=field5d,
+        coeffs_d1=stencils.VPAR_D1,
+        output_d1=out_c2_d1,
+        coeffs_d4=stencils.VPAR_D4,
+        output_d4=out_c2_d4,
+    )
 
     # ── C3: _linear_rhs_core (via _compute_linear_rhs) ───────────────────
     print("\nC3: _compute_linear_rhs")
@@ -100,11 +102,8 @@ def main():
     def _lin_rhs():
         return _compute_linear_rhs(df, phi, geom, params, pre, ops)
 
-
     out_c3 = _lin_rhs()
-    save("linear_rhs",
-         df=df, phi=phi,
-         output=out_c3)
+    save("linear_rhs", df=df, phi=phi, output=out_c3)
 
     # ── C4: nonlinear_term_iii ────────────────────────────────────────────
     print("\nC4: nonlinear_term_iii")
@@ -120,13 +119,9 @@ def main():
     def _nl_fp64():
         return ops.nonlinear_term_iii(field5d, phi, geom, mixed_precision=False)
 
-
-    out_c4_mp   = _nl_mp()
+    out_c4_mp = _nl_mp()
     out_c4_fp64 = _nl_fp64()
-    save("nonlinear",
-         field=field5d, phi=phi,
-         output_mp=out_c4_mp,
-         output_fp64=out_c4_fp64)
+    save("nonlinear", field=field5d, phi=phi, output_mp=out_c4_mp, output_fp64=out_c4_fp64)
 
     # ── C5: _compute_phi ─────────────────────────────────────────────────
     print("\nC5: _compute_phi")
@@ -137,17 +132,15 @@ def main():
         return _compute_phi(df, geom, params, pre)
 
     out_c5 = _phi()
-    save("phi_solve",
-         df=df,
-         output=out_c5)
+    save("phi_solve", df=df, output=out_c5)
 
     # ── C6: pack/unpack_half_spectrum ────────────────────────────────────
     print("\nC6: pack/unpack_half_spectrum")
     from gyaradax.solver import pack_half_spectrum, unpack_half_spectrum
 
-    jind   = pre["nl_jind"]
-    mrad   = int(pre["nl_mrad"])
-    mphi   = int(pre["nl_mphi"])
+    jind = pre["nl_jind"]
+    mrad = int(pre["nl_mrad"])
+    mphi = int(pre["nl_mphi"])
     mphiw3 = int(pre["nl_mphiw3"])
     nkx, nky = field5d.shape[-2], field5d.shape[-1]
 
@@ -163,12 +156,15 @@ def main():
         packed = pack_half_spectrum(spec_in, jind, mrad, mphiw3)
         return unpack_half_spectrum(packed, jind, nky)
 
-    out_packed   = _pack()
+    out_packed = _pack()
     out_unpacked = _unpack()
-    save("pack_spectrum",
-         spec_in=spec_in, jind=jind,
-         output_packed=out_packed,
-         output_unpacked=out_unpacked)
+    save(
+        "pack_spectrum",
+        spec_in=spec_in,
+        jind=jind,
+        output_packed=out_packed,
+        output_unpacked=out_unpacked,
+    )
 
     # ── C7: gkstep_single (full RK4 step) ───────────────────────────────────
     print("\nC7: gkstep_single")
@@ -186,13 +182,16 @@ def main():
     def _rk4_nonlinear(d, s):
         return gkstep_single(d, geom, replace(params, non_linear=True), s, pre_gk, ops=ops)
 
-
     out_df_lin, (out_phi_lin, _), _ = _rk4_linear(df, state)
-    out_df_nl,  (out_phi_nl,  _), _ = _rk4_nonlinear(df, state)
-    save("rk4_step",
-         df=df,
-         out_df_linear=out_df_lin,    out_phi_linear=out_phi_lin,
-         out_df_nonlinear=out_df_nl,  out_phi_nonlinear=out_phi_nl)
+    out_df_nl, (out_phi_nl, _), _ = _rk4_nonlinear(df, state)
+    save(
+        "rk4_step",
+        df=df,
+        out_df_linear=out_df_lin,
+        out_phi_linear=out_phi_lin,
+        out_df_nonlinear=out_df_nl,
+        out_phi_nonlinear=out_phi_nl,
+    )
 
     print("\nAll baselines written to", BASELINES_DIR)
 

@@ -13,11 +13,19 @@ os.environ["CUDA_VISIBLE_DEVICES"] = str(_early.device)
 os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
 
 import jax
+
 jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
 
 sys.path.insert(0, str(Path(__file__).parent))
-from common import load_setup, BenchTimer, roofline_report, check_accuracy, analyze_cost, BASELINES_DIR
+from common import (
+    load_setup,
+    BenchTimer,
+    roofline_report,
+    check_accuracy,
+    analyze_cost,
+    BASELINES_DIR,
+)
 from gyaradax.solver import _compute_phi, GKPre
 
 
@@ -38,13 +46,13 @@ def run(config="configs/iteration_13.yaml", mixed_precision=False):
 
     out = fn(df, pre_gk)
     rel_l2 = check_accuracy(out, baseline, "output")
- 
+
     print(f"  [XLA] Analyzing cost...")
     flops, bytes_rw = analyze_cost(fn, df, pre_gk)
-    
+
     mean_ms, std_ms = BenchTimer(lambda d=df, pr=pre_gk: fn(d, pr).block_until_ready()).run()
     print(f"  timing: {mean_ms:.3f} ± {std_ms:.3f} ms")
-    roofline_report("_compute_phi",  mean_ms, flops, bytes_rw)
+    roofline_report("_compute_phi", mean_ms, flops, bytes_rw)
 
     return {"mean_ms": mean_ms, "rel_l2": rel_l2}
 

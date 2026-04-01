@@ -93,6 +93,7 @@ def run_benchmark():
     if not args.from_scratch and data_dir:
         # look for K01 or similar in data_dir
         from gyaradax.utils import K_files
+
         ks = K_files(data_dir)
         if ks:
             k_path = os.path.join(data_dir, ks[0])
@@ -110,12 +111,12 @@ def run_benchmark():
             print(f"using dtim={actual_dt:.6f} from {os.path.basename(dat_path)}")
             # params is frozen, but we can update it via some mechanism if needed
             # for benchmark we might just want to use config dt unless explicitly resume-testing
-        
+
         state = GKState(
             time=jnp.array(t_start, dtype=jnp.float64),
             step=jnp.array(0, dtype=jnp.int32),
             accumulated_norm_factor=jnp.ones(nky, dtype=jnp.float64),
-            window_start_amp=jnp.ones(nky, dtype=jnp.float64), # keep it 1.0 for standard benchmark
+            window_start_amp=jnp.ones(nky, dtype=jnp.float64),  # keep it 1.0 for standard benchmark
             last_growth_rate=jnp.zeros(nky, dtype=jnp.float64),
         )
         print(f"init: resumed from {os.path.basename(k_path)} (t={t_start:.4f})")

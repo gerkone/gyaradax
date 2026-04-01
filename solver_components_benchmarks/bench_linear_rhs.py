@@ -14,11 +14,19 @@ os.environ["CUDA_VISIBLE_DEVICES"] = str(_early.device)
 os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
 
 import jax
+
 jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
 
 sys.path.insert(0, str(Path(__file__).parent))
-from common import load_setup, BenchTimer, roofline_report, check_accuracy, analyze_cost, BASELINES_DIR
+from common import (
+    load_setup,
+    BenchTimer,
+    roofline_report,
+    check_accuracy,
+    analyze_cost,
+    BASELINES_DIR,
+)
 from gyaradax.solver import _compute_linear_rhs, GKPre
 
 
@@ -32,7 +40,7 @@ def run(config="configs/iteration_13.yaml", mixed_precision=False):
     baseline = BASELINES_DIR / "linear_rhs.npz"
 
     from gyaradax.backends import create_ops
-    
+
     results = {}
     for backend in ["jax", "cuda"]:
         print(f"\n  -- Backend: {backend.upper()}")
@@ -48,13 +56,13 @@ def run(config="configs/iteration_13.yaml", mixed_precision=False):
 
         out = fn(df, phi)
         rel_l2 = check_accuracy(out, baseline, "output")
-        
+
         print(f"     [XLA] Analyzing cost...")
         flops, bytes_rw = analyze_cost(fn, df, phi)
-        
+
         mean_ms, std_ms = BenchTimer(lambda d=df, p=phi: fn(d, p).block_until_ready()).run()
         print(f"     timing: {mean_ms:.3f} ± {std_ms:.3f} ms")
-        
+
         r = roofline_report(f"_compute_linear_rhs ({backend})", mean_ms, flops, bytes_rw)
         r["rel_l2"] = rel_l2
         results[backend] = r

@@ -179,18 +179,15 @@ def _circular_geometry(theta, q, shat, eps, signB=1.0, signJ=1.0, geom_type="cir
         metric = metric.at[:, 0, 2].set(sin_2pi)
         metric = metric.at[:, 2, 0].set(sin_2pi)
         metric = metric.at[:, 1, 1].set(
-            (1 / (2 * jnp.pi * R)) ** 2 * (1 + (1 - eps**2) * (q / eps) ** 2)
-            + dzde**2
+            (1 / (2 * jnp.pi * R)) ** 2 * (1 + (1 - eps**2) * (q / eps) ** 2) + dzde**2
         )
         cross_12 = (
-            q * jnp.sqrt(1 - eps**2) / (2 * jnp.pi * eps) ** 2 * signB * signJ
-            + dzde * sin_2pi
+            q * jnp.sqrt(1 - eps**2) / (2 * jnp.pi * eps) ** 2 * signB * signJ + dzde * sin_2pi
         )
         metric = metric.at[:, 1, 2].set(cross_12)
         metric = metric.at[:, 2, 1].set(cross_12)
         metric = metric.at[:, 2, 2].set(
-            (1 / (2 * jnp.pi)) ** 2
-            * ((1 / eps + jnp.cos(theta)) ** 2 + jnp.sin(theta) ** 2)
+            (1 / (2 * jnp.pi)) ** 2 * ((1 / eps + jnp.cos(theta)) ** 2 + jnp.sin(theta) ** 2)
         )
 
         # circular field derivatives (geom.f90:1525-1541)
@@ -200,12 +197,8 @@ def _circular_geometry(theta, q, shat, eps, signB=1.0, signJ=1.0, geom_type="cir
         )
         dBds_pt = bn * eps * jnp.sin(theta) / R
         dBdpsi, dBds = _psi_theta_to_psi_s(dBdpsi_pt, dBds_pt, theta, eps)
-        dRdpsi, dRds = _psi_theta_to_psi_s(
-            jnp.cos(theta), -eps * jnp.sin(theta), theta, eps
-        )
-        dZdpsi, dZds = _psi_theta_to_psi_s(
-            jnp.sin(theta), eps * jnp.cos(theta), theta, eps
-        )
+        dRdpsi, dRds = _psi_theta_to_psi_s(jnp.cos(theta), -eps * jnp.sin(theta), theta, eps)
+        dZdpsi, dZds = _psi_theta_to_psi_s(jnp.sin(theta), eps * jnp.cos(theta), theta, eps)
 
     if finite_epsilon:
         gfun = ffun * dBds / bn
@@ -269,9 +262,7 @@ def _calc_geom_tensors(cg, signJ=1.0, signB=1.0):
     if finite_epsilon:
         dfun = dfun / bn[:, None]
 
-    hfun = -signB * (
-        metric[:, :, 0] * dZdpsi[:, None] + metric[:, :, 2] * dZds[:, None]
-    )
+    hfun = -signB * (metric[:, :, 0] * dZdpsi[:, None] + metric[:, :, 2] * dZds[:, None])
     if finite_epsilon:
         hfun = hfun.at[:, 2].add(signB * bups**2 * dZds / bn**2)
     hfun = hfun / bn[:, None]
@@ -509,22 +500,16 @@ def compute_geometry(
     sgrid = _parallel_grid(ns, nperiod)
     theta = _poloidal_angle(sgrid, eps, geom_type=geom_type)
 
-    cg = _circular_geometry(
-        theta, q, shat, eps, signB=signB, signJ=signJ, geom_type=geom_type
-    )
+    cg = _circular_geometry(theta, q, shat, eps, signB=signB, signJ=signJ, geom_type=geom_type)
     efun_3x3, dfun, hfun, ifun = _calc_geom_tensors(cg, signJ=signJ, signB=signB)
 
     bn, R = cg["bn"], cg["R"]
-    little_g = jnp.stack(
-        [cg["metric"][:, 1, 1], cg["dzetadeps"], jnp.ones(ns)], axis=-1
-    )
+    little_g = jnp.stack([cg["metric"][:, 1, 1], cg["dzetadeps"], jnp.ones(ns)], axis=-1)
 
     if geom_type == "s-alpha":
         g_zz_mid = (q / (2 * jnp.pi * eps)) ** 2
     else:
-        g_zz_mid = (1 / (2 * jnp.pi * (1 + eps))) ** 2 * (
-            1 + (1 - eps**2) * (q / eps) ** 2
-        )
+        g_zz_mid = (1 / (2 * jnp.pi * (1 + eps))) ** 2 * (1 + (1 - eps**2) * (q / eps) ** 2)
     kthnorm = jnp.sqrt(g_zz_mid)
 
     vpgr, mugr, intvp, intmu = _build_velocity_grids(nvpar, nmu, vpar_max)

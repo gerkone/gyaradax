@@ -1,4 +1,5 @@
 """Microbenchmark for _apply_parallel variants — run before committing to solver.py."""
+
 import time
 import jax
 import jax.numpy as jnp
@@ -14,10 +15,14 @@ RNG = np.random.default_rng(0)
 
 
 def make_inputs():
-    field = jnp.array(RNG.standard_normal((NV, NMU, NS, NKX, NKY))
-                      + 1j * RNG.standard_normal((NV, NMU, NS, NKX, NKY)))
-    coeffs = jnp.array(RNG.standard_normal((N_STENCIL, NV, NMU, NS, NKX, NKY))
-                       + 1j * RNG.standard_normal((N_STENCIL, NV, NMU, NS, NKX, NKY)))
+    field = jnp.array(
+        RNG.standard_normal((NV, NMU, NS, NKX, NKY))
+        + 1j * RNG.standard_normal((NV, NMU, NS, NKX, NKY))
+    )
+    coeffs = jnp.array(
+        RNG.standard_normal((N_STENCIL, NV, NMU, NS, NKX, NKY))
+        + 1j * RNG.standard_normal((N_STENCIL, NV, NMU, NS, NKX, NKY))
+    )
     s_shift = jnp.array(RNG.integers(0, NS, size=(N_STENCIL, NS, NKX, NKY)), dtype=jnp.int32)
     kx_shift = jnp.array(RNG.integers(0, NKX, size=(N_STENCIL, NS, NKX, NKY)), dtype=jnp.int32)
     valid_shift = jnp.ones((N_STENCIL, NS, NKX, NKY), dtype=bool)
@@ -31,9 +36,12 @@ def make_baseline(s_shift, kx_shift, valid_shift):
         nky = field.shape[-1]
         ky_idx = jnp.reshape(jnp.arange(nky, dtype=jnp.int32), (1, 1, -1))
         for i in range(N_STENCIL):
-            shifted = jnp.where(valid_shift[i][None, None], field[:, :, s_shift[i], kx_shift[i], ky_idx], 0.0)
+            shifted = jnp.where(
+                valid_shift[i][None, None], field[:, :, s_shift[i], kx_shift[i], ky_idx], 0.0
+            )
             out = out + coeffs[i] * shifted
         return out
+
     return fn
 
 
@@ -42,10 +50,11 @@ def make_v1(s_shift, kx_shift, valid_shift):
     def fn(field, coeffs):
         nky = field.shape[-1]
         ky_idx = jnp.arange(nky, dtype=jnp.int32)
-        gathered = field[:, :, s_shift, kx_shift, ky_idx]            # (nv,nmu,9,ns,nkx,nky)
-        shifted_stack = jnp.moveaxis(gathered, 2, 0)                  # (9,nv,nmu,ns,nkx,nky)
+        gathered = field[:, :, s_shift, kx_shift, ky_idx]  # (nv,nmu,9,ns,nkx,nky)
+        shifted_stack = jnp.moveaxis(gathered, 2, 0)  # (9,nv,nmu,ns,nkx,nky)
         shifted_stack = jnp.where(valid_shift[:, None, None], shifted_stack, 0.0)
         return jnp.sum(coeffs * shifted_stack, axis=0)
+
     return fn
 
 
@@ -59,8 +68,11 @@ def make_v2(s_shift, kx_shift, valid_shift):
             shifted = jnp.where(valid[None, None], field[:, :, s_map, kx_map, ky_idx], 0.0)
             return coeff_i * shifted
 
-        terms = jax.vmap(gather_one)(s_shift, kx_shift, valid_shift, coeffs)  # (9,nv,nmu,ns,nkx,nky)
+        terms = jax.vmap(gather_one)(
+            s_shift, kx_shift, valid_shift, coeffs
+        )  # (9,nv,nmu,ns,nkx,nky)
         return jnp.sum(terms, axis=0)
+
     return fn
 
 
@@ -69,10 +81,11 @@ def make_v3(s_shift, kx_shift, valid_shift):
     def fn(field, coeffs):
         nky = field.shape[-1]
         ky_idx = jnp.arange(nky, dtype=jnp.int32)
-        gathered = field[:, :, s_shift, kx_shift, ky_idx]            # (nv,nmu,9,ns,nkx,nky)
+        gathered = field[:, :, s_shift, kx_shift, ky_idx]  # (nv,nmu,9,ns,nkx,nky)
         shifted = jnp.where(valid_shift[None, None], gathered, 0.0)  # same shape
         # coeffs: (9,nv,nmu,ns,nkx,nky), shifted: (nv,nmu,9,ns,nkx,nky)
-        return jnp.einsum('abicde,iabcde->abcde', shifted, coeffs)
+        return jnp.einsum("abicde,iabcde->abcde", shifted, coeffs)
+
     return fn
 
 
@@ -87,9 +100,9 @@ def make_v4(s_shift, kx_shift, valid_shift):
             shifted = jnp.where(valid[None, None], field[:, :, s_map, kx_map, ky_idx], 0.0)
             return out + coeff_i * shifted, None
 
-        out, _ = jax.lax.scan(body, jnp.zeros_like(field),
-                               (s_shift, kx_shift, valid_shift, coeffs))
+        out, _ = jax.lax.scan(body, jnp.zeros_like(field), (s_shift, kx_shift, valid_shift, coeffs))
         return out
+
     return fn
 
 
@@ -110,11 +123,11 @@ def main():
     field, coeffs, s_shift, kx_shift, valid_shift = make_inputs()
 
     variants = [
-        ("v0 baseline (Python loop)",        make_baseline),
-        ("v1 batch-gather + moveaxis",        make_v1),
-        ("v2 vmap over 9 stencils",           make_v2),
-        ("v3 batch-gather + einsum",          make_v3),
-        ("v4 lax.scan accumulation",          make_v4),
+        ("v0 baseline (Python loop)", make_baseline),
+        ("v1 batch-gather + moveaxis", make_v1),
+        ("v2 vmap over 9 stencils", make_v2),
+        ("v3 batch-gather + einsum", make_v3),
+        ("v4 lax.scan accumulation", make_v4),
     ]
 
     print(f"\nDevice: {jax.devices()[DEVICE]}")

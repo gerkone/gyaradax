@@ -761,6 +761,8 @@ def load_geometry(directory):
     )
 
     return geometry
+
+
 def pack_half_spectrum(
     spec_kxky: jnp.ndarray, jind: jnp.ndarray, mrad: int, mphiw3: int
 ) -> jnp.ndarray:

@@ -27,14 +27,14 @@ import jax.numpy as jnp
 
 jax.config.update("jax_enable_x64", True)
 import os as _os
+
 _jax_cache = _os.environ.get("JAX_COMPILATION_CACHE_DIR", None)
 if _jax_cache:
     jax.config.update("jax_compilation_cache_dir", _jax_cache)
 
 import math
 import functools
-from typing import Dict, Tuple, Optional, Any
-from dataclasses import dataclass
+from typing import Dict, Tuple, Optional
 
 import jax.random
 
@@ -44,7 +44,6 @@ from gyaradax.integrals import (
     j0,
     geom_tensors,
     calculate_phi,
-    _phi_adiabatic,
     precompute_phi_kinetic,
     precompute_phi_adiabatic,
     calculate_phi_adiabatic,
@@ -54,7 +53,7 @@ from gyaradax import stencils
 from gyaradax.params import GKParams
 from gyaradax.types import GKPre, GKState
 from gyaradax.backends.ops import SolverOps
-from gyaradax.utils import pack_half_spectrum, unpack_half_spectrum
+from gyaradax.utils import pack_half_spectrum
 from einops import rearrange
 
 
@@ -155,9 +154,6 @@ def build_jind(nkx: int, mrad: int, ixzero: int) -> jnp.ndarray:
     return jnp.where(ix >= ixzero, ix - ixzero, mrad + ix - ixzero)
 
 
-
-
-
 def nonlinear_term_iii(
     df: jnp.ndarray,
     phi: jnp.ndarray,
@@ -175,11 +171,14 @@ def nonlinear_term_iii(
         ops = create_ops(pre, df, backend="jax")
 
     return ops.nonlinear_term_iii(
-        df, phi, geometry, efun_sign=efun_sign,
-        fft_prefactor=fft_prefactor, exclude_zero_mode=exclude_zero_mode,
-        mixed_precision=mixed_precision
+        df,
+        phi,
+        geometry,
+        efun_sign=efun_sign,
+        fft_prefactor=fft_prefactor,
+        exclude_zero_mode=exclude_zero_mode,
+        mixed_precision=mixed_precision,
     )
-
 
 
 def estimate_nl_timestep(
@@ -739,9 +738,6 @@ def linear_precompute(geometry: Dict[str, jnp.ndarray], params: GKParams) -> "GK
     return GKPre(out)
 
 
-
-
-
 def _linear_rhs_core(
     df: jnp.ndarray,
     phi_b: jnp.ndarray,
@@ -774,10 +770,7 @@ def _linear_rhs_core(
     out_d1, out_d4 = ops._apply_vpar_dual(df, stencils.VPAR_D1, stencils.VPAR_D4)
     term_iv = pre["utrap"] * out_d1 / params_dvp
     term_vp_diss = (
-        jnp.asarray(params_disp_vp, dtype=jnp.float64)
-        * pre["abs_dum2_vp"]
-        * out_d4
-        / params_dvp
+        jnp.asarray(params_disp_vp, dtype=jnp.float64) * pre["abs_dum2_vp"] * out_d4 / params_dvp
     )
 
     kdotvd = pre["drift_x"] * pre["kx_b"] + pre["drift_y"] * pre["ky_b"]
@@ -797,7 +790,6 @@ def _linear_rhs_core(
         * gyro_phi
         + term_vii
     )
-
 
 
 def linear_rhs(
@@ -1107,7 +1099,7 @@ def gkstep_single(
     Tuple[jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]],
     GKState,
 ]:
-    """ Single small-step RK4 time integration with backend dispatch. """
+    """Single small-step RK4 time integration with backend dispatch."""
     if ops is None:
         ops = create_ops(pre, prev_df, backend=params.backend)
 
@@ -1217,7 +1209,9 @@ def gksolve(
         # Fixed dt path
         def _scan_body(carry, _):
             curr_df, curr_state = carry
-            next_df, out, next_state = gkstep_single(curr_df, geometry, params, curr_state, pre, ops)
+            next_df, out, next_state = gkstep_single(
+                curr_df, geometry, params, curr_state, pre, ops
+            )
             return (next_df, next_state), None
 
         (final_df, final_state), _ = jax.lax.scan(_scan_body, (df, state), None, length=n_steps)

@@ -1,6 +1,8 @@
 """Microbenchmark for _apply_vpar variants."""
+
 import time
 import jax
+
 jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
 import numpy as np
@@ -11,8 +13,8 @@ jax.config.update("jax_default_device", jax.devices()[DEVICE])
 NV, NMU, NS, NKX, NKY = 32, 8, 16, 85, 32
 RNG = np.random.default_rng(0)
 
-COEFFS_D1 = jnp.array([ 1/12, -2/3,  0.0,  2/3, -1/12], dtype=jnp.float64)
-COEFFS_D4 = jnp.array([ 1.0,  -4.0,  6.0, -4.0,  1.0 ], dtype=jnp.float64)
+COEFFS_D1 = jnp.array([1 / 12, -2 / 3, 0.0, 2 / 3, -1 / 12], dtype=jnp.float64)
+COEFFS_D4 = jnp.array([1.0, -4.0, 6.0, -4.0, 1.0], dtype=jnp.float64)
 
 
 def make_field():
@@ -40,10 +42,10 @@ def v1(field, coeffs):
     padded = jnp.pad(field, ((2, 2), (0, 0), (0, 0), (0, 0), (0, 0)))
     return (
         coeffs[0] * padded[0:nv]
-        + coeffs[1] * padded[1:nv + 1]
-        + coeffs[2] * padded[2:nv + 2]
-        + coeffs[3] * padded[3:nv + 3]
-        + coeffs[4] * padded[4:nv + 4]
+        + coeffs[1] * padded[1 : nv + 1]
+        + coeffs[2] * padded[2 : nv + 2]
+        + coeffs[3] * padded[3 : nv + 3]
+        + coeffs[4] * padded[4 : nv + 4]
     )
 
 
@@ -57,9 +59,11 @@ def v2(field, coeffs):
 
     def conv1d_real(x):
         return jax.lax.conv_general_dilated(
-            x, kernel.astype(x.dtype),
-            window_strides=(1,), padding=[(2, 2)],
-            dimension_numbers=('NHC', 'OIH', 'NHC'),
+            x,
+            kernel.astype(x.dtype),
+            window_strides=(1,),
+            padding=[(2, 2)],
+            dimension_numbers=("NHC", "OIH", "NHC"),
         )
 
     r = conv1d_real(f_flat.real) + 1j * conv1d_real(f_flat.imag)
@@ -100,9 +104,9 @@ def main():
     field = make_field()
     variants = [
         ("v0 baseline (take + clip + valid)", v0),
-        ("v1 pad + slice (no Gather)",        v1),
-        ("v2 conv_general_dilated",           v2),
-        ("v3 lax.scan",                       v3),
+        ("v1 pad + slice (no Gather)", v1),
+        ("v2 conv_general_dilated", v2),
+        ("v3 lax.scan", v3),
     ]
 
     print(f"\nDevice: {jax.devices()[DEVICE]}")

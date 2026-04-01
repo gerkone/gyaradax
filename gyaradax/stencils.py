@@ -6,8 +6,8 @@ used in the GKW linear and nonlinear terms.
 """
 
 import jax
-import jax.numpy as jnp
 import numpy as np
+
 # enforce 64-bit precision
 jax.config.update("jax_enable_x64", True)
 

@@ -17,7 +17,6 @@ from jax import ffi
 from gyaradax import stencils
 from gyaradax.backends.ops import SolverOps
 from gyaradax.types import GKPre
-from gyaradax.utils import pack_half_spectrum
 
 LIB_PATH = Path(__file__).parent.parent.parent / "cuda_augmentations" / "liblto_bracket.so"
 _ffi_registered = False
