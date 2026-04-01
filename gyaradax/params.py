@@ -7,6 +7,7 @@ import os
 from omegaconf import OmegaConf
 from dataclasses import dataclass
 from typing import Dict, Any
+from gyaradax.utils import load_scalars
 
 
 @jax.tree_util.register_pytree_node_class
@@ -69,6 +70,7 @@ class GKParams:
     adaptive_dt: bool = False
     cfl_safety: float = 0.95
     mixed_precision: bool = True
+    backend: str = "jax"
 
     # physical parameters (typically from the kinetic species)
     rlt: float = 1.0
@@ -104,6 +106,7 @@ class GKParams:
         "non_linear",
         "adaptive_dt",
         "mixed_precision",
+        "backend",
     )
 
     def tree_flatten(self):
@@ -134,6 +137,7 @@ def gkparams_from_runtime(runtime: Dict[str, Any], **overrides) -> GKParams:
         "finit": str(runtime.get("finit", "cosine2")),
         "amp_init": float(runtime.get("amp_init", 1.0e-4)),
         "adiabatic_electrons": bool(runtime.get("adiabatic_electrons", True)),
+        "backend": str(runtime.get("backend", "jax")),
     }
     # species params may be arrays (multi-species) or scalars
     _SPECIES_PARAMS = {"rlt", "rln", "mas", "tmp", "de", "signz", "vthrat"}
@@ -177,7 +181,6 @@ def gkparams_from_input_dat(input_dat_path: str, **overrides) -> GKParams:
     Returns:
         Configured GKParams instance.
     """
-    from gyaradax.utils import load_scalars
 
     directory = os.path.dirname(input_dat_path)
     scalars = load_scalars(directory)
@@ -272,6 +275,7 @@ def gkparams_from_config(config: Any, **overrides) -> GKParams:
         "adiabatic_electrons": bool(getattr(config.grid, "adiabatic_electrons", True)),
         "adaptive_dt": bool(getattr(solver_cfg, "adaptive_dt", False)),
         "cfl_safety": float(getattr(solver_cfg, "cfl_safety", 0.95)),
+        "backend": str(getattr(solver_cfg, "backend", "jax")),
     }
 
     # physics scalars (may be arrays for multi-species kinetic configs)
@@ -280,7 +284,6 @@ def gkparams_from_config(config: Any, **overrides) -> GKParams:
         if hasattr(physics_cfg, k):
             v = getattr(physics_cfg, k)
             if k in _SPECIES_PARAMS and hasattr(v, "__iter__") and not isinstance(v, str):
-                import jax.numpy as jnp
 
                 params_dict[k] = jnp.array([float(x) for x in v])
             else:

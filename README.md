@@ -97,6 +97,7 @@ python -m scripts.gkw_to_yaml /path/to/gkw_run configs/my_sim.yaml
 
 **Optimization**:
 - [x] JAX-based improvements.
+- [x] CUDA LTO backend (fused linear stencil and nonlinear solve).
 - [ ] Fully spectral solver.
 - [ ] Implicit/explicit integration (IMEX).
 

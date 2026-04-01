@@ -143,6 +143,89 @@ def _phi_adiabatic(geom: Dict[str, jnp.ndarray], df: jnp.ndarray) -> jnp.ndarray
     return jnp.squeeze(phi, axis=(0, 1, 2))
 
 
+def precompute_phi_adiabatic(geometry: Dict[str, jnp.ndarray], params: Any):
+    """Precompute static arrays for the adiabatic phi solve."""
+    from gyaradax.integrals import geom_tensors
+    geom = geom_tensors(geometry, params=params)
+    
+    # Squeeze leading nsp=1 dimension to simplify to 5D: (v, mu, s, kx, ky)
+    for k in list(geom.keys()):
+        if isinstance(geom[k], jnp.ndarray) and geom[k].ndim > 0:
+            geom[k] = jnp.squeeze(geom[k], axis=0)
+    
+    de = geom["de"]
+    signz, tmp, bn = geom["signz"], geom["tmp"], geom["bn"]
+    ints, intvp, intmu = geom["ints"], geom["intvp"], geom["intmu"]
+    bessel, gamma = geom["bessel"], geom["gamma"]
+    
+    # Weights for the first reduction: (nv, nmu, ns, nkx, nky)
+    phi_weight = signz * de * intmu * intvp * bessel * bn
+    phi_weight = jnp.where(jnp.abs(intvp) < 1e-9, 0.0, phi_weight)
+
+    cfen = 0.0
+    diagz = signz * (gamma - 1.0) * jnp.exp(-cfen) / tmp
+    denom = diagz - jnp.exp(-cfen) / tmp
+    denom = jnp.where(jnp.abs(denom) < 1e-15, 1.0, denom)
+    matz = -ints / (signz * de * denom)
+    
+    # Weight for the second reduction (zonal mode correction, sum over ns)
+    phi_corr_weight = matz.at[..., 1:].set(0.0)
+
+    return phi_weight, phi_corr_weight, tmp, de, signz, gamma, ints
+
+
+def calculate_phi_adiabatic(
+    df: jnp.ndarray,
+    phi_weight: jnp.ndarray,
+    phi_corr_weight: jnp.ndarray,
+    tmp: jnp.ndarray,
+    de: jnp.ndarray,
+    signz: jnp.ndarray,
+    gamma: jnp.ndarray,
+    ints: jnp.ndarray,
+) -> jnp.ndarray:
+    """Newly structured hot path for adiabatic phi solve."""
+    # df: (nv, nmu, ns, nkx, nky)
+    # phi_weight: (nv, nmu, ns, nkx, nky)
+    phi_raw = jnp.sum(phi_weight * df, axis=(0, 1), keepdims=True) # (1, 1, ns, nkx, nky)
+    
+    # Zonal mode correction (sum over ns)
+    # phi_corr_weight: (1, 1, ns, 1, 1)
+    bufphi = jnp.sum(phi_corr_weight * phi_raw, axis=2, keepdims=True) # (1, 1, 1, nkx, nky)
+    
+    cfen = 0.0
+    exp_cfen = jnp.exp(-cfen)
+    
+    # Factor 1: maty_val correction (applies only to ky=0)
+    maty_sum = jnp.sum(-phi_corr_weight * exp_cfen, axis=2, keepdims=True)
+    maty = tmp / (de * exp_cfen) + maty_sum / exp_cfen
+    
+    ns, nkx, nky = phi_raw.shape[2], phi_raw.shape[3], phi_raw.shape[4]
+    
+    # ky=0 mask
+    y_mask = jnp.zeros((1, 1, 1, 1, nky), dtype=phi_raw.dtype).at[..., 0].set(1.0)
+    # kx=0 mask
+    x_mask = jnp.zeros((1, 1, 1, nkx, 1), dtype=phi_raw.dtype).at[..., 0, :].set(1.0)
+    
+    maty_val = jnp.where(x_mask > 0, 1.0 + 0j, maty)
+    maty_val = jnp.where(jnp.abs(maty_val) < 1e-15, 1.0, maty_val)
+    
+    phi_corr = phi_raw + (1.0 / maty_val) * bufphi * y_mask
+    
+    # Factor 2: poisson_diag (pdiag)
+    poisson_diag = exp_cfen * (signz**2) * de * (gamma - 1.0) / tmp
+    # zonal mask (kx=0, ky=0)
+    zonal_mask = x_mask * y_mask
+    norm_mask = 1.0 - zonal_mask
+    
+    pdiag = poisson_diag * norm_mask - signz * exp_cfen * de / tmp
+    pdiag = jnp.where(jnp.abs(pdiag) < 1e-15, -1.0, pdiag)
+    
+    phi = phi_corr * (-1.0 / pdiag)
+    # squeeze leading (1, 1) from keepdims but keep (ns, nkx, nky)
+    return phi.reshape(phi.shape[2], phi.shape[3], phi.shape[4])
+
+
 def _species_bessel_gamma(geometry):
     """Per-species Bessel J0 and Gamma_0 for multi-species phi solve."""
     mas = jnp.asarray(geometry["mas"], dtype=jnp.float64)
@@ -242,7 +325,7 @@ def _phi_kinetic(
     if phi_weight is None or phi_diag is None:
         phi_weight, phi_diag = precompute_phi_kinetic(geometry)
 
-    phi_num = jnp.sum(phi_weight * df, axis=(0, 1, 2))
+    phi_num = jnp.einsum('avmjkl,avmjkl->jkl', phi_weight, df)
     return -phi_num / phi_diag
 
 

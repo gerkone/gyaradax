@@ -3,6 +3,11 @@ import re
 import numpy as np
 import jax.numpy as jnp
 from typing import Tuple, Dict, Any
+from gyaradax.geometry import (
+    _build_mode_connectivity,
+    _build_pos_par_grid_classes,
+    _build_parallel_shift_maps,
+)
 
 
 def read_gkw_dump_time(dat_path: str) -> float:
@@ -580,11 +585,6 @@ def load_scalars(directory: str) -> Dict[str, Any]:
 
 def load_geometry(directory):
     """Load geometry and physics parameters into JAX arrays."""
-    from gyaradax.geometry import (
-        _build_mode_connectivity,
-        _build_pos_par_grid_classes,
-        _build_parallel_shift_maps,
-    )
 
     geom = load_geom_dat_file(os.path.join(directory, "geom.dat"))
     input_data = parse_input_dat(os.path.join(directory, "input.dat"))
@@ -761,3 +761,14 @@ def load_geometry(directory):
     )
 
     return geometry
+def pack_half_spectrum(
+    spec_kxky: jnp.ndarray, jind: jnp.ndarray, mrad: int, mphiw3: int
+) -> jnp.ndarray:
+    out_shape = spec_kxky.shape[:-2] + (mrad, mphiw3)
+    out = jnp.zeros(out_shape, dtype=jnp.complex128)
+    nky = spec_kxky.shape[-1]
+    return out.at[..., jind, :nky].set(spec_kxky)
+
+
+def unpack_half_spectrum(spec_half: jnp.ndarray, jind: jnp.ndarray, nky: int) -> jnp.ndarray:
+    return spec_half[..., jind, :nky]

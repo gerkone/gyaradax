@@ -318,158 +318,196 @@ def generate_mp4(snapshots, output_path, R0=3.0, a=1.0, fps=12, dpi=150, dry_run
     if vmax_skk < 1e-30:
         vmax_skk = 1.0
 
-    # torus mesh — higher resolution for smooth rendering
-    n_t, n_z = max(nx, 80), max(ny, 160)
+    # load diagnostics from the snapshot directory
+    diag_dir = sys.argv[1] if len(sys.argv) > 1 else "."
+    eflux_trace = growth_all = kyspec_all = kxspec_all = diag_times = None
+    try:
+        fd = np.load(os.path.join(diag_dir, "fluxes.npz"))
+        eflux_trace = fd["fluxes"][:, 1]
+        diag_times = fd.get("time", np.load(os.path.join(diag_dir, "growth.npz"))["time"])
+    except (FileNotFoundError, KeyError):
+        pass
+    try:
+        growth_all = np.load(os.path.join(diag_dir, "growth.npz"))["growth"]
+    except (FileNotFoundError, KeyError):
+        pass
+    try:
+        kyspec_all = np.load(os.path.join(diag_dir, "kyspec.npz"))["ky_spec"]
+        kxspec_all = np.load(os.path.join(diag_dir, "kxspec.npz"))["kx_spec"]
+    except (FileNotFoundError, KeyError):
+        pass
+
+    if eflux_trace is None:
+        eflux_trace = np.array([float(np.sum(np.abs(s["phi"]) ** 2)) for s in snapshots])
+        diag_times = np.array(times)
+    if kyspec_all is None:
+        kyspec_all = np.array([np.sum(np.abs(s["phi"]) ** 2, axis=(0, 1)) for s in snapshots])
+        kxspec_all = np.array([np.sum(np.abs(s["phi"]) ** 2, axis=(0, 2)) for s in snapshots])
+    if growth_all is None:
+        growth_all = np.zeros((len(times), nky))
+
+    kyspec_max = max(np.max(kyspec_all), 1e-30)
+    kxspec_max = max(np.max(kxspec_all), 1e-30)
+
+    # torus mesh — seamless: use endpoint=False, then append first column
+    n_t, n_z = max(nx, 80), max(ny, 200)
     theta = np.linspace(0, 2 * np.pi, n_t, endpoint=False)
     zeta = np.linspace(0, 2 * np.pi, n_z, endpoint=False)
-    T, Z = np.meshgrid(theta, zeta, indexing="ij")
-    R = R0 + a * np.cos(T)
-    X = R * np.cos(Z)
-    Y = R * np.sin(Z)
+    # append first point to close the surface without a seam
+    theta_c = np.append(theta, theta[0] + 2 * np.pi)
+    zeta_c = np.append(zeta, zeta[0] + 2 * np.pi)
+    T, Z = np.meshgrid(theta_c, zeta_c, indexing="ij")
+    Rm = R0 + a * np.cos(T)
+    X = Rm * np.cos(Z)
+    Y = Rm * np.sin(Z)
     Zc = a * np.sin(T)
 
-    # interpolate phi frames to torus resolution
     from scipy.ndimage import zoom
 
     frames_torus = []
     for f in frames_phi:
-        zf = zoom(f, (n_t / f.shape[0], n_z / f.shape[1]), order=1)
+        zf = zoom(f, (n_t / f.shape[0], n_z / f.shape[1]), order=1, mode="wrap")
+        # pad to close: append first row and column
+        zf = np.pad(zf, ((0, 1), (0, 1)), mode="wrap")
         frames_torus.append(zf)
 
-    fig = plt.figure(figsize=(14, 5), facecolor="white")
-    ax3d = fig.add_axes([-0.18, -0.1, 0.85, 1.2], projection="3d", facecolor="white")
-    gs_r = fig.add_gridspec(
-        3,
-        2,
-        height_ratios=[1, 1, 1.1],
-        hspace=0.2,
-        wspace=0.06,
-        left=0.50,
-        right=0.96,
-        top=0.93,
-        bottom=0.02,
+    # --- LAYOUT ---
+    # Left: torus (MASSIVE, fills most of figure), two small 2d projections (bottom-left)
+    # Right: heat flux, ky+kx spectra (large), phi(x,y) (compact)
+    proj_h = 0.20  # height of projection strip
+    fig = plt.figure(figsize=(16, 8), facecolor="white")
+
+    # torus — MASSIVE: nearly full figure, shifted left so right side is for diagnostics
+    ax3d = fig.add_axes([-0.25, 0.10, 0.95, 0.95], projection="3d", facecolor="white")
+
+    # 2d projections: small bottom-left strip
+    gs_proj = fig.add_gridspec(
+        1, 2, wspace=0.08,
+        left=0.03, right=0.42, top=proj_h + 0.04, bottom=0.04,
     )
-    ax_skx = fig.add_subplot(gs_r[0:2, 0])
-    ax_sky = fig.add_subplot(gs_r[0:2, 1])
-    ax_phi = fig.add_subplot(gs_r[2, :])
+    ax_skx = fig.add_subplot(gs_proj[0])
+    ax_sky = fig.add_subplot(gs_proj[1])
+
+    # right column: flux (tall), spectra (tall), phi(x,y) (compact, same height as projections)
+    gs_right = fig.add_gridspec(
+        3, 1, height_ratios=[1.0, 1.0, 0.5], hspace=0.40,
+        left=0.54, right=0.97, top=0.95, bottom=0.04,
+    )
+    ax_flux = fig.add_subplot(gs_right[0])
+    gs_spec = gs_right[1].subgridspec(1, 2, wspace=0.35)
+    ax_kyspec = fig.add_subplot(gs_spec[0])
+    ax_kxspec = fig.add_subplot(gs_spec[1])
+    ax_phi2d = fig.add_subplot(gs_right[2])
 
     norm_phi = Normalize(-vmax_phi, vmax_phi)
-    _ = Normalize(0, vmax_skk)  # norm_df reserved for future use
     lim = R0 + a
     z_lim = a
 
+    # 2d projection panels — RdBu_r colormap
     im_skx = ax_skx.imshow(
-        np.zeros((ns, nkx)),
-        aspect="auto",
-        cmap="RdBu_r",
-        vmin=0,
-        vmax=vmax_skk,
-        origin="lower",
-        interpolation="bilinear",
+        np.zeros((ns, nkx)), aspect="auto", cmap="RdBu_r",
+        vmin=0, vmax=vmax_skk, origin="lower", interpolation="bilinear",
     )
     im_sky = ax_sky.imshow(
-        np.zeros((ns, nky)),
-        aspect="auto",
-        cmap="RdBu_r",
-        vmin=0,
-        vmax=vmax_skk,
-        origin="lower",
-        interpolation="bilinear",
+        np.zeros((ns, nky)), aspect="auto", cmap="RdBu_r",
+        vmin=0, vmax=vmax_skk, origin="lower", interpolation="bilinear",
     )
-    im_phi = ax_phi.imshow(
-        np.zeros((ny, nx)),
-        aspect="auto",
-        cmap="plasma",
-        vmin=-vmax_phi,
-        vmax=vmax_phi,
-        origin="lower",
-        interpolation="bilinear",
+    for ax, title in [(ax_skx, r"$|\delta f|\;(s, k_x)$"), (ax_sky, r"$|\delta f|\;(s, k_y)$")]:
+        ax.set_title(title, fontsize=14, pad=3)
+        ax.tick_params(axis="both", which="both", length=0, labelsize=0,
+                       labelbottom=False, labelleft=False)
+
+    # heat flux — axes grow with time
+    (flux_line,) = ax_flux.plot([], [], "-", color="#24B6AD", lw=1.2)
+    flux_dot = ax_flux.plot([], [], "o", color="#EA4335", ms=5, zorder=5)[0]
+    ax_flux.set_ylabel("heat flux", fontsize=13)
+    ax_flux.set_title("heat flux", fontsize=14, pad=3)
+    ax_flux.grid(True, alpha=0.3)
+    ax_flux.tick_params(labelsize=11)
+
+    # ky spectrum — axes grow with time
+    (kyspec_line,) = ax_kyspec.semilogy([], [], "o-", color="#9B51E0", ms=2, lw=1)
+    ax_kyspec.set_xlim(0, kyspec_all.shape[1] - 1)
+    ax_kyspec.set_title(r"$k_y$ spec", fontsize=14, pad=3)
+    ax_kyspec.grid(True, which="both", alpha=0.3)
+    ax_kyspec.tick_params(labelsize=11)
+
+    # kx spectrum — axes grow with time
+    (kxspec_line,) = ax_kxspec.semilogy([], [], "o-", color="#9B51E0", ms=2, lw=1)
+    ax_kxspec.set_xlim(0, kxspec_all.shape[1] - 1)
+    ax_kxspec.set_title(r"$k_x$ spec", fontsize=14, pad=3)
+    ax_kxspec.grid(True, which="both", alpha=0.3)
+    ax_kxspec.tick_params(labelsize=11)
+
+    # phi(x,y) — plasma, tall
+    im_phi2d = ax_phi2d.imshow(
+        np.zeros((ny, nx)), aspect="auto", cmap="plasma",
+        vmin=-vmax_phi, vmax=vmax_phi, origin="lower", interpolation="bilinear",
     )
-
-    for ax, title in [
-        (ax_skx, r"$|\delta f|\;(s,\,k_x)$"),
-        (ax_sky, r"$|\delta f|\;(s,\,k_y)$"),
-        (ax_phi, r"$\phi\;(x,\,y)$"),
-    ]:
-        ax.set_title(title, fontsize=11, pad=3)
-        ax.tick_params(
-            axis="both", which="both", length=0, labelsize=0, labelbottom=False, labelleft=False
-        )
-
-    # build torus with a wedge cutout (remove 60 degrees to show cross-section)
-    cutout_start, cutout_end = 0, int(n_z * 0.83)  # keep 300 of 360 degrees
-    X_cut = X[:, cutout_start:cutout_end]
-    Y_cut = Y[:, cutout_start:cutout_end]
-    Zc_cut = Zc[:, cutout_start:cutout_end]
+    ax_phi2d.set_title(r"$\phi(x, y)$", fontsize=14, pad=3)
+    ax_phi2d.tick_params(axis="both", which="both", length=0, labelsize=0,
+                         labelbottom=False, labelleft=False)
 
     def draw(fi):
         ax3d.clear()
 
-        # torus with cutout
-        torus_data = frames_torus[fi][:, cutout_start:cutout_end]
-        colors = plt.cm.plasma(norm_phi(torus_data))
+        torus_data = frames_torus[fi]
+        torus_colors = plt.cm.plasma(norm_phi(torus_data))
         ax3d.plot_surface(
-            X_cut,
-            Y_cut,
-            Zc_cut,
-            facecolors=colors,
-            shade=True,
+            X, Y, Zc,
+            facecolors=torus_colors, shade=True,
             lightsource=LightSource(azdeg=315, altdeg=50),
-            rstride=1,
-            cstride=2,
-            antialiased=False,
-            alpha=0.95,
+            rstride=1, cstride=2, antialiased=False, alpha=0.95,
         )
-
-        # cross-section disk at the cutout edge
-        theta_cs = np.linspace(0, 2 * np.pi, n_t)
-        zeta_cut = 2 * np.pi * cutout_end / n_z
-        r_cs = a * np.cos(theta_cs)
-        z_cs = a * np.sin(theta_cs)
-        x_cs = (R0 + r_cs) * np.cos(zeta_cut)
-        y_cs = (R0 + r_cs) * np.sin(zeta_cut)
-
-        # fill cross-section with phi color
-        phi_cs = frames_torus[fi][:, cutout_end % n_z]
-        cs_colors = plt.cm.plasma(norm_phi(phi_cs))
-        for j in range(len(theta_cs) - 1):
-            ax3d.plot(
-                [x_cs[j], x_cs[j + 1]],
-                [y_cs[j], y_cs[j + 1]],
-                [z_cs[j], z_cs[j + 1]],
-                color=cs_colors[j % len(cs_colors)],
-                lw=2.5,
-            )
-
         ax3d.set_xlim(-lim, lim)
         ax3d.set_ylim(-lim, lim)
         ax3d.set_zlim(-z_lim, z_lim)
         ax3d.set_box_aspect([1, 1, a / lim])
-        ax3d.view_init(elev=30, azim=20)
-        ax3d.dist = 5.0  # zoom in (default ~10)
+        ax3d.view_init(elev=25, azim=20 + fi * 0.5)
+        ax3d.dist = 4.2
         ax3d.axis("off")
+
         fig.texts.clear()
         fig.text(
-            0.02,
-            0.93,
-            f"t = {times[fi]:.2f}",
-            fontsize=13,
-            fontfamily="monospace",
-            color="#444444",
-            bbox=dict(facecolor="#eeeeee", edgecolor="none", pad=3, alpha=0.8),
+            0.02, 0.97, f"t = {times[fi]:.1f}",
+            fontsize=20, fontfamily="monospace", fontweight="bold", color="#333",
+            bbox=dict(facecolor="#eeeeee", edgecolor="none", pad=4, alpha=0.85),
         )
 
+        # 2d projections
         im_skx.set_data(np.sum(frames_skk[fi], axis=-1))
         im_sky.set_data(np.sum(frames_skk[fi], axis=-2))
-        im_phi.set_data(frames_phi[fi].T)
+
+        # diagnostics — animated axes that grow with data
+        di = np.argmin(np.abs(diag_times - times[fi]))
+        mask = diag_times <= times[fi]
+
+        # flux: xlim and ylim grow
+        flux_line.set_data(diag_times[mask], eflux_trace[mask])
+        flux_dot.set_data([diag_times[di]], [eflux_trace[di]])
+        t_now = float(diag_times[di])
+        ax_flux.set_xlim(float(diag_times[0]), max(t_now * 1.05, 1.0))
+        ef_now = float(np.max(eflux_trace[mask])) if mask.any() else 1.0
+        ax_flux.set_ylim(0, max(ef_now * 1.3, 1e-6))
+
+        # spectra: ylim adapts to current frame
+        ky_now = kyspec_all[di]
+        kx_now = kxspec_all[di]
+        kyspec_line.set_data(np.arange(len(ky_now)), ky_now)
+        kxspec_line.set_data(np.arange(len(kx_now)), kx_now)
+        ky_max_now = max(float(np.max(ky_now)), 1e-30)
+        kx_max_now = max(float(np.max(kx_now)), 1e-30)
+        ax_kyspec.set_ylim(ky_max_now * 1e-5, ky_max_now * 3)
+        ax_kxspec.set_ylim(kx_max_now * 1e-5, kx_max_now * 3)
+
+        im_phi2d.set_data(frames_phi[fi].T)
         return []
 
     if dry_run:
         draw(len(times) - 1)
-        out_png = output_path.rsplit(".", 1)[0] + "_preview.png"
+        out_png = os.path.join(os.path.dirname(output_path) or ".", "torus_preview.png")
         fig.savefig(out_png, dpi=dpi, facecolor="white")
         print(f"Dry run: saved {out_png}")
-        plt.show()
         plt.close(fig)
         return
 
@@ -503,7 +541,7 @@ def main():
     parser.add_argument("--dry-run", action="store_true", help="show last frame only (no video)")
     args = parser.parse_args()
 
-    snapshots = load_snapshots(args.output_dir, last_only=args.dry_run)
+    snapshots = load_snapshots(args.output_dir, last_only=False)
     ext = os.path.splitext(args.output)[1].lower()
     if args.dry_run or ext in (".mp4", ".gif", ".png"):
         generate_mp4(
