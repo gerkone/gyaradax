@@ -86,6 +86,7 @@ class JAXOps(SolverOps):
         fft_prefactor: complex = 1.0 + 0.0j,
         exclude_zero_mode: bool = True,
         mixed_precision: bool = True,
+        bessel: Optional[jnp.ndarray] = None,
     ) -> jnp.ndarray:
         """nonlinear ExB advection (term III) via pseudospectral Poisson bracket.
 
@@ -117,7 +118,9 @@ class JAXOps(SolverOps):
         pre = self.pre
         mrad, mphi, mphiw3 = pre["nl_mrad"], pre["nl_mphi"], pre["nl_mphiw3"]
         fft_scale, jind = pre["nl_fft_scale"], pre["nl_jind"]
-        kx2d, ky2d, bessel = pre["nl_kx2d"], pre["nl_ky2d"], pre["bessel"]
+        kx2d, ky2d = pre["nl_kx2d"], pre["nl_ky2d"]
+        if bessel is None:
+            bessel = pre["bessel"]
         dum_s, ixzero, iyzero = pre["nl_dum_s"], pre["ixzero"], pre["iyzero"]
         nky = df.shape[-1]
 
@@ -170,6 +173,7 @@ class JAXOps(SolverOps):
         fft_prefactor: complex = 1.0 + 0.0j,
         exclude_zero_mode: bool = True,
         mixed_precision: bool = True,
+        bessel: Optional[jnp.ndarray] = None,
     ) -> jnp.ndarray:
         """nonlinear bracket using z2z 2-for-1 packing (experimental).
 
@@ -181,7 +185,9 @@ class JAXOps(SolverOps):
         pre = self.pre
         mrad, mphi, mphiw3 = pre["nl_mrad"], pre["nl_mphi"], pre["nl_mphiw3"]
         fft_scale, jind = pre["nl_fft_scale"], pre["nl_jind"]
-        kx2d, ky2d, bessel = pre["nl_kx2d"], pre["nl_ky2d"], pre["bessel"]
+        kx2d, ky2d = pre["nl_kx2d"], pre["nl_ky2d"]
+        if bessel is None:
+            bessel = pre["bessel"]
         dum_s, ixzero, iyzero = pre["nl_dum_s"], pre["ixzero"], pre["iyzero"]
         nky = df.shape[-1]
 

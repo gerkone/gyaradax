@@ -143,6 +143,7 @@ def test_cbc_linear_itg_peak_growth():
         drive_scale=1.0,
         idisp=2,
         cfl_safety=0.95,
+        mixed_precision=False,
     )
 
     df = init_f(geom, finit="cosine2", amp_init_real=1e-4)

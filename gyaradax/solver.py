@@ -726,7 +726,9 @@ def linear_precompute(geometry: Dict[str, jnp.ndarray], params: GKParams) -> "GK
         out["geom_tensors"] = geom_tensors(geometry, params=params)
 
         # Precompute adiabatic phi solve arrays
-        pw, pcw, tmp, de, signz, gamma, ints = precompute_phi_adiabatic(geometry, params)
+        pw, pcw, tmp, de, signz, gamma, ints, has_zonal, ixzero, iyzero = precompute_phi_adiabatic(
+            geometry, params
+        )
         out["phi_weight"] = pw
         out["phi_corr_weight"] = pcw
         out["phi_tmp"] = tmp
@@ -734,6 +736,9 @@ def linear_precompute(geometry: Dict[str, jnp.ndarray], params: GKParams) -> "GK
         out["phi_signz"] = signz
         out["phi_gamma"] = gamma
         out["phi_ints"] = ints
+        out["phi_has_zonal"] = has_zonal
+        out["phi_ixzero"] = ixzero
+        out["phi_iyzero"] = iyzero
 
     return GKPre(out)
 
@@ -1020,6 +1025,9 @@ def _compute_phi(df, geometry, params, pre):
             signz=pre["phi_signz"],
             gamma=pre["phi_gamma"],
             ints=pre["phi_ints"],
+            has_zonal=pre["phi_has_zonal"],
+            ixzero=pre["phi_ixzero"],
+            iyzero=pre["phi_iyzero"],
         )
     else:
         return calculate_phi(geometry, df, params=params, pre=pre)
@@ -1081,7 +1089,7 @@ def _compute_nonlinear_rhs(df, phi, geometry, params, pre, ops: SolverOps):
 
         def _nl_sp(df_sp, bessel_sp):
             # NOTE: this vmap pattern still pass geometry but rely on ops to have correct 'pre'
-            return ops.nonlinear_term_iii(df_sp, phi, geometry, mixed_precision=mp)
+            return ops.nonlinear_term_iii(df_sp, phi, geometry, mixed_precision=mp, bessel=bessel_sp)
 
         return jax.vmap(_nl_sp)(df, pre["bessel"])
 

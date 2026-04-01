@@ -6,9 +6,8 @@ from gyaradax.solver import (
     extended_firstdim_fft_size,
     extended_seconddim_fft_size,
     build_jind,
-    pack_half_spectrum,
-    unpack_half_spectrum,
 )
+from gyaradax.utils import pack_half_spectrum, unpack_half_spectrum
 from gyaradax.params import GKParams
 
 

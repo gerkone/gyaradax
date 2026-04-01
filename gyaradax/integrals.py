@@ -169,10 +169,20 @@ def precompute_phi_adiabatic(geometry: Dict[str, jnp.ndarray], params: Any):
     denom = jnp.where(jnp.abs(denom) < 1e-15, 1.0, denom)
     matz = -ints / (signz * de * denom)
 
-    # Weight for the second reduction (zonal mode correction, sum over ns)
-    phi_corr_weight = matz.at[..., 1:].set(0.0)
+    # zonal mode detection
+    krho_flat = jnp.asarray(geometry["krho"], dtype=jnp.float64)
+    kxrh_flat = jnp.asarray(geometry["kxrh"], dtype=jnp.float64)
+    iyzero = jnp.argmin(jnp.abs(krho_flat))
+    ixzero = jnp.argmin(jnp.abs(kxrh_flat))
+    has_zonal = jnp.where(jnp.abs(krho_flat[iyzero]) < 1e-10, 1.0, 0.0)
 
-    return phi_weight, phi_corr_weight, tmp, de, signz, gamma, ints
+    # Weight for the second reduction (zonal mode correction, sum over ns)
+    # Zero matz for all ky except the zonal mode
+    ky_is_zonal = jnp.arange(matz.shape[-1]) == iyzero
+    matz = matz * ky_is_zonal[None, None, None, None, :] * has_zonal
+    phi_corr_weight = matz
+
+    return phi_weight, phi_corr_weight, tmp, de, signz, gamma, ints, has_zonal, ixzero, iyzero
 
 
 def calculate_phi_adiabatic(
@@ -184,6 +194,9 @@ def calculate_phi_adiabatic(
     signz: jnp.ndarray,
     gamma: jnp.ndarray,
     ints: jnp.ndarray,
+    has_zonal: float,
+    ixzero: int,
+    iyzero: int,
 ) -> jnp.ndarray:
     """Newly structured hot path for adiabatic phi solve."""
     # df: (nv, nmu, ns, nkx, nky)
@@ -203,10 +216,18 @@ def calculate_phi_adiabatic(
 
     ns, nkx, nky = phi_raw.shape[2], phi_raw.shape[3], phi_raw.shape[4]
 
-    # ky=0 mask
-    y_mask = jnp.zeros((1, 1, 1, 1, nky), dtype=phi_raw.dtype).at[..., 0].set(1.0)
-    # kx=0 mask
-    x_mask = jnp.zeros((1, 1, 1, nkx, 1), dtype=phi_raw.dtype).at[..., 0, :].set(1.0)
+    # zonal (ky=iyzero) mask
+    y_mask = (
+        jnp.zeros((1, 1, 1, 1, nky), dtype=phi_raw.dtype)
+        .at[..., iyzero]
+        .set(has_zonal)
+    )
+    # kx=ixzero mask
+    x_mask = (
+        jnp.zeros((1, 1, 1, nkx, 1), dtype=phi_raw.dtype)
+        .at[..., ixzero, :]
+        .set(1.0)
+    )
 
     maty_val = jnp.where(x_mask > 0, 1.0 + 0j, maty)
     maty_val = jnp.where(jnp.abs(maty_val) < 1e-15, 1.0, maty_val)
@@ -215,9 +236,9 @@ def calculate_phi_adiabatic(
 
     # Factor 2: poisson_diag (pdiag)
     poisson_diag = exp_cfen * (signz**2) * de * (gamma - 1.0) / tmp
-    # zonal mask (kx=0, ky=0)
+    # zonal mask (kx=ixzero, ky=iyzero)
     zonal_mask = x_mask * y_mask
-    norm_mask = 1.0 - zonal_mask
+    norm_mask = jnp.ones_like(zonal_mask) - zonal_mask
 
     pdiag = poisson_diag * norm_mask - signz * exp_cfen * de / tmp
     pdiag = jnp.where(jnp.abs(pdiag) < 1e-15, -1.0, pdiag)

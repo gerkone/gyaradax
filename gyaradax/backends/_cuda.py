@@ -403,6 +403,7 @@ class CUDAOps(SolverOps):
         fft_prefactor: complex = 1.0 + 0.0j,
         exclude_zero_mode: bool = True,
         mixed_precision: bool = True,
+        bessel: Optional[jnp.ndarray] = None,
     ) -> jnp.ndarray:
         """nonlinear bracket via CUDA graph-captured cuFFT pipeline.
 
@@ -425,7 +426,9 @@ class CUDAOps(SolverOps):
         df_flat = df.reshape(-1, nkx, nky) * efun_sign
 
         p_b = phi.reshape(1, 1, ns, nkx, nky)
-        p_phi = (pre["bessel"] * p_b).reshape(-1, nkx, nky)
+        if bessel is None:
+            bessel = pre["bessel"]
+        p_phi = (bessel * p_b).reshape(-1, nkx, nky)
 
         _register_ffi()
         out_raw = ffi.ffi_call(
