@@ -62,6 +62,8 @@ def register_ffi():
         "lto_fft_bracket_vexp_ffi": _lib.lto_fft_bracket_vexp_ffi,
         "cufft_bracket_ffi": _lib.cufft_bracket_ffi,
         "cufft_graph_bracket_ffi": _lib.cufft_graph_bracket_ffi,
+        "cufft_graph_bracket_fp64_ffi": _lib.cufft_graph_bracket_fp64_ffi,
+        "cufft_graph_bracket_fp64_direct_ffi": _lib.cufft_graph_bracket_fp64_direct_ffi,
     }
 
     for name, symbol in targets.items():
@@ -339,6 +341,71 @@ def main():
         return (fft_scale * efun_sign * jnp.real(fft_prefactor)) * out
 
     @jax.jit
+    def run_cufft_graph_fp64(d, p):
+        nspec_val = dum_s.shape[0]
+        p_phi = (pre["bessel"] * p.reshape(1, 1, -1, nkx, nky)).reshape(-1, nkx, nky)
+        jind_ffi = jnp.array(jind, dtype=jnp.int32)
+
+        out = ffi.ffi_call(
+            "cufft_graph_bracket_fp64_ffi", jax.ShapeDtypeStruct((batch_total, nkx, nky), jnp.complex128)
+        )(
+            d,
+            p_phi,
+            kx_vec,
+            ky_vec,
+            jind_ffi,
+            inverse_jind,
+            dum_s,
+            batch=np.int32(batch_total // nspec_val),
+            mrad=np.int32(mrad),
+            mphi=np.int32(mphi),
+            nkx=np.int32(nkx),
+            nky=np.int32(nky),
+            nspec=np.int32(nspec_val),
+            ixzero=np.int32(pre["ixzero"]),
+            iyzero=np.int32(pre["iyzero"]),
+        )
+
+        fft_prefactor = pre.get("nl_fft_prefactor", 1.0 + 0.0j)
+        fft_scale = pre["nl_fft_scale"]
+        efun = pre.get("efun", 1.0)
+        efun_sign = jnp.where(efun > 0, 1.0, -1.0)
+        return (fft_scale * efun_sign * jnp.real(fft_prefactor)) * out
+
+    @jax.jit
+    def run_cufft_graph_fp64_direct(d, p):
+        nspec_val = dum_s.shape[0]
+        p_phi = (pre["bessel"] * p.reshape(1, 1, -1, nkx, nky)).reshape(-1, nkx, nky)
+        jind_ffi = jnp.array(jind, dtype=jnp.int32)
+
+        out = ffi.ffi_call(
+            "cufft_graph_bracket_fp64_direct_ffi",
+            jax.ShapeDtypeStruct((batch_total, nkx, nky), jnp.complex128),
+        )(
+            d,
+            p_phi,
+            kx_vec,
+            ky_vec,
+            jind_ffi,
+            inverse_jind,
+            dum_s,
+            batch=np.int32(batch_total // nspec_val),
+            mrad=np.int32(mrad),
+            mphi=np.int32(mphi),
+            nkx=np.int32(nkx),
+            nky=np.int32(nky),
+            nspec=np.int32(nspec_val),
+            ixzero=np.int32(pre["ixzero"]),
+            iyzero=np.int32(pre["iyzero"]),
+        )
+
+        fft_prefactor = pre.get("nl_fft_prefactor", 1.0 + 0.0j)
+        fft_scale = pre["nl_fft_scale"]
+        efun = pre.get("efun", 1.0)
+        efun_sign = jnp.where(efun > 0, 1.0, -1.0)
+        return (fft_scale * efun_sign * jnp.real(fft_prefactor)) * out
+
+    @jax.jit
     def run_lto_v4(d, p):
         p_lto = (pre["bessel"] * p.reshape(1, 1, -1, nkx, nky)).reshape(-1, nkx, nky)
         out = ffi.ffi_call(
@@ -416,6 +483,8 @@ def main():
         ("LTO vZ2Z (Optimized)", run_lto_vz2z, (df_lto, phi_lto)),
         ("LTO vZ2Z-merged", run_lto_vz2z_merged, (df_lto, phi_lto)),
         ("LTO v5 Graph", run_lto_v5_graph, (df_lto, phi_lto)),
+        ("cuFFT Graph FP64", run_cufft_graph_fp64, (df_lto, phi_lto)),
+        ("cuFFT Graph FP64 direct", run_cufft_graph_fp64_direct, (df_lto, phi_lto)),
         ("LTO v4 (Graph)", run_lto_v4, (df_lto, phi_lto)),
         ("cuFFT (non-LTO fused)", run_cufft_non_lto, (df_lto, phi_lto)),
     ]

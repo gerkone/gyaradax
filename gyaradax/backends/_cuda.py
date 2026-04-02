@@ -18,7 +18,7 @@ from gyaradax import stencils
 from gyaradax.backends.ops import SolverOps
 from gyaradax.types import GKPre
 
-LIB_PATH = Path(__file__).parent.parent.parent / "cuda_augmentations" / "liblto_bracket.so"
+LIB_PATH = Path(__file__).parent / "cuda_kernels" / "libgyaradax_cuda.so"
 _ffi_registered = False
 
 
@@ -40,9 +40,9 @@ def _register_ffi():
         "apply_vpar_dual_stencil_ffi": _lib.apply_vpar_dual_stencil_ffi,
         "apply_parallel_ffi": _lib.apply_parallel_ffi,
         "apply_parallel_dual_ffi": _lib.apply_parallel_dual_ffi,
-        "lto_fft_bracket_v2_ffi": _lib.lto_fft_bracket_v2_ffi,
-        "lto_fft_bracket_v4_ffi": _lib.lto_fft_bracket_v4_ffi,
-        "cufft_graph_bracket_ffi": _lib.cufft_graph_bracket_ffi,
+        "cufft_graph_bracket_mp_ffi": _lib.cufft_graph_bracket_mp_ffi,
+        "cufft_graph_bracket_fp64_ffi": _lib.cufft_graph_bracket_fp64_ffi,
+        "cufft_graph_bracket_fp64_direct_ffi": _lib.cufft_graph_bracket_fp64_direct_ffi,
         "linear_rhs_vtiled_ffi": _lib.linear_rhs_vtiled_ffi,
         "linear_rhs_fused_ffi": _lib.linear_rhs_fused_ffi,
     }
@@ -409,6 +409,7 @@ class CUDAOps(SolverOps):
 
         uses z2z 2-for-1 packing with phi at its natural (nmu*ns) batch
         size, avoiding the nvpar duplication that dominates memory bandwidth.
+        uses mixed precision (fp32) for the FFTs to reduce memory bandwidth.
         """
         pre = self.pre
         mrad, mphi = pre["nl_mrad"], pre["nl_mphi"]
@@ -432,7 +433,7 @@ class CUDAOps(SolverOps):
 
         _register_ffi()
         out_raw = ffi.ffi_call(
-            "cufft_graph_bracket_ffi",
+            "cufft_graph_bracket_mp_ffi",
             jax.ShapeDtypeStruct((batch_total, nkx, nky), jnp.complex128),
         )(
             df_flat,
