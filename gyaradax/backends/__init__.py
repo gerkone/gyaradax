@@ -19,11 +19,11 @@ from gyaradax.backends.ops import SolverOps
 log = logging.getLogger(__name__)
 
 
-def create_ops(pre, field_template, backend: str = "auto") -> SolverOps:
+def create_ops(pre, field_template, backend: str = "auto", use_z2z: bool = False) -> SolverOps:
     """Create a SolverOps instance for the given backend."""
     if backend == "jax":
-        log.info("Backend: JAX")
-        return JAXOps(pre, field_template)
+        log.info("Backend: JAX%s", " (z2z)" if use_z2z else "")
+        return JAXOps(pre, field_template, use_z2z=use_z2z)
 
     if backend in ("cuda", "auto"):
         has_gpu = any(d.platform == "gpu" for d in jax.devices())
@@ -34,7 +34,7 @@ def create_ops(pre, field_template, backend: str = "auto") -> SolverOps:
         if has_gpu:
             if is_available():
                 log.info("Backend: CUDA")
-                return CUDAOps(pre, field_template)
+                return CUDAOps(pre, field_template, use_z2z=use_z2z)
             elif backend == "cuda":
                 raise RuntimeError("backend='cuda' but extensions not compiled")
             else:

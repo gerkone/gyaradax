@@ -1,7 +1,7 @@
 """CUDA backend for solver operations using custom FFI kernels.
 
-provides fused stencil application and nonlinear bracket kernels
-compiled from cuda_augmentations/. falls back gracefully if the
+Provides fused stencil application and nonlinear bracket kernels
+compiled from cuda_augmentations/. Falls back gracefully if the
 shared library is not compiled.
 """
 
@@ -18,7 +18,14 @@ from gyaradax import stencils
 from gyaradax.backends.ops import SolverOps
 from gyaradax.types import GKPre
 
-LIB_PATH = Path(__file__).parent / "cuda_kernels" / "libgyaradax_cuda.so"
+# check both old (cuda_augmentations) and new (cuda_kernels) locations
+_CUDA_KERNELS_DIR = Path(__file__).parent / "cuda_kernels"
+_CUDA_AUG_DIR = Path(__file__).parent.parent.parent / "cuda_augmentations"
+LIB_PATH = (
+    _CUDA_KERNELS_DIR / "libgyaradax_cuda.so"
+    if (_CUDA_KERNELS_DIR / "libgyaradax_cuda.so").exists()
+    else _CUDA_AUG_DIR / "liblto_bracket.so"
+)
 _ffi_registered = False
 
 
@@ -32,7 +39,7 @@ def _register_ffi():
 
     try:
         _lib = ctypes.cdll.LoadLibrary(str(LIB_PATH))
-    except Exception:
+    except (OSError, AttributeError):
         return False
 
     targets = {
@@ -40,9 +47,7 @@ def _register_ffi():
         "apply_vpar_dual_stencil_ffi": _lib.apply_vpar_dual_stencil_ffi,
         "apply_parallel_ffi": _lib.apply_parallel_ffi,
         "apply_parallel_dual_ffi": _lib.apply_parallel_dual_ffi,
-        "cufft_graph_bracket_mp_ffi": _lib.cufft_graph_bracket_mp_ffi,
-        "cufft_graph_bracket_fp64_ffi": _lib.cufft_graph_bracket_fp64_ffi,
-        "cufft_graph_bracket_fp64_direct_ffi": _lib.cufft_graph_bracket_fp64_direct_ffi,
+        "cufft_graph_bracket_ffi": _lib.cufft_graph_bracket_ffi,
         "linear_rhs_vtiled_ffi": _lib.linear_rhs_vtiled_ffi,
         "linear_rhs_fused_ffi": _lib.linear_rhs_fused_ffi,
     }
@@ -50,7 +55,7 @@ def _register_ffi():
     for name, symbol in targets.items():
         try:
             ffi.register_ffi_target(name, ffi.pycapsule(symbol), platform="CUDA")
-        except Exception:
+        except (AttributeError, RuntimeError):
             pass
 
     _ffi_registered = True
@@ -58,37 +63,49 @@ def _register_ffi():
 
 
 def is_available():
-    """check if CUDA FFI kernels are compiled and a GPU is present."""
-    return LIB_PATH.exists() and jax.devices("cuda")
+    """Check if CUDA FFI kernels are compiled and a GPU is present."""
+    return LIB_PATH.exists() and bool(jax.devices("cuda"))
+
+
+# velocity tiling factor for the vtiled linear RHS kernel
+_V_TILE = 8
 
 
 @jax.tree_util.register_pytree_node_class
 class CUDAOps(SolverOps):
     """CUDA backend using custom FFI kernels for stencils and FFT bracket."""
 
-    def __init__(self, pre: GKPre, field_template: Optional[jnp.ndarray] = None):
+    def __init__(
+        self, pre: GKPre, field_template: Optional[jnp.ndarray] = None, use_z2z: bool = False
+    ):
         _register_ffi()
-        self.pre = pre
-        if field_template is not None:
-            self.template_meta = (field_template.shape, field_template.dtype)
-        else:
-            self.template_meta = (None, None)
+        super().__init__(pre, field_template, use_z2z=use_z2z)
 
-    def tree_flatten(self):
-        return (self.pre,), self.template_meta
+    def _prepare_parallel_coeffs(self, c, nv, nmu, ns, nkx, nky):
+        """Reshape stencil coefficients to (9, nv*nmu, ns, nkx, nky) for FFI."""
+        if c.ndim == 2:
+            c = c.reshape(9, 1, 1, ns, 1, 1)
+        elif c.ndim == 4:
+            c = c.reshape(9, nv, nmu, ns, 1, 1)
+        elif c.ndim != 6:
+            while c.ndim < 6:
+                c = c[..., None]
+        nv_nmu = nv * nmu
+        return (
+            jnp.broadcast_to(c, (9, nv, nmu, ns, nkx, nky)).reshape(9, nv_nmu, ns, nkx, nky).copy()
+        )
 
-    @classmethod
-    def tree_unflatten(cls, aux_data, children):
-        (pre,) = children
-        obj = cls(pre, None)
-        obj.template_meta = aux_data
-        return obj
+    def _pack_shift_maps(self):
+        """Pack precomputed shift maps into (9, ns, nkx, nky, 2) int32 array."""
+        valid_jax = jnp.array(self.pre["valid_shift"])
+        s_map_jax = jnp.where(valid_jax, self.pre["s_shift"], -1).astype(jnp.int32)
+        kx_map_jax = jnp.array(self.pre["kx_shift"]).astype(jnp.int32)
+        return jnp.stack([s_map_jax, kx_map_jax], axis=-1).copy()
 
     def _apply_vpar(self, field: jnp.ndarray, coeffs) -> jnp.ndarray:
-        """apply 5-point vpar stencil via CUDA kernel."""
+        """Apply 5-point vpar stencil via CUDA kernel."""
         nv = field.shape[0]
         inner_size = field.size // nv
-
         return ffi.ffi_call(
             "apply_vpar_stencil_ffi",
             [jax.ShapeDtypeStruct(field.shape, field.dtype)],
@@ -108,10 +125,9 @@ class CUDAOps(SolverOps):
     def _apply_vpar_dual(
         self, field: jnp.ndarray, coeffs_d1, coeffs_d4
     ) -> Tuple[jnp.ndarray, jnp.ndarray]:
-        """apply d1 and d4 vpar stencils in a single fused kernel."""
+        """Apply d1 and d4 vpar stencils in a single fused kernel."""
         nv = field.shape[0]
         inner_size = field.size // nv
-
         return ffi.ffi_call(
             "apply_vpar_dual_stencil_ffi",
             [
@@ -135,32 +151,11 @@ class CUDAOps(SolverOps):
         )
 
     def _apply_parallel(self, field: jnp.ndarray, coeffs: jnp.ndarray) -> jnp.ndarray:
-        """apply 9-point parallel stencil via CUDA kernel."""
+        """Apply 9-point parallel stencil via CUDA kernel."""
         nv, nmu, ns, nkx, nky = field.shape
-        nv_nmu = np.int32(nv * nmu)
-
-        def prepare_c(c):
-            if c.ndim == 2:
-                c = c.reshape(9, 1, 1, ns, 1, 1)
-            elif c.ndim == 4:
-                c = c.reshape(9, nv, nmu, ns, 1, 1)
-            elif c.ndim != 6:
-                while c.ndim < 6:
-                    c = c[..., None]
-            return (
-                jnp.broadcast_to(c, (9, nv, nmu, ns, nkx, nky))
-                .reshape(9, nv_nmu, ns, nkx, nky)
-                .copy()
-            )
-
-        c_1d = prepare_c(coeffs).reshape(-1)
+        c_1d = self._prepare_parallel_coeffs(coeffs, nv, nmu, ns, nkx, nky).reshape(-1)
         field_b = jnp.broadcast_to(field, (nv, nmu, ns, nkx, nky)).copy()
-
-        valid_jax = jnp.array(self.pre["valid_shift"])
-        s_map_jax = jnp.where(valid_jax, self.pre["s_shift"], -1).astype(jnp.int32)
-        kx_map_jax = jnp.array(self.pre["kx_shift"]).astype(jnp.int32)
-        packed_maps = jnp.stack([s_map_jax, kx_map_jax], axis=-1).copy()
-
+        packed_maps = self._pack_shift_maps()
         return ffi.ffi_call(
             "apply_parallel_ffi",
             [jax.ShapeDtypeStruct(field_b.shape, field_b.dtype)],
@@ -168,7 +163,7 @@ class CUDAOps(SolverOps):
             field_b,
             c_1d,
             packed_maps,
-            nv_nmu=np.int32(nv_nmu),
+            nv_nmu=np.int32(nv * nmu),
             nkx=np.int32(nkx),
             ns=np.int32(ns),
             nky=np.int32(nky),
@@ -184,7 +179,7 @@ class CUDAOps(SolverOps):
         coeffs1: jnp.ndarray,
         coeffs2: jnp.ndarray,
     ) -> Tuple[jnp.ndarray, jnp.ndarray]:
-        """apply parallel stencils to two fields in a single fused kernel."""
+        """Apply parallel stencils to two fields in a single fused kernel."""
         nv1, nmu1, ns1, nkx1, nky1 = field1.shape
         nv2, nmu2, ns2, nkx2, nky2 = field2.shape
         assert (
@@ -197,29 +192,9 @@ class CUDAOps(SolverOps):
         f1_b = jnp.broadcast_to(field1, target_shape).copy()
         f2_b = jnp.broadcast_to(field2, target_shape).copy()
 
-        nv_nmu = np.int32(nv * nmu)
-
-        def prepare_c(c):
-            if c.ndim == 2:
-                c = c.reshape(9, 1, 1, ns, 1, 1)
-            elif c.ndim == 4:
-                c = c.reshape(9, nv, nmu, ns, 1, 1)
-            elif c.ndim != 6:
-                while c.ndim < 6:
-                    c = c[..., None]
-            return (
-                jnp.broadcast_to(c, (9, nv, nmu, ns, nkx, nky))
-                .reshape(9, nv_nmu, ns, nkx, nky)
-                .copy()
-            )
-
-        c1_1d = prepare_c(coeffs1).reshape(-1)
-        c2_1d = prepare_c(coeffs2).reshape(-1)
-
-        valid_jax = jnp.array(self.pre["valid_shift"])
-        s_map_jax = jnp.where(valid_jax, self.pre["s_shift"], -1).astype(jnp.int32)
-        kx_map_jax = jnp.array(self.pre["kx_shift"]).astype(jnp.int32)
-        packed_maps = jnp.stack([s_map_jax, kx_map_jax], axis=-1).copy()
+        c1_1d = self._prepare_parallel_coeffs(coeffs1, nv, nmu, ns, nkx, nky).reshape(-1)
+        c2_1d = self._prepare_parallel_coeffs(coeffs2, nv, nmu, ns, nkx, nky).reshape(-1)
+        packed_maps = self._pack_shift_maps()
 
         return ffi.ffi_call(
             "apply_parallel_dual_ffi",
@@ -233,7 +208,7 @@ class CUDAOps(SolverOps):
             c1_1d,
             c2_1d,
             packed_maps,
-            nv_nmu=np.int32(nv_nmu),
+            nv_nmu=np.int32(nv * nmu),
             nkx=np.int32(nkx),
             ns=np.int32(ns),
             nky=np.int32(nky),
@@ -250,18 +225,20 @@ class CUDAOps(SolverOps):
         params_drive_scale: float,
         target_name: str = "linear_rhs_fused_ffi",
     ) -> jnp.ndarray:
-        """fused linear RHS kernel for 5D data."""
+        """Fused linear RHS kernel for 5D data.
+
+        Dispatches to either the basic fused kernel or the velocity-tiled
+        variant depending on target_name. Falls back to fused if the
+        velocity dimension is not divisible by _V_TILE.
+        """
         nv, nmu, ns, nkx, nky = df.shape
         nv_nmu = np.int32(nv * nmu)
-        V_TILE = 8
 
-        if target_name == "linear_rhs_vtiled_ffi" and nv_nmu % V_TILE != 0:
+        # vtiled requires nv*nmu divisible by tile size
+        if target_name == "linear_rhs_vtiled_ffi" and nv_nmu % _V_TILE != 0:
             target_name = "linear_rhs_fused_ffi"
 
-        f_b = df.copy()
-        phi_b = phi.copy()
-
-        # use explicit reshape to robustly handle the leading singleton dim in JIT
+        # reshape precomputed arrays to expected shapes for FFI
         bessel = pre["bessel"].reshape(nmu, ns, nkx, nky).copy()
 
         c_upar_in = pre["s_total_upar"]
@@ -269,13 +246,11 @@ class CUDAOps(SolverOps):
             c_upar_in = c_upar_in[:, :, 0:1, ...]
         elif c_upar_in.ndim == 7 and c_upar_in.shape[3] > 1:
             c_upar_in = c_upar_in[:, :, :, 0:1, ...]
-
         c_upar = jnp.broadcast_to(c_upar_in, (9, nv, 1, ns, nkx, nky)).copy()
         c_t7 = jnp.broadcast_to(pre["s_total_t7"], (9, nv, nmu, ns, nkx, nky)).copy()
 
         utrap = pre["utrap"].reshape(nmu, ns).copy()
         abs_vp = pre["abs_dum2_vp"].reshape(nmu, ns).copy()
-
         drift_x = pre["drift_x"].reshape(nv, nmu, ns).copy()
         drift_y = pre["drift_y"].reshape(nv, nmu, ns).copy()
         fmaxwl = pre["fmaxwl"].reshape(nv, nmu, ns).copy()
@@ -285,15 +260,13 @@ class CUDAOps(SolverOps):
         kx_vals = pre["kx_b"].reshape(-1)[:nkx].copy()
         ky_vals = pre["ky_b"].reshape(-1)[:nky].copy()
 
-        valid_jax = jnp.array(pre["valid_shift"])
-        s_map_jax = jnp.where(valid_jax, pre["s_shift"], -1).astype(jnp.int32)
-        kx_map_jax = jnp.array(pre["kx_shift"]).astype(jnp.int32)
-        packed_maps = jnp.stack([s_map_jax, kx_map_jax], axis=-1).reshape(9, ns, nkx, nky, 2).copy()
+        packed_maps = self._pack_shift_maps().reshape(9, ns, nkx, nky, 2).copy()
 
         d1 = stencils.VPAR_D1
         d4 = stencils.VPAR_D4
-
         attrs = dict(
+            signz0=float(pre["signz0"]),
+            tmp0=float(pre["tmp0"]),
             nv=np.int32(nv),
             nmu=np.int32(nmu),
             ns=np.int32(ns),
@@ -315,15 +288,12 @@ class CUDAOps(SolverOps):
             drive_scale=float(params_drive_scale),
         )
         if target_name == "linear_rhs_vtiled_ffi":
-            attrs["v_tile"] = np.int32(V_TILE)
-
-        signz0 = jnp.asarray(pre["signz0"], dtype=jnp.float64).reshape(())
-        tmp0   = jnp.asarray(pre["tmp0"],   dtype=jnp.float64).reshape(())
+            attrs["v_tile"] = np.int32(_V_TILE)
 
         _register_ffi()
         return ffi.ffi_call(target_name, [jax.ShapeDtypeStruct(df.shape, df.dtype)])(
-            f_b,
-            phi_b,
+            df.copy(),
+            phi.copy(),
             bessel,
             c_upar,
             c_t7,
@@ -337,8 +307,6 @@ class CUDAOps(SolverOps):
             hyper,
             kx_vals,
             ky_vals,
-            signz0,
-            tmp0,
             **attrs,
         )[0]
 
@@ -349,53 +317,74 @@ class CUDAOps(SolverOps):
         geometry: Dict[str, jnp.ndarray],
         params,
         pre: Dict[str, jnp.ndarray],
-    ) -> jnp.ndarray:
-        """fused linear RHS for single or multi-species."""
-        if df.ndim == 6:
-            nsp, nv, nmu, ns, nkx, nky = df.shape
-            df_5d = df.reshape(nsp * nv * nmu, 1, ns, nkx, nky)
+    ) -> Optional[jnp.ndarray]:
+        """Fused linear RHS for single or multi-species.
 
-            uni_pre = pre.copy()
-
-            def r6to5(arr):
-                if arr.ndim == 6:
-                    return arr.reshape(nsp * nv * nmu, 1, ns, nkx, nky)
-                elif arr.ndim == 5:
-                    return jnp.broadcast_to(arr[None, ...], (nsp, nv, nmu, ns, nkx, nky)).reshape(
-                        nsp * nv * nmu, 1, ns, nkx, nky
-                    )
-                return arr
-
-            def r4to3(arr):
-                return arr.reshape(nsp * nv * nmu, 1, ns)
-
-            uni_pre["bessel"] = r6to5(pre["bessel"])
-            uni_pre["s_total_upar"] = r6to5(pre["s_total_upar"])
-            uni_pre["s_total_t7"] = r6to5(pre["s_total_t7"])
-            uni_pre["fmaxwl"] = r4to3(pre["fmaxwl"])
-            uni_pre["dmaxwel_fm_ek"] = pre["dmaxwel_fm_ek"].reshape(nsp * nv * nmu, 1, ns, nky)
-            uni_pre["drift_x"] = r4to3(pre["drift_x"])
-            uni_pre["drift_y"] = r4to3(pre["drift_y"])
-
-            utrap_4d = jnp.broadcast_to(pre["utrap"][:, None, :, :], (nsp, nv, nmu, ns))
-            abs_vp_4d = jnp.broadcast_to(pre["abs_dum2_vp"][:, None, :, :], (nsp, nv, nmu, ns))
-            uni_pre["utrap"] = utrap_4d.reshape(nsp * nv * nmu, 1, ns)
-            uni_pre["abs_dum2_vp"] = abs_vp_4d.reshape(nsp * nv * nmu, 1, ns)
-
-            if jnp.unique(pre["signz0"]).size > 1 or jnp.unique(pre["tmp0"]).size > 1:
-                return None
-
-            uni_pre["signz0"] = pre["signz0"][0]
-            uni_pre["tmp0"] = pre["tmp0"][0]
-
-            out_5d = self._linear_rhs_fused(
-                df_5d, phi, uni_pre, params.dvp, params.disp_vp, params.drive_scale
-            )
-            return out_5d.reshape(nsp, nv, nmu, ns, nkx, nky)
-        else:
+        For kinetic electrons (6D df), flattens species into the velocity
+        batch dimension. Returns None if per-species parameters differ
+        (signz0/tmp0), signalling the solver to fall back to vmap.
+        """
+        if df.ndim == 5:
             return self._linear_rhs_fused(
                 df, phi, pre, params.dvp, params.disp_vp, params.drive_scale
             )
+
+        # kinetic: flatten (nsp, nv, nmu) → single velocity batch
+        nsp, nv, nmu, ns, nkx, nky = df.shape
+
+        # per-species scalar check — must be uniform for the fused kernel
+        signz0 = pre["signz0"]
+        tmp0 = pre["tmp0"]
+        if hasattr(signz0, "__len__") and (
+            jnp.unique(jnp.asarray(signz0)).size > 1 or jnp.unique(jnp.asarray(tmp0)).size > 1
+        ):
+            return None
+
+        nv_flat = nsp * nv * nmu
+        df_5d = df.reshape(nv_flat, 1, ns, nkx, nky)
+
+        # build a minimal dict with reshaped arrays for the fused kernel
+        def _r6to5(arr):
+            if arr.ndim == 6:
+                return arr.reshape(nv_flat, 1, ns, nkx, nky)
+            elif arr.ndim == 5:
+                return jnp.broadcast_to(arr[None, ...], (nsp, nv, nmu, ns, nkx, nky)).reshape(
+                    nv_flat, 1, ns, nkx, nky
+                )
+            return arr
+
+        def _r4to3(arr):
+            return arr.reshape(nv_flat, 1, ns)
+
+        sp_pre = {
+            "bessel": _r6to5(pre["bessel"]),
+            "s_total_upar": _r6to5(pre["s_total_upar"]),
+            "s_total_t7": _r6to5(pre["s_total_t7"]),
+            "fmaxwl": _r4to3(pre["fmaxwl"]),
+            "dmaxwel_fm_ek": pre["dmaxwel_fm_ek"].reshape(nv_flat, 1, ns, nky),
+            "drift_x": _r4to3(pre["drift_x"]),
+            "drift_y": _r4to3(pre["drift_y"]),
+            "utrap": jnp.broadcast_to(pre["utrap"][:, None, :, :], (nsp, nv, nmu, ns)).reshape(
+                nv_flat, 1, ns
+            ),
+            "abs_dum2_vp": jnp.broadcast_to(
+                pre["abs_dum2_vp"][:, None, :, :], (nsp, nv, nmu, ns)
+            ).reshape(nv_flat, 1, ns),
+            "signz0": signz0[0] if hasattr(signz0, "__getitem__") else signz0,
+            "tmp0": tmp0[0] if hasattr(tmp0, "__getitem__") else tmp0,
+            # pass through shared arrays unchanged
+            "hyper": pre["hyper"],
+            "kx_b": pre["kx_b"],
+            "ky_b": pre["ky_b"],
+            "valid_shift": pre["valid_shift"],
+            "s_shift": pre["s_shift"],
+            "kx_shift": pre["kx_shift"],
+        }
+
+        out_5d = self._linear_rhs_fused(
+            df_5d, phi, sp_pre, params.dvp, params.disp_vp, params.drive_scale
+        )
+        return out_5d.reshape(nsp, nv, nmu, ns, nkx, nky)
 
     def nonlinear_term_iii(
         self,
@@ -409,11 +398,11 @@ class CUDAOps(SolverOps):
         mixed_precision: bool = True,
         bessel: Optional[jnp.ndarray] = None,
     ) -> jnp.ndarray:
-        """nonlinear bracket via CUDA graph-captured cuFFT pipeline.
+        """Nonlinear bracket via CUDA graph-captured cuFFT pipeline.
 
-        uses z2z 2-for-1 packing with phi at its natural (nmu*ns) batch
-        size, avoiding the nvpar duplication that dominates memory bandwidth.
-        uses mixed precision (fp32) for the FFTs to reduce memory bandwidth.
+        Uses z2z 2-for-1 packing with phi at its natural (nmu*ns) batch
+        size. Dispatches to mixed precision (FP32 FFTs) or full precision
+        (FP64) kernel based on the mixed_precision flag.
         """
         pre = self.pre
         mrad, mphi = pre["nl_mrad"], pre["nl_mphi"]
@@ -435,9 +424,10 @@ class CUDAOps(SolverOps):
             bessel = pre["bessel"]
         p_phi = (bessel * p_b).reshape(-1, nkx, nky)
 
+        # the compiled kernel uses mixed precision (FP32 FFTs, FP64 accumulation)
         _register_ffi()
         out_raw = ffi.ffi_call(
-            "cufft_graph_bracket_mp_ffi",
+            "cufft_graph_bracket_ffi",
             jax.ShapeDtypeStruct((batch_total, nkx, nky), jnp.complex128),
         )(
             df_flat,

@@ -71,7 +71,6 @@ def run_benchmark():
 
     cfg = load_config(args.config)
     data_dir = getattr(cfg.run, "data_dir", None)
-    kinetic = args.kinetic
 
     overrides = {"mixed_precision": args.mp}
     params = gkparams_from_config(cfg, **overrides)

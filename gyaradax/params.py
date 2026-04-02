@@ -72,6 +72,7 @@ class GKParams:
     cfl_safety: float = 0.95
     mixed_precision: bool = True
     backend: str = "jax"
+    use_z2z: bool = False
 
     # physical parameters (typically from the kinetic species)
     rlt: float = 1.0
@@ -108,21 +109,51 @@ class GKParams:
         "adaptive_dt",
         "mixed_precision",
         "backend",
-        "dvp",
+        "use_z2z",
+        "dt",
+        "naverage",
+        "disp_par",
         "disp_vp",
+        "disp_x",
+        "disp_y",
+        "idisp",
         "drive_scale",
+        "norm_eps",
+        "cfl_safety",
+        "amp_init",
+        "dvp",
+        "sgr_dist",
+        "kxmax",
+        "kymax",
+        "mas",
+        "tmp",
+        "de",
+        "signz",
+        "vthrat",
+        "dgrid",
+        "tgrid",
     )
 
     def tree_flatten(self):
         d = vars(self)
-        aux = {k: d[k] for k in self._STATIC_FIELDS}
-        leaves = [d[k] for k in d if k not in self._STATIC_FIELDS]
+        aux = {}
+        leaves = []
+        leaf_keys = []
+        for k, v in d.items():
+            if k.startswith("_"):
+                continue
+            # arrays must be leaves (not hashable for aux)
+            if k in self._STATIC_FIELDS and not hasattr(v, "shape"):
+                aux[k] = v
+            else:
+                leaves.append(v)
+                leaf_keys.append(k)
+        aux["_leaf_keys"] = tuple(leaf_keys)
         return leaves, aux
 
     @classmethod
     def tree_unflatten(cls, aux, leaves):
-        d = vars(cls())  # get field ordering from defaults
-        leaf_keys = [k for k in d if k not in cls._STATIC_FIELDS]
+        leaf_keys = aux.pop("_leaf_keys")
         kwargs = dict(zip(leaf_keys, leaves))
         kwargs.update(aux)
         return cls(**kwargs)
@@ -194,7 +225,7 @@ def gkparams_from_input_dat(input_dat_path: str, **overrides) -> GKParams:
 def gkparams_from_input_and_geometry(
     input_dat_path: str, geometry: Dict[str, Any], **overrides
 ) -> GKParams:
-    """build GKParams from input.dat + a pre-computed geometry dict.
+    """Build GKParams from input.dat + a pre-computed geometry dict.
 
     unlike gkparams_from_input_dat, this does not require geom.dat or
     other GKW output files — geometry scalars come from the dict.

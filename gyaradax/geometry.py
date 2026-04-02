@@ -650,7 +650,7 @@ def compute_geometry_from_input(input_dat_path: str) -> Dict[str, Any]:
 
 
 def geometry_from_geom_dat_and_input(input_dat_path: str) -> Dict[str, Any]:
-    """build geometry from a ``geom.dat`` file + grids from ``input.dat``.
+    """Build geometry from a ``geom.dat`` file + grids from ``input.dat``.
 
     use this for geometry types not supported by the analytic circular model
     (e.g. slab_periodic) when reference/geom.dat is available.

@@ -26,11 +26,6 @@ import jax
 import jax.numpy as jnp
 
 jax.config.update("jax_enable_x64", True)
-import os as _os
-
-_jax_cache = _os.environ.get("JAX_COMPILATION_CACHE_DIR", None)
-if _jax_cache:
-    jax.config.update("jax_compilation_cache_dir", _jax_cache)
 
 import math
 import functools
@@ -51,7 +46,7 @@ from gyaradax import stencils
 from gyaradax.params import GKParams
 from gyaradax.types import GKPre, GKState
 from gyaradax.backends.ops import SolverOps
-from gyaradax.utils import pack_half_spectrum, unpack_half_spectrum
+from gyaradax.utils import pack_half_spectrum, unpack_half_spectrum  # noqa: F401
 from einops import rearrange
 
 
@@ -558,8 +553,8 @@ def _compute_species_coeffs(
         "abs_dum2_par": abs_par,
         "abs_dum2_vp": abs_vp,
         "term7_fac": term7_fac,
-        "tmp0": jnp.asarray(tmp if ndim == 5 else tmp.squeeze(), dtype=jnp.float64),
-        "signz0": jnp.asarray(signz if ndim == 5 else signz.squeeze(), dtype=jnp.float64),
+        "tmp0": float(tmp) if ndim == 5 else jnp.asarray(tmp.squeeze(), dtype=jnp.float64),
+        "signz0": float(signz) if ndim == 5 else jnp.asarray(signz.squeeze(), dtype=jnp.float64),
     }
 
 
@@ -956,7 +951,7 @@ def init_f(
 
 
 def _broadcast_profile(prof_s, vel_env, n_species, nv, nmu, ns, nkx, nky):
-    """broadcast a parallel profile (and optional velocity envelope) to full shape."""
+    """Broadcast a parallel profile (and optional velocity envelope) to full shape."""
     if vel_env is not None:
         # vel_env: (nv, nmu, ns), prof_s: (ns,)
         base = vel_env * prof_s[None, None, :]  # (nv, nmu, ns)
@@ -1012,7 +1007,7 @@ def advance_state(
 
 
 def _compute_phi(df, geometry, params, pre):
-    """compute phi via the appropriate solver."""
+    """Compute phi via the appropriate solver."""
     if params.adiabatic_electrons and "phi_weight" in pre and "phi_corr_weight" in pre:
         return calculate_phi_adiabatic(
             df,
@@ -1109,7 +1104,7 @@ def gkstep_single(
 ]:
     """Single small-step RK4 time integration with backend dispatch."""
     if ops is None:
-        ops = create_ops(pre, prev_df, backend=params.backend)
+        ops = create_ops(pre, prev_df, backend=params.backend, use_z2z=params.use_z2z)
 
     dt = dt_override if dt_override is not None else jnp.array(params.dt, dtype=jnp.float64)
 
@@ -1181,7 +1176,7 @@ def gksolve(
     if pre is None:
         pre = linear_precompute(geometry, params)
 
-    ops = create_ops(pre, df, backend=params.backend)
+    ops = create_ops(pre, df, backend=params.backend, use_z2z=params.use_z2z)
 
     if params.adaptive_dt and params.non_linear:
         # adaptive CFL path: carry dt as part of scan state

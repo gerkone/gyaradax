@@ -28,6 +28,7 @@ This installs `gyaradax` in editable mode with JAX (CUDA 12), numpy, and dev too
 - **`params.py`**: Configuration pytrees.
 - **`stencils.py`**: Finite difference stencil definitions.
 - **`diag.py`**: Diagnostics (growth rate, frequency, spectral).
+- **`backends/`**: Backend dispatch (JAX, CUDA). See [CUDA build instructions](#cuda-backend) below.
 - **`plot_utils.py`**: Visualization.
 
 ## Running Simulations
@@ -77,12 +78,46 @@ If you have an existing GKW run, you can extract its parameters and geometry int
 python -m scripts.gkw_to_yaml /path/to/gkw_run configs/my_sim.yaml
 ```
 
-## State of the project and TODOs
+## CUDA Backend
+
+The optional CUDA backend provides fused kernels for the linear RHS stencils and the nonlinear Poisson bracket (cuFFT graph-captured pipeline). It requires CUDA Toolkit >= 13.1 and a GPU with compute capability >= 80.
+
+### Building
+
+From the `gyaradax/backends/cuda_kernels/` directory:
+```bash
+mkdir -p _build && cd _build && cmake .. -DCMAKE_BUILD_TYPE=Release && cmake --build . -j$(nproc) && cmake --install . && cd ..
+```
+
+To target a specific GPU architecture (e.g., Ampere sm_80):
+```bash
+cmake .. -DCMAKE_BUILD_TYPE=Release -DGPU_ARCHITECTURES="80"
+```
+
+CMake prints the detected compute capability, jaxlib version, and cudatoolkit. Ensure these are correct before proceeding.
+
+### Using the CUDA backend
+
+Once compiled, the CUDA backend is auto-detected:
+```python
+# auto-detect (uses CUDA if available, falls back to JAX)
+params = GKParams(backend="auto")
+
+# force CUDA
+params = GKParams(backend="cuda")
+```
+
+Or via config YAML:
+```yaml
+solver:
+  backend: cuda
+```
+
+## State of the project
 
 **Verification**:
 - [x] Empirical validation against reference GKW trajectories.
-<<<<<<< README.md
-- [x] Anaytical validation on RH and Cyclone Base Case.
+- [x] Analytical validation on RH and Cyclone Base Case.
 - [x] Differentiable programming: inverse problem and sensitivity analysis.
 - [ ] GKW tests and benchmarks (see [the gkw paper](docs/gkw.pdf) and Chapter 11 in the manual).
 - [ ] Solver-in-the-Loop and PINNs as an ML showcase.

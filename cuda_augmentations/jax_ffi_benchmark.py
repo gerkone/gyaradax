@@ -192,7 +192,7 @@ def main():
 
     @jax.jit
     def run_jax_z2z(d, p):
-        return jax_ops.nonlinear_term_iii_z2z(d, p, geom, mixed_precision=False)
+        return jax_ops._nl_z2z(d, p, geom, mixed_precision=False)
 
     # 4. Shared Physics & Solver Wrapper
     def apply_physics_wrapper(out_raw, is_lto=True):

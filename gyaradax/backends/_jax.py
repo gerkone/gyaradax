@@ -1,7 +1,7 @@
 """JAX backend for solver operations.
 
-implements the nonlinear ExB bracket (term III) and stencil operations
-using pure JAX. this is the direct port of GKW's non_linear_terms.F90
+Implements the nonlinear ExB bracket (term III) and stencil operations
+using pure JAX. This is the direct port of GKW's non_linear_terms.F90
 and linear_terms.f90 stencil application.
 """
 
@@ -11,7 +11,6 @@ import jax
 import jax.numpy as jnp
 
 from gyaradax.backends.ops import SolverOps
-from gyaradax.types import GKPre
 from gyaradax.utils import pack_half_spectrum, unpack_half_spectrum
 
 
@@ -19,25 +18,8 @@ from gyaradax.utils import pack_half_spectrum, unpack_half_spectrum
 class JAXOps(SolverOps):
     """JAX implementation of solver operations."""
 
-    def __init__(self, pre: GKPre, field_template: Optional[jnp.ndarray] = None):
-        self.pre = pre
-        if field_template is not None:
-            self.template_meta = (field_template.shape, field_template.dtype)
-        else:
-            self.template_meta = (None, None)
-
-    def tree_flatten(self):
-        return (self.pre,), self.template_meta
-
-    @classmethod
-    def tree_unflatten(cls, aux_data, children):
-        (pre,) = children
-        obj = cls(pre, None)
-        obj.template_meta = aux_data
-        return obj
-
     def _apply_vpar(self, field: jnp.ndarray, coeffs) -> jnp.ndarray:
-        """apply 5-point vpar stencil (shifts -2..+2) with boundary clamping."""
+        """Apply 5-point vpar stencil (shifts -2..+2) with boundary clamping."""
         nv = field.shape[0]
         out = jnp.zeros_like(field)
         for c, s in zip(coeffs, (-2, -1, 0, 1, 2)):
@@ -50,11 +32,11 @@ class JAXOps(SolverOps):
     def _apply_vpar_dual(
         self, field: jnp.ndarray, coeffs_d1, coeffs_d4
     ) -> Tuple[jnp.ndarray, jnp.ndarray]:
-        """apply d1 and d4 vpar stencils in two passes."""
+        """Apply d1 and d4 vpar stencils in two passes."""
         return self._apply_vpar(field, coeffs_d1), self._apply_vpar(field, coeffs_d4)
 
     def _apply_parallel(self, field: jnp.ndarray, coeffs: jnp.ndarray) -> jnp.ndarray:
-        """apply 9-point parallel stencil using precomputed shift maps."""
+        """Apply 9-point parallel stencil using precomputed shift maps."""
         out = jnp.zeros_like(field)
         nky = field.shape[-1]
         ky_idx = jnp.reshape(jnp.arange(nky, dtype=jnp.int32), (1, 1, -1))
@@ -73,8 +55,10 @@ class JAXOps(SolverOps):
         coeffs1: jnp.ndarray,
         coeffs2: jnp.ndarray,
     ) -> Tuple[jnp.ndarray, jnp.ndarray]:
-        """apply parallel stencils to two fields."""
+        """Apply parallel stencils to two fields."""
         return self._apply_parallel(field1, coeffs1), self._apply_parallel(field2, coeffs2)
+
+    # ── nonlinear term III ──────────────────────────────────────────────
 
     def nonlinear_term_iii(
         self,
@@ -88,32 +72,35 @@ class JAXOps(SolverOps):
         mixed_precision: bool = True,
         bessel: Optional[jnp.ndarray] = None,
     ) -> jnp.ndarray:
-        """nonlinear ExB advection (term III) via pseudospectral Poisson bracket.
+        """Nonlinear ExB advection (term III). Dispatches to R2C or Z2Z variant."""
+        impl = self._nl_z2z if self.use_z2z else self._nl_r2c
+        return impl(
+            df,
+            phi,
+            geometry,
+            efun_sign=efun_sign,
+            fft_prefactor=fft_prefactor,
+            exclude_zero_mode=exclude_zero_mode,
+            mixed_precision=mixed_precision,
+            bessel=bessel,
+        )
 
-        computes {phi, f} on the dealiased real-space grid using the 3/2-rule
-        for anti-aliasing. port of GKW non_linear_terms.F90.
+    def _nl_r2c(
+        self,
+        df: jnp.ndarray,
+        phi: jnp.ndarray,
+        geometry: Dict[str, jnp.ndarray],
+        *,
+        efun_sign: float = 1.0,
+        fft_prefactor: complex = 1.0 + 0.0j,
+        exclude_zero_mode: bool = True,
+        mixed_precision: bool = True,
+        bessel: Optional[jnp.ndarray] = None,
+    ) -> jnp.ndarray:
+        """Standard R2C Poisson bracket. Port of GKW non_linear_terms.F90.
 
-        the bracket is evaluated per s-slice with jax.vmap over the parallel
-        coordinate axis, avoiding the moveaxis overhead of the naive approach.
-
-        optimization: wavenumber arrays are packed to the dealiased grid once
-        before the per-s loop, so spectral derivatives are computed on the
-        smaller packed arrays rather than the full (nkx, nky) grid.
-
-        mixed precision: inverse FFTs run in FP32 for the real-space product,
-        then the forward FFT result is cast back to FP64 for accumulation.
-
-        args:
-            df: distribution function (nvpar, nmu, ns, nkx, nky).
-            phi: electrostatic potential (ns, nkx, nky).
-            geometry: geometry dict (unused, kept for interface compatibility).
-            efun_sign: sign of the ExB function (geometry-dependent).
-            fft_prefactor: complex prefactor for the Poisson bracket.
-            exclude_zero_mode: zero out the (kx=0, ky=0) zonal mode.
-            mixed_precision: use FP32 for inverse FFTs.
-
-        returns:
-            nonlinear RHS contribution (nvpar, nmu, ns, nkx, nky).
+        Wavenumber arrays are packed to the dealiased grid once before the
+        per-s vmap loop. When mixed_precision is True, FFTs run in FP32.
         """
         pre = self.pre
         mrad, mphi, mphiw3 = pre["nl_mrad"], pre["nl_mphi"], pre["nl_mphiw3"]
@@ -136,10 +123,14 @@ class JAXOps(SolverOps):
             df_packed = pack_half_spectrum(df_s, jind, mrad, mphiw3).astype(fft_dtype)
             phi_packed = pack_half_spectrum(gyro_phi, jind, mrad, mphiw3).astype(fft_dtype)
 
-            packed_grad_phi_y = iky_packed[None, None, :] * phi_packed
-            packed_grad_phi_x = ikx_packed[None, None, :] * phi_packed
-            packed_grad_f_x = ikx_packed[None, None, :] * df_packed
-            packed_grad_f_y = iky_packed[None, None, :] * df_packed
+            # cast wavenumber arrays to fft_dtype to avoid promotion back to fp64
+            ikx = ikx_packed.astype(fft_dtype)
+            iky = iky_packed.astype(fft_dtype)
+
+            packed_grad_phi_y = iky[None, None, :] * phi_packed
+            packed_grad_phi_x = ikx[None, None, :] * phi_packed
+            packed_grad_f_x = ikx[None, None, :] * df_packed
+            packed_grad_f_y = iky[None, None, :] * df_packed
 
             def _to_real(packed_spec):
                 return jnp.fft.irfft2(packed_spec, s=(mrad, mphi), axes=(-2, -1), norm="backward")
@@ -163,7 +154,7 @@ class JAXOps(SolverOps):
         nl = jax.vmap(_per_s, in_axes=(2, 0, 2, 0), out_axes=2)(df, phi, bessel, dum_s)
         return nl.at[:, :, :, ixzero, iyzero].set(0.0) if exclude_zero_mode else nl
 
-    def nonlinear_term_iii_z2z(
+    def _nl_z2z(
         self,
         df: jnp.ndarray,
         phi: jnp.ndarray,
@@ -175,11 +166,11 @@ class JAXOps(SolverOps):
         mixed_precision: bool = True,
         bessel: Optional[jnp.ndarray] = None,
     ) -> jnp.ndarray:
-        """nonlinear bracket using z2z 2-for-1 packing (experimental).
+        """Z2Z 2-for-1 Poisson bracket.
 
-        packs two spectral derivatives into one complex field and uses
+        Packs two spectral derivatives into one complex field and uses
         ifft2 (C2C) instead of irfft2 (C2R), halving the inverse FFT count.
-        hermitian symmetrization at ky=0 corrects the bessel-induced
+        Hermitian symmetrization at ky=0 corrects the Bessel-induced
         symmetry defect that would leak across packed channels.
         """
         pre = self.pre
@@ -195,9 +186,8 @@ class JAXOps(SolverOps):
         ky_1d = ky2d[0, :]
 
         def _pack_full_z2z(field_packed_half, kx_vec, ky_vec, jind, mrad, mphi, nky):
-            """pack half-spectrum into full z2z input with hermitian extension."""
+            """Pack half-spectrum into full z2z input with Hermitian extension."""
             mphiw3 = mphi // 2 + 1
-
             kx_dense = jnp.zeros(mrad, dtype=jnp.float64)
             kx_dense = kx_dense.at[jind].set(kx_vec)
 
@@ -219,23 +209,18 @@ class JAXOps(SolverOps):
             fx_half = _symmetrize_col0(fx_half)
 
             ws_full = jnp.zeros(field_packed_half.shape[:-2] + (mrad, mphi), dtype=jnp.complex128)
-
             ws_primary = fy_half + 1j * fx_half
             ws_full = ws_full.at[..., :, :mphiw3].set(ws_primary)
 
             j_mirror_range = jnp.arange(mphiw3, mphi)
             j_source = mphi - j_mirror_range
-
             fy_mirror = jnp.conj(fy_half[..., m_mirror[:, None], j_source[None, :]])
             fx_mirror = jnp.conj(fx_half[..., m_mirror[:, None], j_source[None, :]])
-            ws_mirror = fy_mirror + 1j * fx_mirror
-            ws_full = ws_full.at[..., :, mphiw3:].set(ws_mirror)
-
+            ws_full = ws_full.at[..., :, mphiw3:].set(fy_mirror + 1j * fx_mirror)
             return ws_full
 
         def _per_s(df_s, phi_s, bessel_s, dum):
             gyro_phi = bessel_s * phi_s[None, None, :, :]
-
             df_packed = pack_half_spectrum(df_s, jind, mrad, mphiw3)
             phi_packed = pack_half_spectrum(gyro_phi, jind, mrad, mphiw3)
 
@@ -250,7 +235,6 @@ class JAXOps(SolverOps):
             )
 
             nl_half_raw = jnp.fft.rfft2(nl_real, s=(mrad, mphi), axes=(-2, -1), norm="backward")
-
             nl_half = (
                 jnp.asarray(fft_prefactor, dtype=jnp.complex128)
                 * jnp.asarray(fft_scale, dtype=jnp.complex128)
@@ -262,5 +246,5 @@ class JAXOps(SolverOps):
         return nl.at[:, :, :, ixzero, iyzero].set(0.0) if exclude_zero_mode else nl
 
     def linear_rhs(self, df, phi, geometry, params, pre) -> Optional[jnp.ndarray]:
-        """not implemented in JAX backend; solver falls back to vmap."""
+        """Not implemented in JAX backend; solver falls back to vmap."""
         return None

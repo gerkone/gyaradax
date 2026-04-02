@@ -82,7 +82,9 @@ def extract_frames(snapshots, dry_run=False):
     return frames_phi_real, frames_s_kx_ky, times, info
 
 
-def generate_mp4(snapshots, output_path, R0=3.0, a=1.0, fps=12, dpi=150, dry_run=False):
+def generate_mp4(
+    snapshots, output_path, R0=3.0, a=1.0, fps=12, dpi=150, dry_run=False, diag_dir="."
+):
     """Render to mp4/gif using matplotlib."""
     import matplotlib.pyplot as plt
     import matplotlib.animation as animation
@@ -100,7 +102,7 @@ def generate_mp4(snapshots, output_path, R0=3.0, a=1.0, fps=12, dpi=150, dry_run
         vmax_skk = 1.0
 
     # load diagnostics from the snapshot directory
-    diag_dir = sys.argv[1] if len(sys.argv) > 1 else "."
+    # diag_dir is passed as a parameter
     eflux_trace = growth_all = kyspec_all = kxspec_all = diag_times = None
     try:
         fd = np.load(os.path.join(diag_dir, "fluxes.npz"))
@@ -370,6 +372,7 @@ def main():
         fps=args.fps,
         dpi=args.dpi,
         dry_run=args.dry_run,
+        diag_dir=args.output_dir,
     )
 
 

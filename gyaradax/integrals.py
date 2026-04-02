@@ -145,8 +145,6 @@ def _phi_adiabatic(geom: Dict[str, jnp.ndarray], df: jnp.ndarray) -> jnp.ndarray
 
 def precompute_phi_adiabatic(geometry: Dict[str, jnp.ndarray], params: Any):
     """Precompute static arrays for the adiabatic phi solve."""
-    from gyaradax.integrals import geom_tensors
-
     geom = geom_tensors(geometry, params=params)
 
     # squeeze leading nsp=1 dimension to simplify to 5D: (v, mu, s, kx, ky)

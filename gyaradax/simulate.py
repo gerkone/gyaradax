@@ -34,7 +34,7 @@ def _compute_phi_for_init(df, geometry, params):
 
 
 def _geometry_from_config(cfg):
-    """build geometry from config when no data_dir is provided.
+    """Build geometry from config when no data_dir is provided.
 
     defaults are defined in compute_geometry(); we only forward
     values that are actually present in the config.

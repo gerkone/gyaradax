@@ -24,7 +24,7 @@ class GKPre:
                 for dk, dv in sorted(v.items()):
                     leaves.append(dv)
                     leaf_keys.append(f"{k}.{dk}")
-            elif isinstance(v, (jnp.ndarray, float, int, bool)):
+            elif isinstance(v, jnp.ndarray):
                 leaves.append(v)
                 leaf_keys.append(k)
             else:
