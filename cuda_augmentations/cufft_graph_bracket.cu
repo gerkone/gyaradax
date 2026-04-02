@@ -1,3 +1,16 @@
+// v5 LTO: Z2Z 2-for-1 + phi broadcast + mixed precision + LTO callbacks.
+//
+// Entire pipeline is two cuFFT calls:
+//   1. cufftExecC2C (FP32, merged b_df+b_phi)
+//      - Load callback fuses pack: Hermitian gather, fy+i*fx, FP64->FP32
+//      - In-place on ws_c2c
+//   2. cufftExecD2Z (FP64, b_df)
+//      - Load callback fuses assembly: FP32->FP64 bracket, dum_s, 1/N^2
+//      - Store callback fuses unpack: scatter to packed, ixzero masking
+//
+// Eliminated vs non-LTO v5: pack kernel, assembly kernel, unpack kernel, ws_nl_r.
+// HBM savings: ~b_df * mrad * mphi * 8 bytes (ws_nl_r eliminated).
+
 #include <cstdio>
 #include <string>
 #include <mutex>
@@ -5,21 +18,38 @@
 #include "xla/ffi/api/ffi.h"
 #include <cuda_runtime.h>
 #include <cufft.h>
+#include <cufftXt.h>
 
-// v5: Z2Z 2-for-1 + phi broadcast + mixed precision.
-//
-// Mixed precision: FP32 inverse C2C (halves FFT I/O bandwidth),
-// FP64 bracket accumulation + forward D2Z (preserves spectral accuracy).
-// This matches JAX's mixed_precision=True path.
-//
-// Pipeline (5 launches, 2 cuFFT calls):
-//   1a/b. v5_pack_z2z  (FP64→FP32 cast on output)
-//   2.    cufftExecC2C  (FP32, merged b_df+b_phi, in-place)
-//   3.    v5_assembly   (FP32→FP64 bracket, writes FP64)
-//   4.    cufftExecD2Z  (FP64)
-//   5.    v5_unpack     (FP64)
+// LTO callback fatbins
+#include "bracket_v5_z2z_load_cb_fatbin.h"
+#include "bracket_v5_d2z_load_cb_fatbin.h"
+#include "bracket_v5_store_cb_fatbin.h"
 
 namespace {
+
+// ── Callback info structs (must match callback .cu definitions) ────
+struct V5Z2zInfo {
+    const double2* df_packed;
+    const double2* phi_packed;
+    const double*  kx;
+    const double*  ky;
+    const int*     inverse_jind;
+    int mrad, mphi, nkx, nky, b_df, b_phi;
+};
+
+struct V5D2zMpInfo {
+    const float2* ws;
+    const double* dum_s;
+    int nspec, mrad, mphi, b_df, b_phi;
+    double scale;
+};
+
+struct V5StoreInfo {
+    double2*    out_packed;
+    const int*  inverse_jind;
+    int mrad, mphiw3, nkx, nky;
+    int ixzero, iyzero;
+};
 
 struct V5Key {
     int device, b_df, b_phi, mrad, mphi, nkx, nky;
@@ -35,123 +65,29 @@ struct V5Key {
 };
 
 struct V5State {
-    cufftHandle plan_c2c = 0;   // FP32 C2C, b_df + b_phi (merged, in-place)
-    cufftHandle plan_d2z = 0;   // FP64 D2Z, b_df
+    cufftHandle plan_c2c = 0;    // FP32 C2C, b_df+b_phi, with load callback
+    cufftHandle plan_d2z = 0;    // FP64 D2Z, b_df, with load + store callbacks
 
-    float2  *ws_c2c  = nullptr;  // [(b_df+b_phi), mrad, mphi] FP32 complex
-    double  *ws_nl_r = nullptr;  // [b_df, mrad, mphi] FP64 real
-    double2 *ws_nl_k = nullptr;  // [b_df, mrad, mphi_half] FP64 complex
+    float2  *ws_c2c     = nullptr;  // [(b_df+b_phi), mrad, mphi]
+    double2 *ws_d2z_out = nullptr;  // [b_df, mrad, mphi_half] dummy D2Z output
+
+    V5Z2zInfo   *d_z2z_cb   = nullptr;  void *d_z2z_ptr   = nullptr;
+    V5D2zMpInfo *d_d2z_cb   = nullptr;  void *d_d2z_ptr   = nullptr;
+    V5StoreInfo *d_store_cb = nullptr;  void *d_store_ptr = nullptr;
 
     ~V5State() {
         if (plan_c2c) cufftDestroy(plan_c2c);
         if (plan_d2z) cufftDestroy(plan_d2z);
-        if (ws_c2c)  cudaFree(ws_c2c);
-        if (ws_nl_r) cudaFree(ws_nl_r);
-        if (ws_nl_k) cudaFree(ws_nl_k);
+        if (ws_c2c)     cudaFree(ws_c2c);
+        if (ws_d2z_out) cudaFree(ws_d2z_out);
+        if (d_z2z_cb)   cudaFree(d_z2z_cb);
+        if (d_d2z_cb)   cudaFree(d_d2z_cb);
+        if (d_store_cb) cudaFree(d_store_cb);
     }
 };
 
 static std::map<V5Key, V5State*> g_cache;
 static std::mutex g_mutex;
-static constexpr int KX_TILE = 4;
-
-// ── Pack: FP64 input → FP32 Z2Z workspace ──────────────────────
-// Hermitian extension + j=0 symmetrization + 2-for-1 packing.
-// All arithmetic in FP64, cast to FP32 on final store.
-__global__ void v5_pack_z2z_kernel(
-    const double2* __restrict__ field,       // [batch, nkx, nky] FP64
-    const double*  __restrict__ kx,
-    const double*  __restrict__ ky,
-    const int*     __restrict__ inverse_jind,
-    float2* __restrict__ out,                // [batch, mrad, mphi] FP32
-    int mrad, int mphi, int nkx, int nky
-) {
-    int b = blockIdx.x;
-    int m = blockIdx.y * KX_TILE + threadIdx.y;
-    int j = blockIdx.z * blockDim.x + threadIdx.x;
-    if (m >= mrad || j >= mphi) return;
-
-    bool mirror = (j > mphi / 2);
-    int j_src = mirror ? (mphi - j) : j;
-    int m_src = mirror ? ((mrad - m) % mrad) : m;
-
-    size_t out_idx = (size_t)b * mrad * mphi + (size_t)m * mphi + j;
-
-    if (j_src >= nky) { out[out_idx] = {0.0f, 0.0f}; return; }
-
-    int kx_idx = __ldg(&inverse_jind[m_src]);
-    if (kx_idx < 0) { out[out_idx] = {0.0f, 0.0f}; return; }
-
-    size_t row = (size_t)nkx * nky;
-    double2 val = __ldg(&field[(size_t)b * row + (size_t)kx_idx * nky + j_src]);
-    double kxv  = __ldg(&kx[kx_idx]);
-    double kyv  = __ldg(&ky[j_src]);
-
-    // Hermitian symmetrization at ky=0
-    if ((j_src == 0 || j_src == mphi / 2) && !mirror) {
-        int m_pair = (mrad - m) % mrad;
-        int kx_pair = __ldg(&inverse_jind[m_pair]);
-        if (kx_pair >= 0 && m_pair != m) {
-            double2 vp = __ldg(&field[(size_t)b * row + (size_t)kx_pair * nky]);
-            val.x = 0.5 * (val.x + vp.x);
-            val.y = 0.5 * (val.y - vp.y);
-        }
-    }
-
-    double fy_re = -kyv * val.y, fy_im = kyv * val.x;
-    double fx_re = -kxv * val.y, fx_im = kxv * val.x;
-
-    // Pack ws = fy + i*fx, cast to FP32
-    float2 packed;
-    if (!mirror) {
-        packed = {(float)(fy_re - fx_im), (float)(fy_im + fx_re)};
-    } else {
-        packed = {(float)(fy_re + fx_im), (float)(fx_re - fy_im)};
-    }
-    out[out_idx] = packed;
-}
-
-// ── Assembly: FP32 C2C output → FP64 bracket ───────────────────
-__global__ void v5_assembly_z2z_kernel(
-    const float2* __restrict__ ws_df,
-    const float2* __restrict__ ws_phi,
-    double* __restrict__ nl,
-    const double* __restrict__ dum_s,
-    int plane, int b_phi, int nspec, double scale
-) {
-    int b   = blockIdx.x;
-    int off = blockIdx.y * blockDim.x + threadIdx.x;
-    if (off >= plane) return;
-
-    float2 d = ws_df[(size_t)b * plane + off];
-    float2 p = ws_phi[(size_t)(b % b_phi) * plane + off];
-
-    // Promote to FP64 for bracket accumulation
-    double bracket = (double)p.x * (double)d.y - (double)p.y * (double)d.x;
-    nl[(size_t)b * plane + off] = scale * __ldg(&dum_s[b % nspec]) * bracket;
-}
-
-// ── Unpack (FP64, unchanged) ────────────────────────────────────
-__global__ void v5_unpack_kernel(
-    const double2* __restrict__ nl_dense_k,
-    double2* __restrict__ out_packed,
-    const int* __restrict__ jind,
-    int mrad, int mphi_half, int nkx, int nky,
-    int ixzero, int iyzero
-) {
-    int b  = blockIdx.x;
-    int kx = blockIdx.y * KX_TILE + threadIdx.y;
-    int ky = threadIdx.x;
-    if (kx >= nkx || ky >= nky) return;
-
-    int m = __ldg(&jind[kx]);
-    double2 val = {0.0, 0.0};
-    if (m >= 0) {
-        val = nl_dense_k[((size_t)b * mrad + m) * mphi_half + ky];
-        if (kx == ixzero && ky == iyzero) val = {0.0, 0.0};
-    }
-    out_packed[((size_t)b * nkx + kx) * nky + ky] = val;
-}
 
 } // namespace
 
@@ -193,75 +129,94 @@ xla_ffi::Error CufftGraphBracketImpl(
     std::lock_guard<std::mutex> lock(g_mutex);
     V5State* s = g_cache[key];
 
-    size_t z_dist = (size_t)mrad * mphi;       // elements per C2C transform
-    size_t c_dist = (size_t)mrad * mphi_half;   // complex elements per D2Z output
-    size_t r_dist = (size_t)mrad * mphi;         // real elements per D2Z input
+    size_t z_dist = (size_t)mrad * mphi;
+    size_t c_dist = (size_t)mrad * mphi_half;
 
     if (!s) {
         s = new V5State();
         g_cache[key] = s;
 
-        // FP32 workspace for C2C (half the size of FP64 Z2Z)
-        CHECK_CUDA(cudaMalloc(&s->ws_c2c,  (size_t)(b_df + b_phi) * z_dist * sizeof(float2)));
-        // FP64 workspace for assembly output + D2Z
-        CHECK_CUDA(cudaMalloc(&s->ws_nl_r, (size_t)b_df * r_dist * sizeof(double)));
-        CHECK_CUDA(cudaMalloc(&s->ws_nl_k, (size_t)b_df * c_dist * sizeof(double2)));
+        // Workspaces
+        CHECK_CUDA(cudaMalloc(&s->ws_c2c,     (size_t)(b_df + b_phi) * z_dist * sizeof(float2)));
+        CHECK_CUDA(cudaMalloc(&s->ws_d2z_out,  (size_t)b_df * c_dist * sizeof(double2)));
 
-        int n[2] = {mrad, mphi};
+        // Callback info structs (device)
+        CHECK_CUDA(cudaMalloc(&s->d_z2z_cb,   sizeof(V5Z2zInfo)));   s->d_z2z_ptr   = (void*)s->d_z2z_cb;
+        CHECK_CUDA(cudaMalloc(&s->d_d2z_cb,   sizeof(V5D2zMpInfo))); s->d_d2z_ptr   = (void*)s->d_d2z_cb;
+        CHECK_CUDA(cudaMalloc(&s->d_store_cb,  sizeof(V5StoreInfo))); s->d_store_ptr = (void*)s->d_store_cb;
 
-        // FP32 C2C plan (replaces FP64 Z2Z — half the I/O bandwidth)
+        long long n_ll[2] = {mrad, mphi};
+        size_t ws = 0;
+
+        // C2C plan with Z2Z FP32 load callback
         CHECK_CUFFT(cufftCreate(&s->plan_c2c));
-        CHECK_CUFFT(cufftPlanMany(&s->plan_c2c, 2, n,
-            NULL, 1, (int)z_dist, NULL, 1, (int)z_dist,
-            CUFFT_C2C, b_df + b_phi));
+        CHECK_CUFFT(cufftXtSetJITCallback(s->plan_c2c,
+            "d_v5_z2z_fp32_load_addr",
+            (void*)bracket_v5_z2z_load_cb_fatbin,
+            sizeof(bracket_v5_z2z_load_cb_fatbin),
+            CUFFT_CB_LD_COMPLEX, &s->d_z2z_ptr));
+        CHECK_CUFFT(cufftXtMakePlanMany(s->plan_c2c, 2, n_ll,
+            NULL, 1, (long long)z_dist, CUDA_C_32F,
+            NULL, 1, (long long)z_dist, CUDA_C_32F,
+            b_df + b_phi, &ws, CUDA_C_32F));
 
-        // FP64 D2Z for forward FFT (preserves spectral accuracy)
+        // D2Z plan with load + store callbacks
         CHECK_CUFFT(cufftCreate(&s->plan_d2z));
-        CHECK_CUFFT(cufftPlanMany(&s->plan_d2z, 2, n,
-            NULL, 1, (int)r_dist, NULL, 1, (int)c_dist,
-            CUFFT_D2Z, b_df));
+        CHECK_CUFFT(cufftXtSetJITCallback(s->plan_d2z,
+            "d_v5_d2z_mp_load_addr",
+            (void*)bracket_v5_d2z_load_cb_fatbin,
+            sizeof(bracket_v5_d2z_load_cb_fatbin),
+            CUFFT_CB_LD_REAL_DOUBLE, &s->d_d2z_ptr));
+        CHECK_CUFFT(cufftXtSetJITCallback(s->plan_d2z,
+            "d_v5_store_cb_addr",
+            (void*)bracket_v5_store_cb_fatbin,
+            sizeof(bracket_v5_store_cb_fatbin),
+            CUFFT_CB_ST_COMPLEX_DOUBLE, &s->d_store_ptr));
+        CHECK_CUFFT(cufftXtMakePlanMany(s->plan_d2z, 2, n_ll,
+            NULL, 1, (long long)z_dist, CUDA_R_64F,
+            NULL, 1, (long long)c_dist, CUDA_C_64F,
+            b_df, &ws, CUDA_R_64F));
     }
 
     CHECK_CUFFT(cufftSetStream(s->plan_c2c, stream));
     CHECK_CUFFT(cufftSetStream(s->plan_d2z, stream));
 
-    dim3 blk(32, KX_TILE);
-    int m_blks = (mrad + KX_TILE - 1) / KX_TILE;
-    int j_blks = (mphi + 31) / 32;
+    // Zero output buffer (store callback only writes valid entries)
+    CHECK_CUDA(cudaMemsetAsync(out->typed_data(), 0,
+        (size_t)b_df * nkx * nky * sizeof(double2), stream));
 
-    float2* ws_df  = s->ws_c2c;
-    float2* ws_phi = s->ws_c2c + (size_t)b_df * z_dist;
+    // Update callback info structs (pointers change each FFI call)
+    double inv_n2 = 1.0 / ((double)mrad * mphi * (double)mrad * mphi);
 
-    // ── 1a. Pack df (FP64 input → FP32 output) ─────────────────
-    v5_pack_z2z_kernel<<<dim3(b_df, m_blks, j_blks), blk, 0, stream>>>(
-        (const double2*)df.typed_data(), kx.typed_data(), ky.typed_data(),
-        inverse_jind.typed_data(), ws_df, mrad, mphi, nkx, nky);
+    V5Z2zInfo h_z2z = {
+        (const double2*)df.typed_data(),
+        (const double2*)phi.typed_data(),
+        kx.typed_data(), ky.typed_data(),
+        inverse_jind.typed_data(),
+        mrad, mphi, nkx, nky, b_df, b_phi
+    };
+    V5D2zMpInfo h_d2z = {
+        s->ws_c2c, dum_s.typed_data(),
+        nspec, mrad, mphi, b_df, b_phi, inv_n2
+    };
+    V5StoreInfo h_store = {
+        (double2*)out->typed_data(),
+        inverse_jind.typed_data(),
+        mrad, mphi_half, nkx, nky,
+        ixzero, iyzero
+    };
 
-    // ── 1b. Pack phi ────────────────────────────────────────────
-    v5_pack_z2z_kernel<<<dim3(b_phi, m_blks, j_blks), blk, 0, stream>>>(
-        (const double2*)phi.typed_data(), kx.typed_data(), ky.typed_data(),
-        inverse_jind.typed_data(), ws_phi, mrad, mphi, nkx, nky);
+    CHECK_CUDA(cudaMemcpyAsync(s->d_z2z_cb,   &h_z2z,   sizeof(V5Z2zInfo),   cudaMemcpyHostToDevice, stream));
+    CHECK_CUDA(cudaMemcpyAsync(s->d_d2z_cb,   &h_d2z,   sizeof(V5D2zMpInfo), cudaMemcpyHostToDevice, stream));
+    CHECK_CUDA(cudaMemcpyAsync(s->d_store_cb,  &h_store,  sizeof(V5StoreInfo), cudaMemcpyHostToDevice, stream));
 
-    // ── 2. FP32 C2C inverse (in-place) ──────────────────────────
+    // ── 1. FP32 C2C inverse with load callback (fuses pack) ────────
     CHECK_CUFFT(cufftExecC2C(s->plan_c2c,
         (cufftComplex*)s->ws_c2c, (cufftComplex*)s->ws_c2c, CUFFT_INVERSE));
 
-    // ── 3. Assembly: FP32→FP64 bracket ──────────────────────────
-    // C2C unnormalized: output *= N. Combined with D2Z: scale = 1/N^2.
-    double inv_n2 = 1.0 / ((double)mrad * mphi * (double)mrad * mphi);
-    int plane = (int)z_dist;
-    v5_assembly_z2z_kernel<<<dim3(b_df, (plane+255)/256), 256, 0, stream>>>(
-        ws_df, ws_phi, s->ws_nl_r, dum_s.typed_data(),
-        plane, b_phi, nspec, inv_n2);
-
-    // ── 4. FP64 forward D2Z ─────────────────────────────────────
-    CHECK_CUFFT(cufftExecD2Z(s->plan_d2z, s->ws_nl_r, s->ws_nl_k));
-
-    // ── 5. Unpack ───────────────────────────────────────────────
-    int kx_blks = (nkx + KX_TILE - 1) / KX_TILE;
-    v5_unpack_kernel<<<dim3(b_df, kx_blks), blk, 0, stream>>>(
-        s->ws_nl_k, (double2*)out->typed_data(), jind.typed_data(),
-        mrad, mphi_half, nkx, nky, ixzero, iyzero);
+    // ── 2. FP64 D2Z with load+store callbacks (fuses assembly+unpack)
+    CHECK_CUFFT(cufftExecD2Z(s->plan_d2z,
+        (cufftDoubleReal*)s->ws_c2c, (cufftDoubleComplex*)s->ws_d2z_out));
 
     return xla_ffi::Error::Success();
 }

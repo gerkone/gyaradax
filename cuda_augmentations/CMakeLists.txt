@@ -65,6 +65,9 @@ add_lto_fatbin_target(bracket_store_cb              bracket_store_cb.cu)
 add_lto_fatbin_target(bracket_d2z_z2z_load_cb       bracket_d2z_z2z_load_cb.cu)
 add_lto_fatbin_target(bracket_z2z_merged_load_cb    bracket_z2z_merged_load_cb.cu)
 add_lto_fatbin_target(bracket_d2z_load_cb_merged    bracket_d2z_load_cb_merged.cu)
+add_lto_fatbin_target(bracket_v5_z2z_load_cb         bracket_v5_z2z_load_cb.cu)
+add_lto_fatbin_target(bracket_v5_d2z_load_cb         bracket_v5_d2z_load_cb.cu)
+add_lto_fatbin_target(bracket_v5_store_cb            bracket_v5_store_cb.cu)
 
 set(LTO_HEADERS
     ${CMAKE_BINARY_DIR}/bracket_load_cb_fatbin.h
@@ -74,7 +77,10 @@ set(LTO_HEADERS
     ${CMAKE_BINARY_DIR}/bracket_store_cb_fatbin.h
     ${CMAKE_BINARY_DIR}/bracket_d2z_z2z_load_cb_fatbin.h
     ${CMAKE_BINARY_DIR}/bracket_z2z_merged_load_cb_fatbin.h
-    ${CMAKE_BINARY_DIR}/bracket_d2z_load_cb_merged_fatbin.h)
+    ${CMAKE_BINARY_DIR}/bracket_d2z_load_cb_merged_fatbin.h
+    ${CMAKE_BINARY_DIR}/bracket_v5_z2z_load_cb_fatbin.h
+    ${CMAKE_BINARY_DIR}/bracket_v5_d2z_load_cb_fatbin.h
+    ${CMAKE_BINARY_DIR}/bracket_v5_store_cb_fatbin.h)
 
 # ── Shared library target ───────────────────────────────────────
 add_library(lto_bracket SHARED
