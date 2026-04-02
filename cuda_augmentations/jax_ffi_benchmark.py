@@ -518,25 +518,26 @@ def main():
                 ) / jnp.linalg.norm(ref_flat.ravel()[:N_acc])
                 errors[name] = float(rel_err)
 
-            mean_ms, _ = BenchTimer(lambda: fn(*inputs).block_until_ready()).run()
-            results[name] = mean_ms
+            mean_ms, std_ms = BenchTimer(lambda: fn(*inputs).block_until_ready(), n_trials=100).run()
+            results[name] = (mean_ms, std_ms)
         except Exception as e:
             print(f"  {name:24s}: FAILED ({e})")
 
-    print(f"\n{'='*95}")
+    print(f"\n{'='*110}")
     print(
-        f"{'Variant':30s} | {'Time (ms)':12s} | {'Speedup':10s} | {'Rel L2':10s} | {'Throughput'}"
+        f"{'Variant':30s} | {'Time (ms)':20s} | {'Speedup':10s} | {'Rel L2':10s} | {'Throughput'}"
     )
-    print(f"{'-'*30} | {'-'*12} | {'-'*10} | {'-'*10} | {'-'*15}")
-    base_time = results.get("JAX FP64 baseline", 1.0)
+    print(f"{'-'*30} | {'-'*20} | {'-'*10} | {'-'*10} | {'-'*15}")
+    base_time, _ = results.get("JAX FP64 baseline", (1.0, 0.0))
     hbm_bytes = 6.11e9
 
-    for name, t in results.items():
+    for name, (t, std) in results.items():
         speedup = base_time / t if t > 0 else 0.0
         bw = (hbm_bytes / 1e9) / (t / 1e3) if t > 0 else 0.0
         rel_err = errors.get(name, 0.0)
-        print(f"{name:30s} | {t:12.3f} | {speedup:10.2f}x | {rel_err:10.2e} | {bw:8.1f} GB/s")
-    print(f"\n{'='*95}")
+        time_str = f"{t:7.3f} ± {std:5.3f}"
+        print(f"{name:30s} | {time_str:20s} | {speedup:10.2f}x | {rel_err:10.2e} | {bw:8.1f} GB/s")
+    print(f"\n{'='*110}")
 
 
 if __name__ == "__main__":
