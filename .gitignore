@@ -11,6 +11,7 @@ mamba_env/
 
 # --- C++ / CUDA build artifacts ---
 build/
+_build/
 *.so
 *.a
 *.o
