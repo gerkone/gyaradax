@@ -108,6 +108,9 @@ class GKParams:
         "adaptive_dt",
         "mixed_precision",
         "backend",
+        "dvp",
+        "disp_vp",
+        "drive_scale",
     )
 
     def tree_flatten(self):

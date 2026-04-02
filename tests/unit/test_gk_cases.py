@@ -19,6 +19,11 @@ from gyaradax.solver import init_f, default_state, linear_precompute
 from gyaradax.simulate import gk_run
 from gyaradax.integrals import calculate_phi
 
+try:
+    from gyaradax.backends._cuda import is_available as cuda_available
+except ImportError:
+    cuda_available = lambda: False
+
 
 jax.config.update("jax_enable_x64", True)
 
@@ -33,7 +38,10 @@ def _rh_residual_xiao_catto(q, eps):
     return 1.0 / (1.0 + q**2 * theta / eps**2)
 
 
-def test_rosenbluth_hinton_residual():
+@pytest.mark.parametrize("backend", ["jax", "cuda"])
+def test_rosenbluth_hinton_residual(backend):
+    if backend == "cuda" and not cuda_available():
+        pytest.skip("CUDA not available")
     """Rosenbluth-Hinton zonal flow test: residual converges to Xiao-Catto.
 
     Uses the GKW benchmark parameters (gkw_ref/benchmarks/zonal_flow/zonal01):
@@ -47,7 +55,7 @@ def test_rosenbluth_hinton_residual():
     geometry = compute_geometry_from_input(zonal01)
     params = gkparams_from_input_and_geometry(zonal01, geometry)
     # non_linear=False + large naverage → linear mode, no per-ky normalization
-    params = replace(params, non_linear=False, naverage=100000)
+    params = replace(params, non_linear=False, naverage=100000, backend=backend)
 
     pre = linear_precompute(geometry, params)
     df = init_f(geometry, finit="zonal", amp_init_real=params.amp_init)
@@ -89,7 +97,10 @@ def test_rosenbluth_hinton_residual():
     )
 
 
-def test_cbc_linear_itg_peak_growth():
+@pytest.mark.parametrize("backend", ["jax", "cuda"])
+def test_cbc_linear_itg_peak_growth(backend):
+    if backend == "cuda" and not cuda_available():
+        pytest.skip("CUDA not available")
     """CBC linear ITG at kt=0.5: growth rate matches GKW benchmark.
 
     Uses GKW benchmark parameters (gkw_ref/benchmarks/cyclone/linear):
@@ -144,6 +155,7 @@ def test_cbc_linear_itg_peak_growth():
         idisp=2,
         cfl_safety=0.95,
         mixed_precision=False,
+        backend=backend,
     )
 
     df = init_f(geom, finit="cosine2", amp_init_real=1e-4)

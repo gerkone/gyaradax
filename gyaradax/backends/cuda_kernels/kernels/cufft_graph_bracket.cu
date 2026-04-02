@@ -220,7 +220,7 @@ xla_ffi::Error CufftGraphBracketImpl(
 }
 
 XLA_FFI_DEFINE_HANDLER_SYMBOL(
-    cufft_graph_bracket_ffi, CufftGraphBracketImpl,
+    cufft_graph_bracket_mp_ffi, CufftGraphBracketImpl,
     xla_ffi::Ffi::Bind()
         .Ctx<xla_ffi::PlatformStream<cudaStream_t>>()
         .Arg<xla_ffi::Buffer<xla_ffi::DataType::C128>>()

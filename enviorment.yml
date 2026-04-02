@@ -13,6 +13,7 @@ dependencies:
   - cmake>=3.26
   # CUDA
   - cuda-toolkit>=13.1
+  - cudnn
   # scientific stack
   - numpy
   - matplotlib

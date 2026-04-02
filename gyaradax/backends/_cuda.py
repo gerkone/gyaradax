@@ -261,7 +261,8 @@ class CUDAOps(SolverOps):
         f_b = df.copy()
         phi_b = phi.copy()
 
-        bessel = jnp.broadcast_to(pre["bessel"].squeeze(), (nmu, ns, nkx, nky)).copy()
+        # use explicit reshape to robustly handle the leading singleton dim in JIT
+        bessel = pre["bessel"].reshape(nmu, ns, nkx, nky).copy()
 
         c_upar_in = pre["s_total_upar"]
         if c_upar_in.ndim == 6 and c_upar_in.shape[2] > 1:
@@ -272,13 +273,13 @@ class CUDAOps(SolverOps):
         c_upar = jnp.broadcast_to(c_upar_in, (9, nv, 1, ns, nkx, nky)).copy()
         c_t7 = jnp.broadcast_to(pre["s_total_t7"], (9, nv, nmu, ns, nkx, nky)).copy()
 
-        utrap = jnp.broadcast_to(pre["utrap"].squeeze(), (nmu, ns)).copy()
-        abs_vp = jnp.broadcast_to(pre["abs_dum2_vp"].squeeze(), (nmu, ns)).copy()
+        utrap = pre["utrap"].reshape(nmu, ns).copy()
+        abs_vp = pre["abs_dum2_vp"].reshape(nmu, ns).copy()
 
-        drift_x = jnp.broadcast_to(pre["drift_x"].squeeze(), (nv, nmu, ns)).copy()
-        drift_y = jnp.broadcast_to(pre["drift_y"].squeeze(), (nv, nmu, ns)).copy()
-        fmaxwl = jnp.broadcast_to(pre["fmaxwl"].squeeze(), (nv, nmu, ns)).copy()
-        dmaxwel = jnp.broadcast_to(pre["dmaxwel_fm_ek"].squeeze(), (nv, nmu, ns, nky)).copy()
+        drift_x = pre["drift_x"].reshape(nv, nmu, ns).copy()
+        drift_y = pre["drift_y"].reshape(nv, nmu, ns).copy()
+        fmaxwl = pre["fmaxwl"].reshape(nv, nmu, ns).copy()
+        dmaxwel = pre["dmaxwel_fm_ek"].reshape(nv, nmu, ns, nky).copy()
 
         hyper = jnp.broadcast_to(pre["hyper"].squeeze(), (ns, nkx, nky)).copy()
         kx_vals = pre["kx_b"].reshape(-1)[:nkx].copy()
@@ -312,11 +313,12 @@ class CUDAOps(SolverOps):
             dvp=float(params_dvp),
             disp_vp=float(params_disp_vp),
             drive_scale=float(params_drive_scale),
-            signz0=float(pre["signz0"]),
-            tmp0=float(pre["tmp0"]),
         )
         if target_name == "linear_rhs_vtiled_ffi":
             attrs["v_tile"] = np.int32(V_TILE)
+
+        signz0 = jnp.asarray(pre["signz0"], dtype=jnp.float64).reshape(())
+        tmp0   = jnp.asarray(pre["tmp0"],   dtype=jnp.float64).reshape(())
 
         _register_ffi()
         return ffi.ffi_call(target_name, [jax.ShapeDtypeStruct(df.shape, df.dtype)])(
@@ -335,6 +337,8 @@ class CUDAOps(SolverOps):
             hyper,
             kx_vals,
             ky_vals,
+            signz0,
+            tmp0,
             **attrs,
         )[0]
 

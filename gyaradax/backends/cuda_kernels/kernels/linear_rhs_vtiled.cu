@@ -31,8 +31,11 @@ linear_rhs_vtiled_kernel(
     int nv, int nmu, int ns, int nkx, int nky, int nv_nmu, int v_tile,
     double c_d1_0, double c_d1_1, double c_d1_2, double c_d1_3, double c_d1_4,
     double c_d4_0, double c_d4_1, double c_d4_2, double c_d4_3, double c_d4_4,
-    double dvp, double disp_vp, double drive_scale, double signz0, double tmp0
+    double dvp, double disp_vp, double drive_scale,
+    const double* __restrict__ signz0_ptr, const double* __restrict__ tmp0_ptr
 ) {
+    const double signz0 = *signz0_ptr;
+    const double tmp0   = *tmp0_ptr;
     extern __shared__ double2 smem_df[]; 
 
     const int tid         = threadIdx.x;
@@ -160,11 +163,13 @@ xla_ffi::Error LinearRhsVtiledImpl(
     xla_ffi::Buffer<xla_ffi::DataType::F64>  hyper,
     xla_ffi::Buffer<xla_ffi::DataType::F64>  kx_vals,
     xla_ffi::Buffer<xla_ffi::DataType::F64>  ky_vals,
+    xla_ffi::Buffer<xla_ffi::DataType::F64>  signz0_buf,
+    xla_ffi::Buffer<xla_ffi::DataType::F64>  tmp0_buf,
     xla_ffi::Result<xla_ffi::Buffer<xla_ffi::DataType::C128>> rhs_out,
     int32_t nv, int32_t nmu, int32_t ns, int32_t nkx, int32_t nky, int32_t nv_nmu, int32_t v_tile,
     double c_d1_0, double c_d1_1, double c_d1_2, double c_d1_3, double c_d1_4,
     double c_d4_0, double c_d4_1, double c_d4_2, double c_d4_3, double c_d4_4,
-    double dvp, double disp_vp, double drive_scale, double signz0, double tmp0
+    double dvp, double disp_vp, double drive_scale
 ) {
     const size_t n_spatial = (size_t)ns * nkx * nky;
     dim3 block(256);
@@ -187,7 +192,8 @@ xla_ffi::Error LinearRhsVtiledImpl(
         nv, nmu, ns, nkx, nky, nv_nmu, v_tile,
         c_d1_0, c_d1_1, c_d1_2, c_d1_3, c_d1_4,
         c_d4_0, c_d4_1, c_d4_2, c_d4_3, c_d4_4,
-        dvp, disp_vp, drive_scale, signz0, tmp0);
+        dvp, disp_vp, drive_scale,
+        signz0_buf.typed_data(), tmp0_buf.typed_data());
 
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess)
@@ -215,6 +221,8 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(
         .Arg<xla_ffi::Buffer<xla_ffi::DataType::F64>>()  // hyper
         .Arg<xla_ffi::Buffer<xla_ffi::DataType::F64>>()  // kx_vals
         .Arg<xla_ffi::Buffer<xla_ffi::DataType::F64>>()  // ky_vals
+        .Arg<xla_ffi::Buffer<xla_ffi::DataType::F64>>()  // signz0
+        .Arg<xla_ffi::Buffer<xla_ffi::DataType::F64>>()  // tmp0
         .Ret<xla_ffi::Buffer<xla_ffi::DataType::C128>>() // rhs_out
         .Attr<int32_t>("nv")
         .Attr<int32_t>("nmu")
@@ -230,6 +238,4 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(
         .Attr<double>("dvp")
         .Attr<double>("disp_vp")
         .Attr<double>("drive_scale")
-        .Attr<double>("signz0")
-        .Attr<double>("tmp0")
 );
