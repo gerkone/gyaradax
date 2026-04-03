@@ -181,18 +181,29 @@ def main():
     print(f"  FFI batch  : {batch_total}")
     print(f"  Grid       : mrad={mrad}, mphi={mphi}, nkx={nkx}, nky={nky}")
 
-    # 3. Reference Baselines
-    @jax.jit
-    def run_jax_fp64(d, p):
-        return nonlinear_term_iii(d, p, geom, pre_gk, mixed_precision=False)
-
+    # 3. JAX Baselines (R2C and Z2Z)
     from gyaradax.backends._jax import JAXOps
 
-    jax_ops = JAXOps(pre_gk)
+    jax_r2c = JAXOps(pre_gk, use_z2z=False)
+    jax_z2z = JAXOps(pre_gk, use_z2z=True)
 
     @jax.jit
-    def run_jax_z2z(d, p):
-        return jax_ops._nl_z2z(d, p, geom, mixed_precision=False)
+    def run_jax_r2c_fp64(d, p):
+        return jax_r2c.nonlinear_term_iii(
+            d, p, geom, efun_sign=1.0, fft_prefactor=1.0 + 0.0j, mixed_precision=False
+        )
+
+    @jax.jit
+    def run_jax_z2z_fp64(d, p):
+        return jax_z2z.nonlinear_term_iii(
+            d, p, geom, efun_sign=1.0, fft_prefactor=1.0 + 0.0j, mixed_precision=False
+        )
+
+    @jax.jit
+    def run_jax_z2z_fp32(d, p):
+        return jax_z2z.nonlinear_term_iii(
+            d, p, geom, efun_sign=1.0, fft_prefactor=1.0 + 0.0j, mixed_precision=True
+        )
 
     # 4. Shared Physics & Solver Wrapper
     def apply_physics_wrapper(out_raw, is_lto=True):
@@ -476,9 +487,12 @@ def main():
         # then multiplies by fft_scale=N → net = (1/N^2) * N = 1/N, matching JAX irfft norm
         return apply_physics_wrapper(out, is_lto=False)
 
+
+
     variants = [
-        ("JAX FP64 baseline", run_jax_fp64, (df, phi)),
-        ("JAX Z2Z 2-for-1", run_jax_z2z, (df, phi)),
+        ("JAX R2C fp64 baseline", run_jax_r2c_fp64, (df, phi)),
+        ("JAX Z2Z fp64", run_jax_z2z_fp64, (df, phi)),
+        ("JAX Z2Z fp32", run_jax_z2z_fp32, (df, phi)),
         ("LTO v2 (Standard)", run_lto_v2, (df_lto, phi_lto)),
         ("LTO vZ2Z (Optimized)", run_lto_vz2z, (df_lto, phi_lto)),
         ("LTO vZ2Z-merged", run_lto_vz2z_merged, (df_lto, phi_lto)),
@@ -492,7 +506,7 @@ def main():
     results = {}
     errors = {}
     try:
-        ref_out = run_jax_fp64(df, phi)
+        ref_out = run_jax_r2c_fp64(df, phi)
         # Use batch_to_run if sliced, else full_batch_size
         limit = batch_to_run if args.slice > 0 else full_batch_size
         ref_flat = ref_out.reshape(-1, nkx, nky)[:limit]
@@ -528,7 +542,7 @@ def main():
         f"{'Variant':30s} | {'Time (ms)':20s} | {'Speedup':10s} | {'Rel L2':10s} | {'Throughput'}"
     )
     print(f"{'-'*30} | {'-'*20} | {'-'*10} | {'-'*10} | {'-'*15}")
-    base_time, _ = results.get("JAX FP64 baseline", (1.0, 0.0))
+    base_time, _ = results.get("JAX R2C fp64 baseline", (1.0, 0.0))
     hbm_bytes = 6.11e9
 
     for name, (t, std) in results.items():

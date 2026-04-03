@@ -72,36 +72,7 @@ class JAXOps(SolverOps):
         mixed_precision: bool = True,
         bessel: Optional[jnp.ndarray] = None,
     ) -> jnp.ndarray:
-        """Nonlinear ExB advection (term III). Dispatches to R2C or Z2Z variant."""
-        impl = self._nl_z2z if self.use_z2z else self._nl_r2c
-        return impl(
-            df,
-            phi,
-            geometry,
-            efun_sign=efun_sign,
-            fft_prefactor=fft_prefactor,
-            exclude_zero_mode=exclude_zero_mode,
-            mixed_precision=mixed_precision,
-            bessel=bessel,
-        )
-
-    def _nl_r2c(
-        self,
-        df: jnp.ndarray,
-        phi: jnp.ndarray,
-        geometry: Dict[str, jnp.ndarray],
-        *,
-        efun_sign: float = 1.0,
-        fft_prefactor: complex = 1.0 + 0.0j,
-        exclude_zero_mode: bool = True,
-        mixed_precision: bool = True,
-        bessel: Optional[jnp.ndarray] = None,
-    ) -> jnp.ndarray:
-        """Standard R2C Poisson bracket. Port of GKW non_linear_terms.F90.
-
-        Wavenumber arrays are packed to the dealiased grid once before the
-        per-s vmap loop. When mixed_precision is True, FFTs run in FP32.
-        """
+        """Nonlinear ExB advection (term III). Shared skeleton for R2C and Z2Z."""
         pre = self.pre
         mrad, mphi, mphiw3 = pre["nl_mrad"], pre["nl_mphi"], pre["nl_mphiw3"]
         fft_scale, jind = pre["nl_fft_scale"], pre["nl_jind"]
@@ -111,140 +82,209 @@ class JAXOps(SolverOps):
         dum_s, ixzero, iyzero = pre["nl_dum_s"], pre["ixzero"], pre["iyzero"]
         nky = df.shape[-1]
 
-        ikx_packed = 1j * pack_half_spectrum(kx2d, jind, mrad, mphiw3)
-        iky_packed = 1j * pack_half_spectrum(ky2d, jind, mrad, mphiw3)
+        if self.use_z2z:
+            kx_1d = kx2d[:, 0]
+            ky_1d = ky2d[0, :]
 
-        def _per_s(df_s, phi_s, bessel_s, dum):
-            fft_dtype = jnp.complex64 if mixed_precision else jnp.complex128
-            real_dtype = jnp.float32 if mixed_precision else jnp.float64
+            def _per_s_wrapper(df_s, phi_s, bessel_s, dum):
+                return _per_s_z2z(
+                    df_s,
+                    phi_s,
+                    bessel_s,
+                    dum,
+                    mixed_precision=mixed_precision,
+                    efun_sign=efun_sign,
+                    fft_prefactor=fft_prefactor,
+                    fft_scale=fft_scale,
+                    kx_vec=kx_1d,
+                    ky_vec=ky_1d,
+                    jind=jind,
+                    mrad=mrad,
+                    mphi=mphi,
+                    mphiw3=mphiw3,
+                    nky=nky,
+                )
 
-            gyro_phi = bessel_s * phi_s[None, None, :, :]
+        else:
+            ikx_packed = 1j * pack_half_spectrum(kx2d, jind, mrad, mphiw3)
+            iky_packed = 1j * pack_half_spectrum(ky2d, jind, mrad, mphiw3)
 
-            df_packed = pack_half_spectrum(df_s, jind, mrad, mphiw3).astype(fft_dtype)
-            phi_packed = pack_half_spectrum(gyro_phi, jind, mrad, mphiw3).astype(fft_dtype)
+            def _per_s_wrapper(df_s, phi_s, bessel_s, dum):
+                return _per_s_r2c(
+                    df_s,
+                    phi_s,
+                    bessel_s,
+                    dum,
+                    mixed_precision=mixed_precision,
+                    efun_sign=efun_sign,
+                    fft_prefactor=fft_prefactor,
+                    fft_scale=fft_scale,
+                    ikx_packed=ikx_packed,
+                    iky_packed=iky_packed,
+                    mrad=mrad,
+                    mphi=mphi,
+                    mphiw3=mphiw3,
+                    jind=jind,
+                    nky=nky,
+                )
 
-            # cast wavenumber arrays to fft_dtype to avoid promotion back to fp64
-            ikx = ikx_packed.astype(fft_dtype)
-            iky = iky_packed.astype(fft_dtype)
-
-            packed_grad_phi_y = iky[None, None, :] * phi_packed
-            packed_grad_phi_x = ikx[None, None, :] * phi_packed
-            packed_grad_f_x = ikx[None, None, :] * df_packed
-            packed_grad_f_y = iky[None, None, :] * df_packed
-
-            def _to_real(packed_spec):
-                return jnp.fft.irfft2(packed_spec, s=(mrad, mphi), axes=(-2, -1), norm="backward")
-
-            nl_real = (efun_sign * dum).astype(real_dtype) * (
-                _to_real(packed_grad_phi_y) * _to_real(packed_grad_f_x)
-                - _to_real(packed_grad_phi_x) * _to_real(packed_grad_f_y)
-            )
-
-            nl_half_raw = jnp.fft.rfft2(nl_real, s=(mrad, mphi), axes=(-2, -1), norm="backward")
-            if mixed_precision:
-                nl_half_raw = nl_half_raw.astype(jnp.complex128)
-
-            nl_half = (
-                jnp.asarray(fft_prefactor, dtype=jnp.complex128)
-                * jnp.asarray(fft_scale, dtype=jnp.complex128)
-                * nl_half_raw
-            )
-            return unpack_half_spectrum(nl_half, jind, nky)
-
-        nl = jax.vmap(_per_s, in_axes=(2, 0, 2, 0), out_axes=2)(df, phi, bessel, dum_s)
-        return nl.at[:, :, :, ixzero, iyzero].set(0.0) if exclude_zero_mode else nl
-
-    def _nl_z2z(
-        self,
-        df: jnp.ndarray,
-        phi: jnp.ndarray,
-        geometry: Dict[str, jnp.ndarray],
-        *,
-        efun_sign: float = 1.0,
-        fft_prefactor: complex = 1.0 + 0.0j,
-        exclude_zero_mode: bool = True,
-        mixed_precision: bool = True,
-        bessel: Optional[jnp.ndarray] = None,
-    ) -> jnp.ndarray:
-        """Z2Z 2-for-1 Poisson bracket.
-
-        Packs two spectral derivatives into one complex field and uses
-        ifft2 (C2C) instead of irfft2 (C2R), halving the inverse FFT count.
-        Hermitian symmetrization at ky=0 corrects the Bessel-induced
-        symmetry defect that would leak across packed channels.
-        """
-        pre = self.pre
-        mrad, mphi, mphiw3 = pre["nl_mrad"], pre["nl_mphi"], pre["nl_mphiw3"]
-        fft_scale, jind = pre["nl_fft_scale"], pre["nl_jind"]
-        kx2d, ky2d = pre["nl_kx2d"], pre["nl_ky2d"]
-        if bessel is None:
-            bessel = pre["bessel"]
-        dum_s, ixzero, iyzero = pre["nl_dum_s"], pre["ixzero"], pre["iyzero"]
-        nky = df.shape[-1]
-
-        kx_1d = kx2d[:, 0]
-        ky_1d = ky2d[0, :]
-
-        def _pack_full_z2z(field_packed_half, kx_vec, ky_vec, jind, mrad, mphi, nky):
-            """Pack half-spectrum into full z2z input with Hermitian extension."""
-            mphiw3 = mphi // 2 + 1
-            kx_dense = jnp.zeros(mrad, dtype=jnp.float64)
-            kx_dense = kx_dense.at[jind].set(kx_vec)
-
-            iky_bcast = jnp.zeros((1, mphiw3), dtype=jnp.complex128)
-            iky_bcast = iky_bcast.at[:, :nky].set(1j * ky_vec[:nky])
-            ikx_bcast = 1j * kx_dense[:, None]
-
-            fy_half = iky_bcast * field_packed_half
-            fx_half = ikx_bcast * field_packed_half
-
-            m_mirror = (mrad - jnp.arange(mrad)) % mrad
-
-            def _symmetrize_col0(arr):
-                col0 = arr[..., :, 0]
-                col0_sym = 0.5 * (col0 + jnp.conj(col0[..., m_mirror]))
-                return arr.at[..., :, 0].set(col0_sym)
-
-            fy_half = _symmetrize_col0(fy_half)
-            fx_half = _symmetrize_col0(fx_half)
-
-            ws_full = jnp.zeros(field_packed_half.shape[:-2] + (mrad, mphi), dtype=jnp.complex128)
-            ws_primary = fy_half + 1j * fx_half
-            ws_full = ws_full.at[..., :, :mphiw3].set(ws_primary)
-
-            j_mirror_range = jnp.arange(mphiw3, mphi)
-            j_source = mphi - j_mirror_range
-            fy_mirror = jnp.conj(fy_half[..., m_mirror[:, None], j_source[None, :]])
-            fx_mirror = jnp.conj(fx_half[..., m_mirror[:, None], j_source[None, :]])
-            ws_full = ws_full.at[..., :, mphiw3:].set(fy_mirror + 1j * fx_mirror)
-            return ws_full
-
-        def _per_s(df_s, phi_s, bessel_s, dum):
-            gyro_phi = bessel_s * phi_s[None, None, :, :]
-            df_packed = pack_half_spectrum(df_s, jind, mrad, mphiw3)
-            phi_packed = pack_half_spectrum(gyro_phi, jind, mrad, mphiw3)
-
-            ws_df = _pack_full_z2z(df_packed, kx_1d, ky_1d, jind, mrad, mphi, nky)
-            ws_phi = _pack_full_z2z(phi_packed, kx_1d, ky_1d, jind, mrad, mphi, nky)
-
-            z2z_df = jnp.fft.ifft2(ws_df, axes=(-2, -1), norm="backward")
-            z2z_phi = jnp.fft.ifft2(ws_phi, axes=(-2, -1), norm="backward")
-
-            nl_real = (efun_sign * dum) * (
-                jnp.real(z2z_phi) * jnp.imag(z2z_df) - jnp.imag(z2z_phi) * jnp.real(z2z_df)
-            )
-
-            nl_half_raw = jnp.fft.rfft2(nl_real, s=(mrad, mphi), axes=(-2, -1), norm="backward")
-            nl_half = (
-                jnp.asarray(fft_prefactor, dtype=jnp.complex128)
-                * jnp.asarray(fft_scale, dtype=jnp.complex128)
-                * nl_half_raw
-            )
-            return unpack_half_spectrum(nl_half, jind, nky)
-
-        nl = jax.vmap(_per_s, in_axes=(2, 0, 2, 0), out_axes=2)(df, phi, bessel, dum_s)
+        nl = jax.vmap(_per_s_wrapper, in_axes=(2, 0, 2, 0), out_axes=2)(df, phi, bessel, dum_s)
         return nl.at[:, :, :, ixzero, iyzero].set(0.0) if exclude_zero_mode else nl
 
     def linear_rhs(self, df, phi, geometry, params, pre) -> Optional[jnp.ndarray]:
         """Not implemented in JAX backend; solver falls back to vmap."""
         return None
+
+
+def _pack_full_z2z(field_packed_half, kx_vec, ky_vec, jind, mrad, mphi, mphiw3, nky, dtype):
+    """Pack half-spectrum into full z2z input with Hermitian extension."""
+    real_dtype = jnp.float32 if dtype == jnp.complex64 else jnp.float64
+    kx_dense = jnp.zeros(mrad, dtype=real_dtype)
+    kx_dense = kx_dense.at[jind].set(kx_vec.astype(real_dtype))
+
+    iky_bcast = jnp.zeros((1, mphiw3), dtype=dtype)
+    one_j = jnp.array(1j, dtype=dtype)
+    iky_bcast = iky_bcast.at[:, :nky].set((one_j * ky_vec[:nky]).astype(dtype))
+    ikx_bcast = (one_j * kx_dense[:, None]).astype(dtype)
+
+    fy_half = iky_bcast * field_packed_half
+    fx_half = ikx_bcast * field_packed_half
+
+    m_mirror = (mrad - jnp.arange(mrad)) % mrad
+
+    # ky=0 column is self-conjugate: F(kx,0) must equal conj(F(-kx,0))
+    # Bessel multiplication can break this (numerical errors)
+    # averaging restores the symmetry
+    def _symmetrize_col0(arr):
+        col0 = arr[..., :, 0]
+        col0_sym = 0.5 * (col0 + jnp.conj(col0[..., m_mirror]))
+        return arr.at[..., :, 0].set(col0_sym)
+
+    fy_half = _symmetrize_col0(fy_half)
+    fx_half = _symmetrize_col0(fx_half)
+
+    ws_full = jnp.zeros(field_packed_half.shape[:-2] + (mrad, mphi), dtype=dtype)
+    ws_primary = fy_half + (one_j * fx_half).astype(dtype)
+    ws_full = ws_full.at[..., :, :mphiw3].set(ws_primary)
+
+    j_mirror_range = jnp.arange(mphiw3, mphi)
+    j_source = mphi - j_mirror_range
+    fy_mirror = jnp.conj(fy_half[..., m_mirror[:, None], j_source[None, :]])
+    fx_mirror = jnp.conj(fx_half[..., m_mirror[:, None], j_source[None, :]])
+    ws_full = ws_full.at[..., :, mphiw3:].set(fy_mirror + (one_j * fx_mirror).astype(dtype))
+    return ws_full
+
+
+def _per_s_r2c(
+    df_s,
+    phi_s,
+    bessel_s,
+    dum,
+    *,
+    mixed_precision,
+    efun_sign,
+    fft_prefactor,
+    fft_scale,
+    ikx_packed,
+    iky_packed,
+    mrad,
+    mphi,
+    mphiw3,
+    jind,
+    nky,
+):
+    """Standard R2C Poisson bracket logic. Port of GKW non_linear_terms.F90.
+
+    Wavenumber arrays are packed to the dealiased grid once before the
+    per-s vmap loop. When mixed_precision is True, FFTs run in FP32.
+    """
+    fft_dtype = jnp.complex64 if mixed_precision else jnp.complex128
+    real_dtype = jnp.float32 if mixed_precision else jnp.float64
+
+    gyro_phi = bessel_s * phi_s[None, None, :, :]
+
+    df_packed = pack_half_spectrum(df_s, jind, mrad, mphiw3).astype(fft_dtype)
+    phi_packed = pack_half_spectrum(gyro_phi, jind, mrad, mphiw3).astype(fft_dtype)
+
+    # cast wavenumber arrays to fft_dtype to avoid promotion back to fp64
+    ikx = ikx_packed.astype(fft_dtype)
+    iky = iky_packed.astype(fft_dtype)
+
+    packed_grad_phi_y = iky[None, None, :] * phi_packed
+    packed_grad_phi_x = ikx[None, None, :] * phi_packed
+    packed_grad_f_x = ikx[None, None, :] * df_packed
+    packed_grad_f_y = iky[None, None, :] * df_packed
+
+    def _to_real(packed_spec):
+        return jnp.fft.irfft2(packed_spec, s=(mrad, mphi), axes=(-2, -1), norm="backward")
+
+    nl_real = (efun_sign * dum).astype(real_dtype) * (
+        _to_real(packed_grad_phi_y) * _to_real(packed_grad_f_x)
+        - _to_real(packed_grad_phi_x) * _to_real(packed_grad_f_y)
+    )
+
+    nl_half_raw = jnp.fft.rfft2(nl_real, s=(mrad, mphi), axes=(-2, -1), norm="backward")
+    if mixed_precision:
+        nl_half_raw = nl_half_raw.astype(jnp.complex128)
+
+    nl_half = (
+        jnp.asarray(fft_prefactor, dtype=jnp.complex128)
+        * jnp.asarray(fft_scale, dtype=jnp.complex128)
+        * nl_half_raw
+    )
+    return unpack_half_spectrum(nl_half, jind, nky)
+
+
+def _per_s_z2z(
+    df_s,
+    phi_s,
+    bessel_s,
+    dum,
+    *,
+    mixed_precision,
+    efun_sign,
+    fft_prefactor,
+    fft_scale,
+    kx_vec,
+    ky_vec,
+    jind,
+    mrad,
+    mphi,
+    mphiw3,
+    nky,
+):
+    """Z2Z 2-for-1 Poisson bracket logic.
+
+    Packs two spectral derivatives into one complex field and uses
+    ifft2 (C2C) instead of irfft2 (C2R), halving the inverse FFT count.
+    Hermitian symmetrization at ky=0 corrects the Bessel-induced
+    symmetry defect that would leak across packed channels.
+    """
+    fft_dtype = jnp.complex64 if mixed_precision else jnp.complex128
+    real_dtype = jnp.float32 if mixed_precision else jnp.float64
+
+    gyro_phi = bessel_s * phi_s[None, None, :, :]
+
+    df_packed = pack_half_spectrum(df_s, jind, mrad, mphiw3).astype(fft_dtype)
+    phi_packed = pack_half_spectrum(gyro_phi, jind, mrad, mphiw3).astype(fft_dtype)
+
+    ws_df = _pack_full_z2z(df_packed, kx_vec, ky_vec, jind, mrad, mphi, mphiw3, nky, fft_dtype)
+    ws_phi = _pack_full_z2z(phi_packed, kx_vec, ky_vec, jind, mrad, mphi, mphiw3, nky, fft_dtype)
+
+    z2z_df = jnp.fft.ifft2(ws_df, axes=(-2, -1), norm="backward")
+    z2z_phi = jnp.fft.ifft2(ws_phi, axes=(-2, -1), norm="backward")
+
+    nl_real = (efun_sign * dum).astype(real_dtype) * (
+        jnp.real(z2z_phi) * jnp.imag(z2z_df) - jnp.imag(z2z_phi) * jnp.real(z2z_df)
+    )
+
+    nl_half_raw = jnp.fft.rfft2(nl_real, s=(mrad, mphi), axes=(-2, -1), norm="backward")
+    if mixed_precision:
+        nl_half_raw = nl_half_raw.astype(jnp.complex128)
+
+    nl_half = (
+        jnp.asarray(fft_prefactor, dtype=jnp.complex128)
+        * jnp.asarray(fft_scale, dtype=jnp.complex128)
+        * nl_half_raw
+    )
+    return unpack_half_spectrum(nl_half, jind, nky)

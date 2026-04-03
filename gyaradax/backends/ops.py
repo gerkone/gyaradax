@@ -72,6 +72,7 @@ class SolverOps(ABC):
         """Compute term III (nonlinear ExB advection) via pseudospectral method."""
         raise NotImplementedError
 
+    @abstractmethod
     def linear_rhs(self, df, phi, geometry, params, pre) -> Optional[jnp.ndarray]:
         """Optional fused linear RHS. Returns None if not implemented."""
         return None
