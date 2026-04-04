@@ -3,6 +3,9 @@
 
 OPTIM.md §4.4: AI ≈ 1.85 FLOP/byte, ~9.8B FLOPs/species, ~5.3 GB R+W/species.
 Benchmarks both mixed_precision=True (default) and False (full FP64).
+
+Architecture: solver.py delegates full implementation and shape dispatch (5D/6D)
+to backend. Backend (JAX/CUDA) handles pseudospectral ExB bracket via FFT.
 """
 import argparse, os, sys
 from pathlib import Path

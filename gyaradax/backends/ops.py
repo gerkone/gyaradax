@@ -5,7 +5,7 @@ constructed once from precomputed data and used throughout the solve.
 """
 
 from abc import ABC, abstractmethod
-from typing import Optional, Tuple
+from typing import Dict, Tuple
 
 import jax.numpy as jnp
 
@@ -18,7 +18,7 @@ class SolverOps(ABC):
     def __init__(
         self,
         pre: GKPre,
-        field_template: Optional[jnp.ndarray] = None,
+        field_template: jnp.ndarray = None,
         use_z2z: bool = False,
     ):
         self.pre = pre
@@ -69,10 +69,52 @@ class SolverOps(ABC):
 
     @abstractmethod
     def nonlinear_term_iii(self, df, phi, geometry, **kwargs) -> jnp.ndarray:
-        """Compute term III (nonlinear ExB advection) via pseudospectral method."""
+        """Compute term III (nonlinear ExB advection) via pseudospectral method.
+
+        Backend must handle both 5D (nv, nmu, ns, nkx, nky) and 6D (nsp, nv, nmu, ns, nkx, nky) df,
+        or raise NotImplementedError/ValueError if unsupported.
+
+        Args:
+            df: Distribution function, 5D or 6D
+            phi: Electrostatic potential (ns, nkx, nky)
+            geometry: Geometry dict with grid and metric data
+            **kwargs: Backend-specific options (mixed_precision, bessel, etc.)
+
+        Returns:
+            Nonlinear RHS contribution (same shape as df)
+
+        Raises:
+            NotImplementedError: If backend cannot handle this configuration (e.g., 6D with non-uniform params)
+            ValueError: If df has unsupported shape
+        """
         raise NotImplementedError
 
     @abstractmethod
-    def linear_rhs(self, df, phi, geometry, params, pre) -> Optional[jnp.ndarray]:
-        """Optional fused linear RHS. Returns None if not implemented."""
-        return None
+    def linear_rhs(
+        self,
+        df: jnp.ndarray,
+        phi: jnp.ndarray,
+        geometry: Dict[str, jnp.ndarray],
+        params,
+        pre,
+    ) -> jnp.ndarray:
+        """Compute linear RHS for 5D (single species) or 6D (multi-species) df.
+
+        Implements Terms I, II, IV, V, VII, VIII + dissipation.
+        Backend must handle both 5D and 6D cases, or raise NotImplementedError/ValueError.
+
+        Args:
+            df: Distribution function, 5D (nv, nmu, ns, nkx, nky) or 6D (nsp, nv, nmu, ns, nkx, nky)
+            phi: Electrostatic potential (ns, nkx, nky)
+            geometry: Geometry dict with grid and metric data
+            params: GKParams with physical parameters
+            pre: GKPre with precomputed coefficients
+
+        Returns:
+            RHS contribution (same shape as df)
+
+        Raises:
+            NotImplementedError: If backend cannot handle this configuration (e.g., non-uniform species params)
+            ValueError: If df has unsupported shape
+        """
+        raise NotImplementedError

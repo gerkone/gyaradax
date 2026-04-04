@@ -638,6 +638,10 @@ def linear_precompute(geometry: Dict[str, jnp.ndarray], params: GKParams) -> "GK
         out.update(sp)
         out["geom_tensors"] = None
         out["nsp"] = nsp
+        # kx_b/ky_b computed in _compute_species_coeffs but not returned - add them here
+        # For kinetic case, need 6D shape (1, 1, 1, 1, nkx, 1) to broadcast with 6D drift arrays
+        out["kx_b"] = jnp.reshape(kx, (1, 1, 1, 1, -1, 1))
+        out["ky_b"] = jnp.reshape(ky, (1, 1, 1, 1, 1, -1))
 
         # precompute kinetic phi solve arrays (avoids recomputing bessel/gamma per RHS call)
         phi_w, phi_d = precompute_phi_kinetic(geometry)

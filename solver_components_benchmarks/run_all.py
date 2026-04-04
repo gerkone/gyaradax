@@ -25,7 +25,7 @@ CONFIG = "configs/iteration_13.yaml"
 COMPONENTS = [
     ("C1 _apply_parallel", "bench_apply_parallel"),
     ("C2 _apply_vpar", "bench_apply_vpar"),
-    ("C3 _compute_linear_rhs", "bench_linear_rhs"),
+    ("C3 linear_rhs", "bench_linear_rhs"),
     ("C4 nonlinear_term_iii", "bench_nonlinear"),
     ("C5 _compute_phi", "bench_phi_solve"),
     ("C6 pack/unpack_spectrum", "bench_pack_spectrum"),

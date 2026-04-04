@@ -8,6 +8,9 @@ Run once from the repo root:
 Writes solver_components_benchmarks/baselines/<component>.npz.
 Each file contains the exact inputs and expected output for that component
 so that bench_*.py files can verify numerical correctness against them.
+
+Note: Uses JAX backend for baseline generation. Benchmarks compare against
+these baselines using both JAX and CUDA backends.
 """
 import argparse
 import os
@@ -58,7 +61,6 @@ def main():
 
     # ── C1: _apply_parallel ────────────────────────────────────────────────
     print("\nC1: _apply_parallel")
-    from gyaradax.solver import _compute_linear_rhs
 
     # replicate closure logic from solver.py:758-768
     s_shift = pre["s_shift"]
@@ -95,12 +97,12 @@ def main():
         output_d4=out_c2_d4,
     )
 
-    # ── C3: _linear_rhs_core (via _compute_linear_rhs) ───────────────────
-    print("\nC3: _compute_linear_rhs")
+    # ── C3: linear_rhs ────────────────────────────────────────────────────
+    print("\nC3: linear_rhs")
 
     @jax.jit
     def _lin_rhs():
-        return _compute_linear_rhs(df, phi, geom, params, pre, ops)
+        return ops.linear_rhs(df, phi, geom, params, pre)
 
     out_c3 = _lin_rhs()
     save("linear_rhs", df=df, phi=phi, output=out_c3)

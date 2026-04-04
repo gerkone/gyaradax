@@ -30,9 +30,8 @@ from gyaradax.solver import (
     GKState,
     linear_precompute,
     _compute_phi,
-    _compute_linear_rhs,
-    _compute_nonlinear_rhs,
 )
+from gyaradax.backends import create_ops
 from gyaradax.utils import load_gkw_k_dump, read_gkw_dump_time, read_gkw_dump_dtim
 
 
@@ -136,6 +135,8 @@ def run_benchmark():
     if args.components:
         print(f"\ncomponent benchmarks (single evaluation, {mode}):")
 
+        ops = create_ops(pre, df, backend=params.backend, use_z2z=params.use_z2z)
+
         bench_component(
             lambda: _compute_phi(df, geom, params, pre),
             label="phi solve",
@@ -144,13 +145,13 @@ def run_benchmark():
         phi = _compute_phi(df, geom, params, pre)
 
         bench_component(
-            lambda: _compute_linear_rhs(df, phi, geom, params, pre),
+            lambda: ops.linear_rhs(df, phi, geom, params, pre),
             label="linear rhs",
         )
 
         if params.non_linear:
             bench_component(
-                lambda: _compute_nonlinear_rhs(df, phi, geom, params, pre),
+                lambda: ops.nonlinear_term_iii(df, phi, geom, mixed_precision=params.mixed_precision),
                 label="nonlinear rhs (term iii)",
             )
         print()

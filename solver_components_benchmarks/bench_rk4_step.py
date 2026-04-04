@@ -3,6 +3,9 @@
 
 Benchmarks CUDA vs JAX ops backends with proper warmup, full
 synchronisation, statistical reporting, and roofline analysis.
+
+Architecture: solver.py delegates linear_rhs and nonlinear_term_iii to backend.
+Backend handles all shape dispatch (5D adiabatic / 6D kinetic electrons).
 """
 
 import argparse

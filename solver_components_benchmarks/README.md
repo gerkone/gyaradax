@@ -4,13 +4,28 @@ Isolated benchmarks for each solver component analysed in `OPTIM.md`.
 Each benchmark loads real solver state (iteration_13.yaml + K01 checkpoint),
 runs the component JIT-compiled, and checks output against a saved baseline.
 
+## Architecture
+
+**Backend Dispatch Model (refactored):**
+- `solver.py` orchestrates RK4 integration and field solve
+- `solver.py` delegates `linear_rhs` and `nonlinear_term_iii` to backend ops
+- Backend (`backends/_jax.py`, `backends/_cuda.py`) handles:
+  - Full implementation of linear/nonlinear RHS
+  - Shape dispatch: 5D (adiabatic) vs 6D (kinetic electrons)
+  - Fused stencil operations and FFT pipelines
+
+**Benchmark Coverage:**
+- **C1-C2**: Low-level stencil ops (`_apply_parallel`, `_apply_vpar`)
+- **C3-C4**: High-level RHS ops (`linear_rhs`, `nonlinear_term_iii`) — backend dispatch
+- **C5-C7**: Field solve, FFT utilities, full RK4 step
+
 ## Files
 
 | File | Component | OPTIM.md |
 |------|-----------|----------|
 | `bench_apply_parallel.py` | `_apply_parallel` — 9-point parallel stencil | §4.1 |
 | `bench_apply_vpar.py` | `_apply_vpar` — 5-point vpar stencil (D1 + D4) | §4.2 |
-| `bench_linear_rhs.py` | `_compute_linear_rhs` — full linear operator | §4.3 |
+| `bench_linear_rhs.py` | `linear_rhs` — full linear operator | §4.3 |
 | `bench_nonlinear.py` | `nonlinear_term_iii` — FFT Poisson bracket (mp + fp64) | §4.4 |
 | `bench_phi_solve.py` | `_compute_phi` — quasineutrality solve | §4.5 |
 | `bench_pack_spectrum.py` | `pack/unpack_half_spectrum` — FFT index scatter/gather | §4.6 |

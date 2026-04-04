@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
-"""C3: _compute_linear_rhs — full linear operator (all terms, all species).
+"""C3: linear_rhs — full linear operator (all terms, all species).
 
 OPTIM.md §4.3: AI ≈ 0.087 FLOP/byte, ~635M FLOPs/species, ~7.3 GB R+W/species.
 Adiabatic (1 species): ~635M FLOPs, ~7.3 GB R+W per call.
+
+Architecture: solver.py delegates full implementation and shape dispatch (5D/6D)
+to backend. Backend (JAX/CUDA) handles Terms I, II, IV, V, VII, VIII + dissipation.
 """
 import argparse, os, sys
 from pathlib import Path
@@ -27,12 +30,12 @@ from common import (
     analyze_cost,
     BASELINES_DIR,
 )
-from gyaradax.solver import _compute_linear_rhs, GKPre
+from gyaradax.solver import GKPre
 
 
 def run(config="configs/iteration_13.yaml", mixed_precision=False):
     print(f"\n{'='*60}")
-    print("C3: _compute_linear_rhs  (full linear operator)")
+    print("C3: linear_rhs  (full linear operator)")
     print(f"{'='*60}")
 
     df, phi, geom, params, pre = load_setup(config, mixed_precision)
@@ -52,7 +55,7 @@ def run(config="configs/iteration_13.yaml", mixed_precision=False):
 
         @jax.jit
         def fn(d, p):
-            return _compute_linear_rhs(d, p, geom, params, pre_gk, ops)
+            return ops.linear_rhs(d, p, geom, params, pre_gk)
 
         out = fn(df, phi)
         rel_l2 = check_accuracy(out, baseline, "output")
@@ -63,7 +66,7 @@ def run(config="configs/iteration_13.yaml", mixed_precision=False):
         mean_ms, std_ms = BenchTimer(lambda d=df, p=phi: fn(d, p).block_until_ready()).run()
         print(f"     timing: {mean_ms:.3f} ± {std_ms:.3f} ms")
 
-        r = roofline_report(f"_compute_linear_rhs ({backend})", mean_ms, flops, bytes_rw)
+        r = roofline_report(f"linear_rhs ({backend})", mean_ms, flops, bytes_rw)
         r["rel_l2"] = rel_l2
         results[backend] = r
 

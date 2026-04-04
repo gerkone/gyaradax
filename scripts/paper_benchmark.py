@@ -30,9 +30,8 @@ from gyaradax import load_geometry, GKParams, gk_init, gksolve
 from gyaradax.solver import (
     linear_precompute,
     _compute_phi,
-    _compute_linear_rhs,
-    _compute_nonlinear_rhs,
 )
+from gyaradax.backends import create_ops
 from gyaradax.params import gkparams_from_config, load_config
 
 
@@ -262,6 +261,8 @@ def benchmark_gyaradax(config_path, n_steps=120, n_blocks=5, device=None):
 
     # component benchmarks
     print("\ncomponent benchmarks:")
+    ops = create_ops(pre, df, backend=params.backend, use_z2z=params.use_z2z)
+
     phi = _compute_phi(df, geometry, params, pre)
 
     phi_ms, phi_std = bench_fn(
@@ -271,14 +272,14 @@ def benchmark_gyaradax(config_path, n_steps=120, n_blocks=5, device=None):
     results["phi_ms"] = phi_ms
 
     lin_ms, lin_std = bench_fn(
-        lambda: _compute_linear_rhs(df, phi, geometry, params, pre),
+        lambda: ops.linear_rhs(df, phi, geometry, params, pre),
         label="linear rhs",
     )
     results["linear_rhs_ms"] = lin_ms
 
     if params.non_linear:
         nl_ms, nl_std = bench_fn(
-            lambda: _compute_nonlinear_rhs(df, phi, geometry, params, pre),
+            lambda: ops.nonlinear_term_iii(df, phi, geometry, mixed_precision=params.mixed_precision),
             label="nonlinear rhs (term iii)",
         )
         results["nonlinear_rhs_ms"] = nl_ms

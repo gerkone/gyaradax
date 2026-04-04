@@ -317,74 +317,39 @@ class CUDAOps(SolverOps):
         geometry: Dict[str, jnp.ndarray],
         params,
         pre: Dict[str, jnp.ndarray],
-    ) -> Optional[jnp.ndarray]:
-        """Fused linear RHS for single or multi-species.
+    ) -> jnp.ndarray:
+        """Fused linear RHS via FFI kernel with shape dispatch.
 
-        For kinetic electrons (6D df), flattens species into the velocity
-        batch dimension. Returns None if per-species parameters differ
-        (signz0/tmp0), signalling the solver to fall back to vmap.
+        For 5D df: direct call to fused kernel.
+        For 6D df: flatten species dimension if params are uniform, else raise NotImplementedError.
         """
         if df.ndim == 5:
-            return self._linear_rhs_fused(
-                df, phi, pre, params.dvp, params.disp_vp, params.drive_scale
-            )
-
-        # kinetic: flatten (nsp, nv, nmu) → single velocity batch
-        nsp, nv, nmu, ns, nkx, nky = df.shape
-
-        # per-species scalar check — must be uniform for the fused kernel
-        signz0 = pre["signz0"]
-        tmp0 = pre["tmp0"]
-        if hasattr(signz0, "__len__") and (
-            jnp.unique(jnp.asarray(signz0)).size > 1 or jnp.unique(jnp.asarray(tmp0)).size > 1
-        ):
-            return None
-
-        nv_flat = nsp * nv * nmu
-        df_5d = df.reshape(nv_flat, 1, ns, nkx, nky)
-
-        # build a minimal dict with reshaped arrays for the fused kernel
-        def _r6to5(arr):
-            if arr.ndim == 6:
-                return arr.reshape(nv_flat, 1, ns, nkx, nky)
-            elif arr.ndim == 5:
-                return jnp.broadcast_to(arr[None, ...], (nsp, nv, nmu, ns, nkx, nky)).reshape(
-                    nv_flat, 1, ns, nkx, nky
+            return self._linear_rhs_fused(df, phi, pre, params.dvp, params.disp_vp, params.drive_scale)
+        elif df.ndim == 6:
+            nsp, nv, nmu, ns, nkx, nky = df.shape
+            
+            # Check if species params are uniform (required for flattening optimization)
+            def _is_uniform(arr):
+                if arr is None:
+                    return True
+                arr = jnp.asarray(arr)
+                return jnp.all(arr == arr.flatten()[0])
+            
+            # Check key species parameters for uniformity
+            if not (_is_uniform(params.mas) and _is_uniform(params.signz) and 
+                    _is_uniform(params.vthrat) and _is_uniform(params.tmp) and
+                    _is_uniform(params.de)):
+                raise NotImplementedError(
+                    "CUDA linear_rhs: non-uniform species parameters not supported. "
+                    "All species must have identical mas, signz, vthrat, tmp, de."
                 )
-            return arr
-
-        def _r4to3(arr):
-            return arr.reshape(nv_flat, 1, ns)
-
-        sp_pre = {
-            "bessel": _r6to5(pre["bessel"]),
-            "s_total_upar": _r6to5(pre["s_total_upar"]),
-            "s_total_t7": _r6to5(pre["s_total_t7"]),
-            "fmaxwl": _r4to3(pre["fmaxwl"]),
-            "dmaxwel_fm_ek": pre["dmaxwel_fm_ek"].reshape(nv_flat, 1, ns, nky),
-            "drift_x": _r4to3(pre["drift_x"]),
-            "drift_y": _r4to3(pre["drift_y"]),
-            "utrap": jnp.broadcast_to(pre["utrap"][:, None, :, :], (nsp, nv, nmu, ns)).reshape(
-                nv_flat, 1, ns
-            ),
-            "abs_dum2_vp": jnp.broadcast_to(
-                pre["abs_dum2_vp"][:, None, :, :], (nsp, nv, nmu, ns)
-            ).reshape(nv_flat, 1, ns),
-            "signz0": signz0[0] if hasattr(signz0, "__getitem__") else signz0,
-            "tmp0": tmp0[0] if hasattr(tmp0, "__getitem__") else tmp0,
-            # pass through shared arrays unchanged
-            "hyper": pre["hyper"],
-            "kx_b": pre["kx_b"],
-            "ky_b": pre["ky_b"],
-            "valid_shift": pre["valid_shift"],
-            "s_shift": pre["s_shift"],
-            "kx_shift": pre["kx_shift"],
-        }
-
-        out_5d = self._linear_rhs_fused(
-            df_5d, phi, sp_pre, params.dvp, params.disp_vp, params.drive_scale
-        )
-        return out_5d.reshape(nsp, nv, nmu, ns, nkx, nky)
+            
+            # Flatten (nsp, nv, nmu) -> (nsp*nv*nmu) for fused kernel
+            df_flat = df.reshape(nsp * nv, nmu, ns, nkx, nky)
+            result_flat = self._linear_rhs_fused(df_flat, phi, pre, params.dvp, params.disp_vp, params.drive_scale)
+            return result_flat.reshape(nsp, nv, nmu, ns, nkx, nky)
+        else:
+            raise ValueError(f"linear_rhs: expected df with ndim 5 or 6, got {df.ndim}")
 
     def nonlinear_term_iii(
         self,
@@ -403,7 +368,16 @@ class CUDAOps(SolverOps):
         Uses z2z 2-for-1 packing with phi at its natural (nmu*ns) batch
         size. Dispatches to mixed precision (FP32 FFTs) or full precision
         (FP64) kernel based on the mixed_precision flag.
+        
+        Only supports 5D df. For 6D (kinetic electrons), use JAX backend or
+        run with adiabatic electrons.
         """
+        if df.ndim == 6:
+            raise NotImplementedError(
+                "CUDA nonlinear_term_iii: 6D df (kinetic electrons) not supported. "
+                "Use JAX backend for kinetic nonlinear runs, or adiabatic electrons with CUDA."
+            )
+        
         pre = self.pre
         mrad, mphi = pre["nl_mrad"], pre["nl_mphi"]
         nv, nmu, ns, nkx, nky = df.shape

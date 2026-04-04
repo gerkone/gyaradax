@@ -297,11 +297,13 @@ When `adiabatic_electrons=False`, the solver:
 2. `_compute_phi`: calls the unified `calculate_phi` which dispatches to
    `_phi_kinetic`, summing the Poisson integral over all species.
 
-3. `_compute_linear_rhs`: uses `jax.vmap` over the species axis. Each species
-   gets its own precomputed coefficients; all share the same $\phi$.
+3. `ops.linear_rhs`: backend handles 5D/6D dispatch internally. JAX backend
+   uses `jax.vmap` over species for 6D; CUDA backend flattens species dimension
+   for uniform params. Each species gets its own precomputed coefficients.
 
-4. `_compute_nonlinear_rhs`: vmaps `nonlinear_term_iii` over species, each
-   with its own Bessel function for gyro-averaging.
+4. `ops.nonlinear_term_iii`: backend handles 5D/6D dispatch. JAX backend vmaps
+   over species with per-species Bessel; CUDA backend raises NotImplementedError
+   for 6D (kinetic electrons not yet supported).
 
 The adiabatic path is completely untouched — branching is via Python `if/else`
 on `params.adiabatic_electrons` (a static pytree field resolved at trace time).

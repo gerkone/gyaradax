@@ -34,10 +34,10 @@ gksimulate / gk_run_batched          ← entry points (simulate.py)
        │    ├─ _compute_phi          ← field solve
        │    │    ├─ _phi_adiabatic   ← adiabatic: quasineutrality + zonal FSA correction
        │    │    └─ _phi_kinetic     ← kinetic: multi-species Poisson
-       │    ├─ _compute_linear_rhs   ← Terms I, II, IV, V, VII, VIII + dissipation
-       │    │    └─ _linear_rhs_core ← inner RHS (vmapped over species for kinetic)
-       │    └─ _compute_nonlinear_rhs← Term III: pseudospectral ExB (vmapped over species)
-       │         └─ nonlinear_term_iii ← 2D FFT Poisson bracket per s-slice
+       │    ├─ ops.linear_rhs        ← Terms I, II, IV, V, VII, VIII + dissipation (backend dispatch)
+       │    │    └─ _linear_rhs_core ← inner RHS (JAX backend, 5D impl, 6D via vmap)
+       │    └─ ops.nonlinear_term_iii← Term III: pseudospectral ExB (backend dispatch)
+       │         └─ _nonlinear_term_iii_core ← 2D FFT Poisson bracket per s-slice (JAX backend)
        └─ estimate_timestep          ← adaptive CFL (nonlinear + von Neumann + field)
             ├─ estimate_nl_timestep   ← max|∇φ| from dealiased FFT
             └─ estimate_linear_timestep ← streaming + trapping + dissipation + field CFL
@@ -64,8 +64,8 @@ compute_geometry                     ← build geometry dict from equilibrium pa
 | gyaradax | GKW subroutine | Fortran file |
 |----------|----------------|--------------|
 | `_phi_adiabatic` | `calculate_fields` + `poisson_zf` | `fields.F90`, `linear_terms.f90` |
-| `_linear_rhs_core` | `calc_linear_terms` | `linear_terms.f90` |
-| `nonlinear_term_iii` | `calculate_nonlinear` | `non_linear_terms.F90` |
+| `_linear_rhs_core` (JAX backend) | `calc_linear_terms` | `linear_terms.f90` |
+| `_nonlinear_term_iii_core` (JAX backend) | `calculate_nonlinear` | `non_linear_terms.F90` |
 | `estimate_linear_timestep` | `get_estimated_timestep` | `matdat.F90` |
 | `init_f` | `init_dist` | `init.f90` |
 | `compute_geometry` | `geom_circ` | `geom.f90` |
