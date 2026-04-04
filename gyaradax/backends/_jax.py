@@ -11,12 +11,16 @@ import jax
 import jax.numpy as jnp
 
 from gyaradax.backends.ops import SolverOps
+from gyaradax.types import GKPre
 from gyaradax.utils import pack_half_spectrum, unpack_half_spectrum
 
 
 @jax.tree_util.register_pytree_node_class
 class JAXOps(SolverOps):
     """JAX implementation of solver operations."""
+
+    def __init__(self, pre: GKPre, field_template: Optional[jnp.ndarray] = None, use_z2z: bool = False):
+        super().__init__(pre, field_template, use_z2z)
 
     def _apply_vpar(self, field: jnp.ndarray, coeffs) -> jnp.ndarray:
         """Apply 5-point vpar stencil (shifts -2..+2) with boundary clamping."""
@@ -71,6 +75,7 @@ class JAXOps(SolverOps):
         exclude_zero_mode: bool = True,
         mixed_precision: bool = True,
         bessel: Optional[jnp.ndarray] = None,
+        **kwargs,
     ) -> jnp.ndarray:
         """Nonlinear ExB advection (term III). Shared skeleton for R2C and Z2Z."""
         pre = self.pre
@@ -85,6 +90,9 @@ class JAXOps(SolverOps):
         if self.use_z2z:
             kx_1d = kx2d[:, 0]
             ky_1d = ky2d[0, :]
+            rev_jind = jnp.full(mrad, -1, dtype=jnp.int32).at[jind].set(
+                jnp.arange(len(jind), dtype=jnp.int32)
+            )
 
             def _per_s_wrapper(df_s, phi_s, bessel_s, dum):
                 return _per_s_z2z(
@@ -99,6 +107,7 @@ class JAXOps(SolverOps):
                     kx_vec=kx_1d,
                     ky_vec=ky_1d,
                     jind=jind,
+                    rev_jind=rev_jind,
                     mrad=mrad,
                     mphi=mphi,
                     mphiw3=mphiw3,
@@ -136,43 +145,60 @@ class JAXOps(SolverOps):
         return None
 
 
-def _pack_full_z2z(field_packed_half, kx_vec, ky_vec, jind, mrad, mphi, mphiw3, nky, dtype):
-    """Pack half-spectrum into full z2z input with Hermitian extension."""
+def _pack_full_z2z(field, kx_vec, ky_vec, jind, rev_jind, mrad, mphi, mphiw3, nky, dtype):
+    """Scatter from packed [nkx, nky] directly to full z2z workspace [mrad, mphi].
+
+    Gathers field values at each output position via rev_jind — no intermediate
+    [mrad, mphiw3] buffer, no scatter ops.
+
+    Packing convention: ws = (i·ky − kx)·F, so Re(IFFT(ws)) = ∂y·F, Im(IFFT(ws)) = ∂x·F.
+    Bracket = ∂yϕ · ∂xf − ∂xϕ · ∂yf  (matches R2C path).
+    """
     real_dtype = jnp.float32 if dtype == jnp.complex64 else jnp.float64
-    kx_dense = jnp.zeros(mrad, dtype=real_dtype)
-    kx_dense = kx_dense.at[jind].set(kx_vec.astype(real_dtype))
-
-    iky_bcast = jnp.zeros((1, mphiw3), dtype=dtype)
     one_j = jnp.array(1j, dtype=dtype)
-    iky_bcast = iky_bcast.at[:, :nky].set((one_j * ky_vec[:nky]).astype(dtype))
-    ikx_bcast = (one_j * kx_dense[:, None]).astype(dtype)
+    nkx = field.shape[-2]
 
-    fy_half = iky_bcast * field_packed_half
-    fx_half = ikx_bcast * field_packed_half
-
+    kx_dense = jnp.zeros(mrad, dtype=real_dtype).at[jind].set(kx_vec.astype(real_dtype))
+    ky_half  = jnp.zeros(mphiw3, dtype=real_dtype).at[:nky].set(ky_vec[:nky].astype(real_dtype))
     m_mirror = (mrad - jnp.arange(mrad)) % mrad
 
-    # ky=0 column is self-conjugate: F(kx,0) must equal conj(F(-kx,0))
-    # Bessel multiplication can break this (numerical errors)
-    # averaging restores the symmetry
-    def _symmetrize_col0(arr):
-        col0 = arr[..., :, 0]
-        col0_sym = 0.5 * (col0 + jnp.conj(col0[..., m_mirror]))
-        return arr.at[..., :, 0].set(col0_sym)
+    # ── Primary half [mrad, mphiw3] ──────────────────────────────────
+    m_p = jnp.arange(mrad)
+    m_g, j_g = jnp.meshgrid(m_p, jnp.arange(mphiw3), indexing="ij")
 
-    fy_half = _symmetrize_col0(fy_half)
-    fx_half = _symmetrize_col0(fx_half)
+    m_src = rev_jind[m_g]
+    valid = (m_src >= 0) & (j_g < nky)
+    val = jnp.where(
+        valid, field[..., jnp.clip(m_src, 0, nkx - 1), j_g], 0
+    ).astype(dtype)
 
-    ws_full = jnp.zeros(field_packed_half.shape[:-2] + (mrad, mphi), dtype=dtype)
-    ws_primary = fy_half + (one_j * fx_half).astype(dtype)
-    ws_full = ws_full.at[..., :, :mphiw3].set(ws_primary)
+    # Symmetrize ky=0: F(kx,0) = conj(F(-kx,0))
+    m_src_mir = rev_jind[m_mirror[m_g]]
+    val0_mir  = jnp.where(
+        (j_g == 0) & (m_src_mir >= 0),
+        field[..., jnp.clip(m_src_mir, 0, nkx - 1), 0],
+        0,
+    ).astype(dtype)
+    val = jnp.where(j_g == 0, 0.5 * (val + jnp.conj(val0_mir)), val)
 
-    j_mirror_range = jnp.arange(mphiw3, mphi)
-    j_source = mphi - j_mirror_range
-    fy_mirror = jnp.conj(fy_half[..., m_mirror[:, None], j_source[None, :]])
-    fx_mirror = jnp.conj(fx_half[..., m_mirror[:, None], j_source[None, :]])
-    ws_full = ws_full.at[..., :, mphiw3:].set(fy_mirror + (one_j * fx_mirror).astype(dtype))
-    return ws_full
+    primary = (one_j * ky_half[j_g] - kx_dense[m_g]).astype(dtype) * val
+
+    # ── Mirror half [mrad, mphi − mphiw3] ────────────────────────────
+    j_src = mphi - jnp.arange(mphiw3, mphi)
+    m_g2, j_src_g = jnp.meshgrid(m_p, j_src, indexing="ij")
+
+    m_mir_g2   = m_mirror[m_g2]
+    m_src_mir2 = rev_jind[m_mir_g2]
+    valid_mir2 = (m_src_mir2 >= 0) & (j_src_g < nky)
+    val_mir = jnp.where(
+        valid_mir2,
+        field[..., jnp.clip(m_src_mir2, 0, nkx - 1), jnp.clip(j_src_g, 0, nky - 1)],
+        0,
+    ).astype(dtype)
+    # kx_dense[m_g2]: output position kx (not source/mirror kx)
+    mirror = jnp.conj((one_j * ky_half[j_src_g] - kx_dense[m_g2]).astype(dtype) * val_mir)
+
+    return jnp.concatenate([primary, mirror], axis=-1)
 
 
 def _per_s_r2c(
@@ -248,6 +274,7 @@ def _per_s_z2z(
     kx_vec,
     ky_vec,
     jind,
+    rev_jind,
     mrad,
     mphi,
     mphiw3,
@@ -257,19 +284,16 @@ def _per_s_z2z(
 
     Packs two spectral derivatives into one complex field and uses
     ifft2 (C2C) instead of irfft2 (C2R), halving the inverse FFT count.
-    Hermitian symmetrization at ky=0 corrects the Bessel-induced
-    symmetry defect that would leak across packed channels.
+    _pack_full_z2z gathers directly from [nkx, nky] into [mrad, mphi]
+    via rev_jind — no intermediate half-spectrum buffer, no scatter ops.
     """
     fft_dtype = jnp.complex64 if mixed_precision else jnp.complex128
     real_dtype = jnp.float32 if mixed_precision else jnp.float64
 
     gyro_phi = bessel_s * phi_s[None, None, :, :]
 
-    df_packed = pack_half_spectrum(df_s, jind, mrad, mphiw3).astype(fft_dtype)
-    phi_packed = pack_half_spectrum(gyro_phi, jind, mrad, mphiw3).astype(fft_dtype)
-
-    ws_df = _pack_full_z2z(df_packed, kx_vec, ky_vec, jind, mrad, mphi, mphiw3, nky, fft_dtype)
-    ws_phi = _pack_full_z2z(phi_packed, kx_vec, ky_vec, jind, mrad, mphi, mphiw3, nky, fft_dtype)
+    ws_df  = _pack_full_z2z(df_s,     kx_vec, ky_vec, jind, rev_jind, mrad, mphi, mphiw3, nky, fft_dtype)
+    ws_phi = _pack_full_z2z(gyro_phi, kx_vec, ky_vec, jind, rev_jind, mrad, mphi, mphiw3, nky, fft_dtype)
 
     z2z_df = jnp.fft.ifft2(ws_df, axes=(-2, -1), norm="backward")
     z2z_phi = jnp.fft.ifft2(ws_phi, axes=(-2, -1), norm="backward")
