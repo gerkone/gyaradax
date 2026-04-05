@@ -89,6 +89,8 @@ add_library(lto_bracket SHARED
     ${PROJECT_SOURCE_DIR}/cufft_graph_bracket.cu
     ${PROJECT_SOURCE_DIR}/cufft_graph_bracket_fp64.cu
     ${PROJECT_SOURCE_DIR}/cufft_graph_bracket_fp64_direct.cu
+    ${PROJECT_SOURCE_DIR}/cufft_graph_bracket_fp32.cu
+    ${PROJECT_SOURCE_DIR}/cufft_graph_bracket_true_fp32.cu
     ${PROJECT_SOURCE_DIR}/bracket_v5_lto_fatbins.cu
     ${PROJECT_SOURCE_DIR}/apply_parallel.cu
     ${PROJECT_SOURCE_DIR}/apply_parallel_dual.cu
