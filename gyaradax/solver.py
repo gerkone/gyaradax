@@ -31,7 +31,7 @@ import math
 import functools
 from typing import Dict, Tuple, Optional
 
-from gyaradax import _EPS
+from gyaradax import _EPS, stencils
 from gyaradax.integrals import (
     get_integrals,
     j0,
@@ -42,7 +42,6 @@ from gyaradax.integrals import (
     calculate_phi_adiabatic,
 )
 from gyaradax.backends import create_ops
-from gyaradax import stencils
 from gyaradax.params import GKParams
 from gyaradax.types import GKPre, GKState
 from gyaradax.backends.ops import SolverOps
@@ -740,75 +739,6 @@ def linear_precompute(geometry: Dict[str, jnp.ndarray], params: GKParams) -> "GK
     return GKPre(out)
 
 
-def _linear_rhs_core(
-    df: jnp.ndarray,
-    phi_b: jnp.ndarray,
-    pre: GKPre,
-    params_dvp: float,
-    params_disp_vp: float,
-    params_drive_scale: float,
-    ops: SolverOps,
-) -> jnp.ndarray:
-    """Core linear RHS for a single species slice (5D arrays).
-
-    All arrays in *pre* must be 5D (nv, nmu, ns, nkx, nky) — species
-    dimension has been removed by vmap or was never present.
-    """
-    # fused linear RHS: parallel stencil + vpar stencil + elementwise
-    if hasattr(ops, "_linear_rhs_fused"):
-        # squeeze phi_b from (1, 1, ns, nkx, nky) to (ns, nkx, nky)
-        phi_3d = phi_b.reshape(phi_b.shape[-3], phi_b.shape[-2], phi_b.shape[-1])
-        return ops._linear_rhs_fused(
-            df, phi_3d, pre, params_dvp, params_disp_vp, params_drive_scale
-        )
-
-    # fallback: decomposed parallel stencils for df and gyro_phi
-    gyro_phi = pre["bessel"] * phi_b
-    term_par, term_vii = ops._apply_parallel_dual(
-        df, gyro_phi, pre["s_total_upar"], pre["s_total_t7"]
-    )
-
-    # fused vpar stencils (D1 and D4)
-    out_d1, out_d4 = ops._apply_vpar_dual(df, stencils.VPAR_D1, stencils.VPAR_D4)
-    term_iv = pre["utrap"] * out_d1 / params_dvp
-    term_vp_diss = (
-        jnp.asarray(params_disp_vp, dtype=jnp.float64) * pre["abs_dum2_vp"] * out_d4 / params_dvp
-    )
-
-    kdotvd = pre["drift_x"] * pre["kx_b"] + pre["drift_y"] * pre["ky_b"]
-
-    return (
-        term_par
-        + term_iv
-        + term_vp_diss
-        - 1j * kdotvd * df
-        + pre["hyper"] * df
-        + 1j
-        * jnp.asarray(params_drive_scale, dtype=jnp.float64)
-        * (
-            pre["dmaxwel_fm_ek"]
-            - pre["signz0"] * kdotvd * (pre["fmaxwl"] / jnp.maximum(pre["tmp0"], _EPS))
-        )
-        * gyro_phi
-        + term_vii
-    )
-
-
-def linear_rhs(
-    df: jnp.ndarray,
-    geometry: Dict[str, jnp.ndarray],
-    params: GKParams,
-    pre: Dict[str, jnp.ndarray],
-    ops: SolverOps,
-    phi: Optional[jnp.ndarray] = None,
-) -> jnp.ndarray:
-    """Adiabatic linear RHS (5D df). Delegates to _linear_rhs_core."""
-    if phi is None:
-        phi = _compute_phi(df, geometry, params, pre)
-    phi_b = jnp.reshape(phi, (1, 1, phi.shape[0], phi.shape[1], phi.shape[2]))
-    return _linear_rhs_core(df, phi_b, pre, params.dvp, params.disp_vp, params.drive_scale, ops)
-
-
 def init_f(
     geometry: Dict[str, jnp.ndarray],
     finit: str = "cosine2",
@@ -1030,67 +960,7 @@ def _compute_phi(df, geometry, params, pre):
         return calculate_phi(geometry, df, params=params, pre=pre)
 
 
-def _compute_linear_rhs(df, phi, geometry, params, pre, ops: SolverOps):
-    """Compute linear RHS for adiabatic (5D) or kinetic (6D) df."""
-    if params.adiabatic_electrons:
-        return linear_rhs(df, geometry, params, pre, ops, phi=phi)
-    else:
-        # unified fused path for multi-species (eliminates vmap overhead)
-        if hasattr(ops, "linear_rhs"):
-            res = ops.linear_rhs(df, phi, geometry, params, pre)
-            if res is not None:
-                return res
 
-        phi_b = phi[None, None, :, :, :]
-
-        # split pre into per-species (vmapped) and shared (broadcast) arrays
-        # fmt: off
-        sp_arrays = {k: pre[k] for k in [
-            "bessel", "fmaxwl", "dmaxwel_fm_ek", "drift_x", "drift_y",
-            "upar", "utrap", "abs_dum2_par", "abs_dum2_vp",
-            "term7_fac", "tmp0", "signz0",
-            "s_total_upar", "s_total_t7",
-        ]}
-        # fmt: on
-        sp_in_axes = {k: 0 for k in sp_arrays}
-        sp_in_axes["s_total_upar"] = 1  # stencil arrays have species on axis 1
-        sp_in_axes["s_total_t7"] = 1
-
-        shared = {
-            k: pre[k]
-            for k in [
-                "kx_b",
-                "ky_b",
-                "hyper",
-                "s_shift",
-                "kx_shift",
-                "valid_shift",
-            ]
-        }
-
-        def _per_species(df_sp, sp):
-            sp_pre = {**sp, **shared}
-            return _linear_rhs_core(
-                df_sp, phi_b, sp_pre, pre["dvp"], params.disp_vp, params.drive_scale, ops
-            )
-
-        return jax.vmap(_per_species, in_axes=(0, sp_in_axes))(df, sp_arrays)
-
-
-def _compute_nonlinear_rhs(df, phi, geometry, params, pre, ops: SolverOps):
-    """Compute nonlinear Term III for adiabatic (5D) or kinetic (6D) df."""
-    mp = params.mixed_precision
-    if params.adiabatic_electrons:
-        return ops.nonlinear_term_iii(df, phi, geometry, mixed_precision=mp)
-    else:
-
-        def _nl_sp(df_sp, bessel_sp):
-            # NOTE: this vmap pattern still passes geometry but relies on ops having correct 'pre'
-            return ops.nonlinear_term_iii(
-                df_sp, phi, geometry, mixed_precision=mp, bessel=bessel_sp
-            )
-
-        return jax.vmap(_nl_sp)(df, pre["bessel"])
 
 
 def gkstep_single(
@@ -1114,9 +984,9 @@ def gkstep_single(
 
     def _rhs(df):
         phi_local = _compute_phi(df, geometry, params, pre)
-        rhs = _compute_linear_rhs(df, phi_local, geometry, params, pre, ops)
+        rhs = ops.linear_rhs(df, phi_local, geometry, params, pre)
         if params.non_linear:
-            rhs = rhs + _compute_nonlinear_rhs(df, phi_local, geometry, params, pre, ops)
+            rhs = rhs + ops.nonlinear_term_iii(df, phi_local, geometry, mixed_precision=params.mixed_precision)
         return rhs
 
     # RK4 — expanded accumulation lets XLA read k1..k4 and prev_df in one fused kernel

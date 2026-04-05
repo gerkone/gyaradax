@@ -5,12 +5,14 @@ using pure JAX. This is the direct port of GKW's non_linear_terms.F90
 and linear_terms.f90 stencil application.
 """
 
-from typing import Dict, Optional, Tuple
+from typing import Dict, Tuple
 
 import jax
 import jax.numpy as jnp
 
+from gyaradax import stencils
 from gyaradax.backends.ops import SolverOps
+from gyaradax.params import GKParams
 from gyaradax.types import GKPre
 from gyaradax.utils import pack_half_spectrum, unpack_half_spectrum
 
@@ -19,7 +21,7 @@ from gyaradax.utils import pack_half_spectrum, unpack_half_spectrum
 class JAXOps(SolverOps):
     """JAX implementation of solver operations."""
 
-    def __init__(self, pre: GKPre, field_template: Optional[jnp.ndarray] = None, use_z2z: bool = False):
+    def __init__(self, pre: GKPre, field_template: jnp.ndarray = None, use_z2z: bool = False):
         super().__init__(pre, field_template, use_z2z)
 
     def _apply_vpar(self, field: jnp.ndarray, coeffs) -> jnp.ndarray:
@@ -36,8 +38,17 @@ class JAXOps(SolverOps):
     def _apply_vpar_dual(
         self, field: jnp.ndarray, coeffs_d1, coeffs_d4
     ) -> Tuple[jnp.ndarray, jnp.ndarray]:
-        """Apply d1 and d4 vpar stencils in two passes."""
-        return self._apply_vpar(field, coeffs_d1), self._apply_vpar(field, coeffs_d4)
+        """Apply d1 and d4 vpar stencils in one pass (shared gathers)."""
+        nv = field.shape[0]
+        out1 = out2 = jnp.zeros_like(field)
+        for (c1, c2), s in zip(zip(coeffs_d1, coeffs_d4), (-2, -1, 0, 1, 2)):
+            idx = jnp.clip(jnp.arange(nv, dtype=jnp.int32) + s, 0, nv - 1)
+            valid = jnp.logical_and(jnp.arange(nv) + s >= 0, jnp.arange(nv) + s < nv)
+            shifted = jnp.take(field, idx, axis=0)
+            masked = jnp.where(valid[:, None, None, None, None], shifted, 0.0)
+            out1 = out1 + c1 * masked
+            out2 = out2 + c2 * masked
+        return out1, out2
 
     def _apply_parallel(self, field: jnp.ndarray, coeffs: jnp.ndarray) -> jnp.ndarray:
         """Apply 9-point parallel stencil using precomputed shift maps."""
@@ -59,12 +70,23 @@ class JAXOps(SolverOps):
         coeffs1: jnp.ndarray,
         coeffs2: jnp.ndarray,
     ) -> Tuple[jnp.ndarray, jnp.ndarray]:
-        """Apply parallel stencils to two fields."""
-        return self._apply_parallel(field1, coeffs1), self._apply_parallel(field2, coeffs2)
+        """Apply parallel stencils to two fields in one pass (shared gathers)."""
+        nky = field1.shape[-1]
+        ky_idx = jnp.reshape(jnp.arange(nky, dtype=jnp.int32), (1, 1, -1))
+        out1 = out2 = jnp.zeros_like(field1)
+        for i in range(9):
+            s_map = self.pre["s_shift"][i]
+            kx_map = self.pre["kx_shift"][i]
+            valid = self.pre["valid_shift"][i]
+            shifted1 = jnp.where(valid[None, None, :, :, :], field1[:, :, s_map, kx_map, ky_idx], 0.0)
+            shifted2 = jnp.where(valid[None, None, :, :, :], field2[:, :, s_map, kx_map, ky_idx], 0.0)
+            out1 = out1 + coeffs1[i] * shifted1
+            out2 = out2 + coeffs2[i] * shifted2
+        return out1, out2
 
     # ── nonlinear term III ──────────────────────────────────────────────
 
-    def nonlinear_term_iii(
+    def _nonlinear_term_iii_core(
         self,
         df: jnp.ndarray,
         phi: jnp.ndarray,
@@ -74,10 +96,9 @@ class JAXOps(SolverOps):
         fft_prefactor: complex = 1.0 + 0.0j,
         exclude_zero_mode: bool = True,
         mixed_precision: bool = True,
-        bessel: Optional[jnp.ndarray] = None,
-        **kwargs,
+        bessel: jnp.ndarray = None,
     ) -> jnp.ndarray:
-        """Nonlinear ExB advection (term III). Shared skeleton for R2C and Z2Z."""
+        """Nonlinear ExB advection (term III) for 5D df. Shared skeleton for R2C and Z2Z."""
         pre = self.pre
         mrad, mphi, mphiw3 = pre["nl_mrad"], pre["nl_mphi"], pre["nl_mphiw3"]
         fft_scale, jind = pre["nl_fft_scale"], pre["nl_jind"]
@@ -140,9 +161,143 @@ class JAXOps(SolverOps):
         nl = jax.vmap(_per_s_wrapper, in_axes=(2, 0, 2, 0), out_axes=2)(df, phi, bessel, dum_s)
         return nl.at[:, :, :, ixzero, iyzero].set(0.0) if exclude_zero_mode else nl
 
-    def linear_rhs(self, df, phi, geometry, params, pre) -> Optional[jnp.ndarray]:
-        """Not implemented in JAX backend; solver falls back to vmap."""
-        return None
+    def nonlinear_term_iii(
+        self,
+        df: jnp.ndarray,
+        phi: jnp.ndarray,
+        geometry: Dict[str, jnp.ndarray],
+        *,
+        efun_sign: float = 1.0,
+        fft_prefactor: complex = 1.0 + 0.0j,
+        exclude_zero_mode: bool = True,
+        mixed_precision: bool = True,
+        bessel: jnp.ndarray = None,
+        **kwargs,
+    ) -> jnp.ndarray:
+        """Nonlinear ExB advection with shape dispatch.
+
+        Dispatches on df.ndim: 5D direct, 6D via vmap over species with per-species bessel.
+        """
+        if df.ndim == 5:
+            return self._nonlinear_term_iii_core(
+                df, phi, geometry,
+                efun_sign=efun_sign,
+                fft_prefactor=fft_prefactor,
+                exclude_zero_mode=exclude_zero_mode,
+                mixed_precision=mixed_precision,
+                bessel=bessel,
+            )
+        elif df.ndim == 6:
+            nsp = df.shape[0]
+            if bessel is None:
+                bessel = self.pre["bessel"]
+            
+            def _per_species(df_sp, bes_sp):
+                return self._nonlinear_term_iii_core(
+                    df_sp, phi, geometry,
+                    efun_sign=efun_sign,
+                    fft_prefactor=fft_prefactor,
+                    exclude_zero_mode=exclude_zero_mode,
+                    mixed_precision=mixed_precision,
+                    bessel=bes_sp,
+                )
+            
+            return jax.vmap(_per_species)(df, bessel)
+        else:
+            raise ValueError(f"nonlinear_term_iii: expected df with ndim 5 or 6, got {df.ndim}")
+
+    def _linear_rhs_core(
+        self,
+        df: jnp.ndarray,
+        phi: jnp.ndarray,
+        params: GKParams,
+        pre: GKPre,
+    ) -> jnp.ndarray:
+        """Fused linear RHS for single species (5D df).
+
+        Implements Terms I, II, IV, V, VII, VIII + dissipation.
+        Matches GKW linear_terms.f90 and GKW's calc_linear_terms.
+        """
+        gyro_phi = pre["bessel"] * phi[None, None, :, :, :]
+
+        term_par, term_vii = self._apply_parallel_dual(
+            df, gyro_phi, pre["s_total_upar"], pre["s_total_t7"]
+        )
+
+        out_d1, out_d4 = self._apply_vpar_dual(df, stencils.VPAR_D1, stencils.VPAR_D4)
+        term_iv = pre["utrap"] * out_d1 / params.dvp
+        term_vp_diss = params.disp_vp * pre["abs_dum2_vp"] * out_d4 / params.dvp
+
+        kdotvd = pre["drift_x"] * pre["kx_b"] + pre["drift_y"] * pre["ky_b"]
+
+        return (
+            term_par
+            + term_iv
+            + term_vp_diss
+            - 1j * kdotvd * df
+            + pre["hyper"] * df
+            + 1j * params.drive_scale * (
+                pre["dmaxwel_fm_ek"]
+                - pre["signz0"] * kdotvd * (pre["fmaxwl"] / jnp.maximum(pre["tmp0"], 1e-15))
+            )
+            * gyro_phi
+            + term_vii
+        )
+
+    def linear_rhs(
+        self,
+        df: jnp.ndarray,
+        phi: jnp.ndarray,
+        geometry: Dict[str, jnp.ndarray],
+        params: GKParams,
+        pre: GKPre,
+    ) -> jnp.ndarray:
+        """Linear RHS with shape dispatch.
+
+        Implements Terms I, II, IV, V, VII, VIII + dissipation.
+        Dispatches on df.ndim: 5D direct, 6D via vmap over species.
+        """
+        if df.ndim == 5:
+            return self._linear_rhs_core(df, phi, params, pre)
+        elif df.ndim == 6:
+            # Split pre into per-species arrays (axis 0) and shared (no species)
+            # Stencil arrays have shape (9, nsp, ...) - move species to axis 0 for vmap
+            sp_arrays = {
+                "bessel": pre["bessel"],
+                "fmaxwl": pre["fmaxwl"],
+                "dmaxwel_fm_ek": pre["dmaxwel_fm_ek"],
+                "drift_x": pre["drift_x"],
+                "drift_y": pre["drift_y"],
+                "upar": pre["upar"],
+                "utrap": pre["utrap"],
+                "abs_dum2_par": pre["abs_dum2_par"],
+                "abs_dum2_vp": pre["abs_dum2_vp"],
+                "term7_fac": pre["term7_fac"],
+                "tmp0": pre["tmp0"],
+                "signz0": pre["signz0"],
+                "s_total_upar": jnp.moveaxis(pre["s_total_upar"], 1, 0),
+                "s_total_t7": jnp.moveaxis(pre["s_total_t7"], 1, 0),
+            }
+            sp_in_axes = {k: 0 for k in sp_arrays}
+            
+            shared = {
+                # kx_b/ky_b in pre are 6D for kinetic (1,1,1,1,nkx,1); flatten to 5D
+                # so that per-species _linear_rhs_core (with 5D df_sp) stays 5D
+                "kx_b": pre["kx_b"].ravel().reshape(1, 1, 1, -1, 1),
+                "ky_b": pre["ky_b"].ravel().reshape(1, 1, 1, 1, -1),
+                "hyper": pre["hyper"],
+                "s_shift": pre["s_shift"],
+                "kx_shift": pre["kx_shift"],
+                "valid_shift": pre["valid_shift"],
+            }
+            
+            def _per_species(df_sp, sp):
+                sp_pre = {**sp, **shared}
+                return self._linear_rhs_core(df_sp, phi, params, sp_pre)
+            
+            return jax.vmap(_per_species, in_axes=(0, sp_in_axes))(df, sp_arrays)
+        else:
+            raise ValueError(f"linear_rhs: expected df with ndim 5 or 6, got {df.ndim}")
 
 
 def _pack_full_z2z(field, kx_vec, ky_vec, jind, rev_jind, mrad, mphi, mphiw3, nky, dtype):
