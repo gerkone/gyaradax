@@ -251,6 +251,22 @@ def run_multi(args):
 
     t0 = time.time()
     target_step = n_steps
+
+    # warmup (compilation)
+    if n_steps > 0:
+        print("warmup (compilation)...")
+        w_t0 = time.time()
+        _ = gk_run_batched(
+            df_batch,
+            geometry_batch,
+            params_batch,
+            state_batch,
+            min(block_size, n_steps),
+            pre_batch,
+        )
+        jax.block_until_ready(_[0])
+        print(f"compilation: {time.time() - w_t0:.2f}s")
+
     while int(state_batch.step[0]) < target_step:
         remaining = target_step - int(state_batch.step[0])
         block = min(block_size, remaining)
@@ -261,6 +277,7 @@ def run_multi(args):
         df_batch, _, fluxes_batch, state_batch = gk_run_batched(
             df_batch, geometry_batch, params_batch, state_batch, block, pre_batch
         )
+        jax.block_until_ready(df_batch)
         wall = time.time() - t0
 
         # log summary

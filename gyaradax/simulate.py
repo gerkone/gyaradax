@@ -236,6 +236,14 @@ def gksimulate(
     current_phi = None
     current_fluxes = None
 
+    # warmup (compilation)
+    if n_steps > 0:
+        print("warmup (compilation)...")
+        w_t0 = time.time()
+        _ = gk_run(current_df, geometry, params, current_state, min(interval, n_steps), pre=pre)
+        jax.block_until_ready(_[0])
+        print(f"compilation: {time.time() - w_t0:.2f}s")
+
     while int(current_state.step) < target_step:
         steps_remaining = target_step - int(current_state.step)
         block_steps = min(interval, steps_remaining)
@@ -246,6 +254,7 @@ def gksimulate(
         current_df, current_phi, current_fluxes, current_state = gk_run(
             current_df, geometry, params, current_state, block_steps, pre=pre
         )
+        jax.block_until_ready(current_df)
         wall_time = time.time() - t0
 
         if output_dir is not None:
