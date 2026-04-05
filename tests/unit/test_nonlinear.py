@@ -18,6 +18,13 @@ except ImportError:
 from gyaradax.types import GKPre
 from gyaradax.solver import build_jind
 
+BACKENDS = [
+    ("jax", False, False),
+    ("jax", True, False),
+    ("jax", True, True),
+    ("cuda", False, False),
+]
+
 
 def _make_pre_bessel(bessel, nkx=4, nky=3, ns=4):
     """Build a minimal GKPre sufficient for nonlinear_term_iii."""
@@ -44,8 +51,8 @@ def _make_pre_bessel(bessel, nkx=4, nky=3, ns=4):
     return GKPre(items)
 
 
-@pytest.mark.parametrize("backend", ["jax", "cuda"])
-def test_kinetic_nl_bessel_correct_per_species(backend):
+@pytest.mark.parametrize("backend, use_z2z, mixed_precision", BACKENDS)
+def test_kinetic_nl_bessel_correct_per_species(backend, use_z2z, mixed_precision):
     """Sanity check: per-species bessel (5-D) is accepted and gives different
     results for species with different Bessel values."""
     if backend == "cuda" and not cuda_available():
@@ -70,11 +77,11 @@ def test_kinetic_nl_bessel_correct_per_species(backend):
     pre0 = _make_pre_bessel(bessel_sp0)
     pre1 = _make_pre_bessel(bessel_sp1)
 
-    nl_sp0 = create_ops(pre0, df, backend=backend).nonlinear_term_iii(
-        df, phi, {}, mixed_precision=False
+    nl_sp0 = create_ops(pre0, backend=backend, use_z2z=use_z2z).nonlinear_term_iii(
+        df, phi, {}, mixed_precision=mixed_precision
     )
-    nl_sp1 = create_ops(pre1, df, backend=backend).nonlinear_term_iii(
-        df, phi, {}, mixed_precision=False
+    nl_sp1 = create_ops(pre1, backend=backend, use_z2z=use_z2z).nonlinear_term_iii(
+        df, phi, {}, mixed_precision=mixed_precision
     )
 
     assert not jnp.allclose(nl_sp0, 0.0, atol=1e-12), "sp0 NL should be non-zero (J0=1)"
@@ -82,8 +89,8 @@ def test_kinetic_nl_bessel_correct_per_species(backend):
     assert not jnp.allclose(nl_sp0, nl_sp1, atol=1e-12), "species should differ"
 
 
-@pytest.mark.parametrize("backend", ["jax", "cuda"])
-def test_kinetic_nl_bessel_full_species_bessel_support(backend):
+@pytest.mark.parametrize("backend, use_z2z, mixed_precision", BACKENDS)
+def test_kinetic_nl_bessel_full_species_bessel_support(backend, use_z2z, mixed_precision):
     """Bug 2 fixed: when ops.pre['bessel'] retains the species axis (6-D),
     the solver should now correctly pass the 5-D species slice.
     """
@@ -105,10 +112,10 @@ def test_kinetic_nl_bessel_full_species_bessel_support(backend):
     bessel_full = jnp.ones((nsp, 1, nmu, ns, nkx, nky), dtype=jnp.float64)
 
     pre = _make_pre_bessel(bessel_full, nkx=nkx, nky=nky, ns=ns)
-    ops_full = create_ops(pre, df_sp, backend=backend)
+    ops_full = create_ops(pre, backend=backend, use_z2z=use_z2z)
 
     # This should now work if bessel is passed as keyword argument
-    nl = ops_full.nonlinear_term_iii(df_sp, phi, {}, mixed_precision=False, bessel=bessel_full[0])
+    nl = ops_full.nonlinear_term_iii(df_sp, phi, {}, mixed_precision=mixed_precision, bessel=bessel_full[0])
     assert nl.shape == df_sp.shape
 
 

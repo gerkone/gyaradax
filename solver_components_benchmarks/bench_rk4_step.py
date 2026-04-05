@@ -62,61 +62,69 @@ def _bench_phase(
     baseline_key_df: str,
     baseline_key_phi: str,
     backend_forced: str | None,
+    test_z2z: bool = False,
 ):
-    """Run one benchmark phase (linear or nonlinear) across backends."""
+    """Run one benchmark phase (linear or nonlinear) across backends.
+    
+    Args:
+        test_z2z: If True, test both R2C and Z2Z FFT modes (nonlinear only).
+                  If False, use R2C only (linear or default).
+    """
 
     print(f"\n[PHASE] {phase_name}")
+    
+    z2z_values = [False, True] if test_z2z else [False]
+    
+    for z2z in z2z_values:
+        z2z_label = "Z2Z" if z2z else "R2C"
+        if len(z2z_values) > 1:
+            print(f"\n  {'#'*50}")
+            print(f"  #  FFT Mode: {z2z_label} (use_z2z={z2z})")
+            print(f"  {'#'*50}")
 
-    for bname in ["jax", "cuda"]:
-        if backend_forced and bname != backend_forced:
-            continue
+        for bname in ["jax", "cuda"]:
+            if backend_forced and bname != backend_forced:
+                continue
 
-        print(f"\n  -- Backend: {bname.upper()}")
+            print(f"\n  -- Backend: {bname.upper()} ({z2z_label})")
 
-        # --- create backend ops -------------------------------------------
-        try:
-            ops = create_ops(pre_gk, df, backend=bname)
-        except Exception as e:
-            print(f"     [SKIP] {bname} not available: {e}")
-            continue
+            # --- create backend ops -------------------------------------------
+            try:
+                ops = create_ops(pre_gk, backend=bname, use_z2z=z2z)
+            except Exception as e:
+                print(f"     [SKIP] {bname} not available: {e}")
+                continue
 
-        # --- build jitted function ----------------------------------------
-        # FIX(#1): `params` is passed as an explicit argument AND marked
-        # static.  "Static" means JAX treats it as a compile-time constant
-        # (no tracing — the CUDA backend can call float() on scalar fields).
-        # "Explicit" means JAX will recompile when params identity changes
-        # between phases (linear vs nonlinear), giving correct cache
-        # invalidation without silent closure capture.
-        @jax.jit
-        def fn(d, s):
-            return gkstep_single(d, geom, params, s, pre_gk, ops=ops)
+            # --- build jitted function ----------------------------------------
+            @jax.jit
+            def fn(d, s):
+                return gkstep_single(d, geom, params, s, pre_gk, ops=ops)
 
-        # --- warmup -------------------------------------------------------
-        # FIX(#2): Multiple warmup calls so the first timed iteration does
-        # not include lazy XLA init / memory-pool expansion.
-        for _ in range(N_WARMUP):
-            # FIX(#7): Synchronise *all* output leaves, not just [0].
-            jax.block_until_ready(fn(df, state))
+            # --- warmup -------------------------------------------------------
+            for _ in range(N_WARMUP):
+                jax.block_until_ready(fn(df, state))
 
-        # --- accuracy check -----------------------------------------------
-        out_df, (out_phi, _), _ = fn(df, state)
-        jax.block_until_ready((out_df, out_phi))
-        check_accuracy(out_df, baseline_path, baseline_key_df)
-        check_accuracy(out_phi, baseline_path, baseline_key_phi)
+            # --- accuracy check -----------------------------------------------
+            out_df, (out_phi, _), _ = fn(df, state)
+            jax.block_until_ready((out_df, out_phi))
+            check_accuracy(out_df, baseline_path, baseline_key_df)
+            check_accuracy(out_phi, baseline_path, baseline_key_phi)
 
-        # --- timing -------------------------------------------------------
-        # FIX(#7): block_until_ready on the full output tree.
-        timer = BenchTimer(lambda: jax.block_until_ready(fn(df, state)))
-        mean_ms, std_ms = timer.run()
-        print(f"     timing: {mean_ms:.3f} ± {std_ms:.3f} ms")
+            # --- timing -------------------------------------------------------
+            timer = BenchTimer(lambda: jax.block_until_ready(fn(df, state)))
+            mean_ms, std_ms = timer.run()
+            print(f"     timing: {mean_ms:.3f} ± {std_ms:.3f} ms")
 
-        # --- cost / roofline (after timing to avoid cache disruption) -----
-        # FIX(#5): Moved cost analysis *after* timing so that any
-        # recompilation triggered by HLO inspection cannot pollute the
-        # timed region.
-        print("     [XLA] Analyzing cost...")
-        flops, bytes_rw = analyze_cost(fn, df, state)
-        roofline_report(f"{phase_name} ({bname})", mean_ms, flops, bytes_rw)
+            # --- cost / roofline ----------------------------------------------
+            print("     [XLA] Analyzing cost...")
+            flops, bytes_rw = analyze_cost(fn, df, state)
+            roofline_report(f"{phase_name} ({bname}, {z2z_label})", mean_ms, flops, bytes_rw)
+    
+    # Print comparison if both modes were tested
+    if len(z2z_values) > 1 and not backend_forced:
+        print(f"\n  {'='*50}")
+        print(f"  FFT Mode Comparison (Z2Z vs R2C)")
+        print(f"  {'='*50}")
 
 
 # ---------------------------------------------------------------------------
@@ -126,7 +134,14 @@ def run(
     config: str = "configs/iteration_13.yaml",
     mixed_precision: bool = False,
     backend_forced: str | None = None,
+    nonlinear_z2z: bool = False,
 ):
+    """Benchmark RK4 step.
+    
+    Args:
+        nonlinear_z2z: If True, test nonlinear phase with both R2C/Z2Z modes.
+                      If False, use R2C only for nonlinear (linear never uses Z2Z).
+    """
     print(f"\n{'=' * 60}")
     print(f"C7: gkstep_single  (Full RK4 Step)")
     print(f"{'=' * 60}")
@@ -135,7 +150,6 @@ def run(
     state = default_state(nky=df.shape[-1])
     pre_gk = GKPre(pre)
 
-    # FIX(#9): Fail fast with a clear message if baseline is missing.
     baseline = BASELINES_DIR / "rk4_step.npz"
     if not baseline.exists():
         sys.exit(
@@ -152,21 +166,23 @@ def run(
         backend_forced=backend_forced,
     )
 
-    # Phase 1 — Linear RK4
+    # Phase 1 — Linear RK4 (no Z2Z, linear doesn't use it)
     _bench_phase(
         "Linear RK4 Step",
         params=replace(params, non_linear=False),
         baseline_key_df="out_df_linear",
         baseline_key_phi="out_phi_linear",
+        test_z2z=False,
         **shared,
     )
 
-    # Phase 2 — Nonlinear RK4
+    # Phase 2 — Nonlinear RK4 (optionally test Z2Z vs R2C)
     _bench_phase(
         "Nonlinear RK4 Step",
         params=replace(params, non_linear=True),
         baseline_key_df="out_df_nonlinear",
         baseline_key_phi="out_phi_nonlinear",
+        test_z2z=nonlinear_z2z,
         **shared,
     )
 
@@ -185,5 +201,11 @@ if __name__ == "__main__":
         choices=["jax", "cuda"],
         help="Run only this backend (default: both)",
     )
+    parser.add_argument(
+        "--z2z",
+        action="store_true",
+        help="Test nonlinear phase with both R2C/Z2Z modes (default: R2C only)",
+    )
     args = parser.parse_args()
-    run(args.config, args.mp, args.backend)
+    
+    run(args.config, args.mp, args.backend, args.z2z)

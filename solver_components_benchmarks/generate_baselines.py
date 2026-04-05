@@ -69,7 +69,7 @@ def main():
 
     from gyaradax.backends import create_ops
 
-    ops = create_ops(pre, field5d, backend="jax")
+    ops = create_ops(pre, backend="jax")
 
     @jax.jit
     def _apply_parallel(field, coeffs):

@@ -24,6 +24,13 @@ try:
 except ImportError:
     cuda_available = lambda: False
 
+BACKENDS = [
+    ("jax", False, False),
+    ("jax", True, False),
+    ("jax", True, True),
+    ("cuda", False, False),
+]
+
 
 jax.config.update("jax_enable_x64", True)
 
@@ -38,8 +45,8 @@ def _rh_residual_xiao_catto(q, eps):
     return 1.0 / (1.0 + q**2 * theta / eps**2)
 
 
-@pytest.mark.parametrize("backend", ["jax", "cuda"])
-def test_rosenbluth_hinton_residual(backend):
+@pytest.mark.parametrize("backend, use_z2z, mixed_precision", BACKENDS)
+def test_rosenbluth_hinton_residual(backend, use_z2z, mixed_precision):
     if backend == "cuda" and not cuda_available():
         pytest.skip("CUDA not available")
     """Rosenbluth-Hinton zonal flow test: residual converges to Xiao-Catto.
@@ -55,7 +62,7 @@ def test_rosenbluth_hinton_residual(backend):
     geometry = compute_geometry_from_input(zonal01)
     params = gkparams_from_input_and_geometry(zonal01, geometry)
     # non_linear=False + large naverage → linear mode, no per-ky normalization
-    params = replace(params, non_linear=False, naverage=100000, backend=backend)
+    params = replace(params, non_linear=False, naverage=100000, backend=backend, use_z2z=use_z2z, mixed_precision=mixed_precision)
 
     pre = linear_precompute(geometry, params)
     df = init_f(geometry, finit="zonal", amp_init_real=params.amp_init)
@@ -97,8 +104,8 @@ def test_rosenbluth_hinton_residual(backend):
     )
 
 
-@pytest.mark.parametrize("backend", ["jax", "cuda"])
-def test_cbc_linear_itg_peak_growth(backend):
+@pytest.mark.parametrize("backend, use_z2z, mixed_precision", BACKENDS)
+def test_cbc_linear_itg_peak_growth(backend, use_z2z, mixed_precision):
     if backend == "cuda" and not cuda_available():
         pytest.skip("CUDA not available")
     """CBC linear ITG at kt=0.5: growth rate matches GKW benchmark.
@@ -154,8 +161,9 @@ def test_cbc_linear_itg_peak_growth(backend):
         drive_scale=1.0,
         idisp=2,
         cfl_safety=0.95,
-        mixed_precision=False,
+        mixed_precision=mixed_precision,
         backend=backend,
+        use_z2z=use_z2z,
     )
 
     df = init_f(geom, finit="cosine2", amp_init_real=1e-4)

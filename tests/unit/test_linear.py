@@ -20,6 +20,13 @@ try:
 except ImportError:
     cuda_available = lambda: False
 
+BACKENDS = [
+    ("jax", False, False), # jax R2C fp64
+    ("jax", True, False),  # jax Z2Z fp64
+    ("jax", True, True),   # jax Z2Z MP
+    ("cuda", False, False),
+]
+
 
 @jax.jit
 def _step_jitted(prev_df, geom, params, state):
@@ -124,12 +131,14 @@ def test_init_f_contract(lin_geom, lin_shape, normalize):
     assert df.dtype == jnp.complex128
 
 
-@pytest.mark.parametrize("backend", ["jax", "cuda"])
-def test_gksolve_contract(lin_geom, lin_shape, backend):
+@pytest.mark.parametrize("backend, use_z2z, mixed_precision", BACKENDS)
+def test_gksolve_contract(lin_geom, lin_shape, backend, use_z2z, mixed_precision):
     if backend == "cuda" and not cuda_available():
         pytest.skip("CUDA not available")
     prev_df = jnp.zeros(lin_shape, dtype=jnp.complex128)
-    params = GKParams(dt=0.01, naverage=40, backend=backend)
+    params = GKParams(
+        dt=0.01, naverage=40, backend=backend, use_z2z=use_z2z, mixed_precision=mixed_precision
+    )
     state = default_state(nky=len(lin_geom["krho"]))
 
     next_df, (phi, fluxes), _ = gksolve(prev_df, lin_geom, params, state, n_steps=1)
@@ -140,12 +149,14 @@ def test_gksolve_contract(lin_geom, lin_shape, backend):
     assert all(isinstance(f, jnp.ndarray) and f.shape == () for f in [pflux, eflux, vflux])
 
 
-@pytest.mark.parametrize("backend", ["jax", "cuda"])
-def test_gksolve_zero_input_invariance(lin_geom, lin_shape, backend):
+@pytest.mark.parametrize("backend, use_z2z, mixed_precision", BACKENDS)
+def test_gksolve_zero_input_invariance(lin_geom, lin_shape, backend, use_z2z, mixed_precision):
     if backend == "cuda" and not cuda_available():
         pytest.skip("CUDA not available")
     prev_df = jnp.zeros(lin_shape, dtype=jnp.complex128)
-    params = GKParams(dt=0.01, naverage=40, backend=backend)
+    params = GKParams(
+        dt=0.01, naverage=40, backend=backend, use_z2z=use_z2z, mixed_precision=mixed_precision
+    )
     state = default_state(nky=len(lin_geom["krho"]))
 
     next_df, (phi, fluxes), next_state = _step_jitted(prev_df, lin_geom, params, state)

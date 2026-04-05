@@ -135,7 +135,7 @@ def run_benchmark():
     if args.components:
         print(f"\ncomponent benchmarks (single evaluation, {mode}):")
 
-        ops = create_ops(pre, df, backend=params.backend, use_z2z=params.use_z2z)
+        ops = create_ops(pre, backend=params.backend, use_z2z=params.use_z2z)
 
         bench_component(
             lambda: _compute_phi(df, geom, params, pre),

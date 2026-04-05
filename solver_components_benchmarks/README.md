@@ -46,7 +46,7 @@ PYTHONPATH=. JAX_COMPILATION_CACHE_DIR=/tmp/jax_cache \
 
 # run a single component
 PYTHONPATH=. JAX_COMPILATION_CACHE_DIR=/tmp/jax_cache \
-  python solver_components_benchmarks/bench_nonlinear.py --device <N> [--mp]
+  python solver_components_benchmarks/bench_nonlinear.py --device <N> [--mp] [--z2z]
 ```
 
 ## Flags
@@ -56,8 +56,37 @@ PYTHONPATH=. JAX_COMPILATION_CACHE_DIR=/tmp/jax_cache \
 | `--device N` | 1 | GPU device index (sets `CUDA_VISIBLE_DEVICES` before JAX init) |
 | `--config PATH` | `configs/iteration_13.yaml` | solver config |
 | `--mp` | off | enable mixed precision (FP32 forward FFTs); propagates to `params.mixed_precision` |
+| `--z2z` | off | Test nonlinear FFT with both R2C/Z2Z modes (default: R2C only) |
+| `--backend {jax,cuda}` | both | Run only specified backend |
+| `--nsteps N` | 50 | Number of RK4 steps (bench_rk4_scan.py only) |
+| `--sweep` | off | Sweep over multiple N values (bench_rk4_scan.py only) |
 
-`bench_nonlinear.py` always benchmarks both `mixed_precision=True` and `False` regardless of `--mp`, since that component is the primary target of the mixed-precision optimisation (O5).
+**Notes:**
+- `bench_nonlinear.py` always benchmarks both `mixed_precision=True` and `False` regardless of `--mp`, since that component is the primary target of the mixed-precision optimisation (O5).
+- `--z2z` only affects nonlinear benchmarks (linear terms don't use Z2Z FFT). When enabled, nonlinear phases test both R2C and Z2Z modes.
+
+## CLI Reference
+
+### `bench_nonlinear.py`
+```bash
+python bench_nonlinear.py [--device N] [--config PATH] [--mp] [--z2z]
+```
+Benchmarks `nonlinear_term_iii` (FFT Poisson bracket). Tests both MP/FP64 automatically.
+
+### `bench_rk4_step.py`
+```bash
+python bench_rk4_step.py [--device N] [--config PATH] [--mp] [--backend {jax,cuda}] [--z2z]
+```
+Benchmarks full RK4 step (linear + nonlinear phases). Linear phase uses R2C only; `--z2z` adds Z2Z comparison for nonlinear phase.
+
+### `bench_rk4_scan.py`
+```bash
+python bench_rk4_scan.py [--device N] [--config PATH] [--mp] [--backend {jax,cuda}] [--nsteps N] [--sweep] [--z2z]
+```
+Benchmarks N-step fused RK4 via `jax.lax.scan`. Reports fusion speedup vs single-step. `--sweep` tests N=[1,5,10,25,50,100,200].
+
+### Other benchmarks
+- `bench_apply_parallel.py`, `bench_apply_vpar.py`, `bench_linear_rhs.py`, `bench_phi_solve.py`, `bench_pack_spectrum.py`: `--device`, `--config`, `--mp`
 
 ## Output per benchmark
 

@@ -261,7 +261,7 @@ def benchmark_gyaradax(config_path, n_steps=120, n_blocks=5, device=None):
 
     # component benchmarks
     print("\ncomponent benchmarks:")
-    ops = create_ops(pre, df, backend=params.backend, use_z2z=params.use_z2z)
+    ops = create_ops(pre, backend=params.backend, use_z2z=params.use_z2z)
 
     phi = _compute_phi(df, geometry, params, pre)
 

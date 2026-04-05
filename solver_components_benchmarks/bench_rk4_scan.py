@@ -118,127 +118,137 @@ def _bench_scan_phase(
     baseline_key_df: str,
     baseline_key_phi: str,
     backend_forced: str | None,
+    test_z2z: bool = False,
 ):
-    """Benchmark one phase (linear / nonlinear) with scan and single-step."""
+    """Benchmark one phase (linear / nonlinear) with scan and single-step.
+    
+    Args:
+        test_z2z: If True, test both R2C/Z2Z modes (nonlinear only).
+                  If False, use R2C only (linear or default).
+    """
 
     print(f"\n{'─' * 60}")
     print(f"  {phase_name}   (N = {nsteps} steps)")
     print(f"{'─' * 60}")
+    
+    z2z_values = [False, True] if test_z2z else [False]
+    
+    for z2z in z2z_values:
+        z2z_label = "Z2Z" if z2z else "R2C"
+        if len(z2z_values) > 1:
+            print(f"\n  {'#'*50}")
+            print(f"  #  FFT Mode: {z2z_label} (use_z2z={z2z})")
+            print(f"  {'#'*50}")
 
-    for bname in ["jax", "cuda"]:
-        if backend_forced and bname != backend_forced:
-            continue
+        for bname in ["jax", "cuda"]:
+            if backend_forced and bname != backend_forced:
+                continue
 
-        print(f"\n  ── Backend: {bname.upper()}")
+            print(f"\n  ── Backend: {bname.upper()} ({z2z_label})")
 
-        # --- backend ops --------------------------------------------------
-        try:
-            ops = create_ops(pre_gk, df, backend=bname)
-        except Exception as e:
-            print(f"     [SKIP] {bname} not available: {e}")
-            continue
+            # --- backend ops --------------------------------------------------
+            try:
+                ops = create_ops(pre_gk, backend=bname, use_z2z=z2z)
+            except Exception as e:
+                print(f"     [SKIP] {bname} not available: {e}")
+                continue
 
-        # ==================================================================
-        # A) Single-step reference
-        # ==================================================================
-        print(f"\n     [A] Single-step reference")
+            # ==================================================================
+            # A) Single-step reference
+            # ==================================================================
+            print(f"\n     [A] Single-step reference")
 
-        single_fn = _build_single_fn(geom, params, pre_gk, ops)
+            single_fn = _build_single_fn(geom, params, pre_gk, ops)
 
-        for _ in range(N_WARMUP):
-            jax.block_until_ready(single_fn(df, state, ops))
+            for _ in range(N_WARMUP):
+                jax.block_until_ready(single_fn(df, state, ops))
 
-        # Accuracy on single step
-        out_df, (out_phi, _), _ = single_fn(df, state, ops)
-        jax.block_until_ready((out_df, out_phi))
-        check_accuracy(out_df, baseline_path, baseline_key_df)
-        check_accuracy(out_phi, baseline_path, baseline_key_phi)
+            # Accuracy on single step
+            out_df, (out_phi, _), _ = single_fn(df, state, ops)
+            jax.block_until_ready((out_df, out_phi))
+            check_accuracy(out_df, baseline_path, baseline_key_df)
+            check_accuracy(out_phi, baseline_path, baseline_key_phi)
 
-        timer_single = BenchTimer(lambda: jax.block_until_ready(single_fn(df, state, ops)))
-        single_mean_ms, single_std_ms = timer_single.run()
-        print(f"         single-step : {single_mean_ms:.3f} ± {single_std_ms:.3f} ms")
+            timer_single = BenchTimer(lambda: jax.block_until_ready(single_fn(df, state, ops)))
+            single_mean_ms, single_std_ms = timer_single.run()
+            print(f"         single-step : {single_mean_ms:.3f} ± {single_std_ms:.3f} ms")
 
-        # ==================================================================
-        # B) Scan-fused N-step benchmark
-        # ==================================================================
-        print(f"\n     [B] Scan-fused  ({nsteps} steps)")
+            # ==================================================================
+            # B) Scan-fused N-step benchmark
+            # ==================================================================
+            print(f"\n     [B] Scan-fused  ({nsteps} steps)")
 
-        scan_fn = _build_scan_fn(geom, params, pre_gk, ops)
+            scan_fn = _build_scan_fn(geom, params, pre_gk, ops)
 
-        # Warmup — the first call triggers XLA compilation of the full
-        # scan program which can be substantially slower than single-step
-        # compilation.
-        print(f"         compiling scan HLO ({nsteps} steps)...")
-        for _ in range(N_WARMUP):
-            jax.block_until_ready(scan_fn(df, state, nsteps))
+            # Warmup
+            print(f"         compiling scan HLO ({nsteps} steps)...")
+            for _ in range(N_WARMUP):
+                jax.block_until_ready(scan_fn(df, state, nsteps))
 
-        # Accuracy: run one scan step and compare to single-step baseline.
-        # A 1-step scan must produce the same result as the single-step fn.
-        scan_1_df, _, _ = scan_fn(df, state, 1)
-        jax.block_until_ready(scan_1_df)
-        check_accuracy(scan_1_df, baseline_path, baseline_key_df)
+            # Accuracy check
+            scan_1_df, _, _ = scan_fn(df, state, 1)
+            jax.block_until_ready(scan_1_df)
+            check_accuracy(scan_1_df, baseline_path, baseline_key_df)
 
-        # Check that phi norms are finite after N steps (divergence guard).
-        final_df, _, phi_norms = scan_fn(df, state, nsteps)
-        jax.block_until_ready((final_df, phi_norms))
+            # Check finite phi norms
+            final_df, _, phi_norms = scan_fn(df, state, nsteps)
+            jax.block_until_ready((final_df, phi_norms))
 
-        n_finite = int(jnp.isfinite(phi_norms).sum())
-        if n_finite < nsteps:
-            print(
-                f"         [WARN] {nsteps - n_finite}/{nsteps} steps "
-                f"produced non-finite phi — solution may be diverging"
-            )
-        else:
-            print(f"         phi norms: all {nsteps} steps finite ✓")
+            n_finite = int(jnp.isfinite(phi_norms).sum())
+            if n_finite < nsteps:
+                print(
+                    f"         [WARN] {nsteps - n_finite}/{nsteps} steps "
+                    f"produced non-finite phi — solution may be diverging"
+                )
+            else:
+                print(f"         phi norms: all {nsteps} steps finite ✓")
 
-        # Timing
-        timer_scan = BenchTimer(lambda: jax.block_until_ready(scan_fn(df, state, nsteps)))
-        scan_mean_ms, scan_std_ms = timer_scan.run()
-        amort_ms = scan_mean_ms / nsteps
-        amort_std = scan_std_ms / nsteps
+            # Timing
+            timer_scan = BenchTimer(lambda: jax.block_until_ready(scan_fn(df, state, nsteps)))
+            scan_mean_ms, scan_std_ms = timer_scan.run()
+            amort_ms = scan_mean_ms / nsteps
+            amort_std = scan_std_ms / nsteps
 
-        print(f"         total time  : {scan_mean_ms:.3f} ± {scan_std_ms:.3f} ms")
-        print(f"         per-step    : {amort_ms:.3f} ± {amort_std:.3f} ms")
+            print(f"         total time  : {scan_mean_ms:.3f} ± {scan_std_ms:.3f} ms")
+            print(f"         per-step    : {amort_ms:.3f} ± {amort_std:.3f} ms")
 
-        # ==================================================================
-        # C) Fusion analysis
-        # ==================================================================
-        naive_total_ms = single_mean_ms * nsteps
-        speedup = naive_total_ms / scan_mean_ms if scan_mean_ms > 0 else float("inf")
-        overhead_pct = (1.0 - speedup) * 100  # negative = fusion helped
+            # ==================================================================
+            # C) Fusion analysis
+            # ==================================================================
+            naive_total_ms = single_mean_ms * nsteps
+            speedup = naive_total_ms / scan_mean_ms if scan_mean_ms > 0 else float("inf")
+            overhead_pct = (1.0 - speedup) * 100
 
-        print(f"\n     [C] Fusion analysis")
-        print(f"         naive  N×single : {naive_total_ms:.3f} ms")
-        print(f"         scan   fused    : {scan_mean_ms:.3f} ms")
-        print(f"         fusion speedup  : {speedup:.2f}×")
-        if speedup > 1.0:
-            print(
-                f"         XLA saved       : {naive_total_ms - scan_mean_ms:.3f} ms "
-                f"({(1 - 1/speedup)*100:.1f}% reduction)"
-            )
-        else:
-            print(
-                f"         overhead        : {-overhead_pct:.1f}% "
-                f"(scan adds scheduling cost — expected for small N)"
-            )
+            print(f"\n     [C] Fusion analysis")
+            print(f"         naive  N×single : {naive_total_ms:.3f} ms")
+            print(f"         scan   fused    : {scan_mean_ms:.3f} ms")
+            print(f"         fusion speedup  : {speedup:.2f}×")
+            if speedup > 1.0:
+                print(
+                    f"         XLA saved       : {naive_total_ms - scan_mean_ms:.3f} ms "
+                    f"({(1 - 1/speedup)*100:.1f}% reduction)"
+                )
+            else:
+                print(
+                    f"         overhead        : {-overhead_pct:.1f}% "
+                    f"(scan adds scheduling cost — expected for small N)"
+                )
 
-        # ==================================================================
-        # D) Roofline for the fused program
-        # ==================================================================
-        print(f"         [XLA] Analyzing fused cost...")
-        try:
-            flops, bytes_rw = analyze_cost(scan_fn, df, state, nsteps)
-            # Report per-step roofline by dividing aggregate by N
-            roofline_report(
-                f"{phase_name} scan/{nsteps} ({bname})",
-                amort_ms,
-                flops / nsteps,
-                bytes_rw / nsteps,
-            )
-        except Exception as e:
-            print(f"         [SKIP] cost analysis failed: {e}")
-            # Fallback: report raw timing only
-            roofline_report(f"{phase_name} scan/{nsteps} ({bname})", amort_ms, 0, 0)
+            # ==================================================================
+            # D) Roofline
+            # ==================================================================
+            print(f"         [XLA] Analyzing fused cost...")
+            try:
+                flops, bytes_rw = analyze_cost(scan_fn, df, state, nsteps)
+                roofline_report(
+                    f"{phase_name} scan/{nsteps} ({bname}, {z2z_label})",
+                    amort_ms,
+                    flops / nsteps,
+                    bytes_rw / nsteps,
+                )
+            except Exception as e:
+                print(f"         [SKIP] cost analysis failed: {e}")
+                roofline_report(f"{phase_name} scan/{nsteps} ({bname}, {z2z_label})", amort_ms, 0, 0)
 
 
 # ---------------------------------------------------------------------------
@@ -254,61 +264,72 @@ def _sweep_nsteps(
     state,
     pre_gk,
     backend_forced: str | None,
+    test_z2z: bool = False,
 ):
-    """Run the scan benchmark at several N values and print a summary table."""
+    """Run the scan benchmark at several N values and print a summary table.
+    
+    Args:
+        test_z2z: If True, test both R2C/Z2Z modes (nonlinear only).
+    """
 
     print(f"\n{'═' * 60}")
     print(f"  SWEEP: {phase_name}")
     print(f"{'═' * 60}")
 
-    for bname in ["jax", "cuda"]:
-        if backend_forced and bname != backend_forced:
-            continue
+    z2z_values = [False, True] if test_z2z else [False]
+    
+    for z2z in z2z_values:
+        z2z_label = "Z2Z" if z2z else "R2C"
+        if len(z2z_values) > 1:
+            print(f"\n  {'#'*50}")
+            print(f"  #  FFT Mode: {z2z_label} (use_z2z={z2z})")
+            print(f"  {'#'*50}")
 
-        try:
-            ops = create_ops(pre_gk, df, backend=bname)
-        except Exception:
-            continue
+        for bname in ["jax", "cuda"]:
+            if backend_forced and bname != backend_forced:
+                continue
 
-        print(f"\n  Backend: {bname.upper()}")
+            try:
+                ops = create_ops(pre_gk, backend=bname, use_z2z=z2z)
+            except Exception:
+                continue
 
-        # Single-step baseline
-        single_fn = _build_single_fn(geom, params, pre_gk, ops)
-        for _ in range(N_WARMUP):
-            jax.block_until_ready(single_fn(df, state, ops))
-        timer = BenchTimer(lambda: jax.block_until_ready(single_fn(df, state, ops)))
-        single_ms, _ = timer.run()
+            print(f"\n  Backend: {bname.upper()} ({z2z_label})")
 
-        # Table header
-        print(
-            f"\n  {'N':>6}  {'total_ms':>10}  {'per_step_ms':>12}  "
-            f"{'naive_ms':>10}  {'speedup':>8}  {'finite':>6}"
-        )
-        print(f"  {'─'*6}  {'─'*10}  {'─'*12}  {'─'*10}  {'─'*8}  {'─'*6}")
-
-        scan_fn = _build_scan_fn(geom, params, pre_gk, ops)
-
-        for n in nsteps_list:
-            # Warmup (recompiles if n changes because it's static)
+            # Single-step baseline
+            single_fn = _build_single_fn(geom, params, pre_gk, ops)
             for _ in range(N_WARMUP):
-                jax.block_until_ready(scan_fn(df, state, n))
+                jax.block_until_ready(single_fn(df, state, ops))
+            timer = BenchTimer(lambda: jax.block_until_ready(single_fn(df, state, ops)))
+            single_ms, _ = timer.run()
 
-            # Check finite
-            _, _, phi_norms = scan_fn(df, state, n)
-            jax.block_until_ready(phi_norms)
-            n_fin = int(jnp.isfinite(phi_norms).sum())
-
-            # Time
-            timer = BenchTimer(lambda n=n: jax.block_until_ready(scan_fn(df, state, n)))
-            total_ms, _ = timer.run()
-            per_step = total_ms / n
-            naive = single_ms * n
-            spdup = naive / total_ms if total_ms > 0 else float("inf")
-
+            # Table header
             print(
-                f"  {n:>6}  {total_ms:>10.3f}  {per_step:>12.3f}  "
-                f"{naive:>10.3f}  {spdup:>7.2f}×  {n_fin:>4}/{n}"
+                f"\n  {'N':>6}  {'total_ms':>10}  {'per_step_ms':>12}  "
+                f"{'naive_ms':>10}  {'speedup':>8}  {'finite':>6}"
             )
+            print(f"  {'─'*6}  {'─'*10}  {'─'*12}  {'─'*10}  {'─'*8}  {'─'*6}")
+
+            scan_fn = _build_scan_fn(geom, params, pre_gk, ops)
+
+            for n in nsteps_list:
+                for _ in range(N_WARMUP):
+                    jax.block_until_ready(scan_fn(df, state, n))
+
+                _, _, phi_norms = scan_fn(df, state, n)
+                jax.block_until_ready(phi_norms)
+                n_fin = int(jnp.isfinite(phi_norms).sum())
+
+                timer = BenchTimer(lambda n=n: jax.block_until_ready(scan_fn(df, state, n)))
+                total_ms, _ = timer.run()
+                per_step = total_ms / n
+                naive = single_ms * n
+                spdup = naive / total_ms if total_ms > 0 else float("inf")
+
+                print(
+                    f"  {n:>6}  {total_ms:>10.3f}  {per_step:>12.3f}  "
+                    f"{naive:>10.3f}  {spdup:>7.2f}×  {n_fin:>4}/{n}"
+                )
 
 
 # ---------------------------------------------------------------------------
@@ -320,7 +341,14 @@ def run(
     backend_forced: str | None = None,
     nsteps: int = DEFAULT_NSTEPS,
     sweep: bool = False,
+    nonlinear_z2z: bool = False,
 ):
+    """Benchmark N-step fused RK4.
+    
+    Args:
+        nonlinear_z2z: If True, test nonlinear phase with both R2C/Z2Z modes.
+                      Linear phase always uses R2C only.
+    """
     print(f"\n{'=' * 60}")
     print(f"C8: gkstep_scan  (Fused N-Step RK4 Benchmark)")
     print(f"{'=' * 60}")
@@ -328,6 +356,7 @@ def run(
     print(f"    mixed-p : {mixed_precision}")
     print(f"    nsteps  : {nsteps}")
     print(f"    sweep   : {sweep}")
+    print(f"    nonlinear_z2z : {nonlinear_z2z}")
 
     df, phi, geom, params, pre = load_setup(config, mixed_precision)
     state = default_state(nky=df.shape[-1])
@@ -351,6 +380,9 @@ def run(
     ]
 
     for phase_name, p_var, key_df, key_phi in phases:
+        # Only test Z2Z for nonlinear phase
+        is_nonlinear = "Nonlinear" in phase_name
+        test_z2z = nonlinear_z2z and is_nonlinear
 
         # --- Detailed benchmark at the requested N -----------------------
         _bench_scan_phase(
@@ -365,6 +397,7 @@ def run(
             baseline_key_df=key_df,
             baseline_key_phi=key_phi,
             backend_forced=backend_forced,
+            test_z2z=test_z2z,
         )
 
         # --- Optional sweep across multiple N values ---------------------
@@ -378,6 +411,7 @@ def run(
                 state=state,
                 pre_gk=pre_gk,
                 backend_forced=backend_forced,
+                test_z2z=test_z2z,
             )
 
 
@@ -402,5 +436,11 @@ if __name__ == "__main__":
     parser.add_argument(
         "--sweep", action="store_true", help="Also run a sweep over multiple N values"
     )
+    parser.add_argument(
+        "--z2z",
+        action="store_true",
+        help="Test nonlinear phase with both R2C/Z2Z modes (default: R2C only)",
+    )
     args = parser.parse_args()
-    run(args.config, args.mp, args.backend, args.nsteps, args.sweep)
+    
+    run(args.config, args.mp, args.backend, args.nsteps, args.sweep, args.z2z)

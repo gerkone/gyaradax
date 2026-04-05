@@ -153,9 +153,9 @@ class GKParams:
 
     @classmethod
     def tree_unflatten(cls, aux, leaves):
-        leaf_keys = aux.pop("_leaf_keys")
-        kwargs = dict(zip(leaf_keys, leaves))
-        kwargs.update(aux)
+        leaf_keys = aux["_leaf_keys"]
+        kwargs = {k: v for k, v in aux.items() if k != "_leaf_keys"}
+        kwargs.update(zip(leaf_keys, leaves))
         return cls(**kwargs)
 
 

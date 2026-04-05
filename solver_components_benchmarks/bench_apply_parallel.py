@@ -57,7 +57,7 @@ def run(config="configs/iteration_13.yaml", mixed_precision=False):
     backends = []
     for b in ["jax", "cuda"]:
         try:
-            ops = create_ops(pre_gk, field, backend=b)
+            ops = create_ops(pre_gk, backend=b)
             backends.append((b, ops))
         except Exception as e:
             print(f"  [SKIP] {b} backend not available: {e}")
@@ -122,7 +122,7 @@ def run(config="configs/iteration_13.yaml", mixed_precision=False):
         def ref_two_calls(f1, f2, c1, c2):
             from gyaradax.backends import create_ops
 
-            ops_ref = create_ops(pre_gk, df, backend="jax")
+            ops_ref = create_ops(pre_gk, backend="jax")
             return ops_ref._apply_parallel(f1, c1), ops_ref._apply_parallel(f2, c2)
 
         o_ref1, o_ref2 = ref_two_calls(df, gyro_phi, coeffs1, coeffs2)

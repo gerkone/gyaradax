@@ -25,30 +25,32 @@ class JAXOps(SolverOps):
         super().__init__(pre, use_z2z)
 
     def _apply_vpar(self, field: jnp.ndarray, coeffs) -> jnp.ndarray:
-        """Apply 5-point vpar stencil (shifts -2..+2) with boundary clamping."""
+        """Apply 5-point vpar stencil (shifts -2..+2) with zero boundary."""
         nv = field.shape[0]
         out = jnp.zeros_like(field)
         for c, s in zip(coeffs, (-2, -1, 0, 1, 2)):
             idx = jnp.clip(jnp.arange(nv, dtype=jnp.int32) + s, 0, nv - 1)
             valid = jnp.logical_and(jnp.arange(nv) + s >= 0, jnp.arange(nv) + s < nv)
+            valid_mask = valid[:, None, None, None, None]
             shifted = jnp.take(field, idx, axis=0)
-            out = out + c * jnp.where(valid[:, None, None, None, None], shifted, 0.0)
+            out = out + c * jnp.where(valid_mask, shifted, 0.0)
         return out
 
     def _apply_vpar_dual(
         self, field: jnp.ndarray, coeffs_d1, coeffs_d4
     ) -> Tuple[jnp.ndarray, jnp.ndarray]:
-        """Apply d1 and d4 vpar stencils in one pass (shared gathers)."""
+        """Apply d1 and d4 vpar stencils."""
         nv = field.shape[0]
-        out1 = out2 = jnp.zeros_like(field)
-        for (c1, c2), s in zip(zip(coeffs_d1, coeffs_d4), (-2, -1, 0, 1, 2)):
+        out_d1 = jnp.zeros_like(field)
+        out_d4 = jnp.zeros_like(field)
+        for c1, c4, s in zip(coeffs_d1, coeffs_d4, (-2, -1, 0, 1, 2)):
             idx = jnp.clip(jnp.arange(nv, dtype=jnp.int32) + s, 0, nv - 1)
             valid = jnp.logical_and(jnp.arange(nv) + s >= 0, jnp.arange(nv) + s < nv)
+            valid_mask = valid[:, None, None, None, None]
             shifted = jnp.take(field, idx, axis=0)
-            masked = jnp.where(valid[:, None, None, None, None], shifted, 0.0)
-            out1 = out1 + c1 * masked
-            out2 = out2 + c2 * masked
-        return out1, out2
+            out_d1 = out_d1 + c1 * jnp.where(valid_mask, shifted, 0.0)
+            out_d4 = out_d4 + c4 * jnp.where(valid_mask, shifted, 0.0)
+        return out_d1, out_d4
 
     def _apply_parallel(self, field: jnp.ndarray, coeffs: jnp.ndarray) -> jnp.ndarray:
         """Apply 9-point parallel stencil using precomputed shift maps."""
@@ -59,7 +61,8 @@ class JAXOps(SolverOps):
             s_map = self.pre["s_shift"][i]
             kx_map = self.pre["kx_shift"][i]
             valid = self.pre["valid_shift"][i]
-            shifted = jnp.where(valid[None, None, :, :, :], field[:, :, s_map, kx_map, ky_idx], 0.0)
+            valid_mask = valid[None, None, :, :, :]
+            shifted = jnp.where(valid_mask, field[:, :, s_map, kx_map, ky_idx], 0.0)
             out = out + coeffs[i] * shifted
         return out
 
@@ -70,16 +73,18 @@ class JAXOps(SolverOps):
         coeffs1: jnp.ndarray,
         coeffs2: jnp.ndarray,
     ) -> Tuple[jnp.ndarray, jnp.ndarray]:
-        """Apply parallel stencils to two fields in one pass (shared gathers)."""
+        """Apply 9-point parallel stencils to two fields."""
+        out1 = jnp.zeros_like(field1)
+        out2 = jnp.zeros_like(field2)
         nky = field1.shape[-1]
         ky_idx = jnp.reshape(jnp.arange(nky, dtype=jnp.int32), (1, 1, -1))
-        out1 = out2 = jnp.zeros_like(field1)
         for i in range(9):
             s_map = self.pre["s_shift"][i]
             kx_map = self.pre["kx_shift"][i]
             valid = self.pre["valid_shift"][i]
-            shifted1 = jnp.where(valid[None, None, :, :, :], field1[:, :, s_map, kx_map, ky_idx], 0.0)
-            shifted2 = jnp.where(valid[None, None, :, :, :], field2[:, :, s_map, kx_map, ky_idx], 0.0)
+            valid_mask = valid[None, None, :, :, :]
+            shifted1 = jnp.where(valid_mask, field1[:, :, s_map, kx_map, ky_idx], 0.0)
+            shifted2 = jnp.where(valid_mask, field2[:, :, s_map, kx_map, ky_idx], 0.0)
             out1 = out1 + coeffs1[i] * shifted1
             out2 = out2 + coeffs2[i] * shifted2
         return out1, out2
@@ -188,7 +193,6 @@ class JAXOps(SolverOps):
                 bessel=bessel,
             )
         elif df.ndim == 6:
-            nsp = df.shape[0]
             if bessel is None:
                 bessel = self.pre["bessel"]
             
@@ -260,35 +264,32 @@ class JAXOps(SolverOps):
         if df.ndim == 5:
             return self._linear_rhs_core(df, phi, params, pre)
         elif df.ndim == 6:
-            # Split pre into per-species arrays (axis 0) and shared (no species)
-            # Stencil arrays have shape (9, nsp, ...) - move species to axis 0 for vmap
+            # Per-species arrays: leading axis is nsp, vmap slices along axis 0.
+            # s_total_upar/t7 are (9, nsp, ...) from _fuse_stencils; moveaxis brings
+            # nsp to front so each vmap slice is (9, ...) — correct for _apply_parallel_dual.
             sp_arrays = {
                 "bessel": pre["bessel"],
                 "fmaxwl": pre["fmaxwl"],
                 "dmaxwel_fm_ek": pre["dmaxwel_fm_ek"],
                 "drift_x": pre["drift_x"],
                 "drift_y": pre["drift_y"],
-                "upar": pre["upar"],
                 "utrap": pre["utrap"],
-                "abs_dum2_par": pre["abs_dum2_par"],
                 "abs_dum2_vp": pre["abs_dum2_vp"],
-                "term7_fac": pre["term7_fac"],
                 "tmp0": pre["tmp0"],
                 "signz0": pre["signz0"],
                 "s_total_upar": jnp.moveaxis(pre["s_total_upar"], 1, 0),
                 "s_total_t7": jnp.moveaxis(pre["s_total_t7"], 1, 0),
             }
             sp_in_axes = {k: 0 for k in sp_arrays}
-            
+
+            # kx_b/ky_b in pre are 6D for kinetic (1,1,1,1,nkx,1); squeeze to 5D
+            # so that per-species _linear_rhs_core (with 5D df_sp) stays 5D.
+            # s_shift/kx_shift/valid_shift are read from self.pre by _apply_parallel_dual
+            # and are species-independent, so they don't belong in the vmapped dict.
             shared = {
-                # kx_b/ky_b in pre are 6D for kinetic (1,1,1,1,nkx,1); flatten to 5D
-                # so that per-species _linear_rhs_core (with 5D df_sp) stays 5D
                 "kx_b": pre["kx_b"].ravel().reshape(1, 1, 1, -1, 1),
                 "ky_b": pre["ky_b"].ravel().reshape(1, 1, 1, 1, -1),
                 "hyper": pre["hyper"],
-                "s_shift": pre["s_shift"],
-                "kx_shift": pre["kx_shift"],
-                "valid_shift": pre["valid_shift"],
             }
             
             def _per_species(df_sp, sp):
