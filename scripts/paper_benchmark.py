@@ -205,13 +205,24 @@ def estimate_flops_per_step(grid_shape, non_linear=True, n_species=1):
     return int(step_flops)
 
 
-def benchmark_gyaradax(config_path, n_steps=120, n_blocks=5, device=None):
+def benchmark_gyaradax(config_path, n_steps=120, n_blocks=5, device=None, args=None, mp=False, z2z=None):
     """Run full gyaradax benchmark. Returns a results dict."""
     if device is not None:
         os.environ["CUDA_VISIBLE_DEVICES"] = str(device)
 
     cfg = load_config(config_path)
-    params = gkparams_from_config(cfg)
+    overrides = {}
+    if args is not None:
+        if args.mp:
+            overrides["mixed_precision"] = True
+        if args.z2z is not None:
+            overrides["use_z2z"] = args.z2z
+    else:
+        if mp:
+            overrides["mixed_precision"] = True
+        if z2z is not None:
+            overrides["use_z2z"] = z2z
+    params = gkparams_from_config(cfg, **overrides)
 
     # force nonlinear for fair comparison
     params = GKParams(
@@ -411,6 +422,9 @@ def main():
     parser.add_argument("--steps", type=int, default=120, help="steps per block")
     parser.add_argument("--blocks", type=int, default=5, help="number of timed blocks")
     parser.add_argument("--device", type=int, default=None, help="GPU device index")
+    parser.add_argument("--mp", action="store_true", help="mixed precision")
+    parser.add_argument("--z2z", action="store_true", default=None, help="use Z2Z FFT for nonlinear term")
+    parser.add_argument("--no-z2z", dest="z2z", action="store_false", help="disable Z2Z FFT for nonlinear term")
     parser.add_argument("--output", type=str, default=None, help="save results JSON")
     parser.add_argument(
         "--gkw-only", action="store_true", help="only print GKW timing, skip gyaradax"
@@ -445,8 +459,9 @@ def main():
     print("gyaradax (adiabatic)")
     print(f"{'='*60}")
     results_adiabatic = benchmark_gyaradax(
-        args.config, n_steps=args.steps, n_blocks=args.blocks, device=args.device
+        args.config, n_steps=args.steps, n_blocks=args.blocks, device=args.device, args=args
     )
+    all_results["gyaradax_adiabatic"] = results_adiabatic
     all_results["gyaradax_adiabatic"] = results_adiabatic
 
     if args.kinetic_config:
@@ -454,7 +469,7 @@ def main():
         print("gyaradax (kinetic)")
         print(f"{'='*60}")
         results_kinetic = benchmark_gyaradax(
-            args.kinetic_config, n_steps=args.steps, n_blocks=args.blocks, device=args.device
+            args.kinetic_config, n_steps=args.steps, n_blocks=args.blocks, device=args.device, args=args
         )
         all_results["gyaradax_kinetic"] = results_kinetic
 

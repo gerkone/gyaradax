@@ -65,13 +65,19 @@ def run_benchmark():
     parser.add_argument("--reference", type=str)
     parser.add_argument("--from-scratch", action="store_true", help="ignore K-files, use init_f")
     parser.add_argument("--mp", action="store_true", help="mixed precision")
+    parser.add_argument("--z2z", action="store_true", default=None, help="use Z2Z FFT for nonlinear term")
+    parser.add_argument("--no-z2z", dest="z2z", action="store_false", help="disable Z2Z FFT for nonlinear term")
 
     args = parser.parse_args()
 
     cfg = load_config(args.config)
     data_dir = getattr(cfg.run, "data_dir", None)
 
-    overrides = {"mixed_precision": args.mp}
+    overrides = {}
+    if args.mp:
+        overrides["mixed_precision"] = True
+    if args.z2z is not None:
+        overrides["use_z2z"] = args.z2z
     params = gkparams_from_config(cfg, **overrides)
 
     # geometry: file-based if geom.dat exists, analytic otherwise
@@ -119,7 +125,7 @@ def run_benchmark():
         )
         print(f"init: resumed from {os.path.basename(k_path)} (t={t_start:.4f})")
     else:
-        df, state = gk_init(geom, params, n_species=n_species)
+        df, geom, state = gk_init(geom, params, n_species=n_species)
         print("init: fresh (init_f)")
 
     mode = "kinetic" if args.kinetic else "adiabatic"

@@ -51,6 +51,7 @@ gkw_ref/
 # --- Other ---
 notebooks/figs/
 hlo_dump/*.txt
+*.hlo.txt
 validation_*/
 figs/
 *egg-info/

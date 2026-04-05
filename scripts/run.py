@@ -92,7 +92,11 @@ def _setup_run(config_path, args):
 
     output_dir = args.output_dir or f"validation_{'kinetic' if kinetic else 'outputs'}_{name}"
 
-    overrides = {"mixed_precision": True}  # args.mp}
+    overrides = {}
+    if args.mp:
+        overrides["mixed_precision"] = True
+    if args.z2z is not None:
+        overrides["use_z2z"] = args.z2z
     if kinetic:
         overrides["adaptive_dt"] = True
     params = gkparams_from_config(cfg, **overrides)
@@ -245,6 +249,7 @@ def run_multi(args):
     for out_dir in set(s["output_dir"] for s in setups):
         os.makedirs(out_dir, exist_ok=True)
 
+    t0 = time.time()
     target_step = n_steps
     while int(state_batch.step[0]) < target_step:
         remaining = target_step - int(state_batch.step[0])
@@ -302,7 +307,8 @@ def run_multi(args):
             os.path.join(s["output_dir"], "growth.npz"), growth=np.stack(a["growth"]), **common
         )
 
-    print(f"\ncompleted {n_batch} configs in {time.time() - t0:.1f}s")
+    runtime = time.time() - t0
+    print(f"\ncompleted {n_batch} configs in {runtime:.1f}s")
 
     for s in setups:
         if s["data_dir"]:
@@ -358,6 +364,8 @@ def main():
     parser.add_argument("inputs", nargs="+", help="yaml config paths")
     parser.add_argument("--kinetic", action="store_true")
     parser.add_argument("--mp", action="store_true", help="mixed precision")
+    parser.add_argument("--z2z", action="store_true", default=None, help="use Z2Z FFT for nonlinear term")
+    parser.add_argument("--no-z2z", dest="z2z", action="store_false", help="disable Z2Z FFT for nonlinear term")
     parser.add_argument("--device", type=int, default=0)
     parser.add_argument("--block-size", type=int, default=120)
     parser.add_argument("--n-blocks", type=int, default=None)
