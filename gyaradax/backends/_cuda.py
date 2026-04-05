@@ -75,11 +75,9 @@ _V_TILE = 8
 class CUDAOps(SolverOps):
     """CUDA backend using custom FFI kernels for stencils and FFT bracket."""
 
-    def __init__(
-        self, pre: GKPre, field_template: Optional[jnp.ndarray] = None, use_z2z: bool = False
-    ):
+    def __init__(self, pre: GKPre, use_z2z: bool = False):
         _register_ffi()
-        super().__init__(pre, field_template, use_z2z=use_z2z)
+        super().__init__(pre, use_z2z)
 
     def _prepare_parallel_coeffs(self, c, nv, nmu, ns, nkx, nky):
         """Reshape stencil coefficients to (9, nv*nmu, ns, nkx, nky) for FFI."""

@@ -3,9 +3,9 @@
 usage:
     from gyaradax.backends import create_ops
 
-    ops = create_ops(pre, df)              # auto-detect
-    ops = create_ops(pre, df, "jax")       # force JAX
-    ops = create_ops(pre, df, "cuda")      # force CUDA (raises if unavailable)
+    ops = create_ops(pre)                  # auto-detect
+    ops = create_ops(pre, "jax")           # force JAX
+    ops = create_ops(pre, "cuda")          # force CUDA (raises if unavailable)
 """
 
 import logging
@@ -19,11 +19,11 @@ from gyaradax.backends.ops import SolverOps
 log = logging.getLogger(__name__)
 
 
-def create_ops(pre, field_template, backend: str = "auto", use_z2z: bool = False) -> SolverOps:
+def create_ops(pre, backend: str = "auto", use_z2z: bool = False) -> SolverOps:
     """Create a SolverOps instance for the given backend."""
     if backend == "jax":
         log.info("Backend: JAX%s", " (z2z)" if use_z2z else "")
-        return JAXOps(pre, field_template, use_z2z=use_z2z)
+        return JAXOps(pre, use_z2z=use_z2z)
 
     if backend in ("cuda", "auto"):
         has_gpu = any(d.platform == "gpu" for d in jax.devices())
@@ -34,7 +34,7 @@ def create_ops(pre, field_template, backend: str = "auto", use_z2z: bool = False
         if has_gpu:
             if is_available():
                 log.info("Backend: CUDA")
-                return CUDAOps(pre, field_template, use_z2z=use_z2z)
+                return CUDAOps(pre, use_z2z=use_z2z)
             elif backend == "cuda":
                 raise RuntimeError("backend='cuda' but extensions not compiled")
             else:
@@ -42,6 +42,6 @@ def create_ops(pre, field_template, backend: str = "auto", use_z2z: bool = False
 
         if backend == "auto":
             log.info("Backend: JAX (GPU not found or CUDA not available)")
-            return JAXOps(pre, field_template)
+            return JAXOps(pre, use_z2z=use_z2z)
 
     raise ValueError(f"Unknown backend: {backend!r}. Use 'jax', 'cuda', or 'auto'.")

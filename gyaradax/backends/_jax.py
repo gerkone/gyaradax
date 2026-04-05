@@ -21,8 +21,8 @@ from gyaradax.utils import pack_half_spectrum, unpack_half_spectrum
 class JAXOps(SolverOps):
     """JAX implementation of solver operations."""
 
-    def __init__(self, pre: GKPre, field_template: jnp.ndarray = None, use_z2z: bool = False):
-        super().__init__(pre, field_template, use_z2z)
+    def __init__(self, pre: GKPre, use_z2z: bool = False):
+        super().__init__(pre, use_z2z)
 
     def _apply_vpar(self, field: jnp.ndarray, coeffs) -> jnp.ndarray:
         """Apply 5-point vpar stencil (shifts -2..+2) with boundary clamping."""

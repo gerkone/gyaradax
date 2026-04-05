@@ -18,26 +18,19 @@ class SolverOps(ABC):
     def __init__(
         self,
         pre: GKPre,
-        field_template: jnp.ndarray = None,
         use_z2z: bool = False,
     ):
         self.pre = pre
         self.use_z2z = use_z2z
-        if field_template is not None:
-            self.template_meta = (field_template.shape, field_template.dtype)
-        else:
-            self.template_meta = (None, None)
 
     def tree_flatten(self):
-        return (self.pre,), (self.template_meta, self.use_z2z)
+        return (self.pre,), (self.use_z2z,)
 
     @classmethod
     def tree_unflatten(cls, aux_data, children):
         (pre,) = children
-        template_meta, use_z2z = aux_data
-        obj = cls(pre, None, use_z2z=use_z2z)
-        obj.template_meta = template_meta
-        return obj
+        (use_z2z,) = aux_data
+        return cls(pre, use_z2z=use_z2z)
 
     @abstractmethod
     def _apply_vpar(self, field: jnp.ndarray, coeffs) -> jnp.ndarray:

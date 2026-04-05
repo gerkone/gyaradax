@@ -160,7 +160,7 @@ def nonlinear_term_iii(
 ) -> jnp.ndarray:
     """Nonlinear ExB advection via pseudospectral method. df is 5D."""
     if ops is None:
-        ops = create_ops(pre, df, backend="jax")
+        ops = create_ops(pre, backend="jax")
 
     return ops.nonlinear_term_iii(
         df,
@@ -978,7 +978,7 @@ def gkstep_single(
 ]:
     """Single small-step RK4 time integration with backend dispatch."""
     if ops is None:
-        ops = create_ops(pre, prev_df, backend=params.backend, use_z2z=params.use_z2z)
+        ops = create_ops(pre, backend=params.backend, use_z2z=params.use_z2z)
 
     dt = dt_override if dt_override is not None else jnp.array(params.dt, dtype=jnp.float64)
 
@@ -1050,7 +1050,7 @@ def gksolve(
     if pre is None:
         pre = linear_precompute(geometry, params)
 
-    ops = create_ops(pre, df, backend=params.backend, use_z2z=params.use_z2z)
+    ops = create_ops(pre, backend=params.backend, use_z2z=params.use_z2z)
 
     if params.adaptive_dt and params.non_linear:
         # adaptive CFL path: carry dt as part of scan state
