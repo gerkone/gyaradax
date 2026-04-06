@@ -7,7 +7,7 @@ Usage in each bench_*.py:
 import os
 import time
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable
 
 import numpy as np
 
@@ -83,7 +83,7 @@ def load_setup(config_path: str = "configs/iteration_13.yaml", mixed_precision: 
     from gyaradax import load_config, load_geometry
     from gyaradax.params import gkparams_from_config
     from gyaradax.simulate import _geometry_from_config
-    from gyaradax.solver import linear_precompute, _compute_phi, GKState
+    from gyaradax.solver import linear_precompute, _compute_phi
     from gyaradax.utils import load_gkw_k_dump, read_gkw_dump_time, K_files
 
     cfg = load_config(config_path)
@@ -109,12 +109,11 @@ def load_setup(config_path: str = "configs/iteration_13.yaml", mixed_precision: 
     if k_path is not None:
         shape = tuple(len(geom[k]) for k in ("intvp", "intmu", "ints", "kxrh", "krho"))
         df = load_gkw_k_dump(k_path, shape, n_species=n_species)
-        t_start = read_gkw_dump_time(k_path + ".dat") if os.path.exists(k_path + ".dat") else 0.0
+        read_gkw_dump_time(k_path + ".dat") if os.path.exists(k_path + ".dat") else 0.0
     else:
         from gyaradax.simulate import gk_init
 
         df, _ = gk_init(geom, params, n_species=n_species)
-        t_start = 0.0
 
     pre = linear_precompute(geom, params)
     phi = _compute_phi(df, geom, params, pre)

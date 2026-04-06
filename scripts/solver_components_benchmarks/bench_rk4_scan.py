@@ -121,7 +121,7 @@ def _bench_scan_phase(
     test_z2z: bool = False,
 ):
     """Benchmark one phase (linear / nonlinear) with scan and single-step.
-    
+
     Args:
         test_z2z: If True, test both R2C/Z2Z modes (nonlinear only).
                   If False, use R2C only (linear or default).
@@ -130,9 +130,9 @@ def _bench_scan_phase(
     print(f"\n{'─' * 60}")
     print(f"  {phase_name}   (N = {nsteps} steps)")
     print(f"{'─' * 60}")
-    
+
     z2z_values = [False, True] if test_z2z else [False]
-    
+
     for z2z in z2z_values:
         z2z_label = "Z2Z" if z2z else "R2C"
         if len(z2z_values) > 1:
@@ -148,7 +148,9 @@ def _bench_scan_phase(
 
             # --- backend ops --------------------------------------------------
             try:
-                ops = create_ops(pre_gk, backend=bname, use_z2z=z2z, mixed_precision=mixed_precision)
+                ops = create_ops(
+                    pre_gk, backend=bname, use_z2z=z2z, mixed_precision=params.mixed_precision
+                )
             except Exception as e:
                 print(f"     [SKIP] {bname} not available: {e}")
                 continue
@@ -156,7 +158,7 @@ def _bench_scan_phase(
             # ==================================================================
             # A) Single-step reference
             # ==================================================================
-            print(f"\n     [A] Single-step reference")
+            print("\n     [A] Single-step reference")
 
             single_fn = _build_single_fn(geom, params, pre_gk, ops)
 
@@ -219,7 +221,7 @@ def _bench_scan_phase(
             speedup = naive_total_ms / scan_mean_ms if scan_mean_ms > 0 else float("inf")
             overhead_pct = (1.0 - speedup) * 100
 
-            print(f"\n     [C] Fusion analysis")
+            print("\n     [C] Fusion analysis")
             print(f"         naive  N×single : {naive_total_ms:.3f} ms")
             print(f"         scan   fused    : {scan_mean_ms:.3f} ms")
             print(f"         fusion speedup  : {speedup:.2f}×")
@@ -237,7 +239,7 @@ def _bench_scan_phase(
             # ==================================================================
             # D) Roofline
             # ==================================================================
-            print(f"         [XLA] Analyzing fused cost...")
+            print("         [XLA] Analyzing fused cost...")
             try:
                 flops, bytes_rw = analyze_cost(scan_fn, df, state, nsteps)
                 roofline_report(
@@ -248,7 +250,9 @@ def _bench_scan_phase(
                 )
             except Exception as e:
                 print(f"         [SKIP] cost analysis failed: {e}")
-                roofline_report(f"{phase_name} scan/{nsteps} ({bname}, {z2z_label})", amort_ms, 0, 0)
+                roofline_report(
+                    f"{phase_name} scan/{nsteps} ({bname}, {z2z_label})", amort_ms, 0, 0
+                )
 
 
 # ---------------------------------------------------------------------------
@@ -267,7 +271,7 @@ def _sweep_nsteps(
     test_z2z: bool = False,
 ):
     """Run the scan benchmark at several N values and print a summary table.
-    
+
     Args:
         test_z2z: If True, test both R2C/Z2Z modes (nonlinear only).
     """
@@ -277,7 +281,7 @@ def _sweep_nsteps(
     print(f"{'═' * 60}")
 
     z2z_values = [False, True] if test_z2z else [False]
-    
+
     for z2z in z2z_values:
         z2z_label = "Z2Z" if z2z else "R2C"
         if len(z2z_values) > 1:
@@ -290,7 +294,9 @@ def _sweep_nsteps(
                 continue
 
             try:
-                ops = create_ops(pre_gk, backend=bname, use_z2z=z2z, mixed_precision=mixed_precision)
+                ops = create_ops(
+                    pre_gk, backend=bname, use_z2z=z2z, mixed_precision=params.mixed_precision
+                )
             except Exception:
                 continue
 
@@ -344,13 +350,13 @@ def run(
     nonlinear_z2z: bool = False,
 ):
     """Benchmark N-step fused RK4.
-    
+
     Args:
         nonlinear_z2z: If True, test nonlinear phase with both R2C/Z2Z modes.
                       Linear phase always uses R2C only.
     """
     print(f"\n{'=' * 60}")
-    print(f"C8: gkstep_scan  (Fused N-Step RK4 Benchmark)")
+    print("C8: gkstep_scan  (Fused N-Step RK4 Benchmark)")
     print(f"{'=' * 60}")
     print(f"    config  : {config}")
     print(f"    mixed-p : {mixed_precision}")
@@ -442,5 +448,5 @@ if __name__ == "__main__":
         help="Test nonlinear phase with both R2C/Z2Z modes (default: R2C only)",
     )
     args = parser.parse_args()
-    
+
     run(args.config, args.mp, args.backend, args.nsteps, args.sweep, args.z2z)

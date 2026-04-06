@@ -48,10 +48,11 @@ message(STATUS "Found CUDA toolkit:  ${CUDAToolkit_VERSION}")
 
 # ── LTO fatbin tooling ────────────────────────────────────────────
 
-# LTO gencode flags: cuFFT 12.x supports lto_80 and lto_90
+# LTO gencode flags for cuFFT callbacks (Ampere, Hopper, Blackwell)
 set(GENCODE_FLAGS_LTO
     --generate-code arch=compute_80,code=lto_80
     --generate-code arch=compute_90,code=lto_90
+    --generate-code arch=compute_100,code=lto_100
     --ptxas-options=-v)
 
 get_filename_component(CUDA_COMPILER_DIR ${CMAKE_CUDA_COMPILER} DIRECTORY)

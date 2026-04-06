@@ -960,9 +960,6 @@ def _compute_phi(df, geometry, params, pre):
         return calculate_phi(geometry, df, params=params, pre=pre)
 
 
-
-
-
 def gkstep_single(
     prev_df: jnp.ndarray,
     geometry: Dict[str, jnp.ndarray],
@@ -978,7 +975,12 @@ def gkstep_single(
 ]:
     """Single small-step RK4 time integration with backend dispatch."""
     if ops is None:
-        ops = create_ops(pre, backend=params.backend, use_z2z=params.use_z2z, mixed_precision=params.mixed_precision)
+        ops = create_ops(
+            pre,
+            backend=params.backend,
+            use_z2z=params.use_z2z,
+            mixed_precision=params.mixed_precision,
+        )
 
     dt = dt_override if dt_override is not None else jnp.array(params.dt, dtype=jnp.float64)
 
@@ -1050,7 +1052,9 @@ def gksolve(
     if pre is None:
         pre = linear_precompute(geometry, params)
 
-    ops = create_ops(pre, backend=params.backend, use_z2z=params.use_z2z, mixed_precision=params.mixed_precision)
+    ops = create_ops(
+        pre, backend=params.backend, use_z2z=params.use_z2z, mixed_precision=params.mixed_precision
+    )
 
     if params.adaptive_dt and params.non_linear:
         # adaptive CFL path: carry dt as part of scan state

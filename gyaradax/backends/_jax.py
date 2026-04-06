@@ -20,7 +20,7 @@ from gyaradax.utils import pack_half_spectrum, unpack_half_spectrum
 @jax.tree_util.register_pytree_node_class
 class JAXOps(SolverOps):
     """JAX implementation of solver operations.
-    
+
     Supports both R2C (real-to-complex) and Z2Z (complex-to-complex) FFTs
     via the use_z2z flag. Mixed precision (FP32 FFTs) is controlled by
     the mixed_precision flag.
@@ -120,8 +120,10 @@ class JAXOps(SolverOps):
         if self.use_z2z:
             kx_1d = kx2d[:, 0]
             ky_1d = ky2d[0, :]
-            rev_jind = jnp.full(mrad, -1, dtype=jnp.int32).at[jind].set(
-                jnp.arange(len(jind), dtype=jnp.int32)
+            rev_jind = (
+                jnp.full(mrad, -1, dtype=jnp.int32)
+                .at[jind]
+                .set(jnp.arange(len(jind), dtype=jnp.int32))
             )
 
             def _per_s_wrapper(df_s, phi_s, bessel_s, dum):
@@ -188,7 +190,9 @@ class JAXOps(SolverOps):
         """
         if df.ndim == 5:
             return self._nonlinear_term_iii_core(
-                df, phi, geometry,
+                df,
+                phi,
+                geometry,
                 efun_sign=efun_sign,
                 fft_prefactor=fft_prefactor,
                 exclude_zero_mode=exclude_zero_mode,
@@ -197,16 +201,18 @@ class JAXOps(SolverOps):
         elif df.ndim == 6:
             if bessel is None:
                 bessel = self.pre["bessel"]
-            
+
             def _per_species(df_sp, bes_sp):
                 return self._nonlinear_term_iii_core(
-                    df_sp, phi, geometry,
+                    df_sp,
+                    phi,
+                    geometry,
                     efun_sign=efun_sign,
                     fft_prefactor=fft_prefactor,
                     exclude_zero_mode=exclude_zero_mode,
                     bessel=bes_sp,
                 )
-            
+
             return jax.vmap(_per_species)(df, bessel)
         else:
             raise ValueError(f"nonlinear_term_iii: expected df with ndim 5 or 6, got {df.ndim}")
@@ -241,7 +247,9 @@ class JAXOps(SolverOps):
             + term_vp_diss
             - 1j * kdotvd * df
             + pre["hyper"] * df
-            + 1j * params.drive_scale * (
+            + 1j
+            * params.drive_scale
+            * (
                 pre["dmaxwel_fm_ek"]
                 - pre["signz0"] * kdotvd * (pre["fmaxwl"] / jnp.maximum(pre["tmp0"], 1e-15))
             )
@@ -292,11 +300,11 @@ class JAXOps(SolverOps):
                 "ky_b": pre["ky_b"].ravel().reshape(1, 1, 1, 1, -1),
                 "hyper": pre["hyper"],
             }
-            
+
             def _per_species(df_sp, sp):
                 sp_pre = {**sp, **shared}
                 return self._linear_rhs_core(df_sp, phi, params, sp_pre)
-            
+
             return jax.vmap(_per_species, in_axes=(0, sp_in_axes))(df, sp_arrays)
         else:
             raise ValueError(f"linear_rhs: expected df with ndim 5 or 6, got {df.ndim}")
@@ -316,7 +324,7 @@ def _pack_full_z2z(field, kx_vec, ky_vec, jind, rev_jind, mrad, mphi, mphiw3, nk
     nkx = field.shape[-2]
 
     kx_dense = jnp.zeros(mrad, dtype=real_dtype).at[jind].set(kx_vec.astype(real_dtype))
-    ky_half  = jnp.zeros(mphiw3, dtype=real_dtype).at[:nky].set(ky_vec[:nky].astype(real_dtype))
+    ky_half = jnp.zeros(mphiw3, dtype=real_dtype).at[:nky].set(ky_vec[:nky].astype(real_dtype))
     m_mirror = (mrad - jnp.arange(mrad)) % mrad
 
     # ── Primary half [mrad, mphiw3] ──────────────────────────────────
@@ -325,13 +333,11 @@ def _pack_full_z2z(field, kx_vec, ky_vec, jind, rev_jind, mrad, mphi, mphiw3, nk
 
     m_src = rev_jind[m_g]
     valid = (m_src >= 0) & (j_g < nky)
-    val = jnp.where(
-        valid, field[..., jnp.clip(m_src, 0, nkx - 1), j_g], 0
-    ).astype(dtype)
+    val = jnp.where(valid, field[..., jnp.clip(m_src, 0, nkx - 1), j_g], 0).astype(dtype)
 
     # Symmetrize ky=0: F(kx,0) = conj(F(-kx,0))
     m_src_mir = rev_jind[m_mirror[m_g]]
-    val0_mir  = jnp.where(
+    val0_mir = jnp.where(
         (j_g == 0) & (m_src_mir >= 0),
         field[..., jnp.clip(m_src_mir, 0, nkx - 1), 0],
         0,
@@ -344,7 +350,7 @@ def _pack_full_z2z(field, kx_vec, ky_vec, jind, rev_jind, mrad, mphi, mphiw3, nk
     j_src = mphi - jnp.arange(mphiw3, mphi)
     m_g2, j_src_g = jnp.meshgrid(m_p, j_src, indexing="ij")
 
-    m_mir_g2   = m_mirror[m_g2]
+    m_mir_g2 = m_mirror[m_g2]
     m_src_mir2 = rev_jind[m_mir_g2]
     valid_mir2 = (m_src_mir2 >= 0) & (j_src_g < nky)
     val_mir = jnp.where(
@@ -449,8 +455,10 @@ def _per_s_z2z(
 
     gyro_phi = bessel_s * phi_s[None, None, :, :]
 
-    ws_df  = _pack_full_z2z(df_s,     kx_vec, ky_vec, jind, rev_jind, mrad, mphi, mphiw3, nky, fft_dtype)
-    ws_phi = _pack_full_z2z(gyro_phi, kx_vec, ky_vec, jind, rev_jind, mrad, mphi, mphiw3, nky, fft_dtype)
+    ws_df = _pack_full_z2z(df_s, kx_vec, ky_vec, jind, rev_jind, mrad, mphi, mphiw3, nky, fft_dtype)
+    ws_phi = _pack_full_z2z(
+        gyro_phi, kx_vec, ky_vec, jind, rev_jind, mrad, mphi, mphiw3, nky, fft_dtype
+    )
 
     z2z_df = jnp.fft.ifft2(ws_df, axes=(-2, -1), norm="backward")
     z2z_phi = jnp.fft.ifft2(ws_phi, axes=(-2, -1), norm="backward")

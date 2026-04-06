@@ -5,7 +5,10 @@ Usage:
     PYTHONPATH=. JAX_COMPILATION_CACHE_DIR=/tmp/jax_cache \
       python solver_components_benchmarks/run_all.py --device 1
 """
-import argparse, os, sys
+
+import argparse
+import os
+import sys
 from pathlib import Path
 
 _p = argparse.ArgumentParser(add_help=False)

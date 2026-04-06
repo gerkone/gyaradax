@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
-"""C5: _compute_phi — kinetic/adiabatic phi solve.
-"""
-import argparse, os, sys
+"""C5: _compute_phi — kinetic/adiabatic phi solve."""
+
+import argparse
+import os
+import sys
 from pathlib import Path
 
 _p = argparse.ArgumentParser(add_help=False)
@@ -13,7 +15,6 @@ os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
 import jax
 
 jax.config.update("jax_enable_x64", True)
-import jax.numpy as jnp
 
 sys.path.insert(0, str(Path(__file__).parent))
 from common import (
@@ -45,7 +46,7 @@ def run(config="configs/iteration_13.yaml", mixed_precision=False):
     out = fn(df, pre_gk)
     rel_l2 = check_accuracy(out, baseline, "output")
 
-    print(f"  [XLA] Analyzing cost...")
+    print("  [XLA] Analyzing cost...")
     flops, bytes_rw = analyze_cost(fn, df, pre_gk)
 
     mean_ms, std_ms = BenchTimer(lambda d=df, pr=pre_gk: fn(d, pr).block_until_ready()).run()

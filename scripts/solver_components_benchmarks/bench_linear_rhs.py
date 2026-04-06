@@ -4,7 +4,10 @@
 Architecture: solver.py delegates full implementation and shape dispatch (5D/6D)
 to backend. Backend (JAX/CUDA) handles Terms I, II, IV, V, VII, VIII + dissipation.
 """
-import argparse, os, sys
+
+import argparse
+import os
+import sys
 from pathlib import Path
 
 _p = argparse.ArgumentParser(add_help=False)
@@ -16,7 +19,6 @@ os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
 import jax
 
 jax.config.update("jax_enable_x64", True)
-import jax.numpy as jnp
 
 sys.path.insert(0, str(Path(__file__).parent))
 from common import (
@@ -57,7 +59,7 @@ def run(config="configs/iteration_13.yaml", mixed_precision=False):
         out = fn(df, phi)
         rel_l2 = check_accuracy(out, baseline, "output")
 
-        print(f"     [XLA] Analyzing cost...")
+        print("     [XLA] Analyzing cost...")
         flops, bytes_rw = analyze_cost(fn, df, phi)
 
         mean_ms, std_ms = BenchTimer(lambda d=df, p=phi: fn(d, p).block_until_ready()).run()

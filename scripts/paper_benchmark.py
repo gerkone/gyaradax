@@ -34,7 +34,6 @@ from gyaradax.solver import (
 from gyaradax.backends import create_ops
 from gyaradax.params import gkparams_from_config, load_config
 
-
 # ---------------------------------------------------------------------------
 # GKW reference parsing
 # ---------------------------------------------------------------------------
@@ -205,7 +204,17 @@ def estimate_flops_per_step(grid_shape, non_linear=True, n_species=1):
     return int(step_flops)
 
 
-def benchmark_gyaradax(config_path, n_steps=120, n_blocks=5, device=None, args=None, mp=False, dp=False, z2z=None, backend="jax"):
+def benchmark_gyaradax(
+    config_path,
+    n_steps=120,
+    n_blocks=5,
+    device=None,
+    args=None,
+    mp=False,
+    dp=False,
+    z2z=None,
+    backend="jax",
+):
     """Run full gyaradax benchmark. Returns a results dict."""
     if device is not None:
         os.environ["CUDA_VISIBLE_DEVICES"] = str(device)
@@ -280,7 +289,9 @@ def benchmark_gyaradax(config_path, n_steps=120, n_blocks=5, device=None, args=N
 
     # component benchmarks
     print("\ncomponent benchmarks:")
-    ops = create_ops(pre, backend=params.backend, use_z2z=params.use_z2z, mixed_precision=params.mixed_precision)
+    ops = create_ops(
+        pre, backend=params.backend, use_z2z=params.use_z2z, mixed_precision=params.mixed_precision
+    )
 
     phi = _compute_phi(df, geometry, params, pre)
 
@@ -345,7 +356,7 @@ def benchmark_gyaradax(config_path, n_steps=120, n_blocks=5, device=None, args=N
                 dev.reset_memory_stats()
             except Exception:
                 pass
-        
+
         t0 = time.time()
         df_cur, (phi_out, fluxes), state_cur = gksolve(
             df_cur, geometry, params, state_cur, n_steps=n_steps, pre=pre
@@ -353,7 +364,7 @@ def benchmark_gyaradax(config_path, n_steps=120, n_blocks=5, device=None, args=N
         jax.block_until_ready(df_cur)
         dt_block = time.time() - t0
         block_times.append(dt_block)
-        
+
         # Capture peak memory for this block
         if hasattr(dev, "memory_stats"):
             try:
@@ -363,7 +374,7 @@ def benchmark_gyaradax(config_path, n_steps=120, n_blocks=5, device=None, args=N
                     block_peaks.append(block_peak)
             except Exception:
                 pass
-        
+
         sps = n_steps / dt_block
         ms_per_step = dt_block * 1000 / n_steps
         vram_str = f", {block_peaks[-1]:.0f} MB VRAM" if block_peaks else ""
@@ -467,11 +478,23 @@ def main():
     parser.add_argument("--steps", type=int, default=120, help="steps per block")
     parser.add_argument("--blocks", type=int, default=5, help="number of timed blocks")
     parser.add_argument("--device", type=int, default=None, help="GPU device index")
-    parser.add_argument("--backend", type=str, default="jax", choices=["jax", "cuda"], help="backend for nonlinear term")
+    parser.add_argument(
+        "--backend",
+        type=str,
+        default="jax",
+        choices=["jax", "cuda"],
+        help="backend for nonlinear term",
+    )
     parser.add_argument("--mp", action="store_true", help="mixed precision (default)")
-    parser.add_argument("--dp", action="store_true", help="double precision (disable mixed precision)")
-    parser.add_argument("--z2z", action="store_true", default=None, help="use Z2Z FFT for nonlinear term")
-    parser.add_argument("--no-z2z", dest="z2z", action="store_false", help="disable Z2Z FFT for nonlinear term")
+    parser.add_argument(
+        "--dp", action="store_true", help="double precision (disable mixed precision)"
+    )
+    parser.add_argument(
+        "--z2z", action="store_true", default=None, help="use Z2Z FFT for nonlinear term"
+    )
+    parser.add_argument(
+        "--no-z2z", dest="z2z", action="store_false", help="disable Z2Z FFT for nonlinear term"
+    )
     parser.add_argument("--output", type=str, default=None, help="save results JSON")
     parser.add_argument(
         "--gkw-only", action="store_true", help="only print GKW timing, skip gyaradax"
@@ -506,7 +529,12 @@ def main():
     print("gyaradax (adiabatic)")
     print(f"{'='*60}")
     results_adiabatic = benchmark_gyaradax(
-        args.config, n_steps=args.steps, n_blocks=args.blocks, device=args.device, args=args, backend=args.backend
+        args.config,
+        n_steps=args.steps,
+        n_blocks=args.blocks,
+        device=args.device,
+        args=args,
+        backend=args.backend,
     )
     all_results["gyaradax_adiabatic"] = results_adiabatic
 
@@ -515,7 +543,12 @@ def main():
         print("gyaradax (kinetic)")
         print(f"{'='*60}")
         results_kinetic = benchmark_gyaradax(
-            args.kinetic_config, n_steps=args.steps, n_blocks=args.blocks, device=args.device, args=args, backend=args.backend
+            args.kinetic_config,
+            n_steps=args.steps,
+            n_blocks=args.blocks,
+            device=args.device,
+            args=args,
+            backend=args.backend,
         )
         all_results["gyaradax_kinetic"] = results_kinetic
 

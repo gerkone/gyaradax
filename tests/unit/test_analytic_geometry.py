@@ -11,8 +11,9 @@ jax.config.update("jax_enable_x64", True)
 from gyaradax.utils import load_geometry
 from gyaradax.geometry import compute_geometry, compute_geometry_from_input
 
-
-GKW_DATA_ROOT = os.environ.get("GKW_DATA_ROOT", os.path.join(os.path.dirname(__file__), "..", "data", "gkw_raw"))
+GKW_DATA_ROOT = os.environ.get(
+    "GKW_DATA_ROOT", os.path.join(os.path.dirname(__file__), "..", "data", "gkw_raw")
+)
 ITERATIONS = [8, 13, 131, 200]
 KINETIC_CASES = [
     "v3_kiteration_991_half_rlt",

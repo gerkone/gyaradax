@@ -4,7 +4,9 @@
 Benchmarks the JAX reference implementation against a custom CUDA FFI
 kernel side-by-side, with full roofline analysis.
 """
-import argparse, os, sys, time, ctypes
+
+import argparse
+import os
 from pathlib import Path
 
 _p = argparse.ArgumentParser(add_help=False)
@@ -13,7 +15,6 @@ _early, _ = _p.parse_known_args()
 os.environ["CUDA_VISIBLE_DEVICES"] = str(_early.device)
 os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
 
-import numpy as np
 import jax
 
 jax.config.update("jax_enable_x64", True)
@@ -28,12 +29,8 @@ from common import (
     analyze_cost,
     BenchTimer,
     roofline_report,
-    DEFAULT_BW_GBS,
-    DEFAULT_FP64_TFLOPS,
 )
 from gyaradax.solver import GKPre
-import gyaradax.stencils as stencils
-
 
 # Reporters and Main removed; now integrated into run()
 
@@ -67,7 +64,7 @@ def run(config="configs/iteration_13.yaml", mixed_precision=False):
     coeffs_broadcasted = jnp.broadcast_to(coeffs_raw, target_coeffs_shape)
 
     # 1. Individual Stencil
-    print(f"\n  -- Single Stencil (_apply_parallel)")
+    print("\n  -- Single Stencil (_apply_parallel)")
     backend_times = {}
 
     for bname, ops in backends:
@@ -100,7 +97,7 @@ def run(config="configs/iteration_13.yaml", mixed_precision=False):
         print(f"     Speedup: {backend_times['jax']/backend_times['cuda']:.2f}x")
 
     # 2. Dual Fused Stencil (Merge from bench_apply_parallel_cuda.py)
-    print(f"\n  -- Dual Stencil Fusion (_apply_parallel_dual)")
+    print("\n  -- Dual Stencil Fusion (_apply_parallel_dual)")
 
     # Setup inputs for dual stencil
     key = jax.random.PRNGKey(42)

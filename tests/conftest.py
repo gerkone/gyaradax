@@ -20,15 +20,15 @@ except ImportError:
     HAS_CUDA = False
 
 JAX_BACKENDS = [
-    ("jax", False, False),   # JAX R2C FP64
-    ("jax", False, True),    # JAX R2C MP
-    ("jax", True, False),    # JAX Z2Z FP64
-    ("jax", True, True),     # JAX Z2Z MP
+    ("jax", False, False),  # JAX R2C FP64
+    ("jax", False, True),  # JAX R2C MP
+    ("jax", True, False),  # JAX Z2Z FP64
+    ("jax", True, True),  # JAX Z2Z MP
 ]
 
 CUDA_BACKENDS = [
     ("cuda", False, False),  # CUDA Z2Z FP64
-    ("cuda", False, True),   # CUDA Z2Z MP
+    ("cuda", False, True),  # CUDA Z2Z MP
 ]
 
 ALL_BACKENDS = JAX_BACKENDS + (CUDA_BACKENDS if HAS_CUDA else [])
@@ -61,7 +61,9 @@ def read_dump_dtim(dat_path):
     return float(m.group(1))
 
 
-GKW_DATA_ROOT = os.environ.get("GKW_DATA_ROOT", os.path.join(os.path.dirname(__file__), "data", "gkw_raw"))
+GKW_DATA_ROOT = os.environ.get(
+    "GKW_DATA_ROOT", os.path.join(os.path.dirname(__file__), "data", "gkw_raw")
+)
 ITERATIONS = [8, 13, 131, 200]
 
 

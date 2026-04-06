@@ -19,9 +19,11 @@ from gyaradax.backends.ops import SolverOps
 log = logging.getLogger(__name__)
 
 
-def create_ops(pre, backend: str = "auto", use_z2z: bool = False, mixed_precision: bool = True) -> SolverOps:
+def create_ops(
+    pre, backend: str = "auto", use_z2z: bool = False, mixed_precision: bool = True
+) -> SolverOps:
     """Create a SolverOps instance for the given backend.
-    
+
     Args:
         pre: Precomputed geometry and coefficients
         backend: Backend selection ('auto', 'jax', or 'cuda')

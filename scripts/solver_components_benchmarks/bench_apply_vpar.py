@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
-"""C2: _apply_vpar — 5-point velocity-space stencil.
-"""
-import argparse, os, sys
+"""C2: _apply_vpar — 5-point velocity-space stencil."""
+
+import argparse
+import os
+import sys
 from pathlib import Path
 
 _p = argparse.ArgumentParser(add_help=False)
@@ -13,7 +15,6 @@ os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
 import jax
 
 jax.config.update("jax_enable_x64", True)
-import jax.numpy as jnp
 
 sys.path.insert(0, str(Path(__file__).parent))
 from common import (
@@ -28,7 +29,6 @@ from gyaradax.solver import GKPre
 from gyaradax.backends import create_ops
 import gyaradax.stencils as stencils
 
-
 # Internal definition removed; using production _apply_vpar_fn instead.
 
 
@@ -41,7 +41,6 @@ def run(config="configs/iteration_13.yaml", mixed_precision=False):
     field = df
     pre_gk = GKPre(pre)
 
-    from gyaradax.backends import create_ops
 
     results = {}
     backends = []
@@ -94,7 +93,7 @@ def run(config="configs/iteration_13.yaml", mixed_precision=False):
             print(f"     Speedup: {backend_times['jax']/backend_times['cuda']:.2f}x")
 
     # 2. Dual Fused Stencil
-    print(f"\n  -- VPAR_D1+D4 Dual Fusion")
+    print("\n  -- VPAR_D1+D4 Dual Fusion")
     c1, c4 = tuple(stencils.VPAR_D1), tuple(stencils.VPAR_D4)
     dual_times = {}
 

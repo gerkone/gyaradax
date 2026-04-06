@@ -70,12 +70,12 @@ def test_kinetic_nl_bessel_correct_per_species(backend, use_z2z, mixed_precision
     pre0 = _make_pre_bessel(bessel_sp0)
     pre1 = _make_pre_bessel(bessel_sp1)
 
-    nl_sp0 = create_ops(pre0, backend=backend, use_z2z=use_z2z, mixed_precision=mixed_precision).nonlinear_term_iii(
-        df, phi, {}
-    )
-    nl_sp1 = create_ops(pre1, backend=backend, use_z2z=use_z2z, mixed_precision=mixed_precision).nonlinear_term_iii(
-        df, phi, {}
-    )
+    nl_sp0 = create_ops(
+        pre0, backend=backend, use_z2z=use_z2z, mixed_precision=mixed_precision
+    ).nonlinear_term_iii(df, phi, {})
+    nl_sp1 = create_ops(
+        pre1, backend=backend, use_z2z=use_z2z, mixed_precision=mixed_precision
+    ).nonlinear_term_iii(df, phi, {})
 
     assert not jnp.allclose(nl_sp0, 0.0, atol=1e-12), "sp0 NL should be non-zero (J0=1)"
     assert jnp.allclose(nl_sp1, 0.0, atol=1e-12), "sp1 NL should be zero (J0=0)"
@@ -87,7 +87,6 @@ def test_kinetic_nl_bessel_full_species_bessel_support(backend, use_z2z, mixed_p
     """Bug 2 fixed: when ops.pre['bessel'] retains the species axis (6-D),
     the solver should now correctly pass the 5-D species slice.
     """
-
 
     nkx, nky, ns, nvpar, nmu, nsp = 4, 3, 4, 4, 3, 2
 
@@ -141,10 +140,19 @@ def _subset_mask_from_mode_chains(mode_label, ixzero, ky_list):
 
 @pytest.mark.parametrize("backend, use_z2z, mixed_precision", ALL_BACKENDS)
 @pytest.mark.parametrize("start_name, end_name, steps", [("100", "101", 120)])
-def test_iteration_parity(backend, use_z2z, mixed_precision, nonlin_dir, nonlin_geom, nonlin_shape, start_name, end_name, steps):
+def test_iteration_parity(
+    backend,
+    use_z2z,
+    mixed_precision,
+    nonlin_dir,
+    nonlin_geom,
+    nonlin_shape,
+    start_name,
+    end_name,
+    steps,
+):
     """verify trajectory parity against GKW reference dumps."""
 
-    
     start_df = load_gkw_k_dump(f"{nonlin_dir}/{start_name}", nonlin_shape)
     end_df_ref = load_gkw_k_dump(f"{nonlin_dir}/{end_name}", nonlin_shape)
 
@@ -179,14 +187,17 @@ def test_iteration_parity(backend, use_z2z, mixed_precision, nonlin_dir, nonlin_
 def test_nonlinear_scaling(backend, use_z2z, mixed_precision, nonlin_geom, nonlin_shape):
     """verify quadratic scaling of the nonlinear term iii."""
 
-    
     key = jax.random.PRNGKey(42)
     df_rand = jax.random.normal(key, nonlin_shape, dtype=jnp.float64) + 0j
 
-    params_nl = GKParams(dt=0.01, non_linear=True, backend=backend, use_z2z=use_z2z, mixed_precision=mixed_precision)
-    params_lin = GKParams(dt=0.01, non_linear=False, backend=backend, use_z2z=use_z2z, mixed_precision=mixed_precision)
+    params_nl = GKParams(
+        dt=0.01, non_linear=True, backend=backend, use_z2z=use_z2z, mixed_precision=mixed_precision
+    )
+    params_lin = GKParams(
+        dt=0.01, non_linear=False, backend=backend, use_z2z=use_z2z, mixed_precision=mixed_precision
+    )
     state = default_state(nky=len(nonlin_geom["krho"]))
-    
+
     pre_nl = linear_precompute(nonlin_geom, params_nl)
     pre_lin = linear_precompute(nonlin_geom, params_lin)
 
@@ -236,20 +247,21 @@ def test_kinetic_adaptive_dt_consistency(
 
     Runs 10 steps with adaptive_dt=True and compares final df between backends.
     """
-    
+
     n_species = 2
     params_jax = _kinetic_params_from_dir(kinetic_dir, dump_name="100")
-    
+
     # Force adaptive_dt=True to test CFL control path
     from dataclasses import replace
+
     params_jax = replace(params_jax, adaptive_dt=True, backend="jax")
-    params_cuda = replace(params_jax, backend="cuda", use_z2z=use_z2z, mixed_precision=mixed_precision)
-    
-    # Load initial condition
-    start_df = load_gkw_k_dump(
-        os.path.join(kinetic_dir, "100"), kinetic_shape, n_species=n_species
+    params_cuda = replace(
+        params_jax, backend="cuda", use_z2z=use_z2z, mixed_precision=mixed_precision
     )
-    
+
+    # Load initial condition
+    start_df = load_gkw_k_dump(os.path.join(kinetic_dir, "100"), kinetic_shape, n_species=n_species)
+
     nky = len(kinetic_geom["krho"])
     state = GKState(
         time=jnp.array(0.0, dtype=jnp.float64),
@@ -258,31 +270,33 @@ def test_kinetic_adaptive_dt_consistency(
         window_start_amp=jnp.ones(nky, dtype=jnp.float64),
         last_growth_rate=jnp.zeros(nky, dtype=jnp.float64),
     )
-    
+
     # Precompute outside JIT to match run.py usage pattern
     pre_jax = linear_precompute(kinetic_geom, params_jax)
     pre_cuda = linear_precompute(kinetic_geom, params_cuda)
-    
+
     # Run 10 steps with adaptive CFL - JAX reference
     jax_df, _, jax_state = gksolve(
         start_df, kinetic_geom, params_jax, state, n_steps=10, pre=pre_jax
     )
-    
+
     # Run 10 steps with adaptive CFL - CUDA backend
     cuda_df, _, cuda_state = gksolve(
         start_df, kinetic_geom, params_cuda, state, n_steps=10, pre=pre_cuda
     )
-    
+
     # Validate: both backends should produce finite results
     assert jnp.all(jnp.isfinite(jax_df)), "JAX backend produced non-finite values"
     assert jnp.all(jnp.isfinite(cuda_df)), "CUDA backend produced non-finite values"
-    
+
     # Validate: states should be consistent
-    assert jnp.isclose(jax_state.time, cuda_state.time, rtol=1e-10), \
-        f"Time mismatch: JAX={jax_state.time}, CUDA={cuda_state.time}"
-    assert jax_state.step == cuda_state.step == 10, \
-        f"Step mismatch: JAX={jax_state.step}, CUDA={cuda_state.step}"
-    
+    assert jnp.isclose(
+        jax_state.time, cuda_state.time, rtol=1e-10
+    ), f"Time mismatch: JAX={jax_state.time}, CUDA={cuda_state.time}"
+    assert (
+        jax_state.step == cuda_state.step == 10
+    ), f"Step mismatch: JAX={jax_state.step}, CUDA={cuda_state.step}"
+
     # Validate: numerical consistency between backends
     # Tolerance is relaxed for adaptive_dt (different CFL estimates may accumulate)
     for isp in range(n_species):
@@ -295,7 +309,14 @@ def test_kinetic_adaptive_dt_consistency(
 @pytest.mark.parametrize("backend, use_z2z, mixed_precision", ALL_BACKENDS)
 @pytest.mark.parametrize("start_name, end_name", [("100", "101")])
 def test_kinetic_iteration_parity(
-    backend, use_z2z, mixed_precision, kinetic_dir, kinetic_geom, kinetic_shape, start_name, end_name
+    backend,
+    use_z2z,
+    mixed_precision,
+    kinetic_dir,
+    kinetic_geom,
+    kinetic_shape,
+    start_name,
+    end_name,
 ):
     """Verify multi-species kinetic trajectory parity against GKW reference dumps.
 
@@ -306,11 +327,10 @@ def test_kinetic_iteration_parity(
     NOTE: Assumes constant dtim between dumps. GKW uses CFL-adaptive timestep,
     so this test is only valid for cases where dtim is stable. Cases with
     varying dtim will need CFL adaptation in the solver.
-    
+
     Tests both JAX and CUDA backends with multi-step gksolve() to validate
     kinetic electron support in both backends.
     """
-
 
     n_species = 2
     start_df = load_gkw_k_dump(
@@ -356,7 +376,7 @@ def test_kinetic_flux_trajectory(kinetic_dir, kinetic_geom, kinetic_shape):
     This test uses only the integral module (phi solver + flux calculation),
     not the time-stepper. It validates that the multi-species field solver
     produces correct per-species fluxes at multiple time points.
-    
+
     Note: This test is backend-agnostic as it only tests integral calculations
     (calculate_phi_kinetic, calculate_fluxes_kinetic), not the solver backend.
     """

@@ -383,9 +383,19 @@ def main():
     parser.add_argument("inputs", nargs="+", help="yaml config paths")
     parser.add_argument("--kinetic", action="store_true")
     parser.add_argument("--mp", action="store_true", help="mixed precision")
-    parser.add_argument("--z2z", action="store_true", default=None, help="use Z2Z FFT for nonlinear term")
-    parser.add_argument("--no-z2z", dest="z2z", action="store_false", help="disable Z2Z FFT for nonlinear term")
-    parser.add_argument("--backend", type=str, default="jax", choices=["jax", "cuda"], help="backend for nonlinear term")
+    parser.add_argument(
+        "--z2z", action="store_true", default=None, help="use Z2Z FFT for nonlinear term"
+    )
+    parser.add_argument(
+        "--no-z2z", dest="z2z", action="store_false", help="disable Z2Z FFT for nonlinear term"
+    )
+    parser.add_argument(
+        "--backend",
+        type=str,
+        default="jax",
+        choices=["jax", "cuda"],
+        help="backend for nonlinear term",
+    )
     parser.add_argument("--device", type=int, default=0)
     parser.add_argument("--block-size", type=int, default=120)
     parser.add_argument("--n-blocks", type=int, default=None)

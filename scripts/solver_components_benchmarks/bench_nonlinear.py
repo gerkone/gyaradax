@@ -4,7 +4,10 @@
 Architecture: solver.py delegates full implementation and shape dispatch (5D/6D)
 to backend. Backend (JAX/CUDA) handles pseudospectral ExB bracket via FFT.
 """
-import argparse, os, sys
+
+import argparse
+import os
+import sys
 from pathlib import Path
 
 _p = argparse.ArgumentParser(add_help=False)
@@ -16,7 +19,6 @@ os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
 import jax
 
 jax.config.update("jax_enable_x64", True)
-import jax.numpy as jnp
 
 sys.path.insert(0, str(Path(__file__).parent))
 from common import (
@@ -27,12 +29,12 @@ from common import (
     analyze_cost,
     BASELINES_DIR,
 )
-from gyaradax.solver import nonlinear_term_iii, GKPre
+from gyaradax.solver import GKPre
 
 
 def run(config="configs/iteration_13.yaml", mixed_precision=False, test_z2z=False):
     """Benchmark nonlinear_term_iii.
-    
+
     Args:
         test_z2z: If True, test both R2C and Z2Z FFT modes.
                  If False, use R2C only (default).
@@ -50,14 +52,14 @@ def run(config="configs/iteration_13.yaml", mixed_precision=False, test_z2z=Fals
 
     results = {}
     z2z_values = [False, True] if test_z2z else [False]
-    
+
     for z2z in z2z_values:
         z2z_label = "Z2Z" if z2z else "R2C"
         if len(z2z_values) > 1:
             print(f"\n{'#'*60}")
             print(f"#  FFT Mode: {z2z_label} (use_z2z={z2z})")
             print(f"{'#'*60}")
-        
+
         for backend in ["jax", "cuda"]:
             print(f"\n{'='*40}")
             print(f"Backend: {backend.upper()} ({z2z_label})")
@@ -83,14 +85,19 @@ def run(config="configs/iteration_13.yaml", mixed_precision=False, test_z2z=Fals
                 out = fn(field, phi)
 
                 rel_l2 = check_accuracy(out, baseline, bkey)
-                print(f"  [XLA] Analyzing cost...")
+                print("  [XLA] Analyzing cost...")
                 flops, bytes_rw = analyze_cost(fn, field, phi)
 
-                mean_ms, std_ms = BenchTimer(lambda f=field, p=phi: fn(f, p).block_until_ready()).run()
+                mean_ms, std_ms = BenchTimer(
+                    lambda f=field, p=phi: fn(f, p).block_until_ready()
+                ).run()
 
                 print(f"  timing: {mean_ms:.3f} ± {std_ms:.3f} ms")
                 r = roofline_report(
-                    f"nonlinear ({backend}, {z2z_label}, {('mp' if mp else 'fp64')})", mean_ms, flops, bytes_rw
+                    f"nonlinear ({backend}, {z2z_label}, {('mp' if mp else 'fp64')})",
+                    mean_ms,
+                    flops,
+                    bytes_rw,
                 )
                 r["rel_l2"] = rel_l2
                 backend_results[(mp, z2z)] = r
@@ -99,7 +106,7 @@ def run(config="configs/iteration_13.yaml", mixed_precision=False, test_z2z=Fals
 
     if len(z2z_values) > 1:
         print(f"\n{'#'*60}")
-        print(f"#  FFT Mode Comparison (Z2Z vs R2C)")
+        print("#  FFT Mode Comparison (Z2Z vs R2C)")
         print(f"{'#'*60}")
         for backend in ["jax", "cuda"]:
             if (backend, True) in results and (backend, False) in results:
@@ -109,10 +116,12 @@ def run(config="configs/iteration_13.yaml", mixed_precision=False, test_z2z=Fals
                     t_r2c = results[(backend, False)][(mp_val, False)]["mean_ms"]
                     t_z2z = results[(backend, True)][(mp_val, True)]["mean_ms"]
                     speedup = t_r2c / t_z2z if t_z2z > 0 else float("inf")
-                    print(f"    {mp_label:6s}: Z2Z vs R2C = {speedup:.2f}x (R2C: {t_r2c:.3f} ms, Z2Z: {t_z2z:.3f} ms)")
+                    print(
+                        f"    {mp_label:6s}: Z2Z vs R2C = {speedup:.2f}x (R2C: {t_r2c:.3f} ms, Z2Z: {t_z2z:.3f} ms)"
+                    )
 
     if any(b == "jax" for (b, _) in results) and any(b == "cuda" for (b, _) in results):
-        print(f"\nSpeedups (CUDA vs JAX):")
+        print("\nSpeedups (CUDA vs JAX):")
         for z2z in z2z_values:
             z2z_label = "Z2Z" if z2z else "R2C"
             for mp_val in [True, False]:
@@ -135,5 +144,5 @@ if __name__ == "__main__":
         help="Test both R2C and Z2Z FFT modes (default: R2C only)",
     )
     args = parser.parse_args()
-    
+
     run(args.config, args.mp, args.z2z)

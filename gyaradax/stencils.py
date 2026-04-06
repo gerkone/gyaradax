@@ -1,7 +1,7 @@
 """
 Numerical finite difference stencils for parallel and velocity coordinates.
 
-These stencils correspond to the fourth-order upwinded and central schemes 
+These stencils correspond to the fourth-order upwinded and central schemes
 used in the GKW linear and nonlinear terms.
 """
 

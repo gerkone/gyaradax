@@ -12,6 +12,7 @@ so that bench_*.py files can verify numerical correctness against them.
 Note: Uses JAX backend for baseline generation. Benchmarks compare against
 these baselines using both JAX and CUDA backends.
 """
+
 import argparse
 import os
 import sys
@@ -28,7 +29,6 @@ os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
 import jax
 
 jax.config.update("jax_enable_x64", True)
-import jax.numpy as jnp
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -63,9 +63,9 @@ def main():
     print("\nC1: _apply_parallel")
 
     # replicate closure logic from solver.py:758-768
-    s_shift = pre["s_shift"]
-    kx_shift = pre["kx_shift"]
-    valid_shift = pre["valid_shift"]
+    pre["s_shift"]
+    pre["kx_shift"]
+    pre["valid_shift"]
 
     from gyaradax.backends import create_ops
 
@@ -109,11 +109,12 @@ def main():
 
     # ── C4: nonlinear_term_iii ────────────────────────────────────────────
     print("\nC4: nonlinear_term_iii")
-    from gyaradax.solver import nonlinear_term_iii
 
     # Create two ops objects for MP and FP64 benchmarks
     ops_mp = create_ops(pre, backend=params.backend, use_z2z=params.use_z2z, mixed_precision=True)
-    ops_fp64 = create_ops(pre, backend=params.backend, use_z2z=params.use_z2z, mixed_precision=False)
+    ops_fp64 = create_ops(
+        pre, backend=params.backend, use_z2z=params.use_z2z, mixed_precision=False
+    )
 
     @jax.jit
     def _nl_mp():
@@ -144,9 +145,9 @@ def main():
 
     jind = pre["nl_jind"]
     mrad = int(pre["nl_mrad"])
-    mphi = int(pre["nl_mphi"])
+    int(pre["nl_mphi"])
     mphiw3 = int(pre["nl_mphiw3"])
-    nkx, nky = field5d.shape[-2], field5d.shape[-1]
+    _nkx, nky = field5d.shape[-2], field5d.shape[-1]
 
     # use a (nv, nmu, nkx, nky) spectral slice as input (one s-slice of field)
     spec_in = field5d[:, :, 0, :, :]  # (nv, nmu, nkx, nky)

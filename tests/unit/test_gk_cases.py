@@ -20,7 +20,6 @@ from gyaradax.solver import init_f, default_state, linear_precompute
 from gyaradax.simulate import gk_run
 from gyaradax.integrals import calculate_phi
 
-
 jax.config.update("jax_enable_x64", True)
 
 
@@ -49,7 +48,14 @@ def test_rosenbluth_hinton_residual(backend, use_z2z, mixed_precision):
     geometry = compute_geometry_from_input(zonal01)
     params = gkparams_from_input_and_geometry(zonal01, geometry)
     # non_linear=False + large naverage → linear mode, no per-ky normalization
-    params = replace(params, non_linear=False, naverage=100000, backend=backend, use_z2z=use_z2z, mixed_precision=mixed_precision)
+    params = replace(
+        params,
+        non_linear=False,
+        naverage=100000,
+        backend=backend,
+        use_z2z=use_z2z,
+        mixed_precision=mixed_precision,
+    )
 
     pre = linear_precompute(geometry, params)
     df = init_f(geometry, finit="zonal", amp_init_real=params.amp_init)

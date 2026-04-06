@@ -11,7 +11,6 @@ Backend handles all shape dispatch (5D adiabatic / 6D kinetic electrons).
 import argparse
 import os
 import sys
-import functools
 from pathlib import Path
 from dataclasses import replace
 
@@ -27,7 +26,6 @@ os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
 import jax  # noqa: E402
 
 jax.config.update("jax_enable_x64", True)
-import jax.numpy as jnp  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).parent))
 from common import (  # noqa: E402
@@ -66,7 +64,7 @@ def _bench_phase(
     mixed_precision: bool = True,
 ):
     """Run one benchmark phase (linear or nonlinear) across backends.
-    
+
     Args:
         test_z2z: If True, test both R2C and Z2Z FFT modes (nonlinear only).
                   If False, use R2C only (linear or default).
@@ -74,9 +72,9 @@ def _bench_phase(
     """
 
     print(f"\n[PHASE] {phase_name}")
-    
+
     z2z_values = [False, True] if test_z2z else [False]
-    
+
     for z2z in z2z_values:
         z2z_label = "Z2Z" if z2z else "R2C"
         if len(z2z_values) > 1:
@@ -92,7 +90,9 @@ def _bench_phase(
 
             # --- create backend ops -------------------------------------------
             try:
-                ops = create_ops(pre_gk, backend=bname, use_z2z=z2z, mixed_precision=mixed_precision)
+                ops = create_ops(
+                    pre_gk, backend=bname, use_z2z=z2z, mixed_precision=mixed_precision
+                )
             except Exception as e:
                 print(f"     [SKIP] {bname} not available: {e}")
                 continue
@@ -121,11 +121,11 @@ def _bench_phase(
             print("     [XLA] Analyzing cost...")
             flops, bytes_rw = analyze_cost(fn, df, state)
             roofline_report(f"{phase_name} ({bname}, {z2z_label})", mean_ms, flops, bytes_rw)
-    
+
     # Print comparison if both modes were tested
     if len(z2z_values) > 1 and not backend_forced:
         print(f"\n  {'='*50}")
-        print(f"  FFT Mode Comparison (Z2Z vs R2C)")
+        print("  FFT Mode Comparison (Z2Z vs R2C)")
         print(f"  {'='*50}")
 
 
@@ -139,13 +139,13 @@ def run(
     nonlinear_z2z: bool = False,
 ):
     """Benchmark RK4 step.
-    
+
     Args:
         nonlinear_z2z: If True, test nonlinear phase with both R2C/Z2Z modes.
                       If False, use R2C only for nonlinear (linear never uses Z2Z).
     """
     print(f"\n{'=' * 60}")
-    print(f"C7: gkstep_single  (Full RK4 Step)")
+    print("C7: gkstep_single  (Full RK4 Step)")
     print(f"{'=' * 60}")
 
     df, phi, geom, params, pre = load_setup(config, mixed_precision)
@@ -210,5 +210,5 @@ if __name__ == "__main__":
         help="Test nonlinear phase with both R2C/Z2Z modes (default: R2C only)",
     )
     args = parser.parse_args()
-    
+
     run(args.config, args.mp, args.backend, args.z2z)

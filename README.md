@@ -11,7 +11,7 @@ This was made possible with significant usage of agentic workflows. [PROMPT.md](
 See [agent notes](docs/NOTES.md) for a detailed walkthrough of GKW and this reimplementation.
 
 <p align="center">
-  <video src="docs/figs/torus.mp4" width="700" autoplay loop muted></video>
+  <img src="docs/figs/torus.gif" width="700" alt="Nonlinear ITG turbulence on a torus">
 </p>
 
 
@@ -61,14 +61,14 @@ The `scripts/run.py` script provides a convenient way to execute simulations, su
 
 ```bash
 # Run a single configuration
-python -m scripts.run configs/iteration_13.yaml --device 0
+python -u -m scripts.run configs/iteration_13.yaml --device 0
 ```
 
 When multiple YAML configuration files are provided, and they share the same grid resolution and static parameters, `scripts/run.py` can automatically batch them using `jax.vmap` for parallel execution on a single device.
 
 ```bash
 # Run two configurations in parallel on device 0
-python -m scripts.run configs/adiabatic_a.yaml configs/adiabatic_b.yaml --device 0
+python -u -m scripts.run configs/adiabatic_a.yaml configs/adiabatic_b.yaml --device 0
 ```
 
 ### Usage
@@ -116,6 +116,12 @@ solver:
   backend: cuda
 ```
 
+## Testing
+```bash
+python -m pytest tests/ -x -q
+```
+
+Most tests require GKW reference data. Set the `GKW_DATA_ROOT` environment variable to the directory containing the reference runs (e.g. `iteration_8/`, `iteration_13/`, `kinetic_electrons/`). These tests skip when the data is not available.
 
 ## State of the project
 

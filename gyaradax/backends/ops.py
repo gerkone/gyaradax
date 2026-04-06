@@ -31,7 +31,7 @@ class SolverOps(ABC):
     @classmethod
     def tree_unflatten(cls, aux_data, children):
         (pre,) = children
-        (use_z2z, mixed_precision) = aux_data
+        use_z2z, mixed_precision = aux_data
         return cls(pre, use_z2z=use_z2z, mixed_precision=mixed_precision)
 
     @abstractmethod

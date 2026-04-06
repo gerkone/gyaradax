@@ -13,8 +13,14 @@ def test_gkstep_gradient_validity(lin_geom, lin_shape, backend, use_z2z, mixed_p
     key = jax.random.PRNGKey(42)
     df0 = jax.random.normal(key, lin_shape, dtype=jnp.float64) + 0j
 
-    params = GKParams(dt=0.01, naverage=40, non_linear=False,
-                      backend=backend, use_z2z=use_z2z, mixed_precision=mixed_precision)
+    params = GKParams(
+        dt=0.01,
+        naverage=40,
+        non_linear=False,
+        backend=backend,
+        use_z2z=use_z2z,
+        mixed_precision=mixed_precision,
+    )
     state = default_state(nky=len(lin_geom["krho"]))
     pre = linear_precompute(lin_geom, params)
 
@@ -42,8 +48,9 @@ def test_nonlinear_gradient_validity(nonlin_geom, nonlin_shape, backend, use_z2z
     df0 = jax.random.normal(key, nonlin_shape, dtype=jnp.float64) + 0j
     # CUDA NL bracket is not AD-differentiable (FFI custom call); skip gradient check
     mp = False if backend == "jax" else mixed_precision
-    params = GKParams(dt=0.01, naverage=40, non_linear=True, mixed_precision=mp,
-                      backend=backend, use_z2z=use_z2z)
+    params = GKParams(
+        dt=0.01, naverage=40, non_linear=True, mixed_precision=mp, backend=backend, use_z2z=use_z2z
+    )
     state = default_state(nky=len(nonlin_geom["krho"]))
     pre = linear_precompute(nonlin_geom, params)
 

@@ -73,7 +73,7 @@ _V_TILE = 8
 @jax.tree_util.register_pytree_node_class
 class CUDAOps(SolverOps):
     """CUDA backend using custom FFI kernels for stencils and FFT bracket.
-    
+
     Note: CUDA backend is Z2Z (complex-to-complex) only. The use_z2z flag
     is ignored for CUDA operations and will emit a warning if set to True.
     """
@@ -82,7 +82,7 @@ class CUDAOps(SolverOps):
         _register_ffi()
         if use_z2z:
             log.warning("CUDA backend: use_z2z=True ignored (CUDA is Z2Z-only)")
-        
+
         super().__init__(pre, use_z2z, mixed_precision)
 
     def _prepare_parallel_coeffs(self, c, nv, nmu, ns, nkx, nky):
@@ -268,7 +268,7 @@ class CUDAOps(SolverOps):
 
         # signz0/tmp0 are buffer args (F64) in the kernel, not scalar attrs
         signz0_buf = jnp.asarray(pre["signz0"], dtype=jnp.float64).reshape(1)
-        tmp0_buf   = jnp.asarray(pre["tmp0"],   dtype=jnp.float64).reshape(1)
+        tmp0_buf = jnp.asarray(pre["tmp0"], dtype=jnp.float64).reshape(1)
 
         d1 = stencils.VPAR_D1
         d4 = stencils.VPAR_D4
@@ -326,21 +326,21 @@ class CUDAOps(SolverOps):
         pre: Dict[str, jnp.ndarray],
     ) -> jnp.ndarray:
         """Handle 6D kinetic df with non-uniform species params.
-        
+
         Loops over species at Python level, calling fused kernel per-species
         with correct scalar signz0[i] and tmp0[i]. Results stacked to 6D.
-        
+
         Note: This incurs ~5-10% overhead vs single fused call (2 kernel launches
         for typical 2-species case) but correctly handles kinetic electrons with
         different species parameters.
         """
         nsp = df.shape[0]
         results = []
-        
+
         for i in range(nsp):
             # Extract 5D slice for this species
             df_sp = df[i]
-            
+
             # Build species-specific pre dict with SCALAR params for kernel
             # Kernel expects 1-element buffer (const double*), not Python scalar
             sp_pre = {
@@ -354,7 +354,7 @@ class CUDAOps(SolverOps):
                 "utrap": pre["utrap"][i],
                 "abs_dum2_vp": pre["abs_dum2_vp"][i],
                 "signz0": jnp.asarray(pre["signz0"][i]).reshape(1),  # 1-element buffer for kernel
-                "tmp0": jnp.asarray(pre["tmp0"][i]).reshape(1),      # 1-element buffer for kernel
+                "tmp0": jnp.asarray(pre["tmp0"][i]).reshape(1),  # 1-element buffer for kernel
                 # Shared arrays (species-independent)
                 "hyper": pre["hyper"],
                 "kx_b": pre["kx_b"],
@@ -363,12 +363,12 @@ class CUDAOps(SolverOps):
                 "s_shift": pre["s_shift"],
                 "kx_shift": pre["kx_shift"],
             }
-            
+
             result_sp = self._linear_rhs_fused(
                 df_sp, phi, sp_pre, params.dvp, params.disp_vp, params.drive_scale
             )
             results.append(result_sp)
-        
+
         return jnp.stack(results)
 
     def linear_rhs(
@@ -410,12 +410,12 @@ class CUDAOps(SolverOps):
         Uses z2z 2-for-1 packing with phi at its natural (nmu*ns) batch
         size. Dispatches to mixed precision (FP32 FFTs) or full precision
         (FP64) kernel based on self.mixed_precision flag.
-        
+
         Supports both 5D (adiabatic) and 6D (kinetic) df. For kinetic,
         flattens (nsp, nv, nmu) into a single batch dimension.
-        
+
         Args:
-            df: Distribution function, 5D (nv, nmu, ns, nkx, nky) or 
+            df: Distribution function, 5D (nv, nmu, ns, nkx, nky) or
                 6D (nsp, nv, nmu, ns, nkx, nky)
             phi: Electrostatic potential (ns, nkx, nky)
             geometry: Geometry dict
@@ -423,13 +423,13 @@ class CUDAOps(SolverOps):
             fft_prefactor: Prefactor for FFT
             exclude_zero_mode: Zero out (kx=0, ky=0) mode
             bessel: Optional Bessel function array
-        
+
         Returns:
             Nonlinear RHS term III
         """
         pre = self.pre
         mrad, mphi = pre["nl_mrad"], pre["nl_mphi"]
-        
+
         # Handle both 5D (adiabatic) and 6D (kinetic) df
         if df.ndim == 5:
             nv, nmu, ns, nkx, nky = df.shape
