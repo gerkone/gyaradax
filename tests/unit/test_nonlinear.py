@@ -4,8 +4,9 @@ import jax.numpy as jnp
 import numpy as np
 import os
 import pytest
+from dataclasses import replace
 
-from gyaradax.solver import gksolve, GKState, default_state
+from gyaradax.solver import gksolve, GKState, default_state, linear_precompute
 from gyaradax.params import GKParams, gkparams_from_input_dat
 from gyaradax.utils import load_gkw_k_dump
 from gyaradax.integrals import calculate_phi_kinetic, calculate_fluxes_kinetic
@@ -124,8 +125,8 @@ def test_kinetic_nl_bessel_full_species_bessel_support(backend, use_z2z, mixed_p
 
 
 @jax.jit
-def _step_jitted(prev_df, geom, params, state):
-    return gksolve(prev_df, geom, params, state, n_steps=1)
+def _step_jitted(prev_df, geom, params, state, pre):
+    return gksolve(prev_df, geom, params, state, n_steps=1, pre=pre)
 
 
 def _selected_ky_representatives(iyzero, nky):
@@ -151,13 +152,18 @@ def _subset_mask_from_mode_chains(mode_label, ixzero, ky_list):
     return mask, np.asarray(labels, dtype=np.int32)
 
 
+@pytest.mark.parametrize("backend, use_z2z, mixed_precision", BACKENDS)
 @pytest.mark.parametrize("start_name, end_name, steps", [("100", "101", 120)])
-def test_iteration_parity(nonlin_dir, nonlin_geom, nonlin_shape, start_name, end_name, steps):
+def test_iteration_parity(backend, use_z2z, mixed_precision, nonlin_dir, nonlin_geom, nonlin_shape, start_name, end_name, steps):
     """verify trajectory parity against GKW reference dumps."""
+    if backend == "cuda" and not cuda_available():
+        pytest.skip("CUDA not available")
+    
     start_df = load_gkw_k_dump(f"{nonlin_dir}/{start_name}", nonlin_shape)
     end_df_ref = load_gkw_k_dump(f"{nonlin_dir}/{end_name}", nonlin_shape)
 
     params = gkparams_from_input_dat(f"{nonlin_dir}/input.dat", non_linear=True)
+    params = replace(params, backend=backend, use_z2z=use_z2z, mixed_precision=mixed_precision)
     nky = len(nonlin_geom["krho"])
     state = GKState(
         time=jnp.array(read_dump_time(f"{nonlin_dir}/{start_name}.dat"), dtype=jnp.float64),
@@ -167,7 +173,8 @@ def test_iteration_parity(nonlin_dir, nonlin_geom, nonlin_shape, start_name, end
         last_growth_rate=jnp.zeros(nky, dtype=jnp.float64),
     )
 
-    pred_df, _, _ = gksolve(start_df, nonlin_geom, params, state, n_steps=steps)
+    pre = linear_precompute(nonlin_geom, params)
+    pred_df, _, _ = gksolve(start_df, nonlin_geom, params, state, n_steps=steps, pre=pre)
 
     # validate subset of modes for parity
     mode_label = np.asarray(nonlin_geom["mode_label"], dtype=np.int32)
@@ -182,19 +189,26 @@ def test_iteration_parity(nonlin_dir, nonlin_geom, nonlin_shape, start_name, end
     assert rel_l2(pred_sub, ref_sub) <= 1.0e-3
 
 
-def test_nonlinear_scaling(nonlin_geom, nonlin_shape):
+@pytest.mark.parametrize("backend, use_z2z, mixed_precision", BACKENDS)
+def test_nonlinear_scaling(backend, use_z2z, mixed_precision, nonlin_geom, nonlin_shape):
     """verify quadratic scaling of the nonlinear term iii."""
+    if backend == "cuda" and not cuda_available():
+        pytest.skip("CUDA not available")
+    
     key = jax.random.PRNGKey(42)
     df_rand = jax.random.normal(key, nonlin_shape, dtype=jnp.float64) + 0j
 
-    params_nl = GKParams(dt=0.01, non_linear=True)
-    params_lin = GKParams(dt=0.01, non_linear=False)
+    params_nl = GKParams(dt=0.01, non_linear=True, backend=backend, use_z2z=use_z2z, mixed_precision=mixed_precision)
+    params_lin = GKParams(dt=0.01, non_linear=False, backend=backend, use_z2z=use_z2z, mixed_precision=mixed_precision)
     state = default_state(nky=len(nonlin_geom["krho"]))
+    
+    pre_nl = linear_precompute(nonlin_geom, params_nl)
+    pre_lin = linear_precompute(nonlin_geom, params_lin)
 
     def get_nl_part(amp):
         df = amp * df_rand
-        next_nl, _, _ = _step_jitted(df, nonlin_geom, params_nl, state)
-        next_lin, _, _ = _step_jitted(df, nonlin_geom, params_lin, state)
+        next_nl, _, _ = _step_jitted(df, nonlin_geom, params_nl, state, pre_nl)
+        next_lin, _, _ = _step_jitted(df, nonlin_geom, params_lin, state, pre_lin)
         return next_nl - next_lin
 
     diff1 = get_nl_part(1e-5)
@@ -224,9 +238,78 @@ def _kinetic_params_from_dir(kinetic_dir, dump_name="100", **overrides):
     return params
 
 
-@jax.jit
-def _step_jitted_kinetic(prev_df, geom, params, state):
-    return gksolve(prev_df, geom, params, state, n_steps=1)
+@pytest.mark.parametrize("backend, use_z2z, mixed_precision", BACKENDS)
+def test_kinetic_adaptive_dt_consistency(
+    backend, use_z2z, mixed_precision, kinetic_dir, kinetic_geom, kinetic_shape
+):
+    """Test kinetic simulation with adaptive_dt=True (CFL control) for CUDA vs JAX consistency.
+    
+    Validates that CUDA backend correctly handles adaptive timestep with kinetic 
+    electrons (non-uniform species params) and produces numerically consistent 
+    results with JAX backend.
+    
+    Runs 10 steps with adaptive_dt=True and compares final df between backends.
+    """
+    if backend == "cuda" and not cuda_available():
+        pytest.skip("CUDA not available")
+    
+    # Skip JAX tests - we only need to test CUDA vs JAX reference
+    if backend == "jax":
+        pytest.skip("JAX is reference backend for this test")
+    
+    n_species = 2
+    params_jax = _kinetic_params_from_dir(kinetic_dir, dump_name="100")
+    
+    # Force adaptive_dt=True to test CFL control path
+    from dataclasses import replace
+    params_jax = replace(params_jax, adaptive_dt=True, backend="jax")
+    params_cuda = replace(params_jax, backend="cuda", use_z2z=use_z2z, mixed_precision=mixed_precision)
+    
+    # Load initial condition
+    start_df = load_gkw_k_dump(
+        os.path.join(kinetic_dir, "100"), kinetic_shape, n_species=n_species
+    )
+    
+    nky = len(kinetic_geom["krho"])
+    state = GKState(
+        time=jnp.array(0.0, dtype=jnp.float64),
+        step=jnp.array(0, dtype=jnp.int32),
+        accumulated_norm_factor=jnp.ones(nky, dtype=jnp.float64),
+        window_start_amp=jnp.ones(nky, dtype=jnp.float64),
+        last_growth_rate=jnp.zeros(nky, dtype=jnp.float64),
+    )
+    
+    # Precompute outside JIT to match run.py usage pattern
+    pre_jax = linear_precompute(kinetic_geom, params_jax)
+    pre_cuda = linear_precompute(kinetic_geom, params_cuda)
+    
+    # Run 10 steps with adaptive CFL - JAX reference
+    jax_df, _, jax_state = gksolve(
+        start_df, kinetic_geom, params_jax, state, n_steps=10, pre=pre_jax
+    )
+    
+    # Run 10 steps with adaptive CFL - CUDA backend
+    cuda_df, _, cuda_state = gksolve(
+        start_df, kinetic_geom, params_cuda, state, n_steps=10, pre=pre_cuda
+    )
+    
+    # Validate: both backends should produce finite results
+    assert jnp.all(jnp.isfinite(jax_df)), "JAX backend produced non-finite values"
+    assert jnp.all(jnp.isfinite(cuda_df)), "CUDA backend produced non-finite values"
+    
+    # Validate: states should be consistent
+    assert jnp.isclose(jax_state.time, cuda_state.time, rtol=1e-10), \
+        f"Time mismatch: JAX={jax_state.time}, CUDA={cuda_state.time}"
+    assert jax_state.step == cuda_state.step == 10, \
+        f"Step mismatch: JAX={jax_state.step}, CUDA={cuda_state.step}"
+    
+    # Validate: numerical consistency between backends
+    # Tolerance is relaxed for adaptive_dt (different CFL estimates may accumulate)
+    for isp in range(n_species):
+        sp_name = "ion" if isp == 0 else "electron"
+        err = rel_l2(np.asarray(jax_df[isp]), np.asarray(cuda_df[isp]))
+        # Relaxed tolerance for adaptive_dt (different timestep sequences)
+        assert err <= 5.0e-2, f"{sp_name} JAX vs CUDA consistency error {err:.4e} > 5e-2"
 
 
 @pytest.mark.parametrize("backend, use_z2z, mixed_precision", BACKENDS)
@@ -243,6 +326,9 @@ def test_kinetic_iteration_parity(
     NOTE: Assumes constant dtim between dumps. GKW uses CFL-adaptive timestep,
     so this test is only valid for cases where dtim is stable. Cases with
     varying dtim will need CFL adaptation in the solver.
+    
+    Tests both JAX and CUDA backends with multi-step gksolve() to validate
+    kinetic electron support in both backends.
     """
     if backend == "cuda" and not cuda_available():
         pytest.skip("CUDA not available")
@@ -256,6 +342,7 @@ def test_kinetic_iteration_parity(
     )
 
     params = _kinetic_params_from_dir(kinetic_dir, dump_name=start_name)
+    params = replace(params, backend=backend, use_z2z=use_z2z, mixed_precision=mixed_precision)
 
     # Compute exact step count from time difference and actual dtim
     t_start = read_dump_time(os.path.join(kinetic_dir, f"{start_name}.dat"))
@@ -271,15 +358,11 @@ def test_kinetic_iteration_parity(
         last_growth_rate=jnp.zeros(nky, dtype=jnp.float64),
     )
 
-    # Use backend-specific ops for kinetic electron simulation
-    if backend == "cuda":
-        # CUDA backend: run step-by-step to avoid JIT recompilation for different step counts
-        pred_df = start_df
-        for _ in range(steps):
-            pred_df, _, _ = _step_jitted_kinetic(pred_df, kinetic_geom, params, state)
-    else:
-        # JAX backend: can use multi-step gksolve directly
-        pred_df, _, _ = gksolve(start_df, kinetic_geom, params, state, n_steps=steps)
+    # Precompute outside JIT to match run.py usage pattern
+    pre = linear_precompute(kinetic_geom, params)
+
+    # Both backends use multi-step gksolve() for kinetic electrons
+    pred_df, _, _ = gksolve(start_df, kinetic_geom, params, state, n_steps=steps, pre=pre)
 
     # Validate per-species trajectory parity
     for isp in range(n_species):
@@ -288,17 +371,16 @@ def test_kinetic_iteration_parity(
         assert err <= 1.0e-3, f"{sp_name} trajectory error {err:.6e} > 1e-3 in {kinetic_dir}"
 
 
-@pytest.mark.parametrize("backend, use_z2z, mixed_precision", BACKENDS)
-def test_kinetic_flux_trajectory(backend, use_z2z, mixed_precision, kinetic_dir, kinetic_geom, kinetic_shape):
+def test_kinetic_flux_trajectory(kinetic_dir, kinetic_geom, kinetic_shape):
     """Verify per-species heat fluxes at a reference dump match GKW fluxes.dat.
 
     This test uses only the integral module (phi solver + flux calculation),
     not the time-stepper. It validates that the multi-species field solver
     produces correct per-species fluxes at multiple time points.
+    
+    Note: This test is backend-agnostic as it only tests integral calculations
+    (calculate_phi_kinetic, calculate_fluxes_kinetic), not the solver backend.
     """
-    if backend == "cuda" and not cuda_available():
-        pytest.skip("CUDA not available")
-
     from gyaradax.utils import K_files
 
     n_species = 2
