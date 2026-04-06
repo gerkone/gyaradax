@@ -1,7 +1,5 @@
 #!/usr/bin/env python3
 """C5: _compute_phi — kinetic/adiabatic phi solve.
-
-OPTIM.md §4.5: AI ≈ 0.17–0.47 FLOP/byte, ~56M FLOPs, ~119–337 MB R+W per call.
 """
 import argparse, os, sys
 from pathlib import Path

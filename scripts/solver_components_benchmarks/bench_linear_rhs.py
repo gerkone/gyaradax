@@ -1,9 +1,6 @@
 #!/usr/bin/env python3
 """C3: linear_rhs — full linear operator (all terms, all species).
 
-OPTIM.md §4.3: AI ≈ 0.087 FLOP/byte, ~635M FLOPs/species, ~7.3 GB R+W/species.
-Adiabatic (1 species): ~635M FLOPs, ~7.3 GB R+W per call.
-
 Architecture: solver.py delegates full implementation and shape dispatch (5D/6D)
 to backend. Backend (JAX/CUDA) handles Terms I, II, IV, V, VII, VIII + dissipation.
 """

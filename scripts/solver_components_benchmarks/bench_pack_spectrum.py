@@ -1,9 +1,5 @@
 #!/usr/bin/env python3
 """C6: pack_half_spectrum / unpack_half_spectrum — FFT index permutation.
-
-OPTIM.md §4.6: Pure memory movement, 0 FLOPs.
-Per pack: input 11.1 MB, output 27.1 MB (+ 27.1 MB zero-init).
-Per unpack: input 27.1 MB, output 11.1 MB.
 """
 import argparse, os, sys
 from pathlib import Path
