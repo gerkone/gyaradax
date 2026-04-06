@@ -1,7 +1,5 @@
 #!/usr/bin/env python3
 """C2: _apply_vpar — 5-point velocity-space stencil.
-
-OPTIM.md §4.2: AI ≈ 0.11 FLOP/byte, ~87M FLOPs, ~782 MB R+W per call per species.
 """
 import argparse, os, sys
 from pathlib import Path
