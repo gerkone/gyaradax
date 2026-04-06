@@ -2,6 +2,7 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 import pytest
+from conftest import ALL_BACKENDS
 
 from gyaradax.solver import gksolve, init_f, default_state
 from gyaradax.params import GKParams
@@ -14,22 +15,6 @@ from gyaradax.integrals import (
     precompute_phi_adiabatic,
     calculate_phi_adiabatic,
 )
-
-try:
-    from gyaradax.backends._cuda import is_available as cuda_available
-except ImportError:
-    cuda_available = lambda: False
-
-BACKENDS = [
-    # JAX backend (supports R2C and Z2Z)
-    ("jax", False, False),  # JAX R2C FP64
-    ("jax", False, True),   # JAX R2C MP
-    ("jax", True, False),   # JAX Z2Z FP64
-    ("jax", True, True),    # JAX Z2Z MP
-    # CUDA backend (Z2Z only, use_z2z flag ignored)
-    ("cuda", False, False), # CUDA Z2Z FP64
-    ("cuda", False, True),  # CUDA Z2Z MP
-]
 
 
 @jax.jit
@@ -135,10 +120,8 @@ def test_init_f_contract(lin_geom, lin_shape, normalize):
     assert df.dtype == jnp.complex128
 
 
-@pytest.mark.parametrize("backend, use_z2z, mixed_precision", BACKENDS)
+@pytest.mark.parametrize("backend, use_z2z, mixed_precision", ALL_BACKENDS)
 def test_gksolve_contract(lin_geom, lin_shape, backend, use_z2z, mixed_precision):
-    if backend == "cuda" and not cuda_available():
-        pytest.skip("CUDA not available")
     prev_df = jnp.zeros(lin_shape, dtype=jnp.complex128)
     params = GKParams(
         dt=0.01, naverage=40, backend=backend, use_z2z=use_z2z, mixed_precision=mixed_precision
@@ -153,10 +136,8 @@ def test_gksolve_contract(lin_geom, lin_shape, backend, use_z2z, mixed_precision
     assert all(isinstance(f, jnp.ndarray) and f.shape == () for f in [pflux, eflux, vflux])
 
 
-@pytest.mark.parametrize("backend, use_z2z, mixed_precision", BACKENDS)
+@pytest.mark.parametrize("backend, use_z2z, mixed_precision", ALL_BACKENDS)
 def test_gksolve_zero_input_invariance(lin_geom, lin_shape, backend, use_z2z, mixed_precision):
-    if backend == "cuda" and not cuda_available():
-        pytest.skip("CUDA not available")
     prev_df = jnp.zeros(lin_shape, dtype=jnp.complex128)
     params = GKParams(
         dt=0.01, naverage=40, backend=backend, use_z2z=use_z2z, mixed_precision=mixed_precision

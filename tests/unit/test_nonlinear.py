@@ -1,4 +1,4 @@
-from conftest import rel_l2, read_dump_time, read_dump_dtim
+from conftest import rel_l2, read_dump_time, read_dump_dtim, ALL_BACKENDS, CUDA_BACKENDS, HAS_CUDA
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -11,24 +11,8 @@ from gyaradax.params import GKParams, gkparams_from_input_dat
 from gyaradax.utils import load_gkw_k_dump
 from gyaradax.integrals import calculate_phi_kinetic, calculate_fluxes_kinetic
 from gyaradax.backends import create_ops
-
-try:
-    from gyaradax.backends._cuda import is_available as cuda_available
-except ImportError:
-    cuda_available = lambda: False
 from gyaradax.types import GKPre
 from gyaradax.solver import build_jind
-
-BACKENDS = [
-    # JAX backend (supports R2C and Z2Z)
-    ("jax", False, False),  # JAX R2C FP64
-    ("jax", False, True),   # JAX R2C MP
-    ("jax", True, False),   # JAX Z2Z FP64
-    ("jax", True, True),    # JAX Z2Z MP
-    # CUDA backend (Z2Z only, use_z2z flag ignored)
-    ("cuda", False, False), # CUDA Z2Z FP64
-    ("cuda", False, True),  # CUDA Z2Z MP
-]
 
 
 def _make_pre_bessel(bessel, nkx=4, nky=3, ns=4):
@@ -56,12 +40,16 @@ def _make_pre_bessel(bessel, nkx=4, nky=3, ns=4):
     return GKPre(items)
 
 
-@pytest.mark.parametrize("backend, use_z2z, mixed_precision", BACKENDS)
+@pytest.mark.parametrize("backend, use_z2z, mixed_precision", ALL_BACKENDS)
 def test_kinetic_nl_bessel_correct_per_species(backend, use_z2z, mixed_precision):
     """Sanity check: per-species bessel (5-D) is accepted and gives different
-    results for species with different Bessel values."""
-    if backend == "cuda" and not cuda_available():
-        pytest.skip("CUDA not available")
+    results for species with different Bessel values.
+
+    Note: uses a tiny synthetic grid (nkx=4, nky=3) that the CUDA cuFFT
+    graph-captured pipeline does not support — skip CUDA for this unit test.
+    """
+    if backend == "cuda":
+        pytest.skip("synthetic grid too small for CUDA cuFFT kernels")
 
     nkx, nky, ns, nvpar, nmu = 4, 3, 4, 4, 3
 
@@ -94,13 +82,12 @@ def test_kinetic_nl_bessel_correct_per_species(backend, use_z2z, mixed_precision
     assert not jnp.allclose(nl_sp0, nl_sp1, atol=1e-12), "species should differ"
 
 
-@pytest.mark.parametrize("backend, use_z2z, mixed_precision", BACKENDS)
+@pytest.mark.parametrize("backend, use_z2z, mixed_precision", ALL_BACKENDS)
 def test_kinetic_nl_bessel_full_species_bessel_support(backend, use_z2z, mixed_precision):
     """Bug 2 fixed: when ops.pre['bessel'] retains the species axis (6-D),
     the solver should now correctly pass the 5-D species slice.
     """
-    if backend == "cuda" and not cuda_available():
-        pytest.skip("CUDA not available")
+
 
     nkx, nky, ns, nvpar, nmu, nsp = 4, 3, 4, 4, 3, 2
 
@@ -152,12 +139,11 @@ def _subset_mask_from_mode_chains(mode_label, ixzero, ky_list):
     return mask, np.asarray(labels, dtype=np.int32)
 
 
-@pytest.mark.parametrize("backend, use_z2z, mixed_precision", BACKENDS)
+@pytest.mark.parametrize("backend, use_z2z, mixed_precision", ALL_BACKENDS)
 @pytest.mark.parametrize("start_name, end_name, steps", [("100", "101", 120)])
 def test_iteration_parity(backend, use_z2z, mixed_precision, nonlin_dir, nonlin_geom, nonlin_shape, start_name, end_name, steps):
     """verify trajectory parity against GKW reference dumps."""
-    if backend == "cuda" and not cuda_available():
-        pytest.skip("CUDA not available")
+
     
     start_df = load_gkw_k_dump(f"{nonlin_dir}/{start_name}", nonlin_shape)
     end_df_ref = load_gkw_k_dump(f"{nonlin_dir}/{end_name}", nonlin_shape)
@@ -189,11 +175,10 @@ def test_iteration_parity(backend, use_z2z, mixed_precision, nonlin_dir, nonlin_
     assert rel_l2(pred_sub, ref_sub) <= 1.0e-3
 
 
-@pytest.mark.parametrize("backend, use_z2z, mixed_precision", BACKENDS)
+@pytest.mark.parametrize("backend, use_z2z, mixed_precision", ALL_BACKENDS)
 def test_nonlinear_scaling(backend, use_z2z, mixed_precision, nonlin_geom, nonlin_shape):
     """verify quadratic scaling of the nonlinear term iii."""
-    if backend == "cuda" and not cuda_available():
-        pytest.skip("CUDA not available")
+
     
     key = jax.random.PRNGKey(42)
     df_rand = jax.random.normal(key, nonlin_shape, dtype=jnp.float64) + 0j
@@ -238,24 +223,19 @@ def _kinetic_params_from_dir(kinetic_dir, dump_name="100", **overrides):
     return params
 
 
-@pytest.mark.parametrize("backend, use_z2z, mixed_precision", BACKENDS)
+@pytest.mark.parametrize("backend, use_z2z, mixed_precision", CUDA_BACKENDS)
+@pytest.mark.skipif(not HAS_CUDA, reason="CUDA not available")
 def test_kinetic_adaptive_dt_consistency(
     backend, use_z2z, mixed_precision, kinetic_dir, kinetic_geom, kinetic_shape
 ):
     """Test kinetic simulation with adaptive_dt=True (CFL control) for CUDA vs JAX consistency.
-    
-    Validates that CUDA backend correctly handles adaptive timestep with kinetic 
-    electrons (non-uniform species params) and produces numerically consistent 
+
+    Validates that CUDA backend correctly handles adaptive timestep with kinetic
+    electrons (non-uniform species params) and produces numerically consistent
     results with JAX backend.
-    
+
     Runs 10 steps with adaptive_dt=True and compares final df between backends.
     """
-    if backend == "cuda" and not cuda_available():
-        pytest.skip("CUDA not available")
-    
-    # Skip JAX tests - we only need to test CUDA vs JAX reference
-    if backend == "jax":
-        pytest.skip("JAX is reference backend for this test")
     
     n_species = 2
     params_jax = _kinetic_params_from_dir(kinetic_dir, dump_name="100")
@@ -312,7 +292,7 @@ def test_kinetic_adaptive_dt_consistency(
         assert err <= 5.0e-2, f"{sp_name} JAX vs CUDA consistency error {err:.4e} > 5e-2"
 
 
-@pytest.mark.parametrize("backend, use_z2z, mixed_precision", BACKENDS)
+@pytest.mark.parametrize("backend, use_z2z, mixed_precision", ALL_BACKENDS)
 @pytest.mark.parametrize("start_name, end_name", [("100", "101")])
 def test_kinetic_iteration_parity(
     backend, use_z2z, mixed_precision, kinetic_dir, kinetic_geom, kinetic_shape, start_name, end_name
@@ -330,8 +310,7 @@ def test_kinetic_iteration_parity(
     Tests both JAX and CUDA backends with multi-step gksolve() to validate
     kinetic electron support in both backends.
     """
-    if backend == "cuda" and not cuda_available():
-        pytest.skip("CUDA not available")
+
 
     n_species = 2
     start_df = load_gkw_k_dump(

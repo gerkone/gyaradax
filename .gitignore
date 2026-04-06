@@ -60,3 +60,4 @@ configs/sweep
 upload_changed_py.sh
 **/CUDALibrarySamples/
 **/jax_cache/
+paper/

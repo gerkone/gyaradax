@@ -11,6 +11,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from dataclasses import replace
+from conftest import ALL_BACKENDS
 
 from gyaradax.geometry import compute_geometry, compute_geometry_from_input
 from gyaradax.params import gkparams_from_input_and_geometry
@@ -18,22 +19,6 @@ from gyaradax.params import GKParams
 from gyaradax.solver import init_f, default_state, linear_precompute
 from gyaradax.simulate import gk_run
 from gyaradax.integrals import calculate_phi
-
-try:
-    from gyaradax.backends._cuda import is_available as cuda_available
-except ImportError:
-    cuda_available = lambda: False
-
-BACKENDS = [
-    # JAX backend (supports R2C and Z2Z)
-    ("jax", False, False),  # JAX R2C FP64
-    ("jax", False, True),   # JAX R2C MP
-    ("jax", True, False),   # JAX Z2Z FP64
-    ("jax", True, True),    # JAX Z2Z MP
-    # CUDA backend (Z2Z only, use_z2z flag ignored)
-    ("cuda", False, False), # CUDA Z2Z FP64
-    ("cuda", False, True),  # CUDA Z2Z MP
-]
 
 
 jax.config.update("jax_enable_x64", True)
@@ -49,10 +34,8 @@ def _rh_residual_xiao_catto(q, eps):
     return 1.0 / (1.0 + q**2 * theta / eps**2)
 
 
-@pytest.mark.parametrize("backend, use_z2z, mixed_precision", BACKENDS)
+@pytest.mark.parametrize("backend, use_z2z, mixed_precision", ALL_BACKENDS)
 def test_rosenbluth_hinton_residual(backend, use_z2z, mixed_precision):
-    if backend == "cuda" and not cuda_available():
-        pytest.skip("CUDA not available")
     """Rosenbluth-Hinton zonal flow test: residual converges to Xiao-Catto.
 
     Uses the GKW benchmark parameters (gkw_ref/benchmarks/zonal_flow/zonal01):
@@ -108,10 +91,8 @@ def test_rosenbluth_hinton_residual(backend, use_z2z, mixed_precision):
     )
 
 
-@pytest.mark.parametrize("backend, use_z2z, mixed_precision", BACKENDS)
+@pytest.mark.parametrize("backend, use_z2z, mixed_precision", ALL_BACKENDS)
 def test_cbc_linear_itg_peak_growth(backend, use_z2z, mixed_precision):
-    if backend == "cuda" and not cuda_available():
-        pytest.skip("CUDA not available")
     """CBC linear ITG at kt=0.5: growth rate matches GKW benchmark.
 
     Uses GKW benchmark parameters (gkw_ref/benchmarks/cyclone/linear):

@@ -1,7 +1,7 @@
 # `gyaradax`: Gyrokinetics in JAX
 
 <p align="center">
-  <img src="figs/gyaradax_small.png" width="500" alt="gyaradax Logo">
+  <img src="docs/figs/gyaradax_small.png" width="500" alt="gyaradax Logo">
 </p>
 
 `gyaradax` is a JAX code for local flux-tube gyrokinetic simulations. It is based on [GKW](https://bitbucket.org/gkw/gkw). At the current stage, it provides a differentiable solver for the electrostatic, collisionless Vlasov-Poisson system.
@@ -19,6 +19,21 @@ uv pip install -e ".[dev]"
 
 This installs `gyaradax` in editable mode with JAX (CUDA 12), numpy, and dev tools (pytest, ruff, black).
 
+### CUDA Backend
+The optional CUDA backend provides fused kernels for the linear RHS stencils and the nonlinear Poisson bracket (cuFFT graph-captured pipeline). It requires CUDA Toolkit >= 13.1 and a GPU with compute capability >= 80.
+
+From `gyaradax/backends/cuda_kernels/`:
+```bash
+mkdir -p _build && cd _build && cmake .. -DCMAKE_BUILD_TYPE=Release && cmake --build . -j$(nproc) && cmake --install . && cd ..
+```
+
+To target a specific GPU architecture (e.g., Ampere sm_80):
+```bash
+cmake .. -DCMAKE_BUILD_TYPE=Release -DGPU_ARCHITECTURES="80"
+```
+
+CMake prints the detected compute capability, jaxlib version, and cudatoolkit. Ensure these are correct before proceeding.
+
 ## Structure
 
 - **`solver.py`**: Linear and nonlinear Terms (I-VIII), RK4 integrator.
@@ -28,7 +43,7 @@ This installs `gyaradax` in editable mode with JAX (CUDA 12), numpy, and dev too
 - **`params.py`**: Configuration pytrees.
 - **`stencils.py`**: Finite difference stencil definitions.
 - **`diag.py`**: Diagnostics (growth rate, frequency, spectral).
-- **`backends/`**: Backend dispatch (JAX, CUDA). See [CUDA build instructions](#cuda-backend) below.
+- **`backends/`**: Backend dispatch (JAX, CUDA). See [CUDA build instructions](#cuda-backend).
 - **`plot_utils.py`**: Visualization.
 
 ## Running Simulations
@@ -78,26 +93,7 @@ If you have an existing GKW run, you can extract its parameters and geometry int
 python -m scripts.gkw_to_yaml /path/to/gkw_run configs/my_sim.yaml
 ```
 
-## CUDA Backend
-
-The optional CUDA backend provides fused kernels for the linear RHS stencils and the nonlinear Poisson bracket (cuFFT graph-captured pipeline). It requires CUDA Toolkit >= 13.1 and a GPU with compute capability >= 80.
-
-### Building
-
-From the `gyaradax/backends/cuda_kernels/` directory:
-```bash
-mkdir -p _build && cd _build && cmake .. -DCMAKE_BUILD_TYPE=Release && cmake --build . -j$(nproc) && cmake --install . && cd ..
-```
-
-To target a specific GPU architecture (e.g., Ampere sm_80):
-```bash
-cmake .. -DCMAKE_BUILD_TYPE=Release -DGPU_ARCHITECTURES="80"
-```
-
-CMake prints the detected compute capability, jaxlib version, and cudatoolkit. Ensure these are correct before proceeding.
-
-### Using the CUDA backend
-
+### CUDA backend
 Once compiled, the CUDA backend is auto-detected:
 ```python
 # auto-detect (uses CUDA if available, falls back to JAX)
@@ -112,6 +108,7 @@ Or via config YAML:
 solver:
   backend: cuda
 ```
+
 
 ## State of the project
 
