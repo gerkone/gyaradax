@@ -1,6 +1,0 @@
-==PROF== Connected to process 141903 (/system/apps/userenv/volkmann/jax_env/bin/python3.14)
-==ERROR== Failed to find metric regex:^none\.(sum|min|max|avg|pct|ratio|max_rate)$
-
-==ERROR== Failed to profile "wrapped_abs" in process 141903
-==PROF== Trying to shutdown target application
-==ERROR== The application returned an error code (9).

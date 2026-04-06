@@ -1,2 +1,0 @@
-==ERROR== Option '--section Roofline' did not match any section.
-==ERROR== Use --list-sections to see the list of available sections.
