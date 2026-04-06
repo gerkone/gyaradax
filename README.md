@@ -11,16 +11,18 @@ This was made possible with significant usage of agentic workflows. [PROMPT.md](
 See [agent notes](docs/NOTES.md) for a detailed walkthrough of GKW and this reimplementation.
 
 ## Installation
+
+Create a conda environment with CUDA toolkit and all dependencies:
 ```bash
-uv venv --python 3.12
-source .venv/bin/activate
-uv pip install -e ".[dev]"
+conda env create -f environment.yml
+conda activate gyaradax_env
+pip install -e ".[dev]"
 ```
 
-This installs `gyaradax` in editable mode with JAX (CUDA 12), numpy, and dev tools (pytest, ruff, black).
+This installs `gyaradax` in editable mode with JAX (CUDA 13, local toolkit), numpy, and dev tools (pytest, ruff, black). The conda environment provides the CUDA toolkit (>= 13.1), cuDNN, cmake, and a C++ compiler.
 
 ### CUDA Backend
-The optional CUDA backend provides fused kernels for the linear RHS stencils and the nonlinear Poisson bracket (cuFFT graph-captured pipeline). It requires CUDA Toolkit >= 13.1 and a GPU with compute capability >= 80.
+The optional CUDA backend provides fused kernels for the linear RHS stencils and the nonlinear Poisson bracket (cuFFT graph-captured pipeline). It requires a GPU with compute capability >= 80.
 
 From `gyaradax/backends/cuda_kernels/`:
 ```bash
