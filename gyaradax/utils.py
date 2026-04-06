@@ -3,6 +3,11 @@ import re
 import numpy as np
 import jax.numpy as jnp
 from typing import Tuple, Dict, Any
+from gyaradax.geometry import (
+    _build_mode_connectivity,
+    _build_pos_par_grid_classes,
+    _build_parallel_shift_maps,
+)
 
 
 def read_gkw_dump_time(dat_path: str) -> float:
@@ -60,9 +65,9 @@ def load_gkw_dump(
         df = jnp.array(knth[0] + 1j * knth[1], dtype=jnp.complex128)
     else:
         # GKW stores species as the outermost (slowest) Fortran index.
-        # Binary layout: (2_re_im, nvpar, nmu, ns, nkx, nky, nspecies) Fortran order.
+        # binary layout: (2_re_im, nvpar, nmu, ns, nkx, nky, nspecies) Fortran order.
         knth = np.reshape(ff, (2, nvpar, nmu, ns, nkx, nky, n_species), order="F")
-        # Combine real/imag and move species to leading axis
+        # combine real/imag and move species to leading axis
         df_np = knth[0] + 1j * knth[1]  # (nvpar, nmu, ns, nkx, nky, nspecies)
         df = jnp.array(
             np.moveaxis(df_np, -1, 0), dtype=jnp.complex128
@@ -114,7 +119,7 @@ def save_dumps(
     """
     os.makedirs(output_dir, exist_ok=True)
 
-    # Spectra use field-line-averaged |phi|^2, matching GKW conventions:
+    # spectra use field-line-averaged |phi|^2, matching GKW conventions:
     #   ky_spec: per-mode spectral density = ds * sum_{s,kx} |phi|^2
     #   kx_spec: total per kx = ds * sum_{s,ky} parseval_ky * |phi|^2
     #     where parseval_ky = [1, 2, 2, ...] (one-sided Parseval for real fields)
@@ -140,34 +145,34 @@ def save_dumps(
         "step": np.array(state.step),
     }
 
-    # Internal helper to append data to an npz file
+    # internal helper to append data to an npz file
     def _append_to_npz(filename, new_data):
         path = os.path.join(output_dir, filename)
         current_step = int(state.step)
         if os.path.exists(path):
             try:
                 with np.load(path) as data:
-                    # Use 'step' to truncate entries strictly before the current one.
-                    # This prevents overlapping history when resuming simulations.
+                    # use 'step' to truncate entries strictly before the current one.
+                    # this prevents overlapping history when resuming simulations.
                     if "step" in data.files:
                         mask = data["step"] < current_step
                         updated = {
                             k: np.append(data[k][mask], [new_data[k]], axis=0) for k in data.files
                         }
                     else:
-                        # Fallback for legacy files without 'step'
+                        # fallback for legacy files without 'step'
                         updated = {k: np.append(data[k], [new_data[k]], axis=0) for k in data.files}
             except (IOError, ValueError):
-                # If file is corrupted or incompatible, start fresh
+                # if file is corrupted or incompatible, start fresh
                 updated = {k: np.array([v]) for k, v in new_data.items()}
         else:
-            # Create new file with first entry
+            # create new file with first entry
             updated = {k: np.array([v]) for k, v in new_data.items()}
         np.savez(path, **updated)
 
-    # Note: We group these to avoid too many small files
+    # note: we group these to avoid too many small files
     # but the user requested "fluxes.npz, kyspec.npz, kxspec.npz, growth.npz"
-    # We now include step and time in every file for self-description and safe appending.
+    # we now include step and time in every file for self-description and safe appending.
     common = {"step": diags["step"], "time": diags["time"]}
 
     _append_to_npz("fluxes.npz", {"fluxes": diags["fluxes"], **common})
@@ -580,11 +585,6 @@ def load_scalars(directory: str) -> Dict[str, Any]:
 
 def load_geometry(directory):
     """Load geometry and physics parameters into JAX arrays."""
-    from gyaradax.geometry import (
-        _build_mode_connectivity,
-        _build_pos_par_grid_classes,
-        _build_parallel_shift_maps,
-    )
 
     geom = load_geom_dat_file(os.path.join(directory, "geom.dat"))
     input_data = parse_input_dat(os.path.join(directory, "input.dat"))
@@ -761,3 +761,16 @@ def load_geometry(directory):
     )
 
     return geometry
+
+
+def pack_half_spectrum(
+    spec_kxky: jnp.ndarray, jind: jnp.ndarray, mrad: int, mphiw3: int
+) -> jnp.ndarray:
+    out_shape = spec_kxky.shape[:-2] + (mrad, mphiw3)
+    out = jnp.zeros(out_shape, dtype=jnp.complex128)
+    nky = spec_kxky.shape[-1]
+    return out.at[..., jind, :nky].set(spec_kxky)
+
+
+def unpack_half_spectrum(spec_half: jnp.ndarray, jind: jnp.ndarray, nky: int) -> jnp.ndarray:
+    return spec_half[..., jind, :nky]

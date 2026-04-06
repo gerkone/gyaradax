@@ -1,0 +1,28 @@
+name: gyaradax_env
+channels:
+  - defaults
+  - nvidia
+  - conda-forge
+
+dependencies:
+  # Python
+  - python>=3.14
+  - pip
+  # build tools
+  - cxx-compiler
+  - cmake>=3.26
+  # CUDA
+  - cuda-toolkit>=13.1
+  - cudnn
+  # scientific stack
+  - numpy
+  - matplotlib
+  - einops
+  - pillow
+  - scipy
+  - omegaconf
+  - pytest
+
+  - pip:
+    - "jax[cuda13-local]"
+  

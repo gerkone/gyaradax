@@ -1,9 +1,10 @@
-from conftest import rel_l2, read_dump_time, read_dump_dtim
+from conftest import rel_l2, read_dump_time, read_dump_dtim, ALL_BACKENDS
 import os
 import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+from dataclasses import replace
 
 from gyaradax.diag import term_iii_fft_pack_roundtrip, term_iii_rhs
 from gyaradax.utils import load_runtime_params
@@ -22,13 +23,13 @@ from gyaradax.utils import load_gkw_k_dump
 from gyaradax.integrals import calculate_phi, calculate_phi_kinetic, geom_tensors
 
 
-def test_init_f_trajectory_parity(nonlin_dir, nonlin_geom, nonlin_shape):
+@pytest.mark.parametrize("backend, use_z2z, mixed_precision", ALL_BACKENDS)
+def test_init_f_trajectory_parity(nonlin_dir, nonlin_geom, nonlin_shape, backend, use_z2z, mixed_precision):
     """
     Verify that init_f exactly matches GKW's internal initial conditions.
     Since GKW does not output t=0 data (K00), we prove parity by initializing
     from scratch in JAX and integrating forward to match the K01 dump.
     """
-    # GKW uses a default amp_init of 1e-4 if not specified
     from gyaradax.utils import parse_input_dat
 
     inp = parse_input_dat(f"{nonlin_dir}/input.dat")
@@ -41,7 +42,6 @@ def test_init_f_trajectory_parity(nonlin_dir, nonlin_geom, nonlin_shape):
     if finit is None:
         finit = inp.get("components", {}).get("finit", "cosine2")
 
-    # We ensure we don't normalize at t=0, matching GKW's behavior when phi=0.
     df_init = init_f(
         nonlin_geom,
         finit=finit,
@@ -50,31 +50,23 @@ def test_init_f_trajectory_parity(nonlin_dir, nonlin_geom, nonlin_shape):
     )
 
     params = gkparams_from_input_dat(f"{nonlin_dir}/input.dat", non_linear=True)
+    params = replace(params, backend=backend, use_z2z=use_z2z, mixed_precision=mixed_precision)
     nky = len(nonlin_geom["krho"])
 
-    # 120 steps reaches K01 in iteration_13
     state = default_state(nky=nky)
-
     pred_df, _, _ = gksolve(df_init, nonlin_geom, params, state, 120)
 
-    # We compare against K01, which is the dump at t=1.2 (120 steps)
     ref_df = load_gkw_k_dump(f"{nonlin_dir}/K01", nonlin_shape)
 
-    # Check that error is extremely low (accounting for integrator drift over 120 steps)
     error = rel_l2(np.array(pred_df), np.array(ref_df))
     assert error < 1e-2
 
 
-def test_init_f_kinetic_parity(kinetic_dir, kinetic_geom, kinetic_shape):
+@pytest.mark.parametrize("backend, use_z2z, mixed_precision", ALL_BACKENDS)
+def test_init_f_kinetic_parity(kinetic_dir, kinetic_geom, kinetic_shape, backend, use_z2z, mixed_precision):
     """
     Verify kinetic gk_init: correct amp_init, species-array injection, and
     short forward integration with flux diagnostics.
-
-    Checks:
-    1. amp_init is parsed from input.dat and applied (not the default 1e-4).
-    2. geometry carries per-species arrays after gk_init.
-    3. A short gksolve (20 steps, fixed dt) runs without error and
-       produces finite df, phi, and per-species fluxes.
     """
     from gyaradax import gk_init, gksolve
     from gyaradax.utils import parse_input_dat
@@ -88,46 +80,39 @@ def test_init_f_kinetic_parity(kinetic_dir, kinetic_geom, kinetic_shape):
         adiabatic_electrons=False,
     )
 
-    # amp_init must be parsed from input.dat (kinetic cases use 0.001)
     inp = parse_input_dat(input_path)
     expected_amp = float(
-        inp.get("spcgeneral", {}).get(
-            "amp_init", inp.get("components", {}).get("amp_init", 1e-4)
-        )
+        inp.get("spcgeneral", {}).get("amp_init", inp.get("components", {}).get("amp_init", 1e-4))
     )
-    assert params.amp_init == pytest.approx(expected_amp), (
-        f"params.amp_init={params.amp_init} != input.dat amp_init={expected_amp}"
-    )
+    assert params.amp_init == pytest.approx(
+        expected_amp
+    ), f"params.amp_init={params.amp_init} != input.dat amp_init={expected_amp}"
 
-    # gk_init should use the parsed amp_init and return 6D df
     df_init, geom_out, state = gk_init(kinetic_geom, params, n_species=n_species)
     assert df_init.ndim == 6
     assert df_init.shape[0] == n_species
 
-    # init amplitude must reflect params.amp_init (max of cosine2 = 2*amp)
     expected_max = params.amp_init * 2.0
     actual_max = float(jnp.max(jnp.abs(df_init)))
-    assert actual_max == pytest.approx(expected_max, rel=0.02), (
-        f"init max|df|={actual_max:.4e} != 2*amp_init={expected_max:.4e}"
-    )
+    assert actual_max == pytest.approx(
+        expected_max, rel=0.02
+    ), f"init max|df|={actual_max:.4e} != 2*amp_init={expected_max:.4e}"
 
-    # geometry must carry per-species arrays
     for k in ("mas", "signz", "de", "tmp", "vthrat", "rlt", "rln"):
-        assert jnp.asarray(geom_out[k]).shape[0] == n_species, (
-            f"geometry[{k}] should have {n_species} species"
-        )
+        assert (
+            jnp.asarray(geom_out[k]).shape[0] == n_species
+        ), f"geometry[{k}] should have {n_species} species"
 
-    # short forward integration with fixed dt (safe for CFL)
-    import dataclasses
-    safe_params = dataclasses.replace(params, dt=0.002, adaptive_dt=False)
+    safe_params = replace(params, dt=0.002, adaptive_dt=False,
+                          backend=backend, use_z2z=use_z2z, mixed_precision=mixed_precision)
     pre = linear_precompute(geom_out, safe_params)
     pred_df, (phi, fluxes), final_state = gksolve(
         df_init, geom_out, safe_params, state, n_steps=20, pre=pre
     )
 
-    assert jnp.all(jnp.isfinite(pred_df)), (
-        f"df has {int(jnp.sum(~jnp.isfinite(pred_df)))} non-finite values"
-    )
+    assert jnp.all(
+        jnp.isfinite(pred_df)
+    ), f"df has {int(jnp.sum(~jnp.isfinite(pred_df)))} non-finite values"
     assert jnp.all(jnp.isfinite(phi)), "phi should be finite"
     fluxes_arr = jnp.asarray(fluxes)
     assert fluxes_arr.shape == (n_species, 3)
@@ -164,10 +149,13 @@ def test_term_iii_fft_roundtrip(nonlin_geom, nonlin_shape):
     np.testing.assert_allclose(np.asarray(repacked), np.asarray(spec_kxky), rtol=1e-10, atol=1e-10)
 
 
-def test_term_iii_rhs_shapes(nonlin_geom, nonlin_shape):
+@pytest.mark.parametrize("backend, use_z2z, mixed_precision", ALL_BACKENDS)
+def test_term_iii_rhs_shapes(nonlin_geom, nonlin_shape, backend, use_z2z, mixed_precision):
     """verify nonlinear term iii output shape."""
+    from gyaradax.params import GKParams
     df = jnp.zeros(nonlin_shape, dtype=jnp.complex128)
-    rhs_nl = term_iii_rhs(df, nonlin_geom)
+    params = GKParams(backend=backend, use_z2z=use_z2z, mixed_precision=mixed_precision)
+    rhs_nl = term_iii_rhs(df, nonlin_geom, params=params)
     assert rhs_nl.shape == nonlin_shape
 
 
@@ -199,7 +187,7 @@ def test_cfl_timestep_estimate(nonlin_dir, nonlin_geom, nonlin_shape):
 def test_cfl_zero_phi_returns_dt_input(nonlin_geom, nonlin_shape):
     """with zero potential, cfl estimate should return dt_input (no constraint)."""
     params = gkparams_from_input_dat(
-        "/restricteddata/ukaea/gyrokinetics/raw/iteration_13/input.dat",
+        os.path.join(os.environ.get("GKW_DATA_ROOT", os.path.join(os.path.dirname(__file__), "..", "data", "gkw_raw")), "iteration_13", "input.dat"),
         non_linear=True,
     )
     pre = linear_precompute(nonlin_geom, params)
@@ -229,7 +217,7 @@ def test_linear_cfl_kinetic_restricts_dt(kinetic_geom, kinetic_shape):
                 "input.dat",
             )
             if "_source_dir" in kinetic_geom
-            else "/restricteddata/ukaea/gyrokinetics/raw/kinetic_electrons/v3_kiteration_991_half_rlt/input.dat"
+            else os.path.join(os.environ.get("GKW_DATA_ROOT", os.path.join(os.path.dirname(__file__), "..", "data", "gkw_raw")), "kinetic_electrons", "v3_kiteration_991_half_rlt", "input.dat")
         ),
         non_linear=True,
         adiabatic_electrons=False,
@@ -252,7 +240,7 @@ def test_linear_cfl_kinetic_restricts_dt(kinetic_geom, kinetic_shape):
 def test_linear_cfl_adiabatic_is_loose(nonlin_geom, nonlin_shape):
     """For adiabatic ions (vthrat=1), linear CFL should not restrict dt much."""
     params = gkparams_from_input_dat(
-        "/restricteddata/ukaea/gyrokinetics/raw/iteration_13/input.dat",
+        os.path.join(os.environ.get("GKW_DATA_ROOT", os.path.join(os.path.dirname(__file__), "..", "data", "gkw_raw")), "iteration_13", "input.dat"),
         non_linear=True,
     )
     pre = linear_precompute(nonlin_geom, params)
@@ -340,7 +328,8 @@ def test_combined_cfl_matches_gkw_adaptive_dt(kinetic_dir, kinetic_geom, kinetic
     )
 
 
-def test_adaptive_dt_kinetic_no_nan(kinetic_dir, kinetic_geom, kinetic_shape):
+@pytest.mark.parametrize("backend, use_z2z, mixed_precision", ALL_BACKENDS)
+def test_adaptive_dt_kinetic_no_nan(kinetic_dir, kinetic_geom, kinetic_shape, backend, use_z2z, mixed_precision):
     """Adaptive CFL must prevent NaN divergence for kinetic electron runs.
 
     Without CFL adaptation, dt=0.004 causes NaN within ~15 steps.
@@ -358,13 +347,13 @@ def test_adaptive_dt_kinetic_no_nan(kinetic_dir, kinetic_geom, kinetic_shape):
     dat_path = os.path.join(kinetic_dir, f"{ks[0]}.dat")
     t_start = read_dump_time(dat_path) if os.path.exists(dat_path) else 0.0
 
-    # Use input.dat dt (0.004) which is too large without CFL
     params = gkparams_from_input_dat(
         os.path.join(kinetic_dir, "input.dat"),
         non_linear=True,
         adiabatic_electrons=False,
         adaptive_dt=True,
     )
+    params = replace(params, backend=backend, use_z2z=use_z2z, mixed_precision=mixed_precision)
     nky = len(kinetic_geom["krho"])
     state = GKState(
         time=jnp.array(t_start, dtype=jnp.float64),
@@ -374,7 +363,6 @@ def test_adaptive_dt_kinetic_no_nan(kinetic_dir, kinetic_geom, kinetic_shape):
         last_growth_rate=jnp.zeros(nky, dtype=jnp.float64),
     )
 
-    # 20 steps is enough to trigger NaN without CFL adaptation
     pred_df, (phi, _), _ = gksolve(df, kinetic_geom, params, state, n_steps=20)
 
     assert jnp.all(jnp.isfinite(pred_df)), (

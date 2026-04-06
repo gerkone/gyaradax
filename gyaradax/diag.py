@@ -6,9 +6,8 @@ from gyaradax.solver import (
     extended_firstdim_fft_size,
     extended_seconddim_fft_size,
     build_jind,
-    pack_half_spectrum,
-    unpack_half_spectrum,
 )
+from gyaradax.utils import pack_half_spectrum, unpack_half_spectrum
 from gyaradax.params import GKParams
 
 
@@ -62,6 +61,9 @@ def term_iii_rhs(
         efun_sign=efun_sign,
         fft_prefactor=fft_prefactor,
         exclude_zero_mode=exclude_zero_mode,
+        mixed_precision=params.mixed_precision,
+        backend=params.backend,
+        use_z2z=params.use_z2z,
     )
 
 

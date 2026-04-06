@@ -1,4 +1,5 @@
 import jax
+import jax.numpy as jnp
 
 # enforce 64-bit precision
 jax.config.update("jax_enable_x64", True)
@@ -7,6 +8,7 @@ import os
 from omegaconf import OmegaConf
 from dataclasses import dataclass
 from typing import Dict, Any
+from gyaradax.utils import load_scalars
 
 
 @jax.tree_util.register_pytree_node_class
@@ -69,6 +71,8 @@ class GKParams:
     adaptive_dt: bool = False
     cfl_safety: float = 0.95
     mixed_precision: bool = True
+    backend: str = "jax"
+    use_z2z: bool = False
 
     # physical parameters (typically from the kinetic species)
     rlt: float = 1.0
@@ -96,7 +100,7 @@ class GKParams:
     dgrid: float = 1.0
     tgrid: float = 1.0
 
-    # Fields that are not JAX-traceable (strings, booleans used for control flow)
+    # fields that are not JAX-traceable (strings, booleans used for control flow)
     # and must be stored as pytree auxiliary data rather than leaves.
     _STATIC_FIELDS = (
         "finit",
@@ -104,20 +108,54 @@ class GKParams:
         "non_linear",
         "adaptive_dt",
         "mixed_precision",
+        "backend",
+        "use_z2z",
+        "dt",
+        "naverage",
+        "disp_par",
+        "disp_vp",
+        "disp_x",
+        "disp_y",
+        "idisp",
+        "drive_scale",
+        "norm_eps",
+        "cfl_safety",
+        "amp_init",
+        "dvp",
+        "sgr_dist",
+        "kxmax",
+        "kymax",
+        "mas",
+        "tmp",
+        "de",
+        "signz",
+        "vthrat",
+        "dgrid",
+        "tgrid",
     )
 
     def tree_flatten(self):
         d = vars(self)
-        aux = {k: d[k] for k in self._STATIC_FIELDS}
-        leaves = [d[k] for k in d if k not in self._STATIC_FIELDS]
+        aux = {}
+        leaves = []
+        leaf_keys = []
+        for k, v in d.items():
+            if k.startswith("_"):
+                continue
+            # arrays must be leaves (not hashable for aux)
+            if k in self._STATIC_FIELDS and not hasattr(v, "shape"):
+                aux[k] = v
+            else:
+                leaves.append(v)
+                leaf_keys.append(k)
+        aux["_leaf_keys"] = tuple(leaf_keys)
         return leaves, aux
 
     @classmethod
     def tree_unflatten(cls, aux, leaves):
-        d = vars(cls())  # get field ordering from defaults
-        leaf_keys = [k for k in d if k not in cls._STATIC_FIELDS]
-        kwargs = dict(zip(leaf_keys, leaves))
-        kwargs.update(aux)
+        leaf_keys = aux["_leaf_keys"]
+        kwargs = {k: v for k, v in aux.items() if k != "_leaf_keys"}
+        kwargs.update(zip(leaf_keys, leaves))
         return cls(**kwargs)
 
 
@@ -134,6 +172,7 @@ def gkparams_from_runtime(runtime: Dict[str, Any], **overrides) -> GKParams:
         "finit": str(runtime.get("finit", "cosine2")),
         "amp_init": float(runtime.get("amp_init", 1.0e-4)),
         "adiabatic_electrons": bool(runtime.get("adiabatic_electrons", True)),
+        "backend": str(runtime.get("backend", "jax")),
     }
     # species params may be arrays (multi-species) or scalars
     _SPECIES_PARAMS = {"rlt", "rln", "mas", "tmp", "de", "signz", "vthrat"}
@@ -177,7 +216,6 @@ def gkparams_from_input_dat(input_dat_path: str, **overrides) -> GKParams:
     Returns:
         Configured GKParams instance.
     """
-    from gyaradax.utils import load_scalars
 
     directory = os.path.dirname(input_dat_path)
     scalars = load_scalars(directory)
@@ -187,7 +225,7 @@ def gkparams_from_input_dat(input_dat_path: str, **overrides) -> GKParams:
 def gkparams_from_input_and_geometry(
     input_dat_path: str, geometry: Dict[str, Any], **overrides
 ) -> GKParams:
-    """build GKParams from input.dat + a pre-computed geometry dict.
+    """Build GKParams from input.dat + a pre-computed geometry dict.
 
     unlike gkparams_from_input_dat, this does not require geom.dat or
     other GKW output files — geometry scalars come from the dict.
@@ -272,6 +310,7 @@ def gkparams_from_config(config: Any, **overrides) -> GKParams:
         "adiabatic_electrons": bool(getattr(config.grid, "adiabatic_electrons", True)),
         "adaptive_dt": bool(getattr(solver_cfg, "adaptive_dt", False)),
         "cfl_safety": float(getattr(solver_cfg, "cfl_safety", 0.95)),
+        "backend": str(getattr(solver_cfg, "backend", "jax")),
     }
 
     # physics scalars (may be arrays for multi-species kinetic configs)
@@ -280,8 +319,6 @@ def gkparams_from_config(config: Any, **overrides) -> GKParams:
         if hasattr(physics_cfg, k):
             v = getattr(physics_cfg, k)
             if k in _SPECIES_PARAMS and hasattr(v, "__iter__") and not isinstance(v, str):
-                import jax.numpy as jnp
-
                 params_dict[k] = jnp.array([float(x) for x in v])
             else:
                 params_dict[k] = float(v)

@@ -41,7 +41,7 @@ def _load_1d_array(path):
 
 
 # ---------------------------------------------------------------------------
-# Continuous geometry functions (JAX-differentiable)
+# continuous geometry functions (JAX-differentiable)
 # ---------------------------------------------------------------------------
 
 
@@ -83,21 +83,20 @@ def _dzetadeps(theta, q, shat, eps, signB, signJ):
     that propagates into all zeta-direction tensors (D_zeta, H_zeta,
     I_zeta). The radial (eps) components are unaffected.
     """
-    ns = len(theta)
     dum2 = jnp.sqrt((1 - eps) / (1 + eps))
 
-    # Vectorized atan + cumulative branch correction.
+    # vectorized atan + cumulative branch correction.
     # GKW uses a sequential while loop; we replicate the monotonicity
     # via a cumulative sum of pi jumps detected by sign changes.
     raw = jnp.arctan(dum2 * jnp.tan(theta / 2))
 
-    # Detect where raw decreases (branch cut) and accumulate pi corrections.
+    # detect where raw decreases (branch cut) and accumulate pi corrections.
     diffs = raw[1:] - raw[:-1]
     jumps = jnp.where(diffs < 0, jnp.pi, 0.0)
     corrections = jnp.concatenate([jnp.zeros(1), jnp.cumsum(jumps)])
     dzde = raw + corrections
 
-    # Align the branch: subtract the offset at s=0
+    # align the branch: subtract the offset at s=0
     dzde = dzde - jnp.pi * jnp.floor((dzde[0] - theta[0] / 2) / jnp.pi)
 
     t2 = jnp.tan(theta / 2)
@@ -179,18 +178,15 @@ def _circular_geometry(theta, q, shat, eps, signB=1.0, signJ=1.0, geom_type="cir
         metric = metric.at[:, 0, 2].set(sin_2pi)
         metric = metric.at[:, 2, 0].set(sin_2pi)
         metric = metric.at[:, 1, 1].set(
-            (1 / (2 * jnp.pi * R)) ** 2 * (1 + (1 - eps**2) * (q / eps) ** 2)
-            + dzde**2
+            (1 / (2 * jnp.pi * R)) ** 2 * (1 + (1 - eps**2) * (q / eps) ** 2) + dzde**2
         )
         cross_12 = (
-            q * jnp.sqrt(1 - eps**2) / (2 * jnp.pi * eps) ** 2 * signB * signJ
-            + dzde * sin_2pi
+            q * jnp.sqrt(1 - eps**2) / (2 * jnp.pi * eps) ** 2 * signB * signJ + dzde * sin_2pi
         )
         metric = metric.at[:, 1, 2].set(cross_12)
         metric = metric.at[:, 2, 1].set(cross_12)
         metric = metric.at[:, 2, 2].set(
-            (1 / (2 * jnp.pi)) ** 2
-            * ((1 / eps + jnp.cos(theta)) ** 2 + jnp.sin(theta) ** 2)
+            (1 / (2 * jnp.pi)) ** 2 * ((1 / eps + jnp.cos(theta)) ** 2 + jnp.sin(theta) ** 2)
         )
 
         # circular field derivatives (geom.f90:1525-1541)
@@ -200,12 +196,8 @@ def _circular_geometry(theta, q, shat, eps, signB=1.0, signJ=1.0, geom_type="cir
         )
         dBds_pt = bn * eps * jnp.sin(theta) / R
         dBdpsi, dBds = _psi_theta_to_psi_s(dBdpsi_pt, dBds_pt, theta, eps)
-        dRdpsi, dRds = _psi_theta_to_psi_s(
-            jnp.cos(theta), -eps * jnp.sin(theta), theta, eps
-        )
-        dZdpsi, dZds = _psi_theta_to_psi_s(
-            jnp.sin(theta), eps * jnp.cos(theta), theta, eps
-        )
+        dRdpsi, dRds = _psi_theta_to_psi_s(jnp.cos(theta), -eps * jnp.sin(theta), theta, eps)
+        dZdpsi, dZds = _psi_theta_to_psi_s(jnp.sin(theta), eps * jnp.cos(theta), theta, eps)
 
     if finite_epsilon:
         gfun = ffun * dBds / bn
@@ -269,9 +261,7 @@ def _calc_geom_tensors(cg, signJ=1.0, signB=1.0):
     if finite_epsilon:
         dfun = dfun / bn[:, None]
 
-    hfun = -signB * (
-        metric[:, :, 0] * dZdpsi[:, None] + metric[:, :, 2] * dZds[:, None]
-    )
+    hfun = -signB * (metric[:, :, 0] * dZdpsi[:, None] + metric[:, :, 2] * dZds[:, None])
     if finite_epsilon:
         hfun = hfun.at[:, 2].add(signB * bups**2 * dZds / bn**2)
     hfun = hfun / bn[:, None]
@@ -324,7 +314,7 @@ def _build_wavevector_grids(
 
 
 # ---------------------------------------------------------------------------
-# Discrete topology functions (numpy, not differentiable)
+# discrete topology functions (numpy, not differentiable)
 # ---------------------------------------------------------------------------
 
 
@@ -472,7 +462,7 @@ def _build_parallel_shift_maps(ixplus, ixminus, iyzero, ns, max_shift=4):
 
 
 # ---------------------------------------------------------------------------
-# Public entry points
+# public entry points
 # ---------------------------------------------------------------------------
 
 
@@ -509,22 +499,16 @@ def compute_geometry(
     sgrid = _parallel_grid(ns, nperiod)
     theta = _poloidal_angle(sgrid, eps, geom_type=geom_type)
 
-    cg = _circular_geometry(
-        theta, q, shat, eps, signB=signB, signJ=signJ, geom_type=geom_type
-    )
+    cg = _circular_geometry(theta, q, shat, eps, signB=signB, signJ=signJ, geom_type=geom_type)
     efun_3x3, dfun, hfun, ifun = _calc_geom_tensors(cg, signJ=signJ, signB=signB)
 
     bn, R = cg["bn"], cg["R"]
-    little_g = jnp.stack(
-        [cg["metric"][:, 1, 1], cg["dzetadeps"], jnp.ones(ns)], axis=-1
-    )
+    little_g = jnp.stack([cg["metric"][:, 1, 1], cg["dzetadeps"], jnp.ones(ns)], axis=-1)
 
     if geom_type == "s-alpha":
         g_zz_mid = (q / (2 * jnp.pi * eps)) ** 2
     else:
-        g_zz_mid = (1 / (2 * jnp.pi * (1 + eps))) ** 2 * (
-            1 + (1 - eps**2) * (q / eps) ** 2
-        )
+        g_zz_mid = (1 / (2 * jnp.pi * (1 + eps))) ** 2 * (1 + (1 - eps**2) * (q / eps) ** 2)
     kthnorm = jnp.sqrt(g_zz_mid)
 
     vpgr, mugr, intvp, intmu = _build_velocity_grids(nvpar, nmu, vpar_max)
@@ -541,8 +525,8 @@ def compute_geometry(
     )
     krho = krho_raw / kthnorm
 
-    # Discrete topology (numpy) — stop gradient and convert to concrete arrays.
-    # Mode labels and connectivity depend only on grid shape and ikxspace,
+    # discrete topology (numpy) — stop gradient and convert to concrete arrays.
+    # mode labels and connectivity depend only on grid shape and ikxspace,
     # not on the continuous values of (q, shat, eps).
     kxrh_np = np.asarray(jax.lax.stop_gradient(kxrh))
     krho_np = np.asarray(jax.lax.stop_gradient(krho))
@@ -666,7 +650,7 @@ def compute_geometry_from_input(input_dat_path: str) -> Dict[str, Any]:
 
 
 def geometry_from_geom_dat_and_input(input_dat_path: str) -> Dict[str, Any]:
-    """build geometry from a ``geom.dat`` file + grids from ``input.dat``.
+    """Build geometry from a ``geom.dat`` file + grids from ``input.dat``.
 
     use this for geometry types not supported by the analytic circular model
     (e.g. slab_periodic) when reference/geom.dat is available.

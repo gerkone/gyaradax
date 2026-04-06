@@ -1,16 +1,20 @@
 import jax
 import jax.numpy as jnp
+import pytest
+from conftest import JAX_BACKENDS
 
 from gyaradax.params import GKParams
 from gyaradax.solver import gkstep_single, default_state, linear_precompute
 
 
-def test_gkstep_gradient_validity(lin_geom, lin_shape):
+@pytest.mark.parametrize("backend, use_z2z, mixed_precision", JAX_BACKENDS)
+def test_gkstep_gradient_validity(lin_geom, lin_shape, backend, use_z2z, mixed_precision):
     """test that gkstep_single is fully differentiable via jax reverse-mode AD."""
     key = jax.random.PRNGKey(42)
     df0 = jax.random.normal(key, lin_shape, dtype=jnp.float64) + 0j
 
-    params = GKParams(dt=0.01, naverage=40, non_linear=False)
+    params = GKParams(dt=0.01, naverage=40, non_linear=False,
+                      backend=backend, use_z2z=use_z2z, mixed_precision=mixed_precision)
     state = default_state(nky=len(lin_geom["krho"]))
     pre = linear_precompute(lin_geom, params)
 
@@ -31,11 +35,15 @@ def test_gkstep_gradient_validity(lin_geom, lin_shape):
     assert rel_error < 1e-4
 
 
-def test_nonlinear_gradient_validity(nonlin_geom, nonlin_shape):
+@pytest.mark.parametrize("backend, use_z2z, mixed_precision", JAX_BACKENDS)
+def test_nonlinear_gradient_validity(nonlin_geom, nonlin_shape, backend, use_z2z, mixed_precision):
     """test differentiability of the nonlinear pseudospectral solver path."""
     key = jax.random.PRNGKey(42)
     df0 = jax.random.normal(key, nonlin_shape, dtype=jnp.float64) + 0j
-    params = GKParams(dt=0.01, naverage=40, non_linear=True, mixed_precision=False)
+    # CUDA NL bracket is not AD-differentiable (FFI custom call); skip gradient check
+    mp = False if backend == "jax" else mixed_precision
+    params = GKParams(dt=0.01, naverage=40, non_linear=True, mixed_precision=mp,
+                      backend=backend, use_z2z=use_z2z)
     state = default_state(nky=len(nonlin_geom["krho"]))
     pre = linear_precompute(nonlin_geom, params)
 

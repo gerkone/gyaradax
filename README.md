@@ -1,7 +1,7 @@
 # `gyaradax`: Gyrokinetics in JAX
 
 <p align="center">
-  <img src="figs/gyaradax_small.png" width="500" alt="gyaradax Logo">
+  <img src="docs/figs/gyaradax_small.png" width="500" alt="gyaradax Logo">
 </p>
 
 `gyaradax` is a JAX code for local flux-tube gyrokinetic simulations. It is based on [GKW](https://bitbucket.org/gkw/gkw). At the current stage, it provides a differentiable solver for the electrostatic, collisionless Vlasov-Poisson system.
@@ -10,14 +10,36 @@ This was made possible with significant usage of agentic workflows. [PROMPT.md](
 
 See [agent notes](docs/NOTES.md) for a detailed walkthrough of GKW and this reimplementation.
 
+<p align="center">
+  <video src="docs/figs/torus.mp4" width="700" autoplay loop muted></video>
+</p>
+
+
 ## Installation
+
+Create a conda environment with CUDA toolkit and all dependencies:
 ```bash
-uv venv --python 3.12
-source .venv/bin/activate
-uv pip install -e ".[dev]"
+conda env create -f environment.yml
+conda activate gyaradax_env
+pip install -e ".[dev]"
 ```
 
-This installs `gyaradax` in editable mode with JAX (CUDA 12), numpy, and dev tools (pytest, ruff, black).
+This installs `gyaradax` in editable mode with JAX (CUDA 13, local toolkit), numpy, and dev tools (pytest, ruff, black). The conda environment provides the CUDA toolkit (>= 13.1), cuDNN, cmake, and a C++ compiler.
+
+### CUDA Backend
+The optional CUDA backend provides fused kernels for the linear RHS stencils and the nonlinear Poisson bracket (cuFFT graph-captured pipeline). It requires a GPU with compute capability >= 80.
+
+From `gyaradax/backends/cuda_kernels/`:
+```bash
+mkdir -p _build && cd _build && cmake .. -DCMAKE_BUILD_TYPE=Release && cmake --build . -j$(nproc) && cmake --install . && cd ..
+```
+
+To target a specific GPU architecture (e.g., Ampere sm_80):
+```bash
+cmake .. -DCMAKE_BUILD_TYPE=Release -DGPU_ARCHITECTURES="80"
+```
+
+CMake prints the detected compute capability, jaxlib version, and cudatoolkit. Ensure these are correct before proceeding.
 
 ## Structure
 
@@ -28,6 +50,7 @@ This installs `gyaradax` in editable mode with JAX (CUDA 12), numpy, and dev too
 - **`params.py`**: Configuration pytrees.
 - **`stencils.py`**: Finite difference stencil definitions.
 - **`diag.py`**: Diagnostics (growth rate, frequency, spectral).
+- **`backends/`**: Backend dispatch (JAX, CUDA). See [CUDA build instructions](#cuda-backend).
 - **`plot_utils.py`**: Visualization.
 
 ## Running Simulations
@@ -77,12 +100,28 @@ If you have an existing GKW run, you can extract its parameters and geometry int
 python -m scripts.gkw_to_yaml /path/to/gkw_run configs/my_sim.yaml
 ```
 
-## State of the project and TODOs
+### CUDA backend
+Once compiled, the CUDA backend is auto-detected:
+```python
+# auto-detect (uses CUDA if available, falls back to JAX)
+params = GKParams(backend="auto")
+
+# force CUDA
+params = GKParams(backend="cuda")
+```
+
+Or via config YAML:
+```yaml
+solver:
+  backend: cuda
+```
+
+
+## State of the project
 
 **Verification**:
 - [x] Empirical validation against reference GKW trajectories.
-<<<<<<< README.md
-- [x] Anaytical validation on RH and Cyclone Base Case.
+- [x] Analytical validation on RH and Cyclone Base Case.
 - [x] Differentiable programming: inverse problem and sensitivity analysis.
 - [ ] GKW tests and benchmarks (see [the gkw paper](docs/gkw.pdf) and Chapter 11 in the manual).
 - [ ] Solver-in-the-Loop and PINNs as an ML showcase.
@@ -97,6 +136,7 @@ python -m scripts.gkw_to_yaml /path/to/gkw_run configs/my_sim.yaml
 
 **Optimization**:
 - [x] JAX-based improvements.
+- [x] CUDA LTO backend (fused linear stencil and nonlinear solve).
 - [ ] Fully spectral solver.
 - [ ] Implicit/explicit integration (IMEX).
 

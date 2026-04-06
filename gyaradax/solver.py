@@ -29,100 +29,24 @@ jax.config.update("jax_enable_x64", True)
 
 import math
 import functools
-from typing import Dict, Tuple, Optional, Any
-from dataclasses import dataclass
+from typing import Dict, Tuple, Optional
 
-import jax.random
-
-from gyaradax import _EPS
+from gyaradax import _EPS, stencils
 from gyaradax.integrals import (
     get_integrals,
     j0,
     geom_tensors,
     calculate_phi,
-    _phi_adiabatic,
     precompute_phi_kinetic,
+    precompute_phi_adiabatic,
+    calculate_phi_adiabatic,
 )
-from gyaradax import stencils
+from gyaradax.backends import create_ops
 from gyaradax.params import GKParams
+from gyaradax.types import GKPre, GKState
+from gyaradax.backends.ops import SolverOps
+from gyaradax.utils import pack_half_spectrum, unpack_half_spectrum  # noqa: F401
 from einops import rearrange
-
-
-@jax.tree_util.register_pytree_node_class
-class GKPre:
-    """
-    Precomputed terms container. Separates dynamic arrays (leaves) from static metadata
-    (auxiliary) so FFT sizes stay concrete under JIT.
-    """
-
-    def __init__(self, items: Dict[str, Any]):
-        self._items = items
-
-    def tree_flatten(self):
-        leaves = []
-        leaf_keys = []
-        aux = {}
-        for k, v in self._items.items():
-            if k.startswith("nl_m") or k in ("ixzero", "iyzero", "nsp"):
-                aux[k] = v
-            elif isinstance(v, dict):
-                # flatten dict values into leaves so traced arrays stay out of aux
-                for dk, dv in sorted(v.items()):
-                    leaves.append(dv)
-                    leaf_keys.append(f"{k}.{dk}")
-            elif isinstance(v, (jnp.ndarray, float, int, bool)):
-                leaves.append(v)
-                leaf_keys.append(k)
-            elif v is None:
-                aux[k] = v
-            else:
-                aux[k] = v
-        return tuple(leaves), {"leaf_keys": tuple(leaf_keys), "aux": aux}
-
-    @classmethod
-    def tree_unflatten(cls, metadata, leaves):
-        items = {}
-        for key, val in zip(metadata["leaf_keys"], leaves):
-            if "." in key:
-                parent, child = key.split(".", 1)
-                if parent not in items:
-                    items[parent] = {}
-                items[parent][child] = val
-            else:
-                items[key] = val
-        items.update(metadata["aux"])
-        return cls(items)
-
-    def __getitem__(self, key):
-        return self._items[key]
-
-    def get(self, key, default=None):
-        return self._items.get(key, default)
-
-    def items(self):
-        return self._items.items()
-
-    def keys(self):
-        return self._items.keys()
-
-
-@jax.tree_util.register_pytree_node_class
-@dataclass(frozen=True)
-class GKState:
-    """Diagnostic state for large-step growth tracking and normalization."""
-
-    time: jnp.ndarray
-    step: jnp.ndarray
-    accumulated_norm_factor: jnp.ndarray
-    window_start_amp: jnp.ndarray
-    last_growth_rate: jnp.ndarray
-
-    def tree_flatten(self):
-        return tuple(vars(self).values()), None
-
-    @classmethod
-    def tree_unflatten(cls, aux_data, leaves):
-        return cls(*leaves)
 
 
 def default_state(nky: int = 1) -> GKState:
@@ -222,72 +146,31 @@ def build_jind(nkx: int, mrad: int, ixzero: int) -> jnp.ndarray:
     return jnp.where(ix >= ixzero, ix - ixzero, mrad + ix - ixzero)
 
 
-def pack_half_spectrum(
-    spec_kxky: jnp.ndarray, jind: jnp.ndarray, mrad: int, mphiw3: int
-) -> jnp.ndarray:
-    out_shape = spec_kxky.shape[:-2] + (mrad, mphiw3)
-    out = jnp.zeros(out_shape, dtype=jnp.complex128)
-    nky = spec_kxky.shape[-1]
-    return out.at[..., jind, :nky].set(spec_kxky)
-
-
-def unpack_half_spectrum(spec_half: jnp.ndarray, jind: jnp.ndarray, nky: int) -> jnp.ndarray:
-    return spec_half[..., jind, :nky]
-
-
 def nonlinear_term_iii(
     df: jnp.ndarray,
     phi: jnp.ndarray,
     geometry: Dict[str, jnp.ndarray],
-    pre: Dict[str, jnp.ndarray],
-    *,
+    pre: GKPre,
     efun_sign: float = 1.0,
     fft_prefactor: complex = 1.0 + 0.0j,
     exclude_zero_mode: bool = True,
     mixed_precision: bool = True,
+    ops: Optional[SolverOps] = None,
+    backend: str = "jax",
+    use_z2z: bool = False,
 ) -> jnp.ndarray:
     """Nonlinear ExB advection via pseudospectral method. df is 5D."""
-    mrad, mphi, mphiw3 = pre["nl_mrad"], pre["nl_mphi"], pre["nl_mphiw3"]
-    fft_scale, jind = pre["nl_fft_scale"], pre["nl_jind"]
-    kx2d, ky2d, bessel = pre["nl_kx2d"], pre["nl_ky2d"], pre["bessel"]
-    dum_s, ixzero, iyzero = pre["nl_dum_s"], pre["ixzero"], pre["iyzero"]
-    nky = df.shape[-1]
+    if ops is None:
+        ops = create_ops(pre, backend=backend, use_z2z=use_z2z, mixed_precision=mixed_precision)
 
-    df_by_s = jnp.moveaxis(df, 2, 0)
-    bessel_by_s = jnp.moveaxis(bessel, 2, 0)
-
-    def _per_s(df_s, phi_s, bessel_s, dum):
-        gyro_phi = bessel_s * phi_s[None, None, :, :]
-        grad_phi_y_k = 1j * ky2d[None, None, :, :] * gyro_phi
-        grad_phi_x_k = 1j * kx2d[None, None, :, :] * gyro_phi
-        grad_f_x_k = 1j * kx2d[None, None, :, :] * df_s
-        grad_f_y_k = 1j * ky2d[None, None, :, :] * df_s
-
-        fft_dtype = jnp.complex64 if mixed_precision else jnp.complex128
-        real_dtype = jnp.float32 if mixed_precision else jnp.float64
-
-        def _to_real(spec):
-            packed = pack_half_spectrum(spec, jind, mrad, mphiw3).astype(fft_dtype)
-            return jnp.fft.irfft2(packed, s=(mrad, mphi), axes=(-2, -1), norm="backward")
-
-        nl_real = (efun_sign * dum).astype(real_dtype) * (
-            _to_real(grad_phi_y_k) * _to_real(grad_f_x_k)
-            - _to_real(grad_phi_x_k) * _to_real(grad_f_y_k)
-        )
-        nl_half = (
-            jnp.asarray(fft_prefactor, dtype=jnp.complex128)
-            * jnp.asarray(fft_scale, dtype=jnp.complex128)
-            * jnp.fft.rfft2(
-                nl_real,
-                s=(mrad, mphi),
-                axes=(-2, -1),
-                norm="backward",
-            ).astype(jnp.complex128)
-        )
-        return unpack_half_spectrum(nl_half, jind, nky)
-
-    nl = jnp.moveaxis(jax.vmap(_per_s)(df_by_s, phi, bessel_by_s, dum_s), 0, 2)
-    return nl.at[:, :, :, ixzero, iyzero].set(0.0) if exclude_zero_mode else nl
+    return ops.nonlinear_term_iii(
+        df,
+        phi,
+        geometry,
+        efun_sign=efun_sign,
+        fft_prefactor=fft_prefactor,
+        exclude_zero_mode=exclude_zero_mode,
+    )
 
 
 def estimate_nl_timestep(
@@ -441,7 +324,7 @@ def _precompute_shared(
 
     def _parallel_coefficients(pos_par_class, table):
         idx = jnp.clip(jnp.asarray(pos_par_class, dtype=jnp.int32) + 2, 0, 4)
-        return jnp.moveaxis(table[idx] / 12.0, -1, 0)
+        return jnp.moveaxis(jnp.asarray(table)[idx] / 12.0, -1, 0)
 
     kx_b = jnp.reshape(kx, (1, 1, 1, -1, 1))
     ky_b = jnp.reshape(ky, (1, 1, 1, 1, -1))
@@ -498,11 +381,11 @@ def _fuse_stencils(
     rearrange pattern: 5 for adiabatic, 6 for kinetic.
     """
     if stencil_ndim == 5:
-        # Adiabatic: arrays are (nv, nmu, ns, nkx, nky)
+        # adiabatic: arrays are (nv, nmu, ns, nkx, nky)
         pat_coeff = "v m s x y -> 1 v m s x y"
         pat_stencil = "i s x y -> i 1 1 s x y"
     else:
-        # Kinetic: arrays are (nsp, nv, nmu, ns, nkx, nky)
+        # kinetic: arrays are (nsp, nv, nmu, ns, nkx, nky)
         pat_coeff = "sp v m s x y -> 1 sp v m s x y"
         pat_stencil = "i s x y -> i 1 1 1 s x y"
 
@@ -557,7 +440,7 @@ def _compute_species_coeffs(
     When ndim=6, species params have shape (nsp,) and output arrays are 6D.
     """
     if ndim == 5:
-        # Adiabatic: scalar species params, 5D grid arrays
+        # adiabatic: scalar species params, 5D grid arrays
         vp2 = jnp.reshape(vpgr**2, (-1, 1, 1, 1, 1))
         vp = jnp.reshape(vpgr, (-1, 1, 1, 1, 1))
         mu = jnp.reshape(mugr, (1, -1, 1, 1, 1))
@@ -576,7 +459,7 @@ def _compute_species_coeffs(
 
         sz = jnp.where(jnp.abs(signz) < _EPS, 1.0, signz)
     else:
-        # Kinetic: per-species params, 6D arrays
+        # kinetic: per-species params, 6D arrays
         nsp = mas.shape[0]
 
         def r6(arr):
@@ -633,16 +516,16 @@ def _compute_species_coeffs(
     et = (vp2 + 2.0 * bn_b * mu) / t_rat - 1.5
     dmax_ek = (rln + rlt * et) * fmax * (efun_b * ky_b)
 
-    # Drifts
+    # drifts
     ed = vp2 + bn_b * mu
     drift_x = ed * d_shape(dfun[:, 0]) / sz
     drift_y = ed * d_shape(dfun[:, 1]) / sz
 
-    # Characteristic speeds
+    # characteristic speeds
     upar = -ffun_b * vthrat * vp
     utrap = vthrat * mu * bn_b * gfun_b
 
-    # Dissipation speeds for idisp=2: RMS velocity (matches GKW linear_terms.f90:643,911)
+    # dissipation speeds for idisp=2: RMS velocity (matches GKW linear_terms.f90:643,911)
     vp_rms = jnp.asarray(
         params.vpgr_rms if hasattr(params, "vpgr_rms") else jnp.sqrt(jnp.mean(vpgr**2)),
         dtype=jnp.float64,
@@ -669,8 +552,8 @@ def _compute_species_coeffs(
         "abs_dum2_par": abs_par,
         "abs_dum2_vp": abs_vp,
         "term7_fac": term7_fac,
-        "tmp0": jnp.asarray(tmp if ndim == 5 else tmp.squeeze(), dtype=jnp.float64),
-        "signz0": jnp.asarray(signz if ndim == 5 else signz.squeeze(), dtype=jnp.float64),
+        "tmp0": float(tmp) if ndim == 5 else jnp.asarray(tmp.squeeze(), dtype=jnp.float64),
+        "signz0": float(signz) if ndim == 5 else jnp.asarray(signz.squeeze(), dtype=jnp.float64),
     }
 
 
@@ -690,7 +573,7 @@ def linear_precompute(geometry: Dict[str, jnp.ndarray], params: GKParams) -> "GK
     efun = jnp.asarray(geometry.get("efun", jnp.ones_like(bn)), dtype=jnp.float64)
     little_g = jnp.asarray(geometry["little_g"], dtype=jnp.float64)
 
-    # Species-independent shared quantities
+    # species-independent shared quantities
     out = _precompute_shared(
         geometry, params, kx, ky, ns, nkx, nky, vpgr, mugr, bn, ffun, gfun, dfun, efun
     )
@@ -720,7 +603,7 @@ def linear_precompute(geometry: Dict[str, jnp.ndarray], params: GKParams) -> "GK
             params,
             ndim=6,
         )
-        # Override vpgr_rms/mugr_rms if available
+        # override vpgr_rms/mugr_rms if available
         if "vpgr_rms" in geometry:
             vp_rms = jnp.asarray(geometry["vpgr_rms"], dtype=jnp.float64)
             mu_rms = jnp.asarray(geometry.get("mugr_rms", 1.0), dtype=jnp.float64)
@@ -754,6 +637,10 @@ def linear_precompute(geometry: Dict[str, jnp.ndarray], params: GKParams) -> "GK
         out.update(sp)
         out["geom_tensors"] = None
         out["nsp"] = nsp
+        # kx_b/ky_b computed in _compute_species_coeffs but not returned - add them here
+        # For kinetic case, need 6D shape (1, 1, 1, 1, nkx, 1) to broadcast with 6D drift arrays
+        out["kx_b"] = jnp.reshape(kx, (1, 1, 1, 1, -1, 1))
+        out["ky_b"] = jnp.reshape(ky, (1, 1, 1, 1, 1, -1))
 
         # precompute kinetic phi solve arrays (avoids recomputing bessel/gamma per RHS call)
         phi_w, phi_d = precompute_phi_kinetic(geometry)
@@ -779,7 +666,7 @@ def linear_precompute(geometry: Dict[str, jnp.ndarray], params: GKParams) -> "GK
         time_field = jnp.min(jnp.where(field_period > _EPS, field_period, 1e30))
         out["tmax_field"] = jnp.where(time_field < 1e20, 1.0 / time_field, 0.0)
     else:
-        # Adiabatic: scalar species params, 5D arrays
+        # adiabatic: scalar species params, 5D arrays
         sp = _compute_species_coeffs(
             params.mas,
             params.signz,
@@ -801,7 +688,7 @@ def linear_precompute(geometry: Dict[str, jnp.ndarray], params: GKParams) -> "GK
             params,
             ndim=5,
         )
-        # Override vpgr_rms/mugr_rms if available
+        # override vpgr_rms/mugr_rms if available
         if "vpgr_rms" in geometry:
             vp_rms = jnp.asarray(geometry["vpgr_rms"], dtype=jnp.float64)
             mu_rms = jnp.asarray(geometry.get("mugr_rms", 1.0), dtype=jnp.float64)
@@ -834,86 +721,22 @@ def linear_precompute(geometry: Dict[str, jnp.ndarray], params: GKParams) -> "GK
         out.update(sp)
         out["geom_tensors"] = geom_tensors(geometry, params=params)
 
-    return GKPre(out)
-
-
-def _linear_rhs_core(
-    df: jnp.ndarray,
-    phi_b: jnp.ndarray,
-    pre: Dict[str, jnp.ndarray],
-    params_dvp: float,
-    params_disp_vp: float,
-    params_drive_scale: float,
-) -> jnp.ndarray:
-    """Core linear RHS for a single species slice (5D arrays).
-
-    All arrays in *pre* must be 5D (nv, nmu, ns, nkx, nky) — species
-    dimension has been removed by vmap or was never present.
-    """
-
-    def _apply_parallel(field, coeffs):
-        out = jnp.zeros_like(field)
-        nky = field.shape[-1]
-        ky_idx = jnp.reshape(jnp.arange(nky, dtype=jnp.int32), (1, 1, -1))
-        for i in range(9):
-            s_map = pre["s_shift"][i]
-            kx_map = pre["kx_shift"][i]
-            valid = pre["valid_shift"][i]
-            shifted = jnp.where(valid[None, None, :, :, :], field[:, :, s_map, kx_map, ky_idx], 0.0)
-            out = out + coeffs[i] * shifted
-        return out
-
-    def _apply_vpar(field, coeffs):
-        nv = field.shape[0]
-        out = jnp.zeros_like(field)
-        for c, s in zip(coeffs, (-2, -1, 0, 1, 2)):
-            idx = jnp.clip(jnp.arange(nv, dtype=jnp.int32) + s, 0, nv - 1)
-            valid = jnp.logical_and(jnp.arange(nv) + s >= 0, jnp.arange(nv) + s < nv)
-            shifted = jnp.take(field, idx, axis=0)
-            out = out + c * jnp.where(valid[:, None, None, None, None], shifted, 0.0)
-        return out
-
-    term_par = _apply_parallel(df, pre["s_total_upar"])
-    term_iv = pre["utrap"] * _apply_vpar(df, stencils.VPAR_D1) / params_dvp
-    term_vp_diss = (
-        jnp.asarray(params_disp_vp, dtype=jnp.float64)
-        * pre["abs_dum2_vp"]
-        * _apply_vpar(df, stencils.VPAR_D4)
-        / params_dvp
-    )
-    kdotvd = pre["drift_x"] * pre["kx_b"] + pre["drift_y"] * pre["ky_b"]
-    gyro_phi = pre["bessel"] * phi_b
-    term_vii = _apply_parallel(gyro_phi, pre["s_total_t7"])
-
-    return (
-        term_par
-        + term_iv
-        + term_vp_diss
-        - 1j * kdotvd * df
-        + pre["hyper"] * df
-        + 1j
-        * jnp.asarray(params_drive_scale, dtype=jnp.float64)
-        * (
-            pre["dmaxwel_fm_ek"]
-            - pre["signz0"] * kdotvd * (pre["fmaxwl"] / jnp.maximum(pre["tmp0"], _EPS))
+        # precompute adiabatic phi solve arrays
+        pw, pcw, tmp, de, signz, gamma, ints, has_zonal, ixzero, iyzero = precompute_phi_adiabatic(
+            geometry, params
         )
-        * gyro_phi
-        + term_vii
-    )
+        out["phi_weight"] = pw
+        out["phi_corr_weight"] = pcw
+        out["phi_tmp"] = tmp
+        out["phi_de"] = de
+        out["phi_signz"] = signz
+        out["phi_gamma"] = gamma
+        out["phi_ints"] = ints
+        out["phi_has_zonal"] = has_zonal
+        out["phi_ixzero"] = ixzero
+        out["phi_iyzero"] = iyzero
 
-
-def linear_rhs(
-    df: jnp.ndarray,
-    geometry: Dict[str, jnp.ndarray],
-    params: GKParams,
-    pre: Dict[str, jnp.ndarray],
-    phi: Optional[jnp.ndarray] = None,
-) -> jnp.ndarray:
-    """Adiabatic linear RHS (5D df). Delegates to _linear_rhs_core."""
-    if phi is None:
-        phi = _phi_adiabatic(pre["geom_tensors"], df)
-    phi_b = jnp.reshape(phi, (1, 1, phi.shape[0], phi.shape[1], phi.shape[2]))
-    return _linear_rhs_core(df, phi_b, pre, params.dvp, params.disp_vp, params.drive_scale)
+    return GKPre(out)
 
 
 def init_f(
@@ -958,7 +781,7 @@ def init_f(
     full_shape = shape_6d if n_species > 1 else shape_5d
 
     # velocity-space Maxwellian: (n/n_grid) * exp(-(vpar^2 + 2*mu*B)/T) / (sqrt(T*pi))^3
-    # Matches GKW's fmaxwl in components.f90 (with dens=dref=tref=1).
+    # matches GKW's fmaxwl in components.f90 (with dens=dref=tref=1).
     vp2 = vpgr**2  # (nv,)
     tmp_val = jnp.asarray(geometry.get("tmp", jnp.ones(1)), dtype=jnp.float64)
     if tmp_val.ndim > 0:
@@ -1010,7 +833,7 @@ def init_f(
 
     elif finit == "zonal":
         # Rosenbluth-Hinton test: only the zonal mode (ky=0) is initialized.
-        # In spectral space, set kx = ±1 around kx=0 with ±i*amp*fmaxwl/2
+        # in spectral space, set kx = ±1 around kx=0 with ±i*amp*fmaxwl/2
         # to produce a sin(kx*x) radial density perturbation.  Only ions
         # (signz > 0) are initialized.  (GKW init.f90:1471-1514)
         kxrh = jnp.asarray(geometry["kxrh"], dtype=jnp.float64)
@@ -1062,7 +885,7 @@ def init_f(
 
 
 def _broadcast_profile(prof_s, vel_env, n_species, nv, nmu, ns, nkx, nky):
-    """broadcast a parallel profile (and optional velocity envelope) to full shape."""
+    """Broadcast a parallel profile (and optional velocity envelope) to full shape."""
     if vel_env is not None:
         # vel_env: (nv, nmu, ns), prof_s: (ns,)
         base = vel_env * prof_s[None, None, :]  # (nv, nmu, ns)
@@ -1118,63 +941,26 @@ def advance_state(
 
 
 def _compute_phi(df, geometry, params, pre):
-    """compute phi via the appropriate solver."""
-    return calculate_phi(geometry, df, params=params, pre=pre)
-
-
-def _compute_linear_rhs(df, phi, geometry, params, pre):
-    """Compute linear RHS for adiabatic (5D) or kinetic (6D) df."""
-    if params.adiabatic_electrons:
-        return linear_rhs(df, geometry, params, pre, phi=phi)
+    """Compute phi via the appropriate solver."""
+    if params.adiabatic_electrons and "phi_weight" in pre and "phi_corr_weight" in pre:
+        return calculate_phi_adiabatic(
+            df,
+            phi_weight=pre["phi_weight"],
+            phi_corr_weight=pre["phi_corr_weight"],
+            tmp=pre["phi_tmp"],
+            de=pre["phi_de"],
+            signz=pre["phi_signz"],
+            gamma=pre["phi_gamma"],
+            ints=pre["phi_ints"],
+            has_zonal=pre["phi_has_zonal"],
+            ixzero=pre["phi_ixzero"],
+            iyzero=pre["phi_iyzero"],
+        )
     else:
-        phi_b = phi[None, None, :, :, :]
-
-        # split pre into per-species (vmapped) and shared (broadcast) arrays
-        # fmt: off
-        sp_arrays = {k: pre[k] for k in [
-            "bessel", "fmaxwl", "dmaxwel_fm_ek", "drift_x", "drift_y",
-            "upar", "utrap", "abs_dum2_par", "abs_dum2_vp",
-            "term7_fac", "tmp0", "signz0",
-            "s_total_upar", "s_total_t7",
-        ]}
-        # fmt: on
-        sp_in_axes = {k: 0 for k in sp_arrays}
-        sp_in_axes["s_total_upar"] = 1  # stencil arrays have species on axis 1
-        sp_in_axes["s_total_t7"] = 1
-
-        shared = {
-            k: pre[k]
-            for k in [
-                "kx_b",
-                "ky_b",
-                "hyper",
-                "s_shift",
-                "kx_shift",
-                "valid_shift",
-            ]
-        }
-
-        def _per_species(df_sp, sp):
-            sp_pre = {**sp, **shared}
-            return _linear_rhs_core(
-                df_sp, phi_b, sp_pre, pre["dvp"], params.disp_vp, params.drive_scale
-            )
-
-        return jax.vmap(_per_species, in_axes=(0, sp_in_axes))(df, sp_arrays)
+        return calculate_phi(geometry, df, params=params, pre=pre)
 
 
-def _compute_nonlinear_rhs(df, phi, geometry, params, pre):
-    """Compute nonlinear Term III for adiabatic (5D) or kinetic (6D) df."""
-    mp = params.mixed_precision
-    if params.adiabatic_electrons:
-        return nonlinear_term_iii(df, phi, geometry, pre, mixed_precision=mp)
-    else:
 
-        def _nl_sp(df_sp, bessel_sp):
-            pre_sp = {**pre, "bessel": bessel_sp}
-            return nonlinear_term_iii(df_sp, phi, geometry, pre_sp, mixed_precision=mp)
-
-        return jax.vmap(_nl_sp)(df, pre["bessel"])
 
 
 def gkstep_single(
@@ -1183,35 +969,36 @@ def gkstep_single(
     params: GKParams,
     state: GKState,
     pre: GKPre,
+    ops: Optional[SolverOps] = None,
     dt_override: Optional[jnp.ndarray] = None,
 ) -> Tuple[
     jnp.ndarray,
     Tuple[jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]],
     GKState,
 ]:
-    """Single small-step RK4 time integration.
+    """Single small-step RK4 time integration with backend dispatch."""
+    if ops is None:
+        ops = create_ops(pre, backend=params.backend, use_z2z=params.use_z2z, mixed_precision=params.mixed_precision)
 
-    Args:
-        dt_override: If provided, use this dt instead of params.dt.
-            Used by the adaptive CFL path where dt varies per step.
-    """
     dt = dt_override if dt_override is not None else jnp.array(params.dt, dtype=jnp.float64)
 
     def _rhs(df):
         phi_local = _compute_phi(df, geometry, params, pre)
-        rhs = _compute_linear_rhs(df, phi_local, geometry, params, pre)
+        rhs = ops.linear_rhs(df, phi_local, geometry, params, pre)
         if params.non_linear:
-            rhs = rhs + _compute_nonlinear_rhs(df, phi_local, geometry, params, pre)
+            rhs = rhs + ops.nonlinear_term_iii(df, phi_local, geometry)
         return rhs
 
-    # RK4
+    # RK4 — expanded accumulation lets XLA read k1..k4 and prev_df in one fused kernel
     k1 = _rhs(prev_df)
     k2 = _rhs(prev_df + 0.5 * dt * k1)
     k3 = _rhs(prev_df + 0.5 * dt * k2)
     k4 = _rhs(prev_df + dt * k3)
-    next_df_raw = prev_df + (dt / 6.0) * (k1 + 2.0 * k2 + 2.0 * k3 + k4)
+    dt6 = dt / 6.0
+    dt3 = dt / 3.0
+    next_df_raw = prev_df + dt6 * k1 + dt3 * k2 + dt3 * k3 + dt6 * k4
 
-    # Post-step: normalization and amplitude tracking
+    # post-step: normalization and amplitude tracking
     new_step = state.step + jnp.array(1, dtype=jnp.int32)
     is_window_end = jnp.equal(jnp.mod(new_step, params.naverage), 0)
 
@@ -1263,17 +1050,19 @@ def gksolve(
     if pre is None:
         pre = linear_precompute(geometry, params)
 
+    ops = create_ops(pre, backend=params.backend, use_z2z=params.use_z2z, mixed_precision=params.mixed_precision)
+
     if params.adaptive_dt and params.non_linear:
-        # Adaptive CFL path: carry dt as part of scan state
+        # adaptive CFL path: carry dt as part of scan state
         dt_input = jnp.array(params.dt, dtype=jnp.float64)
         cfl_safety = jnp.array(params.cfl_safety, dtype=jnp.float64)
 
         def _scan_body(carry, _):
             curr_df, curr_state, curr_dt = carry
             next_df, out, next_state = gkstep_single(
-                curr_df, geometry, params, curr_state, pre, dt_override=curr_dt
+                curr_df, geometry, params, curr_state, pre, ops, dt_override=curr_dt
             )
-            # Estimate next dt from current phi (one-step lag)
+            # estimate next dt from current phi (one-step lag)
             phi_for_cfl = out[0]  # phi from gkstep_single
             bessel_for_cfl = pre["bessel"]
             if not params.adiabatic_electrons:
@@ -1294,10 +1083,12 @@ def gksolve(
             _scan_body, (df, state, init_dt), None, length=n_steps
         )
     else:
-        # Fixed dt path
+        # fixed dt path
         def _scan_body(carry, _):
             curr_df, curr_state = carry
-            next_df, out, next_state = gkstep_single(curr_df, geometry, params, curr_state, pre)
+            next_df, out, next_state = gkstep_single(
+                curr_df, geometry, params, curr_state, pre, ops
+            )
             return (next_df, next_state), None
 
         (final_df, final_state), _ = jax.lax.scan(_scan_body, (df, state), None, length=n_steps)

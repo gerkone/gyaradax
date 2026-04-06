@@ -11,6 +11,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from dataclasses import replace
+from conftest import ALL_BACKENDS
 
 from gyaradax.geometry import compute_geometry, compute_geometry_from_input
 from gyaradax.params import gkparams_from_input_and_geometry
@@ -24,9 +25,8 @@ jax.config.update("jax_enable_x64", True)
 
 
 GKW_CASES_DIR = os.path.join(os.path.dirname(__file__), "..", "data", "gkw_cases")
-GKW_BENCHMARKS = os.path.join(
-    os.path.dirname(__file__), "..", "..", "gkw_ref", "benchmarks"
-)
+GKW_BENCHMARKS = os.path.join(os.path.dirname(__file__), "..", "..", "gkw_ref", "benchmarks")
+
 
 def _rh_residual_xiao_catto(q, eps):
     """Analytical RH residual (Xiao-Catto, PoP 13 2006)."""
@@ -34,7 +34,8 @@ def _rh_residual_xiao_catto(q, eps):
     return 1.0 / (1.0 + q**2 * theta / eps**2)
 
 
-def test_rosenbluth_hinton_residual():
+@pytest.mark.parametrize("backend, use_z2z, mixed_precision", ALL_BACKENDS)
+def test_rosenbluth_hinton_residual(backend, use_z2z, mixed_precision):
     """Rosenbluth-Hinton zonal flow test: residual converges to Xiao-Catto.
 
     Uses the GKW benchmark parameters (gkw_ref/benchmarks/zonal_flow/zonal01):
@@ -48,7 +49,7 @@ def test_rosenbluth_hinton_residual():
     geometry = compute_geometry_from_input(zonal01)
     params = gkparams_from_input_and_geometry(zonal01, geometry)
     # non_linear=False + large naverage → linear mode, no per-ky normalization
-    params = replace(params, non_linear=False, naverage=100000)
+    params = replace(params, non_linear=False, naverage=100000, backend=backend, use_z2z=use_z2z, mixed_precision=mixed_precision)
 
     pre = linear_precompute(geometry, params)
     df = init_f(geometry, finit="zonal", amp_init_real=params.amp_init)
@@ -68,9 +69,7 @@ def test_rosenbluth_hinton_residual():
     trace = []
     times = []
     for _ in range(500):
-        df, phi, _, state = gk_run(
-            df, geometry, params, state, 20, pre=pre
-        )
+        df, phi, _, state = gk_run(df, geometry, params, state, 20, pre=pre)
         trace.append(kxspec(phi) / kx0)
         times.append(float(state.time))
 
@@ -92,7 +91,8 @@ def test_rosenbluth_hinton_residual():
     )
 
 
-def test_cbc_linear_itg_peak_growth():
+@pytest.mark.parametrize("backend, use_z2z, mixed_precision", ALL_BACKENDS)
+def test_cbc_linear_itg_peak_growth(backend, use_z2z, mixed_precision):
     """CBC linear ITG at kt=0.5: growth rate matches GKW benchmark.
 
     Uses GKW benchmark parameters (gkw_ref/benchmarks/cyclone/linear):
@@ -101,22 +101,54 @@ def test_cbc_linear_itg_peak_growth():
     GKW reference (exact, identical params): gamma=0.1785 at kt=0.5.
     """
     geom = compute_geometry(
-        q=1.4, shat=0.78, eps=0.19,
-        ns=144, nvpar=64, nmu=16, vpar_max=3.0,
-        nkx=1, nky=1, nperiod=5,
-        kxmax=0.5, signB=1.0, Rref=1.0, krhomax=0.5,
+        q=1.4,
+        shat=0.78,
+        eps=0.19,
+        ns=144,
+        nvpar=64,
+        nmu=16,
+        vpar_max=3.0,
+        nkx=1,
+        nky=1,
+        nperiod=5,
+        kxmax=0.5,
+        signB=1.0,
+        Rref=1.0,
+        krhomax=0.5,
         geom_type="s-alpha",
     )
     params = GKParams(
-        dt=0.003, naverage=100, non_linear=False, adaptive_dt=False,
+        dt=0.003,
+        naverage=100,
+        non_linear=False,
+        adaptive_dt=False,
         adiabatic_electrons=True,
-        disp_par=1.0, disp_vp=0.0, disp_x=0.0, disp_y=0.0,
-        finit="cosine2", amp_init=1e-4,
-        mas=1.0, signz=1.0, tmp=1.0, de=1.0, vthrat=1.0,
-        rlt=6.9, rln=2.2, dgrid=1.0, tgrid=1.0,
-        sgr_dist=float(geom["sgr_dist"]), dvp=float(geom["dvp"]),
-        kxmax=0.5, kymax=0.5, norm_eps=1e-14, drive_scale=1.0,
-        idisp=2, cfl_safety=0.95,
+        disp_par=1.0,
+        disp_vp=0.0,
+        disp_x=0.0,
+        disp_y=0.0,
+        finit="cosine2",
+        amp_init=1e-4,
+        mas=1.0,
+        signz=1.0,
+        tmp=1.0,
+        de=1.0,
+        vthrat=1.0,
+        rlt=6.9,
+        rln=2.2,
+        dgrid=1.0,
+        tgrid=1.0,
+        sgr_dist=float(geom["sgr_dist"]),
+        dvp=float(geom["dvp"]),
+        kxmax=0.5,
+        kymax=0.5,
+        norm_eps=1e-14,
+        drive_scale=1.0,
+        idisp=2,
+        cfl_safety=0.95,
+        mixed_precision=mixed_precision,
+        backend=backend,
+        use_z2z=use_z2z,
     )
 
     df = init_f(geom, finit="cosine2", amp_init_real=1e-4)

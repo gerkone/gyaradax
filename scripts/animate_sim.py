@@ -1,19 +1,16 @@
-"""Export gyrokinetic snapshots as a self-contained HTML torus animation.
+"""Export gyrokinetic snapshots as an animation.
 
 Usage:
-    python scripts/animate_sim.py output_dir/ -o torus.html
     python scripts/animate_sim.py output_dir/ -o torus.mp4 --fps 12
 
 Reads step_*.npz snapshots. Converts spectral phi/df to real space using
 the same ifftshift+ifftn convention as warm_restart_eval.ipynb.
 
-HTML output: self-contained Three.js viewer (opens in any browser).
 MP4/GIF output: matplotlib 3D rendering.
 """
 
 import argparse
 import glob
-import json
 import os
 import sys
 
@@ -47,7 +44,7 @@ def spectral_to_real(field_spectral):
     return np.fft.ifftn(shifted, axes=(-2, -1), norm="forward").real
 
 
-def extract_frames(snapshots, quantity="phi"):
+def extract_frames(snapshots, dry_run=False):
     """Extract per-frame 2D real-space data from snapshots.
 
     Returns: list of (n_theta, n_zeta) arrays, list of times,
@@ -57,6 +54,9 @@ def extract_frames(snapshots, quantity="phi"):
     frames_s_kx_ky = []  # velocity-averaged |df|(s, kx, ky)
     times = []
     info = {}
+
+    if dry_run:
+        snapshots = [snapshots[-1]]
 
     for snap in snapshots:
         t = float(snap["time"])
@@ -82,232 +82,15 @@ def extract_frames(snapshots, quantity="phi"):
     return frames_phi_real, frames_s_kx_ky, times, info
 
 
-def generate_html(snapshots, output_path, R0=3.0, a=1.0):
-    frames_phi, frames_skk, times, info = extract_frames(snapshots)
-    ns, nkx, nky = info["ns"], info["nkx"], info["nky"]
-
-    # real-space grid size = nkx x nky (from FFT)
-    nx, ny = frames_phi[0].shape
-
-    vmax = max(np.max(np.abs(f)) for f in frames_phi)
-    if vmax < 1e-30:
-        vmax = 1.0
-
-    # also compute vmax for the s-kx-ky panels
-    vmax_skk = max(np.max(f) for f in frames_skk)
-    if vmax_skk < 1e-30:
-        vmax_skk = 1.0
-
-    # serialize frames as flat lists for JS
-    phi_flat = [f.ravel().tolist() for f in frames_phi]
-    # for the info panels: take central s-slice of df, and ky-sum for s-kx view
-    skx_flat = [np.sum(f, axis=-1).ravel().tolist() for f in frames_skk]  # (ns, nkx) per frame
-    sky_flat = [np.sum(f, axis=-2).ravel().tolist() for f in frames_skk]  # (ns, nky) per frame
-
-    html = f"""<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<title>Gyrokinetic Torus</title>
-<style>
-  * {{ margin: 0; padding: 0; box-sizing: border-box; }}
-  body {{ background: #ffffff; overflow: hidden; font-family: -apple-system, system-ui, sans-serif; color: #333; }}
-  #main {{ display: flex; width: 100vw; height: 100vh; }}
-  #torus-panel {{ flex: 1; position: relative; }}
-  #side-panel {{
-    width: 320px; background: #f8f9fa; border-left: 1px solid #dee2e6;
-    display: flex; flex-direction: column; padding: 12px; gap: 8px; overflow-y: auto;
-  }}
-  #side-panel h3 {{ font-size: 13px; font-weight: 600; color: #555; margin: 4px 0 2px; }}
-  #side-panel canvas {{ width: 100%; border-radius: 4px; border: 1px solid #dee2e6; }}
-  #controls {{
-    position: absolute; bottom: 16px; left: 50%; transform: translateX(-50%);
-    display: flex; align-items: center; gap: 10px; z-index: 10;
-    background: rgba(255,255,255,0.9); padding: 8px 16px; border-radius: 8px;
-    box-shadow: 0 2px 8px rgba(0,0,0,0.1); backdrop-filter: blur(6px);
-  }}
-  #controls button {{
-    background: #2563eb; color: white; border: none; padding: 5px 14px;
-    border-radius: 5px; cursor: pointer; font-size: 12px;
-  }}
-  #controls button:hover {{ background: #1d4ed8; }}
-  #slider {{ width: 240px; accent-color: #2563eb; }}
-  #time-label {{ font-size: 12px; min-width: 70px; color: #555; }}
-  .info-row {{ display: flex; justify-content: space-between; font-size: 11px; color: #777; }}
-</style>
-</head>
-<body>
-<div id="main">
-  <div id="torus-panel">
-    <div id="controls">
-      <button id="play-btn" onclick="togglePlay()">Play</button>
-      <input type="range" id="slider" min="0" max="{len(times)-1}" value="0" oninput="setFrame(+this.value)">
-      <span id="time-label">t = {times[0]:.2f}</span>
-    </div>
-  </div>
-  <div id="side-panel">
-    <div class="info-row"><span>grid: {ns}s x {nkx}kx x {nky}ky</span><span id="frame-info">0/{len(times)}</span></div>
-    <h3>|df|(s, kx) summed over ky</h3>
-    <canvas id="c-skx" width="{nkx}" height="{ns}"></canvas>
-    <h3>|df|(s, ky) summed over kx</h3>
-    <canvas id="c-sky" width="{nky}" height="{ns}"></canvas>
-    <h3>phi real-space (x, y)</h3>
-    <canvas id="c-phi" width="{nx}" height="{ny}"></canvas>
-  </div>
-</div>
-
-<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
-<script>
-const R0={R0}, a={a}, NX={nx}, NY={ny}, NS={ns}, NKX={nkx}, NKY={nky};
-const VMAX={vmax}, VMAX_SKK={vmax_skk};
-const TIMES={json.dumps([round(t,4) for t in times])};
-const PHI_FRAMES={json.dumps(phi_flat)};
-const SKX_FRAMES={json.dumps(skx_flat)};
-const SKY_FRAMES={json.dumps(sky_flat)};
-const NFRAMES=TIMES.length;
-
-let scene, camera, renderer, mesh, frameIdx=0, playing=false, playInterval;
-
-function colormap(v, vmax) {{
-  let t = (v/vmax+1)*0.5;
-  t = Math.max(0, Math.min(1, t));
-  if (t<0.5) {{ let s=t*2; return [0.15+s*0.85, 0.3+s*0.7, 0.8+s*0.2]; }}
-  else {{ let s=(t-0.5)*2; return [1, 1-s*0.6, 1-s*0.85]; }}
-}}
-
-function viridis(t) {{
-  t = Math.max(0, Math.min(1, t));
-  let r = 0.267+t*(0.329+t*(-1.426+t*(3.024+t*(-2.392+t*0.785))));
-  let g = 0.004+t*(1.314+t*(-0.489+t*(-0.477+t*(0.654-t*0.232))));
-  let b = 0.329+t*(1.527+t*(-3.866+t*(5.669+t*(-3.727+t*0.906))));
-  return [Math.max(0,Math.min(1,r)), Math.max(0,Math.min(1,g)), Math.max(0,Math.min(1,b))];
-}}
-
-function drawHeatmap(canvasId, data, rows, cols, vmax, useDiverging) {{
-  const c = document.getElementById(canvasId);
-  c.width = cols; c.height = rows;
-  c.style.height = (rows*3)+'px'; c.style.imageRendering = 'pixelated';
-  const ctx = c.getContext('2d');
-  const img = ctx.createImageData(cols, rows);
-  for (let r=0; r<rows; r++) {{
-    for (let c2=0; c2<cols; c2++) {{
-      const v = data[r*cols+c2];
-      let rgb;
-      if (useDiverging) rgb = colormap(v, vmax);
-      else rgb = viridis(v/vmax);
-      const i = (r*cols+c2)*4;
-      img.data[i]=rgb[0]*255; img.data[i+1]=rgb[1]*255; img.data[i+2]=rgb[2]*255; img.data[i+3]=255;
-    }}
-  }}
-  ctx.putImageData(img, 0, 0);
-}}
-
-function init() {{
-  const container = document.getElementById('torus-panel');
-  const W = container.clientWidth, H = container.clientHeight;
-
-  scene = new THREE.Scene();
-  scene.background = new THREE.Color(0xffffff);
-
-  camera = new THREE.PerspectiveCamera(40, W/H, 0.1, 100);
-  // flat side view: look from above-ish, no spin
-  camera.position.set(0, R0*2.5, R0*1.2);
-  camera.lookAt(0, 0, 0);
-
-  renderer = new THREE.WebGLRenderer({{ antialias: true }});
-  renderer.setSize(W, H);
-  renderer.setPixelRatio(window.devicePixelRatio);
-  container.insertBefore(renderer.domElement, container.firstChild);
-
-  const ambient = new THREE.AmbientLight(0xffffff, 0.6);
-  scene.add(ambient);
-  const dir = new THREE.DirectionalLight(0xffffff, 0.8);
-  dir.position.set(R0*2, R0*3, R0*2);
-  scene.add(dir);
-  const dir2 = new THREE.DirectionalLight(0xaabbdd, 0.3);
-  dir2.position.set(-R0*2, -R0, R0);
-  scene.add(dir2);
-
-  // torus lies flat: rotate 90 degrees around X
-  const geom = new THREE.TorusGeometry(R0, a, NX, NY);
-  const colors = new Float32Array(geom.attributes.position.count*3);
-  geom.setAttribute('color', new THREE.BufferAttribute(colors, 3));
-  const mat = new THREE.MeshPhongMaterial({{ vertexColors: true, shininess: 30, specular: 0x111111 }});
-  mesh = new THREE.Mesh(geom, mat);
-  mesh.rotation.x = Math.PI / 2;  // lie flat
-  scene.add(mesh);
-
-  updateFrame(0);
-  render();
-
-  window.addEventListener('resize', () => {{
-    const W2 = container.clientWidth, H2 = container.clientHeight;
-    camera.aspect = W2/H2;
-    camera.updateProjectionMatrix();
-    renderer.setSize(W2, H2);
-  }});
-}}
-
-function updateFrame(fi) {{
-  frameIdx = fi;
-  const phiData = PHI_FRAMES[fi];
-  const skxData = SKX_FRAMES[fi];
-  const skyData = SKY_FRAMES[fi];
-
-  // update torus colors
-  const colors = mesh.geometry.attributes.color;
-  const pos = mesh.geometry.attributes.position;
-  const n = pos.count;
-  for (let i=0; i<n; i++) {{
-    const x=pos.getX(i), y=pos.getY(i), z=pos.getZ(i);
-    const zeta = Math.atan2(y, x);
-    const Rxy = Math.sqrt(x*x+y*y);
-    const theta = Math.atan2(z, Rxy-R0);
-    let it = Math.round(((theta/(2*Math.PI))%1+1)%1*NX)%NX;
-    let iz = Math.round(((zeta/(2*Math.PI))%1+1)%1*NY)%NY;
-    const val = phiData[it*NY+iz];
-    const [r,g,b] = colormap(val, VMAX);
-    colors.setXYZ(i, r, g, b);
-  }}
-  colors.needsUpdate = true;
-
-  // update side panels
-  drawHeatmap('c-skx', skxData, NS, NKX, VMAX_SKK, false);
-  drawHeatmap('c-sky', skyData, NS, NKY, VMAX_SKK, false);
-  drawHeatmap('c-phi', phiData, NX, NY, VMAX, true);
-
-  document.getElementById('time-label').textContent = 't = '+TIMES[fi].toFixed(2);
-  document.getElementById('slider').value = fi;
-  document.getElementById('frame-info').textContent = (fi+1)+'/'+NFRAMES;
-}}
-
-function render() {{ requestAnimationFrame(render); renderer.render(scene, camera); }}
-function setFrame(i) {{ updateFrame(parseInt(i)); }}
-function togglePlay() {{
-  playing = !playing;
-  document.getElementById('play-btn').textContent = playing ? 'Pause' : 'Play';
-  if (playing) playInterval = setInterval(()=>{{ updateFrame((frameIdx+1)%NFRAMES); }}, 120);
-  else clearInterval(playInterval);
-}}
-
-init();
-</script>
-</body>
-</html>"""
-
-    with open(output_path, "w") as f:
-        f.write(html)
-    size_mb = os.path.getsize(output_path) / 1e6
-    print(f"Saved {output_path} ({size_mb:.1f} MB, {len(times)} frames)")
-
-
-def generate_mp4(snapshots, output_path, R0=3.0, a=1.0, fps=12, dpi=150, dry_run=False):
+def generate_mp4(
+    snapshots, output_path, R0=3.0, a=1.0, fps=12, dpi=150, dry_run=False, diag_dir="."
+):
     """Render to mp4/gif using matplotlib."""
     import matplotlib.pyplot as plt
     import matplotlib.animation as animation
     from matplotlib.colors import Normalize, LightSource
 
-    frames_phi, frames_skk, times, info = extract_frames(snapshots)
+    frames_phi, frames_skk, times, info = extract_frames(snapshots, dry_run=dry_run)
     nx, ny = frames_phi[0].shape
     ns, nkx, nky = info["ns"], info["nkx"], info["nky"]
 
@@ -318,46 +101,100 @@ def generate_mp4(snapshots, output_path, R0=3.0, a=1.0, fps=12, dpi=150, dry_run
     if vmax_skk < 1e-30:
         vmax_skk = 1.0
 
-    # torus mesh — higher resolution for smooth rendering
-    n_t, n_z = max(nx, 80), max(ny, 160)
+    # load diagnostics from the snapshot directory
+    # diag_dir is passed as a parameter
+    eflux_trace = growth_all = kyspec_all = kxspec_all = diag_times = None
+    try:
+        fd = np.load(os.path.join(diag_dir, "fluxes.npz"))
+        eflux_trace = fd["fluxes"][:, 1]
+        diag_times = fd.get("time", np.load(os.path.join(diag_dir, "growth.npz"))["time"])
+    except (FileNotFoundError, KeyError):
+        pass
+    try:
+        growth_all = np.load(os.path.join(diag_dir, "growth.npz"))["growth"]
+    except (FileNotFoundError, KeyError):
+        pass
+    try:
+        kyspec_all = np.load(os.path.join(diag_dir, "kyspec.npz"))["ky_spec"]
+        kxspec_all = np.load(os.path.join(diag_dir, "kxspec.npz"))["kx_spec"]
+    except (FileNotFoundError, KeyError):
+        pass
+
+    if eflux_trace is None:
+        eflux_trace = np.array([float(np.sum(np.abs(s["phi"]) ** 2)) for s in snapshots])
+        diag_times = np.array(times)
+    if kyspec_all is None:
+        kyspec_all = np.array([np.sum(np.abs(s["phi"]) ** 2, axis=(0, 1)) for s in snapshots])
+        kxspec_all = np.array([np.sum(np.abs(s["phi"]) ** 2, axis=(0, 2)) for s in snapshots])
+    if growth_all is None:
+        growth_all = np.zeros((len(times), nky))
+
+    # torus mesh — seamless: use endpoint=False, then append first column
+    n_t, n_z = max(nx, 80), max(ny, 200)
     theta = np.linspace(0, 2 * np.pi, n_t, endpoint=False)
     zeta = np.linspace(0, 2 * np.pi, n_z, endpoint=False)
-    T, Z = np.meshgrid(theta, zeta, indexing="ij")
-    R = R0 + a * np.cos(T)
-    X = R * np.cos(Z)
-    Y = R * np.sin(Z)
+    # append first point to close the surface without a seam
+    theta_c = np.append(theta, theta[0] + 2 * np.pi)
+    zeta_c = np.append(zeta, zeta[0] + 2 * np.pi)
+    T, Z = np.meshgrid(theta_c, zeta_c, indexing="ij")
+    Rm = R0 + a * np.cos(T)
+    X = Rm * np.cos(Z)
+    Y = Rm * np.sin(Z)
     Zc = a * np.sin(T)
 
-    # interpolate phi frames to torus resolution
     from scipy.ndimage import zoom
 
     frames_torus = []
     for f in frames_phi:
-        zf = zoom(f, (n_t / f.shape[0], n_z / f.shape[1]), order=1)
+        zf = zoom(f, (n_t / f.shape[0], n_z / f.shape[1]), order=1, mode="wrap")
+        # pad to close: append first row and column
+        zf = np.pad(zf, ((0, 1), (0, 1)), mode="wrap")
         frames_torus.append(zf)
 
-    fig = plt.figure(figsize=(14, 5), facecolor="white")
-    ax3d = fig.add_axes([-0.18, -0.1, 0.85, 1.2], projection="3d", facecolor="white")
-    gs_r = fig.add_gridspec(
-        3,
+    # --- LAYOUT ---
+    # Left: torus (MASSIVE, fills most of figure), two small 2d projections (bottom-left)
+    # Right: heat flux, ky+kx spectra (large), phi(x,y) (compact)
+    proj_h = 0.30  # height of projection strip
+    fig = plt.figure(figsize=(16, 8), facecolor="white")
+
+    # torus — MASSIVE: nearly full figure, shifted left so right side is for diagnostics
+    ax3d = fig.add_axes([-0.25, 0.20, 0.95, 0.95], projection="3d", facecolor="white")
+
+    # 2d projections: small bottom-left strip
+    gs_proj = fig.add_gridspec(
+        1,
         2,
-        height_ratios=[1, 1, 1.1],
-        hspace=0.2,
-        wspace=0.06,
-        left=0.50,
-        right=0.96,
-        top=0.93,
-        bottom=0.02,
+        wspace=0.08,
+        left=0.03,
+        right=0.42,
+        top=proj_h + 0.04,
+        bottom=0.04,
     )
-    ax_skx = fig.add_subplot(gs_r[0:2, 0])
-    ax_sky = fig.add_subplot(gs_r[0:2, 1])
-    ax_phi = fig.add_subplot(gs_r[2, :])
+    ax_skx = fig.add_subplot(gs_proj[0])
+    ax_sky = fig.add_subplot(gs_proj[1])
+
+    # right column: flux (tall), spectra (tall), phi(x,y) (compact, same height as projections)
+    gs_right = fig.add_gridspec(
+        3,
+        1,
+        height_ratios=[0.5, 0.7, 0.8],
+        hspace=0.40,
+        left=0.54,
+        right=0.97,
+        top=0.95,
+        bottom=0.04,
+    )
+    ax_flux = fig.add_subplot(gs_right[0])
+    gs_spec = gs_right[1].subgridspec(1, 2, wspace=0.35)
+    ax_kyspec = fig.add_subplot(gs_spec[0])
+    ax_kxspec = fig.add_subplot(gs_spec[1])
+    ax_phi2d = fig.add_subplot(gs_right[2])
 
     norm_phi = Normalize(-vmax_phi, vmax_phi)
-    _ = Normalize(0, vmax_skk)  # norm_df reserved for future use
     lim = R0 + a
     z_lim = a
 
+    # 2d projection panels — RdBu_r colormap
     im_skx = ax_skx.imshow(
         np.zeros((ns, nkx)),
         aspect="auto",
@@ -376,7 +213,36 @@ def generate_mp4(snapshots, output_path, R0=3.0, a=1.0, fps=12, dpi=150, dry_run
         origin="lower",
         interpolation="bilinear",
     )
-    im_phi = ax_phi.imshow(
+    for ax, title in [(ax_skx, r"$|\delta f|\;(s, k_x)$"), (ax_sky, r"$|\delta f|\;(s, k_y)$")]:
+        ax.set_title(title, fontsize=14, pad=3)
+        ax.tick_params(
+            axis="both", which="both", length=0, labelsize=0, labelbottom=False, labelleft=False
+        )
+
+    # heat flux — axes grow with time
+    (flux_line,) = ax_flux.plot([], [], "-", color="#24B6AD", lw=1.2)
+    flux_dot = ax_flux.plot([], [], "o", color="#EA4335", ms=5, zorder=5)[0]
+    ax_flux.set_ylabel("heat flux", fontsize=13)
+    ax_flux.set_title("heat flux", fontsize=14, pad=3)
+    ax_flux.grid(True, alpha=0.3)
+    ax_flux.tick_params(labelsize=11)
+
+    # ky spectrum — axes grow with time
+    (kyspec_line,) = ax_kyspec.semilogy([], [], "o-", color="#9B51E0", ms=2, lw=1)
+    ax_kyspec.set_xlim(0, kyspec_all.shape[1] - 1)
+    ax_kyspec.set_title(r"$k_y$ spec", fontsize=14, pad=3)
+    ax_kyspec.grid(True, which="both", alpha=0.3)
+    ax_kyspec.tick_params(labelsize=11)
+
+    # kx spectrum — axes grow with time
+    (kxspec_line,) = ax_kxspec.semilogy([], [], "o-", color="#9B51E0", ms=2, lw=1)
+    ax_kxspec.set_xlim(0, kxspec_all.shape[1] - 1)
+    ax_kxspec.set_title(r"$k_x$ spec", fontsize=14, pad=3)
+    ax_kxspec.grid(True, which="both", alpha=0.3)
+    ax_kxspec.tick_params(labelsize=11)
+
+    # phi(x,y) — plasma, tall
+    im_phi2d = ax_phi2d.imshow(
         np.zeros((ny, nx)),
         aspect="auto",
         cmap="plasma",
@@ -385,34 +251,21 @@ def generate_mp4(snapshots, output_path, R0=3.0, a=1.0, fps=12, dpi=150, dry_run
         origin="lower",
         interpolation="bilinear",
     )
-
-    for ax, title in [
-        (ax_skx, r"$|\delta f|\;(s,\,k_x)$"),
-        (ax_sky, r"$|\delta f|\;(s,\,k_y)$"),
-        (ax_phi, r"$\phi\;(x,\,y)$"),
-    ]:
-        ax.set_title(title, fontsize=11, pad=3)
-        ax.tick_params(
-            axis="both", which="both", length=0, labelsize=0, labelbottom=False, labelleft=False
-        )
-
-    # build torus with a wedge cutout (remove 60 degrees to show cross-section)
-    cutout_start, cutout_end = 0, int(n_z * 0.83)  # keep 300 of 360 degrees
-    X_cut = X[:, cutout_start:cutout_end]
-    Y_cut = Y[:, cutout_start:cutout_end]
-    Zc_cut = Zc[:, cutout_start:cutout_end]
+    ax_phi2d.set_title(r"$\phi(x, y)$", fontsize=14, pad=3)
+    ax_phi2d.tick_params(
+        axis="both", which="both", length=0, labelsize=0, labelbottom=False, labelleft=False
+    )
 
     def draw(fi):
         ax3d.clear()
 
-        # torus with cutout
-        torus_data = frames_torus[fi][:, cutout_start:cutout_end]
-        colors = plt.cm.plasma(norm_phi(torus_data))
+        torus_data = frames_torus[fi]
+        torus_colors = plt.cm.plasma(norm_phi(torus_data))
         ax3d.plot_surface(
-            X_cut,
-            Y_cut,
-            Zc_cut,
-            facecolors=colors,
+            X,
+            Y,
+            Zc,
+            facecolors=torus_colors,
             shade=True,
             lightsource=LightSource(azdeg=315, altdeg=50),
             rstride=1,
@@ -420,56 +273,60 @@ def generate_mp4(snapshots, output_path, R0=3.0, a=1.0, fps=12, dpi=150, dry_run
             antialiased=False,
             alpha=0.95,
         )
-
-        # cross-section disk at the cutout edge
-        theta_cs = np.linspace(0, 2 * np.pi, n_t)
-        zeta_cut = 2 * np.pi * cutout_end / n_z
-        r_cs = a * np.cos(theta_cs)
-        z_cs = a * np.sin(theta_cs)
-        x_cs = (R0 + r_cs) * np.cos(zeta_cut)
-        y_cs = (R0 + r_cs) * np.sin(zeta_cut)
-
-        # fill cross-section with phi color
-        phi_cs = frames_torus[fi][:, cutout_end % n_z]
-        cs_colors = plt.cm.plasma(norm_phi(phi_cs))
-        for j in range(len(theta_cs) - 1):
-            ax3d.plot(
-                [x_cs[j], x_cs[j + 1]],
-                [y_cs[j], y_cs[j + 1]],
-                [z_cs[j], z_cs[j + 1]],
-                color=cs_colors[j % len(cs_colors)],
-                lw=2.5,
-            )
-
         ax3d.set_xlim(-lim, lim)
         ax3d.set_ylim(-lim, lim)
         ax3d.set_zlim(-z_lim, z_lim)
         ax3d.set_box_aspect([1, 1, a / lim])
-        ax3d.view_init(elev=30, azim=20)
-        ax3d.dist = 5.0  # zoom in (default ~10)
+        ax3d.view_init(elev=25, azim=20 + fi * 0.5)
+        ax3d.dist = 4.2
         ax3d.axis("off")
+
         fig.texts.clear()
         fig.text(
             0.02,
-            0.93,
-            f"t = {times[fi]:.2f}",
-            fontsize=13,
+            0.97,
+            f"t = {times[fi]:.1f}",
+            fontsize=20,
             fontfamily="monospace",
-            color="#444444",
-            bbox=dict(facecolor="#eeeeee", edgecolor="none", pad=3, alpha=0.8),
+            fontweight="bold",
+            color="#333",
+            bbox=dict(facecolor="#eeeeee", edgecolor="none", pad=4, alpha=0.85),
         )
 
+        # 2d projections
         im_skx.set_data(np.sum(frames_skk[fi], axis=-1))
         im_sky.set_data(np.sum(frames_skk[fi], axis=-2))
-        im_phi.set_data(frames_phi[fi].T)
+
+        # diagnostics — animated axes that grow with data
+        di = np.argmin(np.abs(diag_times - times[fi]))
+        mask = diag_times <= times[fi]
+
+        # flux: xlim and ylim grow
+        flux_line.set_data(diag_times[mask], eflux_trace[mask])
+        flux_dot.set_data([diag_times[di]], [eflux_trace[di]])
+        t_now = float(diag_times[di])
+        ax_flux.set_xlim(float(diag_times[0]), max(t_now * 1.05, 1.0))
+        ef_now = float(np.max(eflux_trace[mask])) if mask.any() else 1.0
+        ax_flux.set_ylim(0, max(ef_now * 1.3, 1e-6))
+
+        # spectra: ylim adapts to current frame
+        ky_now = kyspec_all[di]
+        kx_now = kxspec_all[di]
+        kyspec_line.set_data(np.arange(len(ky_now)), ky_now)
+        kxspec_line.set_data(np.arange(len(kx_now)), kx_now)
+        ky_max_now = max(float(np.max(ky_now)), 1e-30)
+        kx_max_now = max(float(np.max(kx_now)), 1e-30)
+        ax_kyspec.set_ylim(ky_max_now * 1e-5, ky_max_now * 3)
+        ax_kxspec.set_ylim(kx_max_now * 1e-5, kx_max_now * 3)
+
+        im_phi2d.set_data(frames_phi[fi].T)
         return []
 
     if dry_run:
         draw(len(times) - 1)
-        out_png = output_path.rsplit(".", 1)[0] + "_preview.png"
+        out_png = os.path.join(os.path.dirname(output_path) or ".", "torus_preview.png")
         fig.savefig(out_png, dpi=dpi, facecolor="white")
         print(f"Dry run: saved {out_png}")
-        plt.show()
         plt.close(fig)
         return
 
@@ -492,20 +349,321 @@ def generate_mp4(snapshots, output_path, R0=3.0, a=1.0, fps=12, dpi=150, dry_run
     plt.close(fig)
 
 
+def generate_html_viewer(snapshots, output_path, R0=3.0, a=1.0, diag_dir=".", dry_run=False):
+    """Generate a self-contained HTML viewer with Three.js torus and SVG diagnostics."""
+    import json as _json
+
+    frames_phi, frames_skk, times, info = extract_frames(snapshots, dry_run=dry_run)
+    ns, nkx, nky = info["ns"], info["nkx"], info["nky"]
+    nx, ny = frames_phi[0].shape
+
+    vmax = max(np.max(np.abs(f)) for f in frames_phi)
+    if vmax < 1e-30:
+        vmax = 1.0
+
+    # load diagnostics
+    eflux_trace = kyspec_all = kxspec_all = diag_times = None
+    try:
+        fd = np.load(os.path.join(diag_dir, "fluxes.npz"))
+        eflux_trace = fd["fluxes"][:, 1].tolist()
+        diag_times = fd.get("time", np.load(os.path.join(diag_dir, "growth.npz"))["time"]).tolist()
+    except (FileNotFoundError, KeyError):
+        pass
+    try:
+        kyspec_all = np.load(os.path.join(diag_dir, "kyspec.npz"))["ky_spec"].tolist()
+        kxspec_all = np.load(os.path.join(diag_dir, "kxspec.npz"))["kx_spec"].tolist()
+    except (FileNotFoundError, KeyError):
+        pass
+
+    if eflux_trace is None:
+        eflux_trace = [float(np.sum(np.abs(s["phi"]) ** 2)) for s in snapshots]
+        diag_times = times
+    if kyspec_all is None:
+        kyspec_all = [np.sum(np.abs(s["phi"]) ** 2, axis=(0, 1)).tolist() for s in snapshots]
+        kxspec_all = [np.sum(np.abs(s["phi"]) ** 2, axis=(0, 2)).tolist() for s in snapshots]
+
+    # serialize frames as flat float lists
+    phi_flat = [f.ravel().tolist() for f in frames_phi]
+
+    html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Gyrokinetic Torus Viewer</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  * {{ margin:0; padding:0; box-sizing:border-box; }}
+  body {{ background:#0d0d1a; color:#ccc; font-family:'SF Mono','Fira Code',monospace; font-size:16px; overflow-x:hidden; }}
+  #app {{ display:grid; grid-template-columns:3fr 2fr; grid-template-rows:1fr; height:70vh; max-width:1400px; margin:0 auto; gap:0; }}
+  #torus-panel {{ position:relative; background:#0d0d1a; min-height:0; }}
+  #side {{ background:#111122; border-left:1px solid #222; display:flex; flex-direction:column; padding:12px; gap:6px; overflow:hidden; }}
+  #side > div {{ display:flex; flex-direction:column; min-height:0; }}
+  #side > div:first-child {{ flex:0 0 auto; }}
+  #side > div:nth-child(2) {{ flex:3 1 0; }}
+  #side > div:nth-child(3) {{ flex:2 1 0; }}
+  #side > div:nth-child(4) {{ flex:2 1 0; }}
+  #side > div:last-child {{ flex:3 1 0; }}
+  .panel-title {{ color:#778; font-size:13px; text-transform:uppercase; letter-spacing:1.5px; margin-bottom:6px; }}
+  .stat {{ color:#9fcefd; font-size:20px; font-weight:600; }}
+  .stat-label {{ color:#556; font-size:12px; }}
+  canvas.diag {{ width:100%; flex:1; min-height:0; border-radius:4px; background:#0a0a16; border:1px solid #1a1a2e; }}
+  canvas.phi2d {{ width:100%; flex:1; min-height:0; border-radius:4px; image-rendering:pixelated; border:1px solid #1a1a2e; }}
+  #controls {{ position:absolute; bottom:16px; left:50%; transform:translateX(-50%); width:80%; display:flex; align-items:center; gap:10px; z-index:10; background:rgba(13,13,26,0.9); padding:8px 18px; border-radius:8px; border:1px solid #222; backdrop-filter:blur(8px); }}
+  #controls button {{ background:#1a1a2e; color:#9fcefd; border:1px solid #334; padding:5px 16px; border-radius:4px; cursor:pointer; font-family:inherit; font-size:13px; }}
+  #controls button:hover {{ background:#222244; border-color:#9fcefd; }}
+  #slider {{ flex:1; accent-color:#9fcefd; height:4px; }}
+  #time-label {{ color:#9fcefd; font-size:17px; min-width:80px; font-weight:600; }}
+  .grid-info {{ color:#556; font-size:14px; }}
+  @media (max-width:800px) {{
+    #app {{ grid-template-columns:1fr; grid-template-rows:50vh 1fr; }}
+    #side {{ border-left:none; border-top:1px solid #222; }}
+  }}
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="torus-panel">
+    <div id="controls">
+      <button id="play-btn" onclick="togglePlay()">&#9654;</button>
+      <input type="range" id="slider" min="0" max="{len(times)-1}" value="{len(times)-1}" oninput="setFrame(+this.value)">
+      <span id="time-label">t = {times[-1]:.1f}</span>
+    </div>
+  </div>
+  <div id="side">
+    <div>
+      <div class="panel-title">simulation</div>
+      <span class="grid-info">{ns}s &times; {nkx}kx &times; {nky}ky &nbsp; | &nbsp; <span id="frame-info">{len(times)}/{len(times)}</span></span>
+    </div>
+    <div>
+      <div class="panel-title">heat flux</div>
+      <canvas id="c-flux" class="diag"></canvas>
+    </div>
+    <div>
+      <div class="panel-title">k<sub>y</sub> spectrum</div>
+      <canvas id="c-ky" class="diag"></canvas>
+    </div>
+    <div>
+      <div class="panel-title">k<sub>x</sub> spectrum</div>
+      <canvas id="c-kx" class="diag"></canvas>
+    </div>
+    <div>
+      <div class="panel-title">&phi;(x, y)</div>
+      <canvas id="c-phi" class="phi2d" width="{nx}" height="{ny}"></canvas>
+    </div>
+  </div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+const R0={R0}, AA={a}, NX={nx}, NY={ny};
+const VMAX={vmax};
+const TIMES={_json.dumps([round(t,3) for t in times])};
+const PHI={_json.dumps(phi_flat)};
+const FLUX_T={_json.dumps([round(t,3) for t in diag_times])};
+const FLUX={_json.dumps([round(v,6) for v in eflux_trace])};
+const KYSPEC={_json.dumps(kyspec_all)};
+const KXSPEC={_json.dumps(kxspec_all)};
+const NF=TIMES.length;
+
+let scene,camera,renderer,mesh,frameIdx=NF-1,playing=false,playInterval;
+
+function plasma(v,vmax) {{
+  let t=Math.max(0,Math.min(1,(v/vmax+1)*0.5));
+  // dark blue -> white -> dark red
+  let r,g,b;
+  if(t<0.5){{ let s=t*2; r=s*0.3; g=s*0.3+0.05; b=0.15+s*0.7; }}
+  else{{ let s=(t-0.5)*2; r=0.3+s*0.7; g=0.35-s*0.3; b=0.85-s*0.7; }}
+  return [r,g,b];
+}}
+
+function drawLine(canvasId,data,highlight,isLog,rawVal) {{
+  let c=document.getElementById(canvasId);
+  let W=c.width=c.clientWidth*2, H=c.height=c.clientHeight*2;
+  let ctx=c.getContext('2d');
+  ctx.clearRect(0,0,W,H);
+  if(!data||data.length<2) return;
+
+  let vals=isLog?data.map(v=>Math.log10(Math.max(v,1e-30))):data;
+  let mn=Math.min(...vals), mx=Math.max(...vals);
+  if(mx-mn<1e-20) mx=mn+1;
+
+  ctx.beginPath();
+  for(let i=0;i<vals.length;i++){{
+    let x=i/(vals.length-1)*W;
+    let y=H-((vals[i]-mn)/(mx-mn))*H*0.85-H*0.05;
+    i===0?ctx.moveTo(x,y):ctx.lineTo(x,y);
+  }}
+  ctx.strokeStyle='rgba(159,206,253,0.6)';
+  ctx.lineWidth=1.5;
+  ctx.stroke();
+
+  if(highlight>=0&&highlight<vals.length){{
+    let x=highlight/(vals.length-1)*W;
+    let y=H-((vals[highlight]-mn)/(mx-mn))*H*0.85-H*0.05;
+    ctx.beginPath(); ctx.arc(x,y,7,0,Math.PI*2);
+    ctx.fillStyle='#c27721'; ctx.fill();
+    if(rawVal!==undefined){{
+      let label=rawVal<10?rawVal.toFixed(2):rawVal.toFixed(1);
+      ctx.font=(H*0.12)+'px monospace';
+      ctx.fillStyle='rgba(159,206,253,0.8)';
+      ctx.textAlign=x>W*0.75?'right':'left';
+      ctx.fillText(label,x>W*0.75?x-12:x+12,y+4);
+    }}
+  }}
+}}
+
+function drawSpectrum(canvasId,spec,isLog) {{
+  if(!spec) return;
+  let c=document.getElementById(canvasId);
+  let W=c.width=c.clientWidth*2, H=c.height=c.clientHeight*2;
+  let ctx=c.getContext('2d');
+  ctx.clearRect(0,0,W,H);
+
+  let vals=isLog?spec.map(v=>Math.log10(Math.max(v,1e-30))):spec;
+  let mn=Math.min(...vals), mx=Math.max(...vals);
+  if(mx-mn<1e-20) mx=mn+1;
+
+  let bw=W/vals.length;
+  for(let i=0;i<vals.length;i++){{
+    let h=((vals[i]-mn)/(mx-mn))*H*0.85;
+    ctx.fillStyle='rgba(159,206,253,0.5)';
+    ctx.fillRect(i*bw,H-h,bw-1,h);
+  }}
+}}
+
+function drawPhi(fi) {{
+  let c=document.getElementById('c-phi');
+  c.width=NY; c.height=NX;
+  c.style.imageRendering='pixelated';
+  let ctx=c.getContext('2d');
+  let img=ctx.createImageData(NY,NX);
+  let d=PHI[fi];
+  for(let r=0;r<NX;r++) for(let j=0;j<NY;j++) {{
+    let v=d[r*NY+j];
+    let [cr,cg,cb]=plasma(v,VMAX);
+    let idx=(r*NY+j)*4;
+    img.data[idx]=cr*255; img.data[idx+1]=cg*255; img.data[idx+2]=cb*255; img.data[idx+3]=255;
+  }}
+  ctx.putImageData(img,0,0);
+}}
+
+function init() {{
+  let container=document.getElementById('torus-panel');
+  let W=container.clientWidth, H=container.clientHeight;
+  scene=new THREE.Scene();
+  scene.background=new THREE.Color(0x0d0d1a);
+  camera=new THREE.PerspectiveCamera(50,W/H,0.1,300);
+  camera.position.set(0,R0*2.7,R0*2.7);
+  camera.lookAt(0,0,0);
+  renderer=new THREE.WebGLRenderer({{antialias:true}});
+  renderer.setSize(W,H);
+  renderer.setPixelRatio(window.devicePixelRatio);
+  container.insertBefore(renderer.domElement,container.firstChild);
+
+  let amb=new THREE.AmbientLight(0xffffff,0.5);
+  scene.add(amb);
+  let dir=new THREE.DirectionalLight(0xffffff,0.8);
+  dir.position.set(R0*2,R0*3,R0*2);
+  scene.add(dir);
+
+  let geom=new THREE.TorusGeometry(R0,AA,Math.max(NX,64),Math.max(NY,128));
+  let colors=new Float32Array(geom.attributes.position.count*3);
+  geom.setAttribute('color',new THREE.BufferAttribute(colors,3));
+  let mat=new THREE.MeshPhongMaterial({{vertexColors:true,shininess:20,specular:0x111111}});
+  mesh=new THREE.Mesh(geom,mat);
+  mesh.rotation.x=Math.PI/2;
+  scene.add(mesh);
+
+  updateFrame(NF-1);
+  render();
+
+  window.addEventListener('resize',()=>{{
+    let W2=container.clientWidth, H2=container.clientHeight;
+    camera.aspect=W2/H2;
+    camera.updateProjectionMatrix();
+    renderer.setSize(W2,H2);
+  }});
+}}
+
+function updateFrame(fi) {{
+  frameIdx=fi;
+  let phiData=PHI[fi];
+
+  let colors=mesh.geometry.attributes.color;
+  let pos=mesh.geometry.attributes.position;
+  for(let i=0;i<pos.count;i++){{
+    let x=pos.getX(i),y=pos.getY(i),z=pos.getZ(i);
+    let zeta=Math.atan2(y,x);
+    let Rxy=Math.sqrt(x*x+y*y);
+    let theta=Math.atan2(z,Rxy-R0);
+    let it=Math.round(((theta/(2*Math.PI))%1+1)%1*NX)%NX;
+    let iz=Math.round(((zeta/(2*Math.PI))%1+1)%1*NY)%NY;
+    let val=phiData[it*NY+iz];
+    let [r,g,b]=plasma(val,VMAX);
+    colors.setXYZ(i,r,g,b);
+  }}
+  colors.needsUpdate=true;
+
+  // find closest diagnostic frame
+  let di=0; let minD=1e20;
+  for(let i=0;i<FLUX_T.length;i++){{ let d=Math.abs(FLUX_T[i]-TIMES[fi]); if(d<minD){{minD=d;di=i;}} }}
+
+  drawLine('c-flux',FLUX.slice(0,di+1),di,false,FLUX[di]);
+  if(KYSPEC[di]) drawSpectrum('c-ky',KYSPEC[di],true);
+  if(KXSPEC[di]) drawSpectrum('c-kx',KXSPEC[di],true);
+  drawPhi(fi);
+
+  document.getElementById('time-label').textContent='t = '+TIMES[fi].toFixed(1);
+  document.getElementById('slider').value=fi;
+  document.getElementById('frame-info').textContent=(fi+1)+'/'+NF;
+}}
+
+function render() {{
+  requestAnimationFrame(render);
+  renderer.render(scene,camera);
+}}
+function setFrame(i) {{ updateFrame(parseInt(i)); }}
+function togglePlay() {{
+  playing=!playing;
+  document.getElementById('play-btn').innerHTML=playing?'&#9646;&#9646;':'&#9654;';
+  if(playing) playInterval=setInterval(()=>updateFrame((frameIdx+1)%NF),24);
+  else clearInterval(playInterval);
+}}
+init();
+</script>
+</body>
+</html>"""
+
+    with open(output_path, "w") as f:
+        f.write(html)
+    size_mb = os.path.getsize(output_path) / 1e6
+    print(f"Saved {output_path} ({size_mb:.1f} MB, {len(times)} frames)")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Export torus animation.")
     parser.add_argument("output_dir", help="directory with step_*.npz snapshots")
-    parser.add_argument("-o", "--output", default="torus.html")
+    parser.add_argument("-o", "--output", default="torus.mp4")
     parser.add_argument("--R0", type=float, default=3.0, help="major radius")
     parser.add_argument("--a", type=float, default=1.0, help="minor radius")
     parser.add_argument("--fps", type=int, default=12, help="frames per second (mp4/gif)")
     parser.add_argument("--dpi", type=int, default=120, help="resolution (mp4/gif)")
-    parser.add_argument("--dry-run", action="store_true", help="show last frame only (no video)")
+    parser.add_argument("--dry-run", action="store_true", help="last frame only (no video)")
     args = parser.parse_args()
 
     snapshots = load_snapshots(args.output_dir, last_only=args.dry_run)
     ext = os.path.splitext(args.output)[1].lower()
-    if args.dry_run or ext in (".mp4", ".gif", ".png"):
+
+    if ext == ".html":
+        generate_html_viewer(
+            snapshots,
+            args.output,
+            R0=args.R0,
+            a=args.a,
+            diag_dir=args.output_dir,
+            dry_run=args.dry_run,
+        )
+    else:
         generate_mp4(
             snapshots,
             args.output,
@@ -514,9 +672,8 @@ def main():
             fps=args.fps,
             dpi=args.dpi,
             dry_run=args.dry_run,
+            diag_dir=args.output_dir,
         )
-    else:
-        generate_html(snapshots, args.output, R0=args.R0, a=args.a)
 
 
 if __name__ == "__main__":

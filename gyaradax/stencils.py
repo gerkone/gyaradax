@@ -6,7 +6,7 @@ used in the GKW linear and nonlinear terms.
 """
 
 import jax
-import jax.numpy as jnp
+import numpy as np
 
 # enforce 64-bit precision
 jax.config.update("jax_enable_x64", True)
@@ -23,7 +23,7 @@ def _center_5pt(stencil5):
 # correspond to the fortran implementation of upwinded fourth-order finite differences.
 
 # D1_IPW_POS: First derivative, upwinded for positive characteristic velocity
-D1_IPW_POS = jnp.asarray(
+D1_IPW_POS = np.asarray(
     [
         _center_5pt([0.0, 0.0, -18.0, 24.0, -6.0]),
         [0.0, 0.0, 0.0, -4.0, -6.0, 12.0, -2.0, 0.0, 0.0],
@@ -31,11 +31,11 @@ D1_IPW_POS = jnp.asarray(
         [0.0, 0.0, 1.0, -8.0, 0.0, 8.0, 0.0, 0.0, 0.0],
         _center_5pt([0.0, -6.0, 0.0, 0.0, 0.0]),
     ],
-    dtype=jnp.float64,
+    dtype=np.float64,
 )
 
 # D1_IPW_NEG: First derivative, upwinded for negative characteristic velocity
-D1_IPW_NEG = jnp.asarray(
+D1_IPW_NEG = np.asarray(
     [
         _center_5pt([0.0, 0.0, 0.0, 6.0, 0.0]),
         [0.0, 0.0, 0.0, -8.0, 0.0, 8.0, -1.0, 0.0, 0.0],
@@ -43,11 +43,11 @@ D1_IPW_NEG = jnp.asarray(
         [0.0, 0.0, 2.0, -12.0, 6.0, 4.0, 0.0, 0.0, 0.0],
         _center_5pt([6.0, -24.0, 18.0, 0.0, 0.0]),
     ],
-    dtype=jnp.float64,
+    dtype=np.float64,
 )
 
 # D4_IPW_POS: Fourth derivative dissipation, corresponding to POS upwinding
-D4_IPW_POS = jnp.asarray(
+D4_IPW_POS = np.asarray(
     [
         [0.0] * 9,
         [0.0] * 9,
@@ -55,11 +55,11 @@ D4_IPW_POS = jnp.asarray(
         [0.0, 0.0, -1.0, 4.0, -6.0, 4.0, 0.0, 0.0, 0.0],
         _center_5pt([0.0, 12.0, -24.0, 0.0, 0.0]),
     ],
-    dtype=jnp.float64,
+    dtype=np.float64,
 )
 
 # D4_IPW_NEG: Fourth derivative dissipation, corresponding to NEG upwinding
-D4_IPW_NEG = jnp.asarray(
+D4_IPW_NEG = np.asarray(
     [
         _center_5pt([0.0, 0.0, -24.0, 12.0, 0.0]),
         [0.0, 0.0, 0.0, 4.0, -6.0, 4.0, -1.0, 0.0, 0.0],
@@ -67,11 +67,11 @@ D4_IPW_NEG = jnp.asarray(
         [0.0] * 9,
         [0.0] * 9,
     ],
-    dtype=jnp.float64,
+    dtype=np.float64,
 )
 
 # VPAR_D1: Central first derivative in parallel velocity space
-VPAR_D1 = jnp.asarray([1.0, -8.0, 0.0, 8.0, -1.0], dtype=jnp.float64) / 12.0
+VPAR_D1 = np.asarray([1.0, -8.0, 0.0, 8.0, -1.0], dtype=np.float64) / 12.0
 
 # VPAR_D4: Central fourth derivative in parallel velocity space
-VPAR_D4 = jnp.asarray([-1.0, 4.0, -6.0, 4.0, -1.0], dtype=jnp.float64) / 12.0
+VPAR_D4 = np.asarray([-1.0, 4.0, -6.0, 4.0, -1.0], dtype=np.float64) / 12.0

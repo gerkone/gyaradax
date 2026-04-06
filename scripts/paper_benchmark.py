@@ -30,9 +30,8 @@ from gyaradax import load_geometry, GKParams, gk_init, gksolve
 from gyaradax.solver import (
     linear_precompute,
     _compute_phi,
-    _compute_linear_rhs,
-    _compute_nonlinear_rhs,
 )
+from gyaradax.backends import create_ops
 from gyaradax.params import gkparams_from_config, load_config
 
 
@@ -206,13 +205,32 @@ def estimate_flops_per_step(grid_shape, non_linear=True, n_species=1):
     return int(step_flops)
 
 
-def benchmark_gyaradax(config_path, n_steps=120, n_blocks=5, device=None):
+def benchmark_gyaradax(config_path, n_steps=120, n_blocks=5, device=None, args=None, mp=False, dp=False, z2z=None, backend="jax"):
     """Run full gyaradax benchmark. Returns a results dict."""
     if device is not None:
         os.environ["CUDA_VISIBLE_DEVICES"] = str(device)
 
     cfg = load_config(config_path)
-    params = gkparams_from_config(cfg)
+    overrides = {}
+    if args is not None:
+        if args.dp:
+            overrides["mixed_precision"] = False
+        elif args.mp:
+            overrides["mixed_precision"] = True
+        if args.z2z is not None:
+            overrides["use_z2z"] = args.z2z
+        if args.backend:
+            overrides["backend"] = args.backend
+    else:
+        if dp:
+            overrides["mixed_precision"] = False
+        elif mp:
+            overrides["mixed_precision"] = True
+        if z2z is not None:
+            overrides["use_z2z"] = z2z
+        if backend:
+            overrides["backend"] = backend
+    params = gkparams_from_config(cfg, **overrides)
 
     # force nonlinear for fair comparison
     params = GKParams(
@@ -262,6 +280,8 @@ def benchmark_gyaradax(config_path, n_steps=120, n_blocks=5, device=None):
 
     # component benchmarks
     print("\ncomponent benchmarks:")
+    ops = create_ops(pre, backend=params.backend, use_z2z=params.use_z2z, mixed_precision=params.mixed_precision)
+
     phi = _compute_phi(df, geometry, params, pre)
 
     phi_ms, phi_std = bench_fn(
@@ -271,14 +291,14 @@ def benchmark_gyaradax(config_path, n_steps=120, n_blocks=5, device=None):
     results["phi_ms"] = phi_ms
 
     lin_ms, lin_std = bench_fn(
-        lambda: _compute_linear_rhs(df, phi, geometry, params, pre),
+        lambda: ops.linear_rhs(df, phi, geometry, params, pre),
         label="linear rhs",
     )
     results["linear_rhs_ms"] = lin_ms
 
     if params.non_linear:
         nl_ms, nl_std = bench_fn(
-            lambda: _compute_nonlinear_rhs(df, phi, geometry, params, pre),
+            lambda: ops.nonlinear_term_iii(df, phi, geometry),
             label="nonlinear rhs (term iii)",
         )
         results["nonlinear_rhs_ms"] = nl_ms
@@ -302,10 +322,30 @@ def benchmark_gyaradax(config_path, n_steps=120, n_blocks=5, device=None):
         results["peak_memory_mb"] = mem["peak_mb"]
         results["memory_limit_mb"] = mem["limit_mb"]
 
-    # timed blocks
+    # working set (steady-state memory before solve blocks)
+    dev = jax.devices()[0]
+    if hasattr(dev, "memory_stats"):
+        try:
+            stats = dev.memory_stats()
+            if stats:
+                working_set_mb = stats.get("bytes_in_use", 0) / 1e6
+                print(f"working set: {working_set_mb:.0f} MB")
+                results["working_set_mb"] = working_set_mb
+        except Exception:
+            pass
+
+    # timed blocks with per-block VRAM measurement
     df_cur, state_cur = df_w, state_w
     block_times = []
+    block_peaks = []
     for i in range(n_blocks):
+        # Reset memory stats for independent per-block measurement
+        if hasattr(dev, "reset_memory_stats"):
+            try:
+                dev.reset_memory_stats()
+            except Exception:
+                pass
+        
         t0 = time.time()
         df_cur, (phi_out, fluxes), state_cur = gksolve(
             df_cur, geometry, params, state_cur, n_steps=n_steps, pre=pre
@@ -313,10 +353,22 @@ def benchmark_gyaradax(config_path, n_steps=120, n_blocks=5, device=None):
         jax.block_until_ready(df_cur)
         dt_block = time.time() - t0
         block_times.append(dt_block)
+        
+        # Capture peak memory for this block
+        if hasattr(dev, "memory_stats"):
+            try:
+                mem = dev.memory_stats()
+                if mem:
+                    block_peak = mem.get("peak_bytes_in_use", 0) / 1e6
+                    block_peaks.append(block_peak)
+            except Exception:
+                pass
+        
         sps = n_steps / dt_block
         ms_per_step = dt_block * 1000 / n_steps
+        vram_str = f", {block_peaks[-1]:.0f} MB VRAM" if block_peaks else ""
         print(
-            f"  block {i+1}/{n_blocks}: {dt_block:.3f}s ({sps:.1f} steps/s, {ms_per_step:.2f} ms/step)"
+            f"  block {i+1}/{n_blocks}: {dt_block:.3f}s ({sps:.1f} steps/s, {ms_per_step:.2f} ms/step{vram_str})"
         )
 
     times = np.array(block_times)
@@ -328,6 +380,8 @@ def benchmark_gyaradax(config_path, n_steps=120, n_blocks=5, device=None):
     print(f"  total: {n_steps * n_blocks} steps in {np.sum(times):.3f}s")
     print(f"  throughput: {mean_sps:.2f} +/- {std_sps:.2f} steps/s")
     print(f"  latency: {ms_per_step:.2f} ms/step")
+    if block_peaks:
+        print(f"  VRAM: {np.mean(block_peaks):.0f} MB avg / {np.max(block_peaks):.0f} MB peak")
 
     results["n_steps_total"] = n_steps * n_blocks
     results["total_time_s"] = float(np.sum(times))
@@ -335,6 +389,9 @@ def benchmark_gyaradax(config_path, n_steps=120, n_blocks=5, device=None):
     results["steps_per_sec_std"] = float(std_sps)
     results["ms_per_step"] = float(ms_per_step)
     results["block_times_s"] = block_times
+    if block_peaks:
+        results["vram_avg_mb"] = float(np.mean(block_peaks))
+        results["vram_peak_mb"] = float(np.max(block_peaks))
 
     # FLOP estimate
     est_flops = estimate_flops_per_step(grid_shape, non_linear=params.non_linear)
@@ -410,6 +467,11 @@ def main():
     parser.add_argument("--steps", type=int, default=120, help="steps per block")
     parser.add_argument("--blocks", type=int, default=5, help="number of timed blocks")
     parser.add_argument("--device", type=int, default=None, help="GPU device index")
+    parser.add_argument("--backend", type=str, default="jax", choices=["jax", "cuda"], help="backend for nonlinear term")
+    parser.add_argument("--mp", action="store_true", help="mixed precision (default)")
+    parser.add_argument("--dp", action="store_true", help="double precision (disable mixed precision)")
+    parser.add_argument("--z2z", action="store_true", default=None, help="use Z2Z FFT for nonlinear term")
+    parser.add_argument("--no-z2z", dest="z2z", action="store_false", help="disable Z2Z FFT for nonlinear term")
     parser.add_argument("--output", type=str, default=None, help="save results JSON")
     parser.add_argument(
         "--gkw-only", action="store_true", help="only print GKW timing, skip gyaradax"
@@ -444,7 +506,7 @@ def main():
     print("gyaradax (adiabatic)")
     print(f"{'='*60}")
     results_adiabatic = benchmark_gyaradax(
-        args.config, n_steps=args.steps, n_blocks=args.blocks, device=args.device
+        args.config, n_steps=args.steps, n_blocks=args.blocks, device=args.device, args=args, backend=args.backend
     )
     all_results["gyaradax_adiabatic"] = results_adiabatic
 
@@ -453,7 +515,7 @@ def main():
         print("gyaradax (kinetic)")
         print(f"{'='*60}")
         results_kinetic = benchmark_gyaradax(
-            args.kinetic_config, n_steps=args.steps, n_blocks=args.blocks, device=args.device
+            args.kinetic_config, n_steps=args.steps, n_blocks=args.blocks, device=args.device, args=args, backend=args.backend
         )
         all_results["gyaradax_kinetic"] = results_kinetic
 
