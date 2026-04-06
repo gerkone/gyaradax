@@ -52,15 +52,8 @@ def register_ffi():
     _lib = ctypes.cdll.LoadLibrary(str(lib_path))
 
     targets = {
-        "lto_fft_bracket_ffi": _lib.lto_fft_bracket_ffi,
-        "lto_fft_bracket_v1_ffi": _lib.lto_fft_bracket_v1_ffi,
         "lto_fft_bracket_v2_ffi": _lib.lto_fft_bracket_v2_ffi,
         "lto_fft_bracket_v3_ffi": _lib.lto_fft_bracket_v3_ffi,
-        "lto_fft_bracket_vz2z_ffi": _lib.lto_fft_bracket_vz2z_ffi,
-        "lto_fft_bracket_vz2z_merged_ffi": _lib.lto_fft_bracket_vz2z_merged_ffi,
-        "lto_fft_bracket_v4_ffi": _lib.lto_fft_bracket_v4_ffi,
-        "lto_fft_bracket_vexp_ffi": _lib.lto_fft_bracket_vexp_ffi,
-        "cufft_bracket_ffi": _lib.cufft_bracket_ffi,
         "cufft_graph_bracket_ffi": _lib.cufft_graph_bracket_ffi,
         "cufft_graph_bracket_fp64_ffi": _lib.cufft_graph_bracket_fp64_ffi,
         "cufft_graph_bracket_fp64_direct_ffi": _lib.cufft_graph_bracket_fp64_direct_ffi,
@@ -76,31 +69,7 @@ def register_ffi():
     return True
 
 
-# --- FFI Call Wrapper ---
-def lto_bracket_ffi_call(df, phi, kx, ky, jind, dum_s, batch, mrad, mphi, nkx, nky, version=0):
-    suffixes = {0: "", 1: "_v1", 2: "_v2", 3: "_v3", "exp": "_vexp"}
-    suffix = suffixes.get(version, "")
-    target_name = f"lto_fft_bracket{suffix}_ffi"
 
-    # Version 3+ uses sparse store callback writing to packed [batch, nkx, nky]
-    if version == 3:
-        out_shape = (batch, nkx, nky)
-    else:
-        out_shape = (batch, mrad, (mphi // 2 + 1))
-
-    return ffi.ffi_call(target_name, jax.ShapeDtypeStruct(out_shape, jnp.complex128))(
-        df,
-        phi,
-        kx,
-        ky,
-        jind,
-        dum_s,
-        batch=np.int32(batch),
-        mrad=np.int32(mrad),
-        mphi=np.int32(mphi),
-        nkx=np.int32(nkx),
-        nky=np.int32(nky),
-    )
 
 
 # --- Main Benchmark ---
@@ -232,82 +201,45 @@ def main():
     @jax.jit
     def run_lto_v2(d, p):
         p_lto = (pre["bessel"] * p.reshape(1, 1, -1, nkx, nky)).reshape(-1, nkx, nky)
-        out = lto_bracket_ffi_call(
-            d, p_lto, kx_vec, ky_vec, inverse_jind, dum_s, batch_total, mrad, mphi, nkx, nky, 2
+        out = ffi.ffi_call(
+            "lto_fft_bracket_v2_ffi",
+            jax.ShapeDtypeStruct((batch_total, mrad, mphi // 2 + 1), jnp.complex128),
+        )(
+            d,
+            p_lto,
+            kx_vec,
+            ky_vec,
+            inverse_jind,
+            dum_s,
+            batch=np.int32(batch_total),
+            mrad=np.int32(mrad),
+            mphi=np.int32(mphi),
+            nkx=np.int32(nkx),
+            nky=np.int32(nky),
         )
         return apply_physics_wrapper(out, is_lto=True)
 
     @jax.jit
     def run_lto_v3(d, p):
         p_lto = (pre["bessel"] * p.reshape(1, 1, -1, nkx, nky)).reshape(-1, nkx, nky)
-        out = lto_bracket_ffi_call(
-            d, p_lto, kx_vec, ky_vec, inverse_jind, dum_s, batch_total, mrad, mphi, nkx, nky, 3
+        out = ffi.ffi_call(
+            "lto_fft_bracket_v3_ffi",
+            jax.ShapeDtypeStruct((batch_total, nkx, nky), jnp.complex128),
+        )(
+            d,
+            p_lto,
+            kx_vec,
+            ky_vec,
+            inverse_jind,
+            dum_s,
+            batch=np.int32(batch_total),
+            mrad=np.int32(mrad),
+            mphi=np.int32(mphi),
+            nkx=np.int32(nkx),
+            nky=np.int32(nky),
         )
-        # v3 uses sparse store, but still needs division by N^2 in apply_physics_wrapper
-        # wait! v3 returns (batch, nkx, nky).
-        # apply_physics_wrapper expects (batch, mrad, mphi_half).
-        # Ah! I need a different wrapper for sparse outputs.
         N = mrad * mphi
         out_normalized = out / (N * N)
-        fft_prefactor = pre.get("nl_fft_prefactor", 1.0 + 0.0j)
-        fft_scale = pre["nl_fft_scale"]
-        efun = pre.get("efun", 1.0)
-        efun_sign = jnp.where(efun > 0, 1.0, -1.0)
-
-        nl = (fft_scale * efun_sign * jnp.real(fft_prefactor)) * out_normalized
-        ixzero, iyzero = pre["ixzero"], pre["iyzero"]
-        return nl.at[:, ixzero, iyzero].set(0.0).reshape(-1, nkx, nky)
-
-    @jax.jit
-    def run_lto_vz2z(d, p):
-        p_lto = (pre["bessel"] * p.reshape(1, 1, -1, nkx, nky)).reshape(-1, nkx, nky)
-        out = ffi.ffi_call(
-            "lto_fft_bracket_vz2z_ffi",
-            jax.ShapeDtypeStruct((batch_total, nkx, nky), jnp.complex128),
-        )(
-            d,
-            p_lto,
-            kx_vec,
-            ky_vec,
-            inverse_jind,
-            dum_s,
-            batch=np.int32(batch_total),
-            mrad=np.int32(mrad),
-            mphi=np.int32(mphi),
-            nkx=np.int32(nkx),
-            nky=np.int32(nky),
-        )
-        # vZ2Z is now normalized to 1/N^2 in CUDA
-        out_normalized = out
-        fft_prefactor = pre.get("nl_fft_prefactor", 1.0 + 0.0j)
-        fft_scale = pre["nl_fft_scale"]
-        efun = pre.get("efun", 1.0)
-        efun_sign = jnp.where(efun > 0, 1.0, -1.0)
-
-        nl = (fft_scale * efun_sign * jnp.real(fft_prefactor)) * out_normalized
-        ixzero, iyzero = pre["ixzero"], pre["iyzero"]
-        return nl.at[:, ixzero, iyzero].set(0.0).reshape(-1, nkx, nky)
-
-    @jax.jit
-    def run_lto_vz2z_merged(d, p):
-        p_lto = (pre["bessel"] * p.reshape(1, 1, -1, nkx, nky)).reshape(-1, nkx, nky)
-        out = ffi.ffi_call(
-            "lto_fft_bracket_vz2z_merged_ffi",
-            jax.ShapeDtypeStruct((batch_total, nkx, nky), jnp.complex128),
-        )(
-            d,
-            p_lto,
-            kx_vec,
-            ky_vec,
-            inverse_jind,
-            dum_s,
-            batch=np.int32(batch_total),
-            mrad=np.int32(mrad),
-            mphi=np.int32(mphi),
-            nkx=np.int32(nkx),
-            nky=np.int32(nky),
-        )
-        out_normalized = out
         fft_prefactor = pre.get("nl_fft_prefactor", 1.0 + 0.0j)
         fft_scale = pre["nl_fft_scale"]
         efun = pre.get("efun", 1.0)
@@ -362,39 +294,6 @@ def main():
 
         out = ffi.ffi_call(
             "cufft_graph_bracket_fp64_ffi", jax.ShapeDtypeStruct((batch_total, nkx, nky), jnp.complex128)
-        )(
-            d,
-            p_phi,
-            kx_vec,
-            ky_vec,
-            jind_ffi,
-            inverse_jind,
-            dum_s,
-            batch=np.int32(batch_total // nspec_val),
-            mrad=np.int32(mrad),
-            mphi=np.int32(mphi),
-            nkx=np.int32(nkx),
-            nky=np.int32(nky),
-            nspec=np.int32(nspec_val),
-            ixzero=np.int32(pre["ixzero"]),
-            iyzero=np.int32(pre["iyzero"]),
-        )
-
-        fft_prefactor = pre.get("nl_fft_prefactor", 1.0 + 0.0j)
-        fft_scale = pre["nl_fft_scale"]
-        efun = pre.get("efun", 1.0)
-        efun_sign = jnp.where(efun > 0, 1.0, -1.0)
-        return (fft_scale * efun_sign * jnp.real(fft_prefactor)) * out
-
-    @jax.jit
-    def run_cufft_graph_fp64_direct(d, p):
-        nspec_val = dum_s.shape[0]
-        p_phi = (pre["bessel"] * p.reshape(1, 1, -1, nkx, nky)).reshape(-1, nkx, nky)
-        jind_ffi = jnp.array(jind, dtype=jnp.int32)
-
-        out = ffi.ffi_call(
-            "cufft_graph_bracket_fp64_direct_ffi",
-            jax.ShapeDtypeStruct((batch_total, nkx, nky), jnp.complex128),
         )(
             d,
             p_phi,
@@ -487,93 +386,15 @@ def main():
         efun_sign = jnp.where(efun > 0, 1.0, -1.0)
         return (fft_scale * efun_sign * jnp.real(fft_prefactor)) * out
 
-    @jax.jit
-    def run_lto_v4(d, p):
-        p_lto = (pre["bessel"] * p.reshape(1, 1, -1, nkx, nky)).reshape(-1, nkx, nky)
-        out = ffi.ffi_call(
-            "lto_fft_bracket_v4_ffi", jax.ShapeDtypeStruct((batch_total, nkx, nky), jnp.complex128)
-        )(
-            d,
-            p_lto,
-            kx_vec,
-            ky_vec,
-            inverse_jind,
-            dum_s,
-            batch=np.int32(batch_total),
-            mrad=np.int32(mrad),
-            mphi=np.int32(mphi),
-            nkx=np.int32(nkx),
-            nky=np.int32(nky),
-        )
-        out_normalized = out
-        fft_prefactor = pre.get("nl_fft_prefactor", 1.0 + 0.0j)
-        fft_scale = pre["nl_fft_scale"]
-        efun = pre.get("efun", 1.0)
-        efun_sign = jnp.where(efun > 0, 1.0, -1.0)
-
-        nl = (fft_scale * efun_sign * jnp.real(fft_prefactor)) * out_normalized
-        ixzero, iyzero = pre["ixzero"], pre["iyzero"]
-        return nl.at[:, ixzero, iyzero].set(0.0).reshape(-1, nkx, nky)
-
-    @jax.jit
-    def run_cufft_non_lto(d, p):
-        # Match exactly the same structure as run_lto_v2:
-        # gyroaverage phi, pack 4 derivative spectra, call FFI, unpack
-        p_gyro = (pre["bessel"] * p.reshape(1, 1, -1, nkx, nky)).reshape(-1, nkx, nky)
-        d_flat = d.reshape(-1, nkx, nky)
-
-        # Compute Fourier-space derivatives — pack first then multiply (matches JAX baseline)
-        jind_jnp = jnp.array(jind)
-        mphi_half = mphi // 2 + 1
-        ikx = 1j * pack_half_spectrum(
-            jnp.broadcast_to(kx_vec[:, None], (nkx, nky)), jind_jnp, mrad, mphi_half
-        )
-        iky = 1j * pack_half_spectrum(
-            jnp.broadcast_to(ky_vec[None, :], (nkx, nky)), jind_jnp, mrad, mphi_half
-        )
-
-        phi_y_dense = iky[None, ...] * pack_half_spectrum(p_gyro, jind_jnp, mrad, mphi_half)
-        f_x_dense = ikx[None, ...] * pack_half_spectrum(d_flat, jind_jnp, mrad, mphi_half)
-        phi_x_dense = ikx[None, ...] * pack_half_spectrum(p_gyro, jind_jnp, mrad, mphi_half)
-        f_y_dense = iky[None, ...] * pack_half_spectrum(d_flat, jind_jnp, mrad, mphi_half)
-
-        # dum_s is (ns,); nspec = ns; kernel cycles batch_idx % nspec → correct for (nvpar,nmu,ns) layout
-        ns_val = dum_s.shape[0]
-        out = ffi.ffi_call(
-            "cufft_bracket_ffi",
-            jax.ShapeDtypeStruct((batch_total, mrad, mphi_half), jnp.complex128),
-        )(
-            phi_y_dense,
-            f_x_dense,
-            phi_x_dense,
-            f_y_dense,
-            dum_s,
-            batch=np.int32(batch_total),
-            mrad=np.int32(mrad),
-            mphi=np.int32(mphi),
-            nspec=np.int32(ns_val),
-        )
-
-        # Kernel applied inv_n2=1/N^2; apply_physics_wrapper(is_lto=False) skips /N^2
-        # then multiplies by fft_scale=N → net = (1/N^2) * N = 1/N, matching JAX irfft norm
-        return apply_physics_wrapper(out, is_lto=False)
-
-
-
     variants = [
         ("JAX R2C fp64 baseline", run_jax_r2c_fp64, (df, phi)),
         ("JAX Z2Z fp64", run_jax_z2z_fp64, (df, phi)),
         ("JAX Z2Z fp32", run_jax_z2z_fp32, (df, phi)),
         ("LTO v2 (Standard)", run_lto_v2, (df_lto, phi_lto)),
-        ("LTO vZ2Z (Optimized)", run_lto_vz2z, (df_lto, phi_lto)),
-        ("LTO vZ2Z-merged", run_lto_vz2z_merged, (df_lto, phi_lto)),
         ("LTO v5 Graph", run_lto_v5_graph, (df_lto, phi_lto)),
         ("cuFFT Graph FP64", run_cufft_graph_fp64, (df_lto, phi_lto)),
-        ("cuFFT Graph FP64 direct", run_cufft_graph_fp64_direct, (df_lto, phi_lto)),
         ("cuFFT Graph FP32", run_cufft_graph_fp32, (df_lto, phi_lto)),
         ("cuFFT True FP32+Graph", run_cufft_graph_true_fp32, (df_lto, phi_lto)),
-        ("LTO v4 (Graph)", run_lto_v4, (df_lto, phi_lto)),
-        ("cuFFT (non-LTO fused)", run_cufft_non_lto, (df_lto, phi_lto)),
     ]
 
     results = {}
