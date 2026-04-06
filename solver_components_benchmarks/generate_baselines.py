@@ -69,7 +69,7 @@ def main():
 
     from gyaradax.backends import create_ops
 
-    ops = create_ops(pre, backend="jax")
+    ops = create_ops(pre, backend="jax", mixed_precision=params.mixed_precision)
 
     @jax.jit
     def _apply_parallel(field, coeffs):
@@ -111,15 +111,17 @@ def main():
     print("\nC4: nonlinear_term_iii")
     from gyaradax.solver import nonlinear_term_iii
 
-    mp = params.mixed_precision
+    # Create two ops objects for MP and FP64 benchmarks
+    ops_mp = create_ops(pre, backend=params.backend, use_z2z=params.use_z2z, mixed_precision=True)
+    ops_fp64 = create_ops(pre, backend=params.backend, use_z2z=params.use_z2z, mixed_precision=False)
 
     @jax.jit
     def _nl_mp():
-        return ops.nonlinear_term_iii(field5d, phi, geom, mixed_precision=True)
+        return ops_mp.nonlinear_term_iii(field5d, phi, geom)
 
     @jax.jit
     def _nl_fp64():
-        return ops.nonlinear_term_iii(field5d, phi, geom, mixed_precision=False)
+        return ops_fp64.nonlinear_term_iii(field5d, phi, geom)
 
     out_c4_mp = _nl_mp()
     out_c4_fp64 = _nl_fp64()

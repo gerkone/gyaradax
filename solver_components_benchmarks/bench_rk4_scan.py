@@ -148,7 +148,7 @@ def _bench_scan_phase(
 
             # --- backend ops --------------------------------------------------
             try:
-                ops = create_ops(pre_gk, backend=bname, use_z2z=z2z)
+                ops = create_ops(pre_gk, backend=bname, use_z2z=z2z, mixed_precision=mixed_precision)
             except Exception as e:
                 print(f"     [SKIP] {bname} not available: {e}")
                 continue
@@ -290,7 +290,7 @@ def _sweep_nsteps(
                 continue
 
             try:
-                ops = create_ops(pre_gk, backend=bname, use_z2z=z2z)
+                ops = create_ops(pre_gk, backend=bname, use_z2z=z2z, mixed_precision=mixed_precision)
             except Exception:
                 continue
 

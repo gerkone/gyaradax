@@ -150,17 +150,18 @@ def nonlinear_term_iii(
     df: jnp.ndarray,
     phi: jnp.ndarray,
     geometry: Dict[str, jnp.ndarray],
-    pre: Dict[str, jnp.ndarray],
-    *,
+    pre: GKPre,
     efun_sign: float = 1.0,
     fft_prefactor: complex = 1.0 + 0.0j,
     exclude_zero_mode: bool = True,
     mixed_precision: bool = True,
     ops: Optional[SolverOps] = None,
+    backend: str = "jax",
+    use_z2z: bool = False,
 ) -> jnp.ndarray:
     """Nonlinear ExB advection via pseudospectral method. df is 5D."""
     if ops is None:
-        ops = create_ops(pre, backend="jax")
+        ops = create_ops(pre, backend=backend, use_z2z=use_z2z, mixed_precision=mixed_precision)
 
     return ops.nonlinear_term_iii(
         df,
@@ -169,7 +170,6 @@ def nonlinear_term_iii(
         efun_sign=efun_sign,
         fft_prefactor=fft_prefactor,
         exclude_zero_mode=exclude_zero_mode,
-        mixed_precision=mixed_precision,
     )
 
 
@@ -978,7 +978,7 @@ def gkstep_single(
 ]:
     """Single small-step RK4 time integration with backend dispatch."""
     if ops is None:
-        ops = create_ops(pre, backend=params.backend, use_z2z=params.use_z2z)
+        ops = create_ops(pre, backend=params.backend, use_z2z=params.use_z2z, mixed_precision=params.mixed_precision)
 
     dt = dt_override if dt_override is not None else jnp.array(params.dt, dtype=jnp.float64)
 
@@ -986,7 +986,7 @@ def gkstep_single(
         phi_local = _compute_phi(df, geometry, params, pre)
         rhs = ops.linear_rhs(df, phi_local, geometry, params, pre)
         if params.non_linear:
-            rhs = rhs + ops.nonlinear_term_iii(df, phi_local, geometry, mixed_precision=params.mixed_precision)
+            rhs = rhs + ops.nonlinear_term_iii(df, phi_local, geometry)
         return rhs
 
     # RK4 — expanded accumulation lets XLA read k1..k4 and prev_df in one fused kernel
@@ -1050,7 +1050,7 @@ def gksolve(
     if pre is None:
         pre = linear_precompute(geometry, params)
 
-    ops = create_ops(pre, backend=params.backend, use_z2z=params.use_z2z)
+    ops = create_ops(pre, backend=params.backend, use_z2z=params.use_z2z, mixed_precision=params.mixed_precision)
 
     if params.adaptive_dt and params.non_linear:
         # adaptive CFL path: carry dt as part of scan state

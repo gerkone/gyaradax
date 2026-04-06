@@ -205,7 +205,7 @@ def estimate_flops_per_step(grid_shape, non_linear=True, n_species=1):
     return int(step_flops)
 
 
-def benchmark_gyaradax(config_path, n_steps=120, n_blocks=5, device=None, args=None, mp=False, z2z=None):
+def benchmark_gyaradax(config_path, n_steps=120, n_blocks=5, device=None, args=None, mp=False, z2z=None, backend="jax"):
     """Run full gyaradax benchmark. Returns a results dict."""
     if device is not None:
         os.environ["CUDA_VISIBLE_DEVICES"] = str(device)
@@ -217,11 +217,15 @@ def benchmark_gyaradax(config_path, n_steps=120, n_blocks=5, device=None, args=N
             overrides["mixed_precision"] = True
         if args.z2z is not None:
             overrides["use_z2z"] = args.z2z
+        if args.backend:
+            overrides["backend"] = args.backend
     else:
         if mp:
             overrides["mixed_precision"] = True
         if z2z is not None:
             overrides["use_z2z"] = z2z
+        if backend:
+            overrides["backend"] = backend
     params = gkparams_from_config(cfg, **overrides)
 
     # force nonlinear for fair comparison
@@ -272,7 +276,7 @@ def benchmark_gyaradax(config_path, n_steps=120, n_blocks=5, device=None, args=N
 
     # component benchmarks
     print("\ncomponent benchmarks:")
-    ops = create_ops(pre, backend=params.backend, use_z2z=params.use_z2z)
+    ops = create_ops(pre, backend=params.backend, use_z2z=params.use_z2z, mixed_precision=params.mixed_precision)
 
     phi = _compute_phi(df, geometry, params, pre)
 
@@ -290,7 +294,7 @@ def benchmark_gyaradax(config_path, n_steps=120, n_blocks=5, device=None, args=N
 
     if params.non_linear:
         nl_ms, nl_std = bench_fn(
-            lambda: ops.nonlinear_term_iii(df, phi, geometry, mixed_precision=params.mixed_precision),
+            lambda: ops.nonlinear_term_iii(df, phi, geometry),
             label="nonlinear rhs (term iii)",
         )
         results["nonlinear_rhs_ms"] = nl_ms
@@ -422,6 +426,7 @@ def main():
     parser.add_argument("--steps", type=int, default=120, help="steps per block")
     parser.add_argument("--blocks", type=int, default=5, help="number of timed blocks")
     parser.add_argument("--device", type=int, default=None, help="GPU device index")
+    parser.add_argument("--backend", type=str, default="jax", choices=["jax", "cuda"], help="backend for nonlinear term")
     parser.add_argument("--mp", action="store_true", help="mixed precision")
     parser.add_argument("--z2z", action="store_true", default=None, help="use Z2Z FFT for nonlinear term")
     parser.add_argument("--no-z2z", dest="z2z", action="store_false", help="disable Z2Z FFT for nonlinear term")
@@ -459,9 +464,8 @@ def main():
     print("gyaradax (adiabatic)")
     print(f"{'='*60}")
     results_adiabatic = benchmark_gyaradax(
-        args.config, n_steps=args.steps, n_blocks=args.blocks, device=args.device, args=args
+        args.config, n_steps=args.steps, n_blocks=args.blocks, device=args.device, args=args, backend=args.backend
     )
-    all_results["gyaradax_adiabatic"] = results_adiabatic
     all_results["gyaradax_adiabatic"] = results_adiabatic
 
     if args.kinetic_config:
@@ -469,7 +473,7 @@ def main():
         print("gyaradax (kinetic)")
         print(f"{'='*60}")
         results_kinetic = benchmark_gyaradax(
-            args.kinetic_config, n_steps=args.steps, n_blocks=args.blocks, device=args.device, args=args
+            args.kinetic_config, n_steps=args.steps, n_blocks=args.blocks, device=args.device, args=args, backend=args.backend
         )
         all_results["gyaradax_kinetic"] = results_kinetic
 

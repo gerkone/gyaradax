@@ -19,10 +19,14 @@ from gyaradax.types import GKPre
 from gyaradax.solver import build_jind
 
 BACKENDS = [
-    ("jax", False, False),
-    ("jax", True, False),
-    ("jax", True, True),
-    ("cuda", False, False),
+    # JAX backend (supports R2C and Z2Z)
+    ("jax", False, False),  # JAX R2C FP64
+    ("jax", False, True),   # JAX R2C MP
+    ("jax", True, False),   # JAX Z2Z FP64
+    ("jax", True, True),    # JAX Z2Z MP
+    # CUDA backend (Z2Z only, use_z2z flag ignored)
+    ("cuda", False, False), # CUDA Z2Z FP64
+    ("cuda", False, True),  # CUDA Z2Z MP
 ]
 
 
@@ -77,11 +81,11 @@ def test_kinetic_nl_bessel_correct_per_species(backend, use_z2z, mixed_precision
     pre0 = _make_pre_bessel(bessel_sp0)
     pre1 = _make_pre_bessel(bessel_sp1)
 
-    nl_sp0 = create_ops(pre0, backend=backend, use_z2z=use_z2z).nonlinear_term_iii(
-        df, phi, {}, mixed_precision=mixed_precision
+    nl_sp0 = create_ops(pre0, backend=backend, use_z2z=use_z2z, mixed_precision=mixed_precision).nonlinear_term_iii(
+        df, phi, {}
     )
-    nl_sp1 = create_ops(pre1, backend=backend, use_z2z=use_z2z).nonlinear_term_iii(
-        df, phi, {}, mixed_precision=mixed_precision
+    nl_sp1 = create_ops(pre1, backend=backend, use_z2z=use_z2z, mixed_precision=mixed_precision).nonlinear_term_iii(
+        df, phi, {}
     )
 
     assert not jnp.allclose(nl_sp0, 0.0, atol=1e-12), "sp0 NL should be non-zero (J0=1)"
@@ -112,10 +116,10 @@ def test_kinetic_nl_bessel_full_species_bessel_support(backend, use_z2z, mixed_p
     bessel_full = jnp.ones((nsp, 1, nmu, ns, nkx, nky), dtype=jnp.float64)
 
     pre = _make_pre_bessel(bessel_full, nkx=nkx, nky=nky, ns=ns)
-    ops_full = create_ops(pre, backend=backend, use_z2z=use_z2z)
+    ops_full = create_ops(pre, backend=backend, use_z2z=use_z2z, mixed_precision=mixed_precision)
 
     # This should now work if bessel is passed as keyword argument
-    nl = ops_full.nonlinear_term_iii(df_sp, phi, {}, mixed_precision=mixed_precision, bessel=bessel_full[0])
+    nl = ops_full.nonlinear_term_iii(df_sp, phi, {}, bessel=bessel_full[0])
     assert nl.shape == df_sp.shape
 
 
@@ -220,8 +224,16 @@ def _kinetic_params_from_dir(kinetic_dir, dump_name="100", **overrides):
     return params
 
 
+@jax.jit
+def _step_jitted_kinetic(prev_df, geom, params, state):
+    return gksolve(prev_df, geom, params, state, n_steps=1)
+
+
+@pytest.mark.parametrize("backend, use_z2z, mixed_precision", BACKENDS)
 @pytest.mark.parametrize("start_name, end_name", [("100", "101")])
-def test_kinetic_iteration_parity(kinetic_dir, kinetic_geom, kinetic_shape, start_name, end_name):
+def test_kinetic_iteration_parity(
+    backend, use_z2z, mixed_precision, kinetic_dir, kinetic_geom, kinetic_shape, start_name, end_name
+):
     """Verify multi-species kinetic trajectory parity against GKW reference dumps.
 
     Loads the kinetic distribution at dump 100, computes the exact number
@@ -232,6 +244,8 @@ def test_kinetic_iteration_parity(kinetic_dir, kinetic_geom, kinetic_shape, star
     so this test is only valid for cases where dtim is stable. Cases with
     varying dtim will need CFL adaptation in the solver.
     """
+    if backend == "cuda" and not cuda_available():
+        pytest.skip("CUDA not available")
 
     n_species = 2
     start_df = load_gkw_k_dump(
@@ -257,7 +271,15 @@ def test_kinetic_iteration_parity(kinetic_dir, kinetic_geom, kinetic_shape, star
         last_growth_rate=jnp.zeros(nky, dtype=jnp.float64),
     )
 
-    pred_df, _, _ = gksolve(start_df, kinetic_geom, params, state, n_steps=steps)
+    # Use backend-specific ops for kinetic electron simulation
+    if backend == "cuda":
+        # CUDA backend: run step-by-step to avoid JIT recompilation for different step counts
+        pred_df = start_df
+        for _ in range(steps):
+            pred_df, _, _ = _step_jitted_kinetic(pred_df, kinetic_geom, params, state)
+    else:
+        # JAX backend: can use multi-step gksolve directly
+        pred_df, _, _ = gksolve(start_df, kinetic_geom, params, state, n_steps=steps)
 
     # Validate per-species trajectory parity
     for isp in range(n_species):
@@ -266,13 +288,17 @@ def test_kinetic_iteration_parity(kinetic_dir, kinetic_geom, kinetic_shape, star
         assert err <= 1.0e-3, f"{sp_name} trajectory error {err:.6e} > 1e-3 in {kinetic_dir}"
 
 
-def test_kinetic_flux_trajectory(kinetic_dir, kinetic_geom, kinetic_shape):
+@pytest.mark.parametrize("backend, use_z2z, mixed_precision", BACKENDS)
+def test_kinetic_flux_trajectory(backend, use_z2z, mixed_precision, kinetic_dir, kinetic_geom, kinetic_shape):
     """Verify per-species heat fluxes at a reference dump match GKW fluxes.dat.
 
     This test uses only the integral module (phi solver + flux calculation),
     not the time-stepper. It validates that the multi-species field solver
     produces correct per-species fluxes at multiple time points.
     """
+    if backend == "cuda" and not cuda_available():
+        pytest.skip("CUDA not available")
+
     from gyaradax.utils import K_files
 
     n_species = 2
@@ -300,6 +326,7 @@ def test_kinetic_flux_trajectory(kinetic_dir, kinetic_geom, kinetic_shape):
         if not np.isclose(orig_times[ts_idx], time_val, rtol=1e-4):
             continue
 
+        # Backend-specific phi solve (though currently phi_kinetic is backend-agnostic)
         phi = calculate_phi_kinetic(kinetic_geom, df_full)
         per_sp_fluxes = calculate_fluxes_kinetic(kinetic_geom, df_full, phi)
 

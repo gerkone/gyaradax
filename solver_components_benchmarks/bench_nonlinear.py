@@ -66,12 +66,6 @@ def run(config="configs/iteration_13.yaml", mixed_precision=False, test_z2z=Fals
             print(f"Backend: {backend.upper()} ({z2z_label})")
             print(f"{'='*40}")
 
-            try:
-                ops = create_ops(pre_gk, backend=backend, use_z2z=z2z)
-            except Exception as e:
-                print(f"  [SKIP] {backend} not available: {e}")
-                continue
-
             backend_results = {}
             for label, mp, bkey in [
                 ("mixed_precision=True  (default)", True, "output_mp"),
@@ -79,9 +73,15 @@ def run(config="configs/iteration_13.yaml", mixed_precision=False, test_z2z=Fals
             ]:
                 print(f"\n  -- {label}")
 
+                try:
+                    ops = create_ops(pre_gk, backend=backend, use_z2z=z2z, mixed_precision=mp)
+                except Exception as e:
+                    print(f"  [SKIP] {backend} ({label}) not available: {e}")
+                    continue
+
                 @jax.jit
-                def fn(f, p, m=mp):
-                    return ops.nonlinear_term_iii(f, p, geom, mixed_precision=m)
+                def fn(f, p):
+                    return ops.nonlinear_term_iii(f, p, geom)
 
                 out = fn(field, phi)
 

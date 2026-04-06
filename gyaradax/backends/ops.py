@@ -19,18 +19,20 @@ class SolverOps(ABC):
         self,
         pre: GKPre,
         use_z2z: bool = False,
+        mixed_precision: bool = True,
     ):
         self.pre = pre
         self.use_z2z = use_z2z
+        self.mixed_precision = mixed_precision
 
     def tree_flatten(self):
-        return (self.pre,), (self.use_z2z,)
+        return (self.pre,), (self.use_z2z, self.mixed_precision)
 
     @classmethod
     def tree_unflatten(cls, aux_data, children):
         (pre,) = children
-        (use_z2z,) = aux_data
-        return cls(pre, use_z2z=use_z2z)
+        (use_z2z, mixed_precision) = aux_data
+        return cls(pre, use_z2z=use_z2z, mixed_precision=mixed_precision)
 
     @abstractmethod
     def _apply_vpar(self, field: jnp.ndarray, coeffs) -> jnp.ndarray:
@@ -61,17 +63,32 @@ class SolverOps(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def nonlinear_term_iii(self, df, phi, geometry, **kwargs) -> jnp.ndarray:
+    def nonlinear_term_iii(
+        self,
+        df: jnp.ndarray,
+        phi: jnp.ndarray,
+        geometry: Dict[str, jnp.ndarray],
+        *,
+        efun_sign: float = 1.0,
+        fft_prefactor: complex = 1.0 + 0.0j,
+        exclude_zero_mode: bool = True,
+        bessel: jnp.ndarray = None,
+    ) -> jnp.ndarray:
         """Compute term III (nonlinear ExB advection) via pseudospectral method.
 
         Backend must handle both 5D (nv, nmu, ns, nkx, nky) and 6D (nsp, nv, nmu, ns, nkx, nky) df,
         or raise NotImplementedError/ValueError if unsupported.
 
+        Mixed precision is controlled by self.mixed_precision (set at construction time).
+
         Args:
             df: Distribution function, 5D or 6D
             phi: Electrostatic potential (ns, nkx, nky)
             geometry: Geometry dict with grid and metric data
-            **kwargs: Backend-specific options (mixed_precision, bessel, etc.)
+            efun_sign: Sign factor for ExB bracket
+            fft_prefactor: Prefactor for FFT
+            exclude_zero_mode: Zero out (kx=0, ky=0) mode
+            bessel: Optional Bessel function array
 
         Returns:
             Nonlinear RHS contribution (same shape as df)

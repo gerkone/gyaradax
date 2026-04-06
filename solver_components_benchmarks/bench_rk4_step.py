@@ -63,12 +63,14 @@ def _bench_phase(
     baseline_key_phi: str,
     backend_forced: str | None,
     test_z2z: bool = False,
+    mixed_precision: bool = True,
 ):
     """Run one benchmark phase (linear or nonlinear) across backends.
     
     Args:
         test_z2z: If True, test both R2C and Z2Z FFT modes (nonlinear only).
                   If False, use R2C only (linear or default).
+        mixed_precision: Use mixed precision (FP32 FFTs) for nonlinear bracket.
     """
 
     print(f"\n[PHASE] {phase_name}")
@@ -90,7 +92,7 @@ def _bench_phase(
 
             # --- create backend ops -------------------------------------------
             try:
-                ops = create_ops(pre_gk, backend=bname, use_z2z=z2z)
+                ops = create_ops(pre_gk, backend=bname, use_z2z=z2z, mixed_precision=mixed_precision)
             except Exception as e:
                 print(f"     [SKIP] {bname} not available: {e}")
                 continue
@@ -164,6 +166,7 @@ def run(
         pre_gk=pre_gk,
         baseline_path=baseline,
         backend_forced=backend_forced,
+        mixed_precision=mixed_precision,
     )
 
     # Phase 1 — Linear RK4 (no Z2Z, linear doesn't use it)

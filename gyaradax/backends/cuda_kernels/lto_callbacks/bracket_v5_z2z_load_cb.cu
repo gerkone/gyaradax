@@ -90,3 +90,66 @@ __device__ cufftDoubleComplex d_v5_z2z_fp64_load(
 
 __device__ cufftJITCallbackLoadC d_v5_z2z_fp32_load_addr = d_v5_z2z_fp32_load;
 __device__ cufftJITCallbackLoadZ d_v5_z2z_fp64_load_addr = d_v5_z2z_fp64_load;
+
+// ── True FP32 Z2Z Load Callback (Early Cast Optimization) ───────────────────
+// Casts input double2 and kx/ky to float2/float IMMEDIATELY, then performs
+// all arithmetic (Hermitian symmetry, derivative packing) in FP32.
+// This reduces register pressure by ~50% and eliminates FP64 ALU usage.
+
+__device__ static float2 v5_z2z_true_fp32_pack(
+    unsigned long long offset, const V5Z2zInfo* ci)
+{
+    int plane = ci->mrad * ci->mphi;
+    int gb    = (int)(offset / (unsigned long long)plane);
+    int i     = (int)((offset / ci->mphi) % ci->mrad);
+    int j     = (int)(offset % ci->mphi);
+
+    bool is_phi = (gb >= ci->b_df);
+    int  lb     = is_phi ? (gb - ci->b_df) % ci->b_phi : gb;
+    const double2* field = is_phi ? ci->phi_packed : ci->df_packed;
+
+    bool mirror = (j > ci->mphi / 2);
+    int  j_src  = mirror ? ci->mphi - j : j;
+    int  m_src  = mirror ? (ci->mrad - i) % ci->mrad : i;
+
+    int kxi = ci->inverse_jind[m_src];
+    if (kxi < 0 || j_src >= ci->nky) return make_float2(0.0f, 0.0f);
+
+    // CAST IMMEDIATELY: double2 -> float2
+    double2 val_d = v5_get(field, lb, kxi, j_src, ci->nkx, ci->nky);
+    float2 val = make_float2((float)val_d.x, (float)val_d.y);
+    
+    // Cast kx/ky to FP32 immediately
+    float kxv = (float)ci->kx[kxi];
+    float kyv = (float)ci->ky[j_src];
+
+    // Hermitian symmetrisation at ky=0 (in FP32)
+    if ((j_src == 0 || j_src == ci->mphi / 2) && !mirror) {
+        int m_pair  = (ci->mrad - i) % ci->mrad;
+        int kx_pair = ci->inverse_jind[m_pair];
+        if (kx_pair >= 0 && m_pair != i) {
+            double2 vp_d = v5_get(field, lb, kx_pair, j_src, ci->nkx, ci->nky);
+            float2 vp = make_float2((float)vp_d.x, (float)vp_d.y);
+            val.x = 0.5f * (val.x + vp.x);
+            val.y = 0.5f * (val.y - vp.y);
+        }
+    }
+
+    // Derivative packing: fy + i*fx in FP32
+    float fy_re = -kyv * val.y, fy_im = kyv * val.x;
+    float fx_re = -kxv * val.y, fx_im = kxv * val.x;
+
+    if (!mirror)
+        return make_float2(fy_re - fx_im, fy_im + fx_re);
+    else
+        return make_float2(fy_re + fx_im, fx_re - fy_im);
+}
+
+__device__ cufftComplex d_v5_z2z_true_fp32_load(
+    void *dataIn, unsigned long long offset,
+    void *callerInfo, void *sharedPointer)
+{
+    return v5_z2z_true_fp32_pack(offset, (const V5Z2zInfo*)callerInfo);
+}
+
+__device__ cufftJITCallbackLoadC d_v5_z2z_true_fp32_load_addr = d_v5_z2z_true_fp32_load;

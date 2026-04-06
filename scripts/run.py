@@ -97,6 +97,8 @@ def _setup_run(config_path, args):
         overrides["mixed_precision"] = True
     if args.z2z is not None:
         overrides["use_z2z"] = args.z2z
+    if args.backend:
+        overrides["backend"] = args.backend
     if kinetic:
         overrides["adaptive_dt"] = True
     params = gkparams_from_config(cfg, **overrides)
@@ -383,6 +385,7 @@ def main():
     parser.add_argument("--mp", action="store_true", help="mixed precision")
     parser.add_argument("--z2z", action="store_true", default=None, help="use Z2Z FFT for nonlinear term")
     parser.add_argument("--no-z2z", dest="z2z", action="store_false", help="disable Z2Z FFT for nonlinear term")
+    parser.add_argument("--backend", type=str, default="jax", choices=["jax", "cuda"], help="backend for nonlinear term")
     parser.add_argument("--device", type=int, default=0)
     parser.add_argument("--block-size", type=int, default=120)
     parser.add_argument("--n-blocks", type=int, default=None)

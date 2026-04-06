@@ -66,14 +66,13 @@ def setup_test_data(nv=16, nmu=8, ns=4, nkx=64, nky=32, dtype=jnp.complex128):
 
 def run_z2z_benchmark(df, phi, pre, mixed_precision=False):
     """Run Z2Z nonlinear term and return result."""
-    ops = JAXOps(pre, use_z2z=True)
+    ops = JAXOps(pre, use_z2z=True, mixed_precision=mixed_precision)
     
     result = ops.nonlinear_term_iii(
         df, phi, {},
         efun_sign=1.0,
         fft_prefactor=1.0 + 0j,
         exclude_zero_mode=True,
-        mixed_precision=mixed_precision,
     )
     return result
 

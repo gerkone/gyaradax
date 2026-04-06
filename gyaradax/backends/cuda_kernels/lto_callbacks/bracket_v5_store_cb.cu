@@ -37,4 +37,31 @@ __device__ void d_v5_store_cb(
     si->out_packed[((unsigned long long)batch_idx * si->nkx + i_pack) * si->nky + j] = element;
 }
 
-__device__ cufftJITCallbackStoreZ d_v5_store_cb_addr = d_v5_store_cb;
+__device__ void d_v5_store_fp32_cb(
+    void *dataOut, unsigned long long offset,
+    cufftComplex element,
+    void *callerInfo, void *sharedPointer)
+{
+    const V5StoreInfo* si = (const V5StoreInfo*)callerInfo;
+    int batch_idx = (int)(offset / ((unsigned long long)si->mrad * si->mphiw3));
+    int i_dense   = (int)((offset / si->mphiw3) % si->mrad);
+    int j         = (int)(offset % si->mphiw3);
+
+    if (j >= si->nky) return;
+
+    int i_pack = si->inverse_jind[i_dense];
+    if (i_pack < 0) return;
+
+    // Zero-mode masking
+    double2 elem_d = {0.0, 0.0};
+    if (i_pack == si->ixzero && j == si->iyzero) {
+        elem_d = {0.0, 0.0};
+    } else {
+        elem_d = {(double)element.x, (double)element.y};
+    }
+
+    si->out_packed[((unsigned long long)batch_idx * si->nkx + i_pack) * si->nky + j] = elem_d;
+}
+
+__device__ cufftJITCallbackStoreZ d_v5_store_cb_addr       = d_v5_store_cb;
+__device__ cufftJITCallbackStoreC d_v5_store_fp32_cb_addr  = d_v5_store_fp32_cb;

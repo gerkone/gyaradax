@@ -49,7 +49,7 @@ def run(config="configs/iteration_13.yaml", mixed_precision=False):
     backends = []
     for b in ["jax", "cuda"]:
         try:
-            ops = create_ops(pre_gk, backend=b)
+            ops = create_ops(pre_gk, backend=b, mixed_precision=mixed_precision)
             backends.append((b, ops))
         except Exception as e:
             print(f"  [SKIP] {b} backend not available: {e}")

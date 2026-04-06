@@ -60,6 +60,7 @@ def run_benchmark():
     parser.add_argument("--kinetic", action="store_true")
     parser.add_argument("--resume", type=str, default="100")
     parser.add_argument("--device", type=int, default=-1, help="GPU device ID")
+    parser.add_argument("--backend", type=str, default="jax", choices=["jax", "cuda"], help="backend for nonlinear term")
     parser.add_argument("--components", action="store_true", help="benchmark individual components")
     parser.add_argument("--save-reference", type=str)
     parser.add_argument("--reference", type=str)
@@ -78,6 +79,8 @@ def run_benchmark():
         overrides["mixed_precision"] = True
     if args.z2z is not None:
         overrides["use_z2z"] = args.z2z
+    if args.backend:
+        overrides["backend"] = args.backend
     params = gkparams_from_config(cfg, **overrides)
 
     # geometry: file-based if geom.dat exists, analytic otherwise
@@ -141,7 +144,7 @@ def run_benchmark():
     if args.components:
         print(f"\ncomponent benchmarks (single evaluation, {mode}):")
 
-        ops = create_ops(pre, backend=params.backend, use_z2z=params.use_z2z)
+        ops = create_ops(pre, backend=params.backend, use_z2z=params.use_z2z, mixed_precision=params.mixed_precision)
 
         bench_component(
             lambda: _compute_phi(df, geom, params, pre),
@@ -157,7 +160,7 @@ def run_benchmark():
 
         if params.non_linear:
             bench_component(
-                lambda: ops.nonlinear_term_iii(df, phi, geom, mixed_precision=params.mixed_precision),
+                lambda: ops.nonlinear_term_iii(df, phi, geom),
                 label="nonlinear rhs (term iii)",
             )
         print()

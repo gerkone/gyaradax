@@ -48,7 +48,7 @@ def run(config="configs/iteration_13.yaml", mixed_precision=False):
     for backend in ["jax", "cuda"]:
         print(f"\n  -- Backend: {backend.upper()}")
         try:
-            ops = create_ops(pre_gk, backend=backend)
+            ops = create_ops(pre_gk, backend=backend, mixed_precision=mixed_precision)
         except Exception as e:
             print(f"     [SKIP] {backend} not available: {e}")
             continue

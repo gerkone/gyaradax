@@ -6,6 +6,7 @@ shared library is not compiled.
 """
 
 import ctypes
+import logging
 from pathlib import Path
 from typing import Dict, Optional, Tuple
 
@@ -17,6 +18,8 @@ from jax import ffi
 from gyaradax import stencils
 from gyaradax.backends.ops import SolverOps
 from gyaradax.types import GKPre
+
+log = logging.getLogger(__name__)
 
 # check both old (cuda_augmentations) and new (cuda_kernels) locations
 _CUDA_KERNELS_DIR = Path(__file__).parent / "cuda_kernels"
@@ -47,7 +50,11 @@ def _register_ffi():
         "apply_vpar_dual_stencil_ffi": _lib.apply_vpar_dual_stencil_ffi,
         "apply_parallel_ffi": _lib.apply_parallel_ffi,
         "apply_parallel_dual_ffi": _lib.apply_parallel_dual_ffi,
-        "cufft_graph_bracket_ffi": _lib.cufft_graph_bracket_ffi,
+        # Nonlinear bracket kernels (all 4 variants)
+        "cufft_graph_bracket_mp_ffi": _lib.cufft_graph_bracket_mp_ffi,
+        "cufft_graph_bracket_true_fp32_ffi": _lib.cufft_graph_bracket_true_fp32_ffi,
+        "cufft_graph_bracket_fp64_ffi": _lib.cufft_graph_bracket_fp64_ffi,
+        "cufft_graph_bracket_fp64_direct_ffi": _lib.cufft_graph_bracket_fp64_direct_ffi,
         "linear_rhs_vtiled_ffi": _lib.linear_rhs_vtiled_ffi,
         "linear_rhs_fused_ffi": _lib.linear_rhs_fused_ffi,
     }
@@ -73,11 +80,17 @@ _V_TILE = 8
 
 @jax.tree_util.register_pytree_node_class
 class CUDAOps(SolverOps):
-    """CUDA backend using custom FFI kernels for stencils and FFT bracket."""
+    """CUDA backend using custom FFI kernels for stencils and FFT bracket.
+    
+    Note: CUDA backend is Z2Z (complex-to-complex) only. The use_z2z flag
+    is ignored for CUDA operations and will emit a warning if set to True.
+    """
 
-    def __init__(self, pre: GKPre, use_z2z: bool = False):
+    def __init__(self, pre: GKPre, use_z2z: bool = False, mixed_precision: bool = True):
         _register_ffi()
-        super().__init__(pre, use_z2z)
+        if use_z2z:
+            log.warning("CUDA backend: use_z2z=True ignored (CUDA is Z2Z-only)")
+        super().__init__(pre, use_z2z, mixed_precision)
 
     def _prepare_parallel_coeffs(self, c, nv, nmu, ns, nkx, nky):
         """Reshape stencil coefficients to (9, nv*nmu, ns, nkx, nky) for FFI."""
@@ -260,11 +273,13 @@ class CUDAOps(SolverOps):
 
         packed_maps = self._pack_shift_maps().reshape(9, ns, nkx, nky, 2).copy()
 
+        # signz0/tmp0 are buffer args (F64) in the kernel, not scalar attrs
+        signz0_buf = jnp.asarray(pre["signz0"], dtype=jnp.float64).reshape(1)
+        tmp0_buf   = jnp.asarray(pre["tmp0"],   dtype=jnp.float64).reshape(1)
+
         d1 = stencils.VPAR_D1
         d4 = stencils.VPAR_D4
         attrs = dict(
-            signz0=float(pre["signz0"]),
-            tmp0=float(pre["tmp0"]),
             nv=np.int32(nv),
             nmu=np.int32(nmu),
             ns=np.int32(ns),
@@ -305,6 +320,8 @@ class CUDAOps(SolverOps):
             hyper,
             kx_vals,
             ky_vals,
+            signz0_buf,
+            tmp0_buf,
             **attrs,
         )[0]
 
@@ -316,38 +333,73 @@ class CUDAOps(SolverOps):
         params,
         pre: Dict[str, jnp.ndarray],
     ) -> jnp.ndarray:
-        """Fused linear RHS via FFI kernel with shape dispatch.
+        """Fused linear RHS for single or multi-species.
 
-        For 5D df: direct call to fused kernel.
-        For 6D df: flatten species dimension if params are uniform, else raise NotImplementedError.
+        For kinetic electrons (6D df), flattens species into the velocity
+        batch dimension. Returns None if per-species parameters differ
+        (signz0/tmp0), signalling the solver to fall back to vmap.
         """
         if df.ndim == 5:
-            return self._linear_rhs_fused(df, phi, pre, params.dvp, params.disp_vp, params.drive_scale)
-        elif df.ndim == 6:
-            nsp, nv, nmu, ns, nkx, nky = df.shape
-            
-            # Check if species params are uniform (required for flattening optimization)
-            def _is_uniform(arr):
-                if arr is None:
-                    return True
-                arr = jnp.asarray(arr)
-                return jnp.all(arr == arr.flatten()[0])
-            
-            # Check key species parameters for uniformity
-            if not (_is_uniform(params.mas) and _is_uniform(params.signz) and 
-                    _is_uniform(params.vthrat) and _is_uniform(params.tmp) and
-                    _is_uniform(params.de)):
-                raise NotImplementedError(
-                    "CUDA linear_rhs: non-uniform species parameters not supported. "
-                    "All species must have identical mas, signz, vthrat, tmp, de."
+            return self._linear_rhs_fused(
+                df, phi, pre, params.dvp, params.disp_vp, params.drive_scale
+            )
+
+        # kinetic: flatten (nsp, nv, nmu) → single velocity batch
+        nsp, nv, nmu, ns, nkx, nky = df.shape
+
+        # per-species scalar check — must be uniform for the fused kernel
+        signz0 = pre["signz0"]
+        tmp0 = pre["tmp0"]
+        if hasattr(signz0, "__len__") and (
+            jnp.unique(jnp.asarray(signz0)).size > 1 or jnp.unique(jnp.asarray(tmp0)).size > 1
+        ):
+            return None
+
+        nv_flat = nsp * nv * nmu
+        df_5d = df.reshape(nv_flat, 1, ns, nkx, nky)
+
+        # build a minimal dict with reshaped arrays for the fused kernel
+        def _r6to5(arr):
+            if arr.ndim == 6:
+                return arr.reshape(nv_flat, 1, ns, nkx, nky)
+            elif arr.ndim == 5:
+                return jnp.broadcast_to(arr[None, ...], (nsp, nv, nmu, ns, nkx, nky)).reshape(
+                    nv_flat, 1, ns, nkx, nky
                 )
-            
-            # Flatten (nsp, nv, nmu) -> (nsp*nv*nmu) for fused kernel
-            df_flat = df.reshape(nsp * nv, nmu, ns, nkx, nky)
-            result_flat = self._linear_rhs_fused(df_flat, phi, pre, params.dvp, params.disp_vp, params.drive_scale)
-            return result_flat.reshape(nsp, nv, nmu, ns, nkx, nky)
-        else:
-            raise ValueError(f"linear_rhs: expected df with ndim 5 or 6, got {df.ndim}")
+            return arr
+
+        def _r4to3(arr):
+            return arr.reshape(nv_flat, 1, ns)
+
+        sp_pre = {
+            "bessel": _r6to5(pre["bessel"]),
+            "s_total_upar": _r6to5(pre["s_total_upar"]),
+            "s_total_t7": _r6to5(pre["s_total_t7"]),
+            "fmaxwl": _r4to3(pre["fmaxwl"]),
+            "dmaxwel_fm_ek": pre["dmaxwel_fm_ek"].reshape(nv_flat, 1, ns, nky),
+            "drift_x": _r4to3(pre["drift_x"]),
+            "drift_y": _r4to3(pre["drift_y"]),
+            "utrap": jnp.broadcast_to(pre["utrap"][:, None, :, :], (nsp, nv, nmu, ns)).reshape(
+                nv_flat, 1, ns
+            ),
+            "abs_dum2_vp": jnp.broadcast_to(
+                pre["abs_dum2_vp"][:, None, :, :], (nsp, nv, nmu, ns)
+            ).reshape(nv_flat, 1, ns),
+            "signz0": signz0[0] if hasattr(signz0, "__getitem__") else signz0,
+            "tmp0": tmp0[0] if hasattr(tmp0, "__getitem__") else tmp0,
+            # pass through shared arrays unchanged
+            "hyper": pre["hyper"],
+            "kx_b": pre["kx_b"],
+            "ky_b": pre["ky_b"],
+            "valid_shift": pre["valid_shift"],
+            "s_shift": pre["s_shift"],
+            "kx_shift": pre["kx_shift"],
+        }
+
+        out_5d = self._linear_rhs_fused(
+            df_5d, phi, sp_pre, params.dvp, params.disp_vp, params.drive_scale
+        )
+        return out_5d.reshape(nsp, nv, nmu, ns, nkx, nky)
 
     def nonlinear_term_iii(
         self,
@@ -358,27 +410,40 @@ class CUDAOps(SolverOps):
         efun_sign: float = 1.0,
         fft_prefactor: complex = 1.0 + 0.0j,
         exclude_zero_mode: bool = True,
-        mixed_precision: bool = True,
         bessel: Optional[jnp.ndarray] = None,
     ) -> jnp.ndarray:
         """Nonlinear bracket via CUDA graph-captured cuFFT pipeline.
 
         Uses z2z 2-for-1 packing with phi at its natural (nmu*ns) batch
         size. Dispatches to mixed precision (FP32 FFTs) or full precision
-        (FP64) kernel based on the mixed_precision flag.
+        (FP64) kernel based on self.mixed_precision flag.
         
-        Only supports 5D df. For 6D (kinetic electrons), use JAX backend or
-        run with adiabatic electrons.
+        Supports both 5D (adiabatic) and 6D (kinetic) df. For kinetic,
+        flattens (nsp, nv, nmu) into a single batch dimension.
+        
+        Args:
+            df: Distribution function, 5D (nv, nmu, ns, nkx, nky) or 
+                6D (nsp, nv, nmu, ns, nkx, nky)
+            phi: Electrostatic potential (ns, nkx, nky)
+            geometry: Geometry dict
+            efun_sign: Sign factor for ExB bracket
+            fft_prefactor: Prefactor for FFT
+            exclude_zero_mode: Zero out (kx=0, ky=0) mode
+            bessel: Optional Bessel function array
+        
+        Returns:
+            Nonlinear RHS term III
         """
-        if df.ndim == 6:
-            raise NotImplementedError(
-                "CUDA nonlinear_term_iii: 6D df (kinetic electrons) not supported. "
-                "Use JAX backend for kinetic nonlinear runs, or adiabatic electrons with CUDA."
-            )
-        
         pre = self.pre
         mrad, mphi = pre["nl_mrad"], pre["nl_mphi"]
-        nv, nmu, ns, nkx, nky = df.shape
+        
+        # Handle both 5D (adiabatic) and 6D (kinetic) df
+        if df.ndim == 5:
+            nv, nmu, ns, nkx, nky = df.shape
+        elif df.ndim == 6:
+            nsp, nv, nmu, ns, nkx, nky = df.shape
+        else:
+            raise ValueError(f"nonlinear_term_iii: expected df with ndim 5 or 6, got {df.ndim}")
 
         jind = pre["nl_jind"]
         inverse_jind = jnp.full((mrad,), -1, dtype=jnp.int32)
@@ -388,18 +453,38 @@ class CUDAOps(SolverOps):
         ky_vec = pre["nl_ky2d"][0, :]
         dum_s = pre["nl_dum_s"]
 
-        batch_total = nv * nmu * ns
-        df_flat = df.reshape(-1, nkx, nky) * efun_sign
+        # Flatten leading dimensions for batched FFT
+        if df.ndim == 5:
+            batch_total = nv * nmu * ns
+            df_flat = df.reshape(-1, nkx, nky) * efun_sign
+            p_b = phi.reshape(1, 1, ns, nkx, nky)
+            if bessel is None:
+                bessel = pre["bessel"]
+            p_phi = (bessel * p_b).reshape(-1, nkx, nky)
+        else:  # 6D kinetic
+            batch_total = nsp * nv * nmu * ns
+            df_flat = df.reshape(-1, nkx, nky) * efun_sign
+            # For kinetic, phi is still (ns, nkx, nky), broadcast to all species
+            p_b = phi.reshape(1, 1, ns, nkx, nky)
+            if bessel is None:
+                bessel = pre["bessel"]
+            # bessel is (nsp, nv, nmu, ns, nkx, nky) for kinetic
+            if bessel.ndim == 6:
+                p_phi = (bessel * p_b).reshape(-1, nkx, nky)
+            else:
+                p_phi = (bessel * p_b).reshape(-1, nkx, nky)
 
-        p_b = phi.reshape(1, 1, ns, nkx, nky)
-        if bessel is None:
-            bessel = pre["bessel"]
-        p_phi = (bessel * p_b).reshape(-1, nkx, nky)
-
-        # the compiled kernel uses mixed precision (FP32 FFTs, FP64 accumulation)
+        # Dispatch to kernel based on self.mixed_precision
+        if self.mixed_precision:
+            kernel_name = "cufft_graph_bracket_true_fp32_ffi"
+            log.debug("CUDA bracket: %s (True FP32)", kernel_name)
+        else:
+            kernel_name = "cufft_graph_bracket_fp64_ffi"
+            log.debug("CUDA bracket: %s (Full FP64)", kernel_name)
+        
         _register_ffi()
         out_raw = ffi.ffi_call(
-            "cufft_graph_bracket_ffi",
+            kernel_name,
             jax.ShapeDtypeStruct((batch_total, nkx, nky), jnp.complex128),
         )(
             df_flat,

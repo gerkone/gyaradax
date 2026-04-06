@@ -21,10 +21,14 @@ except ImportError:
     cuda_available = lambda: False
 
 BACKENDS = [
-    ("jax", False, False), # jax R2C fp64
-    ("jax", True, False),  # jax Z2Z fp64
-    ("jax", True, True),   # jax Z2Z MP
-    ("cuda", False, False),
+    # JAX backend (supports R2C and Z2Z)
+    ("jax", False, False),  # JAX R2C FP64
+    ("jax", False, True),   # JAX R2C MP
+    ("jax", True, False),   # JAX Z2Z FP64
+    ("jax", True, True),    # JAX Z2Z MP
+    # CUDA backend (Z2Z only, use_z2z flag ignored)
+    ("cuda", False, False), # CUDA Z2Z FP64
+    ("cuda", False, True),  # CUDA Z2Z MP
 ]
 
 

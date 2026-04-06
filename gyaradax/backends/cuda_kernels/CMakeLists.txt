@@ -89,6 +89,7 @@ add_library(gyaradax_cuda SHARED
     kernels/cufft_graph_bracket.cu
     kernels/cufft_graph_bracket_fp64.cu
     kernels/cufft_graph_bracket_fp64_direct.cu
+    kernels/cufft_graph_bracket_true_fp32.cu
     lto_callbacks/bracket_v5_lto_fatbins.cu
     kernels/apply_parallel.cu
     kernels/apply_parallel_dual.cu
@@ -120,6 +121,7 @@ target_link_libraries(gyaradax_cuda PRIVATE
 
 
 # ── Install: place .so next to this CMakeLists.txt ────────────────
-# cmake --install _build/cuda  →  gyaradax/backends/cuda/libgyaradax_cuda.so
+# cmake --install _build  →  gyaradax/backends/cuda_kernels/libgyaradax_cuda.so
 install(TARGETS gyaradax_cuda
-    LIBRARY DESTINATION ${CMAKE_CURRENT_SOURCE_DIR})
+    LIBRARY DESTINATION ${CMAKE_CURRENT_SOURCE_DIR}
+    COMPONENT runtime)

@@ -19,10 +19,15 @@ from gyaradax.utils import pack_half_spectrum, unpack_half_spectrum
 
 @jax.tree_util.register_pytree_node_class
 class JAXOps(SolverOps):
-    """JAX implementation of solver operations."""
+    """JAX implementation of solver operations.
+    
+    Supports both R2C (real-to-complex) and Z2Z (complex-to-complex) FFTs
+    via the use_z2z flag. Mixed precision (FP32 FFTs) is controlled by
+    the mixed_precision flag.
+    """
 
-    def __init__(self, pre: GKPre, use_z2z: bool = False):
-        super().__init__(pre, use_z2z)
+    def __init__(self, pre: GKPre, use_z2z: bool = False, mixed_precision: bool = True):
+        super().__init__(pre, use_z2z, mixed_precision)
 
     def _apply_vpar(self, field: jnp.ndarray, coeffs) -> jnp.ndarray:
         """Apply 5-point vpar stencil (shifts -2..+2) with zero boundary."""
@@ -100,7 +105,6 @@ class JAXOps(SolverOps):
         efun_sign: float = 1.0,
         fft_prefactor: complex = 1.0 + 0.0j,
         exclude_zero_mode: bool = True,
-        mixed_precision: bool = True,
         bessel: jnp.ndarray = None,
     ) -> jnp.ndarray:
         """Nonlinear ExB advection (term III) for 5D df. Shared skeleton for R2C and Z2Z."""
@@ -126,7 +130,7 @@ class JAXOps(SolverOps):
                     phi_s,
                     bessel_s,
                     dum,
-                    mixed_precision=mixed_precision,
+                    mixed_precision=self.mixed_precision,
                     efun_sign=efun_sign,
                     fft_prefactor=fft_prefactor,
                     fft_scale=fft_scale,
@@ -150,7 +154,7 @@ class JAXOps(SolverOps):
                     phi_s,
                     bessel_s,
                     dum,
-                    mixed_precision=mixed_precision,
+                    mixed_precision=self.mixed_precision,
                     efun_sign=efun_sign,
                     fft_prefactor=fft_prefactor,
                     fft_scale=fft_scale,
@@ -175,13 +179,12 @@ class JAXOps(SolverOps):
         efun_sign: float = 1.0,
         fft_prefactor: complex = 1.0 + 0.0j,
         exclude_zero_mode: bool = True,
-        mixed_precision: bool = True,
         bessel: jnp.ndarray = None,
-        **kwargs,
     ) -> jnp.ndarray:
         """Nonlinear ExB advection with shape dispatch.
 
         Dispatches on df.ndim: 5D direct, 6D via vmap over species with per-species bessel.
+        Mixed precision is controlled by self.mixed_precision (set at construction time).
         """
         if df.ndim == 5:
             return self._nonlinear_term_iii_core(
@@ -189,7 +192,6 @@ class JAXOps(SolverOps):
                 efun_sign=efun_sign,
                 fft_prefactor=fft_prefactor,
                 exclude_zero_mode=exclude_zero_mode,
-                mixed_precision=mixed_precision,
                 bessel=bessel,
             )
         elif df.ndim == 6:
@@ -202,7 +204,6 @@ class JAXOps(SolverOps):
                     efun_sign=efun_sign,
                     fft_prefactor=fft_prefactor,
                     exclude_zero_mode=exclude_zero_mode,
-                    mixed_precision=mixed_precision,
                     bessel=bes_sp,
                 )
             

@@ -25,13 +25,12 @@ def setup_test_data(pre, jax, jnp, dtype):
     return df, phi
 
 
-def run_z2z_nonlinear(ops, df, phi, geom, mixed_precision):
+def run_z2z_nonlinear(ops, df, phi, geom):
     """Run Z2Z nonlinear term via JAXOps.nonlinear_term_iii."""
     return ops.nonlinear_term_iii(
         df, phi, geom,
         efun_sign=1.0,
         fft_prefactor=1.0 + 0.0j,
-        mixed_precision=mixed_precision,
     )
 
 
@@ -96,11 +95,12 @@ def main():
     
     df, phi = setup_test_data(pre, jax, jnp, jnp.complex128)
     
-    ops_z2z = JAXOps(pre_gk, use_z2z=True)
+    ops_z2z_fp64 = JAXOps(pre_gk, use_z2z=True, mixed_precision=False)
+    ops_z2z_fp32 = JAXOps(pre_gk, use_z2z=True, mixed_precision=True)
     
     # FP64 HLO
-    lowered64 = jax.jit(run_z2z_nonlinear, static_argnums=(4,)).lower(
-        ops_z2z, df, phi, geom, False
+    lowered64 = jax.jit(run_z2z_nonlinear).lower(
+        ops_z2z_fp64, df, phi, geom
     )
     hlo_text64 = lowered64.as_text()
     with open("z2z_fp64.hlo.txt", "w") as f:
@@ -108,8 +108,8 @@ def main():
     print(f"  FP64: z2z_fp64.hlo.txt ({len(hlo_text64)} chars)")
     
     # FP32 HLO
-    lowered32 = jax.jit(run_z2z_nonlinear, static_argnums=(4,)).lower(
-        ops_z2z, df, phi, geom, True
+    lowered32 = jax.jit(run_z2z_nonlinear).lower(
+        ops_z2z_fp32, df, phi, geom
     )
     hlo_text32 = lowered32.as_text()
     with open("z2z_fp32.hlo.txt", "w") as f:

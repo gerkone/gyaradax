@@ -49,14 +49,17 @@ print(f"  df shape: {df.shape}")
 print(f"  phi shape: {phi.shape}")
 print(f"  Grid: mrad={mrad}, mphi={mphi}, nkx={nkx}, nky={nky}")
 
+jax_z2z_fp64 = JAXOps(pre, use_z2z=True, mixed_precision=False)
+jax_z2z_fp32 = JAXOps(pre, use_z2z=True, mixed_precision=True)
+
 def run_z2z_fp64(d, p):
-    return jax_z2z.nonlinear_term_iii(
-        d, p, geom, efun_sign=1.0, fft_prefactor=1.0 + 0.0j, mixed_precision=False
+    return jax_z2z_fp64.nonlinear_term_iii(
+        d, p, geom, efun_sign=1.0, fft_prefactor=1.0 + 0.0j
     )
 
 def run_z2z_fp32(d, p):
-    return jax_z2z.nonlinear_term_iii(
-        d, p, geom, efun_sign=1.0, fft_prefactor=1.0 + 0.0j, mixed_precision=True
+    return jax_z2z_fp32.nonlinear_term_iii(
+        d, p, geom, efun_sign=1.0, fft_prefactor=1.0 + 0.0j
     )
 
 fp64_dump_dir = output_dir / "xla_hlo_fp64"
