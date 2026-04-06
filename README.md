@@ -10,6 +10,11 @@ This was made possible with significant usage of agentic workflows. [PROMPT.md](
 
 See [agent notes](docs/NOTES.md) for a detailed walkthrough of GKW and this reimplementation.
 
+<p align="center">
+  <video src="docs/figs/torus.mp4" width="700" autoplay loop muted></video>
+</p>
+
+
 ## Installation
 
 Create a conda environment with CUDA toolkit and all dependencies:

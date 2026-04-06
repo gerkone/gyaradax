@@ -53,7 +53,8 @@ notebooks/figs/
 hlo_dump/*.txt
 *.hlo.txt
 validation_*/
-figs/
+/figs/
+!docs/figs/
 *egg-info/
 .nfs*
 configs/sweep
