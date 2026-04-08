@@ -1,9 +1,0 @@
-jax
-jaxlib
-numpy
-omegaconf
-matplotlib
-einops
-pytest
-pillow
-scipy

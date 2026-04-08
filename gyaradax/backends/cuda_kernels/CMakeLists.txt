@@ -13,7 +13,7 @@ if(NOT CMAKE_BUILD_TYPE)
 endif()
 
 # ── GPU architectures ─────────────────────────────────────────────
-set(GPU_ARCHITECTURES "103" CACHE STRING
+set(GPU_ARCHITECTURES "native" CACHE STRING
     "Target GPU compute capabilities (semicolon-separated, or 'native')")
 set(CMAKE_CUDA_ARCHITECTURES ${GPU_ARCHITECTURES})
 

@@ -8,7 +8,7 @@
 
 This was made possible with significant usage of agentic workflows. [PROMPT.md](docs/PROMPT.md) contains the prompt used to obtain the initial working version of `gyaradax`
 
-See [agent notes](docs/NOTES.md) for a detailed walkthrough of GKW and this reimplementation.
+Check out [our whitepaper](https://arxiv.org/abs/2604.06085), or see [agent notes](docs/NOTES.md) for a detailed walkthrough of GKW and this reimplementation.
 
 <p align="center">
   <img src="docs/figs/torus.gif" width="700" alt="Nonlinear ITG turbulence on a torus">
@@ -149,4 +149,11 @@ Most tests require GKW reference data. Set the `GKW_DATA_ROOT` environment varia
 
 ## Citing
 ```
+@misc{galletti2026gyaradax,
+      title={gyaradax: Local Gyrokinetics JAX Code}, 
+      author={Gianluca Galletti and Eric Volkmann and Johannes Brandstetter},
+      year={2026},
+      primaryClass={physics.plasm-ph},
+      url={https://arxiv.org/abs/2604.06085}, 
+}
 ```
