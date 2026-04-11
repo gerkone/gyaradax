@@ -13,6 +13,28 @@ def j0(x):
     return jnp.where(jnp.abs(x) < 1e-10, 1.0, res)
 
 
+def j1_hat(x):
+    """Modified J1 Bessel: 2*J_1(x)/x.
+
+    Matches GKW ``mod_besselj1_gkw`` (functions.f90:119-142).
+    GKW returns 0.5 when krloc < 1e-5 (zero-mode convention).
+    For non-zero x the mathematical limit is 1.0, but we follow GKW exactly.
+    The caller must pass ``krloc_is_zero`` to select the zero-mode value.
+    """
+    safe_x = jnp.where(jnp.abs(x) < 1e-30, 1.0, x)
+    # bessel_jn(x, v=n) returns [J_0, J_1, ..., J_n]; index [1] for J_1
+    j1_val = bessel_jn(safe_x, v=1)[1]
+    return jnp.where(jnp.abs(x) < 1e-30, 1.0, 2.0 * j1_val / safe_x)
+
+
+def i1e(b):
+    """Gamma_1(b) = I_1(b)*exp(-b), the scaled modified Bessel of order 1.
+
+    Matches GKW ``gamma1_gkw`` (functions.f90:42-56) via ``expbessi1``.
+    """
+    return jax.scipy.special.i1e(b)
+
+
 def geom_tensors(geometry: Dict[str, jnp.ndarray], params: Any = None) -> Dict[str, jnp.ndarray]:
     """
     Expand geometry constants for broadcasting and compute Bessel terms.
@@ -378,6 +400,226 @@ def calculate_phi(
 calculate_phi_kinetic = _phi_kinetic
 
 
+# ── Ampere's law for A_parallel ──────────────────────────────────────────────
+
+
+def precompute_apar(geometry: Dict[str, jnp.ndarray], params: Any = None):
+    """
+    Precompute static arrays for the Ampere A_parallel solve (kinetic species).
+
+    From GKW linear_terms.f90 ampere_int + ampere_dia.
+
+    Ampere's law (normalized):
+        [k_perp^2 + beta * sum_sp(Z^2 n / m * Gamma_0)] * A_par
+        = beta * sum_sp(Z * vthrat * n * 2pi*B * integral(vpar * J0 * g * dvpar dmu))
+
+    Returns (apar_weight, apar_diag, kperp_sq) where:
+        apar_weight: (nsp, nvpar, nmu, ns, nkx, nky) — Ampere numerator weight
+        apar_diag: (ns, nkx, nky) — Ampere denominator (precomputed)
+        kperp_sq: (1, 1, 1, ns, nkx, nky) — k_perp^2 for reuse
+    """
+
+    # Use species arrays from params when available (multi-species from input.dat),
+    # falling back to geometry arrays (which may be single-species defaults).
+    def _sp_arr(key, geom_key=None):
+        if geom_key is None:
+            geom_key = key
+        if params is not None and hasattr(params, key):
+            v = getattr(params, key)
+            return jnp.atleast_1d(jnp.asarray(v, dtype=jnp.float64))
+        return jnp.atleast_1d(jnp.asarray(geometry[geom_key], dtype=jnp.float64))
+
+    mas = _sp_arr("mas")
+    signz = _sp_arr("signz")
+    tmp = _sp_arr("tmp")
+    de = _sp_arr("de")
+    vthrat = _sp_arr("vthrat")
+    nsp = mas.shape[0]
+
+    # Build geometry with proper species arrays for Bessel computation
+    geom_sp = dict(geometry)
+    geom_sp["mas"] = mas
+    geom_sp["signz"] = signz
+    geom_sp["tmp"] = tmp
+    geom_sp["de"] = de
+    geom_sp["vthrat"] = vthrat
+    bessel, gamma = _species_bessel_gamma(geom_sp)
+
+    mas_6d = mas.reshape(nsp, 1, 1, 1, 1, 1)
+    signz_6d = signz.reshape(nsp, 1, 1, 1, 1, 1)
+    de_6d = de.reshape(nsp, 1, 1, 1, 1, 1)
+    tmp_6d = tmp.reshape(nsp, 1, 1, 1, 1, 1)
+    vthrat_6d = vthrat.reshape(nsp, 1, 1, 1, 1, 1)
+
+    intvp = jnp.asarray(geometry["intvp"], dtype=jnp.float64).reshape(1, -1, 1, 1, 1, 1)
+    intmu = jnp.asarray(geometry["intmu"], dtype=jnp.float64).reshape(1, 1, -1, 1, 1, 1)
+    vpgr = jnp.asarray(geometry["vpgr"], dtype=jnp.float64).reshape(1, -1, 1, 1, 1, 1)
+    bn = jnp.asarray(geometry["bn"], dtype=jnp.float64).reshape(1, 1, 1, -1, 1, 1)
+
+    beta = float(params.beta) if params is not None else 0.0
+
+    # k_perp^2 (same computation as in _species_bessel_gamma)
+    krho = jnp.asarray(geometry["krho"], dtype=jnp.float64).reshape(1, 1, 1, 1, 1, -1)
+    kxrh = jnp.asarray(geometry["kxrh"], dtype=jnp.float64).reshape(1, 1, 1, 1, -1, 1)
+    little_g = jnp.asarray(geometry["little_g"], dtype=jnp.float64)
+    g0 = little_g[:, 0].reshape(1, 1, 1, -1, 1, 1)
+    g1 = little_g[:, 1].reshape(1, 1, 1, -1, 1, 1)
+    g2 = little_g[:, 2].reshape(1, 1, 1, -1, 1, 1)
+    kperp_sq = krho**2 * g0 + 2 * krho * kxrh * g1 + kxrh**2 * g2
+
+    # --- Ampere numerator weight ---
+    # RHS = beta * sum_sp [ Z * vthrat * n * integral(vpar * J0 * g * B * dvpar * dmu) ]
+    # Weight applied to g: signz * de * vthrat * vpgr * J0 * bn * intvp * intmu
+    # (matches GKW ampere_int: signz*de*veta*intvp*intmu*vthrat*bn*vpgr*bes)
+    # Note: veta in GKW is effectively beta. We multiply by beta outside.
+    apar_weight = beta * signz_6d * de_6d * vthrat_6d * vpgr * bessel * bn * intvp * intmu
+    apar_weight = jnp.where(jnp.abs(intvp) < _EPS, 0.0, apar_weight)
+
+    # --- Ampere denominator ---
+    # Computed as analytical fallback here; solver.py overrides with
+    # numerical gamma_num (using properly normalized fmaxwl) for GKW parity.
+    diag_per_sp = signz_6d**2 * de_6d / mas_6d * gamma
+    diag_em = beta * jnp.sum(diag_per_sp, axis=0)
+    diag_em = diag_em.reshape(diag_em.shape[-3], diag_em.shape[-2], diag_em.shape[-1])
+    kperp_sq_3d = kperp_sq.reshape(kperp_sq.shape[-3], kperp_sq.shape[-2], kperp_sq.shape[-1])
+
+    apar_diag = kperp_sq_3d + diag_em
+    apar_diag = jnp.where(jnp.abs(apar_diag) < _EPS, 1.0, apar_diag)
+
+    return apar_weight, apar_diag, kperp_sq
+
+
+def calculate_apar(
+    geometry: Dict[str, jnp.ndarray],
+    df: jnp.ndarray,
+    params: Any = None,
+    pre: Dict = None,
+) -> jnp.ndarray:
+    """
+    Compute A_parallel from Ampere's law.
+
+    df: (nsp, nvpar, nmu, ns, nkx, nky) — the physical distribution δf (not g).
+    Returns: A_parallel with shape (ns, nkx, nky).
+
+    Note: df must be the physical distribution (after g2f transform), not the
+    mixed variable g. The caller is responsible for the g->f conversion.
+    """
+    if pre is not None and "apar_weight" in pre:
+        apar_weight = pre["apar_weight"]
+        apar_diag = pre["apar_diag"]
+    else:
+        apar_weight, apar_diag, _ = precompute_apar(geometry, params)
+
+    # numerator: integral of weight * df over (species, vpar, mu)
+    apar_num = jnp.einsum("avmjkl,avmjkl->jkl", apar_weight, df)
+    return apar_num / apar_diag
+
+
+def precompute_bpar(geometry, params):
+    """Precompute the coupled Poisson-Bpar field solve arrays.
+
+    When nlbpar=True, the Poisson and Bpar equations form a coupled 2x2
+    system, decoupled via intermediate coefficients F_sp1, F_sp2, B_sp1,
+    B_sp2 (GKW ``poisson_dia``, ``poisson_int``, ``ampere_bpar_int`` in
+    linear_terms.f90:3112-3377, 3444-3525).
+
+    Returns (coupled_phi_weight, bpar_weight, coupled_diag, j1hat_6d, gamma1_6d)
+    where:
+      coupled_phi_weight: (nsp, nvpar, nmu, ns, nkx, nky) -- replaces phi_weight
+      bpar_weight: (nsp, nvpar, nmu, ns, nkx, nky) -- B_par numerator weight
+      coupled_diag: (ns, nkx, nky) -- shared coupled diagonal
+      j1hat_6d: (nsp, nvpar, nmu, ns, nkx, nky) -- for gyro-averaging B_par
+      gamma1_6d: (nsp, 1, 1, ns, nkx, nky) -- Gamma_1 for diagnostics
+    """
+    import numpy as np
+
+    geom_ = geom_tensors(geometry, params)
+    beta = jnp.asarray(getattr(params, "beta", 0.0), dtype=jnp.float64)
+
+    signz_6d = geom_["signz"]
+    de_6d = geom_["de"]
+    tmp_6d = geom_["tmp"]
+    bn = geom_["bn"]
+    mugr = geom_["mugr"]
+    intvp = geom_["intvp"]
+    intmu = geom_["intmu"]
+
+    bessel_j0 = geom_["bessel"]  # J0(bessel_arg)
+    gamma0 = geom_["gamma"]  # Gamma_0 = I_0(b)*exp(-b)
+
+    # --- Gamma_1 and J1_hat ---
+    kxrh = rearrange(jnp.asarray(geometry["kxrh"], dtype=jnp.float64), "x -> 1 1 1 1 x 1")
+    little_g = rearrange(
+        jnp.asarray(geometry["little_g"], dtype=jnp.float64), "s three -> three 1 1 1 s 1 1"
+    )
+    krloc_sq = (
+        geom_["krho"] ** 2 * little_g[0]
+        + 2 * geom_["krho"] * kxrh * little_g[1]
+        + kxrh**2 * little_g[2]
+    )
+    krloc = jnp.sqrt(jnp.maximum(krloc_sq, _EPS))
+
+    # Gamma_1(b) = I_1(b)*exp(-b) where b = 0.5*(mas*vthrat*krloc/(signz*bn))^2
+    sz = jnp.where(jnp.abs(signz_6d) < _EPS, 1.0, signz_6d)
+    gamma_arg = 0.5 * (geom_["mas"] * geom_["vthrat"] * krloc / (sz * bn)) ** 2
+    gamma_arg = jnp.clip(gamma_arg, 0.0, 500.0)
+    gamma1_6d = i1e(gamma_arg)
+
+    # gamma_diff = (Gamma_0 - Gamma_1) * exp(-cfen)
+    # Without rotation: cfen=0, so gamma_diff = Gamma_0 - Gamma_1
+    # Zero-mode limit: gamma_diff = 1 (Gamma_0=1, Gamma_1=0)
+    krloc_is_zero = jnp.abs(krloc) < 1e-5
+    gamma_diff = jnp.where(krloc_is_zero, 1.0, gamma0 - gamma1_6d)
+
+    # J1_hat: 2*J_1(bessel_arg) / bessel_arg
+    mugr_bn = jnp.maximum(2.0 * mugr / bn, _EPS)
+    bessel_arg = geom_["mas"] * geom_["vthrat"] * krloc * jnp.sqrt(mugr_bn) / sz
+    bessel_arg = jnp.where(jnp.isnan(bessel_arg), 0.0, bessel_arg)
+    # GKW returns 0.5 for zero mode (krloc < 1e-5)
+    j1hat_6d = jnp.where(krloc_is_zero, 0.5, j1_hat(bessel_arg))
+
+    # --- Coupling coefficients (summed over species) ---
+    # F_sp1 = sum_sp[ signz^2 * de * (Gamma_0 - 1) / tmp ]
+    # F_sp2 = sum_sp[ signz * beta * de * gamma_diff / (2*bn) ]
+    # B_sp1 = sum_sp[ signz * de * gamma_diff / bn ]
+    # B_sp2 = sum_sp[ tmp * de * beta * gamma_diff / bn^2 ]
+    # Note: GKW uses gamma*exp(-cfen) for F_sp1; without rotation gamma_0 already
+    # includes exp(-cfen)=1. For the zero mode, gamma=1.
+    gamma0_for_fsp1 = jnp.where(krloc_is_zero, 1.0, gamma0)
+    F_sp1 = jnp.sum(signz_6d**2 * de_6d * (gamma0_for_fsp1 - 1.0) / tmp_6d, axis=0, keepdims=True)
+    F_sp2 = jnp.sum(signz_6d * beta * de_6d * gamma_diff / (2.0 * bn), axis=0, keepdims=True)
+    B_sp1 = jnp.sum(signz_6d * de_6d * gamma_diff / bn, axis=0, keepdims=True)
+    B_sp2 = jnp.sum(tmp_6d * de_6d * beta * gamma_diff / bn**2, axis=0, keepdims=True)
+
+    # --- Coupled diagonal ---
+    # diagonal = F_sp1 * (1 + B_sp2) - F_sp2 * B_sp1
+    coupled_diag = F_sp1 * (1.0 + B_sp2) - F_sp2 * B_sp1
+
+    # Squeeze to (ns, nkx, nky) — remove species/vpar/mu dims
+    coupled_diag = coupled_diag.reshape(
+        coupled_diag.shape[-3], coupled_diag.shape[-2], coupled_diag.shape[-1]
+    )
+    coupled_diag = jnp.where(jnp.abs(coupled_diag) < _EPS, 1.0, coupled_diag)
+
+    # --- Coupled phi weight (modified Poisson numerator) ---
+    # I_sp1 = signz * de * bn * J0 * intvp * intmu   (standard Poisson weight)
+    # I_sp2 = beta * bn * tmp * de * intvp * intmu * mugr * J1_hat
+    # coupled_phi_weight = I_sp1 * (1 + B_sp2) - I_sp2 * B_sp1
+    I_sp1 = signz_6d * de_6d * bn * bessel_j0 * intvp * intmu
+    I_sp2 = beta * bn * tmp_6d * de_6d * intvp * intmu * mugr * j1hat_6d
+
+    coupled_phi_weight = I_sp1 * (1.0 + B_sp2) - I_sp2 * B_sp1
+
+    # --- Bpar weight ---
+    # bpar_weight = I_sp2 * F_sp1 - I_sp1 * F_sp2
+    bpar_weight = I_sp2 * F_sp1 - I_sp1 * F_sp2
+
+    # Squeeze gamma1 to (nsp, 1, 1, ns, nkx, nky) for diagnostics
+    gamma1_out = gamma1_6d[:, :1, :1, :, :, :]
+
+    return coupled_phi_weight, bpar_weight, coupled_diag, j1hat_6d, gamma1_out
+
+
 @jax.jit
 def calculate_fluxes(
     geom: Dict[str, jnp.ndarray], df: jnp.ndarray, phi: jnp.ndarray
@@ -425,6 +667,68 @@ def calculate_fluxes_kinetic(
         return jnp.stack([pflux, eflux, vflux])
 
     return jnp.stack([_flux_single(i) for i in range(nsp)])
+
+
+def calculate_em_fluxes(
+    geometry: Dict[str, jnp.ndarray],
+    df: jnp.ndarray,
+    apar: jnp.ndarray,
+    params: Any = None,
+) -> Tuple[jnp.ndarray, jnp.ndarray]:
+    """
+    Electromagnetic flux contributions from A_parallel (magnetic flutter).
+
+    The EM particle flux: Q_em_p = Im[sum(conj(A_par_gyro) * vpar * vthrat * df * d3v)]
+    The EM heat flux:     Q_em_e = Im[sum(conj(A_par_gyro) * vpar * vthrat * E * df * d3v)]
+
+    where E = vpar^2 + 2*mu*B is the energy.
+
+    df: 5D (nvpar, nmu, ns, nkx, nky) or 6D (nsp, nvpar, nmu, ns, nkx, nky).
+    apar: (ns, nkx, nky).
+    Returns: (em_pflux, em_eflux) scalars or (nsp, 2) for kinetic.
+    """
+    if apar is None:
+        z = jnp.array(0.0, dtype=jnp.float64)
+        return z, z
+
+    parseval = jnp.asarray(geometry["parseval"], dtype=jnp.float64)
+    ints = jnp.asarray(geometry["ints"], dtype=jnp.float64)
+    intvp = jnp.asarray(geometry["intvp"], dtype=jnp.float64)
+    intmu = jnp.asarray(geometry["intmu"], dtype=jnp.float64)
+    vpgr = jnp.asarray(geometry["vpgr"], dtype=jnp.float64)
+    mugr = jnp.asarray(geometry["mugr"], dtype=jnp.float64)
+    bn = jnp.asarray(geometry["bn"], dtype=jnp.float64)
+    efun = jnp.asarray(geometry["efun"], dtype=jnp.float64)
+    krho = jnp.asarray(geometry["krho"], dtype=jnp.float64)
+    d2X = jnp.asarray(geometry.get("d2X", 1.0), dtype=jnp.float64)
+
+    if df.ndim == 5:
+        # single species (adiabatic)
+        vthrat = float(getattr(params, "vthrat", 1.0)) if params else 1.0
+        apar_b = apar[jnp.newaxis, jnp.newaxis, :, :, :]
+        vpgr_b = vpgr.reshape(-1, 1, 1, 1, 1)
+        mugr_b = mugr.reshape(1, -1, 1, 1, 1)
+        bn_b = bn.reshape(1, 1, -1, 1, 1)
+        ints_b = ints.reshape(1, 1, -1, 1, 1)
+        parseval_b = parseval.reshape(1, 1, 1, 1, -1)
+        efun_b = efun.reshape(1, 1, -1, 1, 1)
+        krho_b = krho.reshape(1, 1, 1, 1, -1)
+        intvp_b = intvp.reshape(-1, 1, 1, 1, 1)
+        intmu_b = intmu.reshape(1, -1, 1, 1, 1)
+
+        d3v = d2X * intmu_b * bn_b * intvp_b
+        dum = parseval_b * ints_b * (efun_b * krho_b) * df
+        dum_apar = dum * jnp.conj(apar_b) * vthrat * vpgr_b
+
+        em_pflux = jnp.sum(d3v * jnp.imag(dum_apar))
+        em_eflux = jnp.sum(
+            d3v * (vpgr_b**2 * jnp.imag(dum_apar) + 2 * mugr_b * bn_b * jnp.imag(dum_apar))
+        )
+        return em_pflux, em_eflux
+    else:
+        # kinetic: sum over species not implemented yet, return zeros
+        z = jnp.array(0.0, dtype=jnp.float64)
+        return z, z
 
 
 def get_integrals(

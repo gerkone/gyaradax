@@ -49,6 +49,44 @@ from gyaradax.utils import pack_half_spectrum, unpack_half_spectrum  # noqa: F40
 from einops import rearrange
 
 
+def g_to_f(dg, apar, params, pre):
+    """Convert mixed variable g to physical distribution f.
+
+    g = f + (2Z/T) * vthrat * vpar * J0 * A_par * F_M
+    => f = g - (2Z/T) * vthrat * vpar * J0 * A_par * F_M
+    => f = g + g2f_factor * A_par  (g2f_factor is negative of the coupling)
+
+    When nlapar=False, returns dg unchanged (identity).
+    """
+    if not params.nlapar:
+        return dg
+    g2f = pre["g2f_factor"]
+    # apar shape: (ns, nkx, nky) -> broadcast to match df shape
+    if dg.ndim == 5:
+        apar_b = apar[jnp.newaxis, jnp.newaxis, :, :, :]
+    else:
+        apar_b = apar[jnp.newaxis, jnp.newaxis, jnp.newaxis, :, :, :]
+    return dg + g2f * apar_b
+
+
+def f_to_g(df, apar, params, pre):
+    """Convert physical distribution f to mixed variable g.
+
+    g = f + (2Z/T) * vthrat * vpar * J0 * A_par * F_M
+    => g = f - g2f_factor * A_par  (since g2f_factor = -(2Z/T)*vthrat*vpar*J0*F_M/T)
+
+    When nlapar=False, returns df unchanged (identity).
+    """
+    if not params.nlapar:
+        return df
+    g2f = pre["g2f_factor"]
+    if df.ndim == 5:
+        apar_b = apar[jnp.newaxis, jnp.newaxis, :, :, :]
+    else:
+        apar_b = apar[jnp.newaxis, jnp.newaxis, jnp.newaxis, :, :, :]
+    return df - g2f * apar_b
+
+
 def default_state(nky: int = 1) -> GKState:
     return GKState(
         time=jnp.array(0.0, dtype=jnp.float64),
@@ -643,11 +681,129 @@ def linear_precompute(geometry: Dict[str, jnp.ndarray], params: GKParams) -> "GK
         out["ky_b"] = jnp.reshape(ky, (1, 1, 1, 1, 1, -1))
 
         # precompute kinetic phi solve arrays (avoids recomputing bessel/gamma per RHS call)
-        phi_w, phi_d = precompute_phi_kinetic(geometry)
+        # Ensure geometry has correct multi-species arrays from params
+        # (compute_geometry_from_input may only have single-species defaults)
+        geom_sp = dict(geometry)
+        geom_sp["mas"] = jnp.asarray(params.mas, dtype=jnp.float64).reshape(-1)
+        geom_sp["signz"] = jnp.asarray(params.signz, dtype=jnp.float64).reshape(-1)
+        geom_sp["tmp"] = jnp.asarray(params.tmp, dtype=jnp.float64).reshape(-1)
+        geom_sp["de"] = jnp.asarray(params.de, dtype=jnp.float64).reshape(-1)
+        geom_sp["vthrat"] = jnp.asarray(params.vthrat, dtype=jnp.float64).reshape(-1)
+        phi_w, phi_d = precompute_phi_kinetic(geom_sp)
         out["phi_weight"] = phi_w
         out["phi_diag"] = phi_d
 
-        # field CFL: ES limit of Alfvén wave (time_est_field, matdat.F90:1859)
+        # electromagnetic precomputation (A_parallel)
+        if params.nlapar:
+            from gyaradax.integrals import precompute_apar
+
+            apar_w, _apar_d_analytical, kperp_sq = precompute_apar(geometry, params)
+            out["apar_weight"] = apar_w
+            out["kperp_sq"] = kperp_sq
+
+            signz_6 = jnp.asarray(params.signz, dtype=jnp.float64).reshape(nsp, 1, 1, 1, 1, 1)
+            tmp_6 = jnp.asarray(params.tmp, dtype=jnp.float64).reshape(nsp, 1, 1, 1, 1, 1)
+            vthrat_6 = jnp.asarray(params.vthrat, dtype=jnp.float64).reshape(nsp, 1, 1, 1, 1, 1)
+            vpgr_6 = jnp.reshape(vpgr, (1, -1, 1, 1, 1, 1))
+            mas_6 = jnp.asarray(params.mas, dtype=jnp.float64).reshape(nsp, 1, 1, 1, 1, 1)
+            de_6 = jnp.asarray(params.de, dtype=jnp.float64).reshape(nsp, 1, 1, 1, 1, 1)
+            intmu_6 = jnp.asarray(geometry["intmu"], dtype=jnp.float64).reshape(1, 1, -1, 1, 1, 1)
+            intvp_6 = jnp.asarray(geometry["intvp"], dtype=jnp.float64).reshape(1, -1, 1, 1, 1, 1)
+            bn_6 = jnp.reshape(bn, (1, 1, 1, -1, 1, 1))
+
+            # Override Ampere denominator with GKW-matching numerical integral:
+            # gamma_num = sum(2*B*intmu*intvp * J0^2 * vpgr^2 * fmaxwl) per species
+            # (GKW ampere_dia, linear_terms.f90:3760-3785)
+            gamma_num = jnp.sum(
+                2.0 * bn_6 * intmu_6 * intvp_6 * sp["bessel"] ** 2 * vpgr_6**2 * sp["fmaxwl"],
+                axis=(1, 2),
+                keepdims=True,
+            )  # (nsp, 1, 1, ns, nkx, nky)
+            diag_per_sp = signz_6**2 * de_6 * gamma_num / mas_6
+            diag_em = params.beta * jnp.sum(diag_per_sp, axis=0)
+            diag_em = diag_em.reshape(diag_em.shape[-3], diag_em.shape[-2], diag_em.shape[-1])
+            kperp_sq_3d = kperp_sq.reshape(
+                kperp_sq.shape[-3], kperp_sq.shape[-2], kperp_sq.shape[-1]
+            )
+            apar_d = kperp_sq_3d + diag_em
+            apar_d = jnp.where(jnp.abs(apar_d) < _EPS, 1.0, apar_d)
+            out["apar_diag"] = apar_d
+            # g2f_factor matches GKW g2f_correct: -2*signz*vthrat*vpgr*J0*fmaxwl/tmp
+            g2f = -2.0 * signz_6 * vthrat_6 * vpgr_6 * sp["bessel"] * sp["fmaxwl"] / tmp_6
+            out["g2f_factor"] = g2f
+            # correction to Ampere denominator for self-consistent solve from g
+            # When solving from g: (apar_diag - g2f_correction) * apar = einsum(apar_weight, g)
+            out["apar_g2f_correction"] = jnp.einsum("avmjkl,avmjkl->jkl", apar_w, g2f)
+            # chi factor: gyro_chi = gyro_phi + apar_chi_factor * apar
+            # where chi = phi - 2*v_R*v_par*A_par (the generalized EM potential)
+            # apar_chi_factor = -2 * vthrat * vpgr * J0 (shape: 6D per-species)
+            out["apar_chi_factor"] = -2.0 * vthrat_6 * vpgr_6 * sp["bessel"]
+
+        # B_parallel precomputation (coupled Poisson-Bpar system)
+        if params.nlbpar:
+            from gyaradax.integrals import i1e as _i1e, j1_hat as _j1_hat
+
+            beta = jnp.asarray(params.beta, dtype=jnp.float64)
+            mugr_6 = jnp.asarray(geometry["mugr"], dtype=jnp.float64).reshape(1, 1, -1, 1, 1, 1)
+
+            # krloc for zero-mode detection
+            kxrh_6 = jnp.reshape(kx, (1, 1, 1, 1, -1, 1))
+            ky_6 = jnp.reshape(ky, (1, 1, 1, 1, 1, -1))
+            krloc_sq = (
+                ky_6**2 * little_g[:, 0].reshape(1, 1, 1, -1, 1, 1)
+                + 2 * ky_6 * kxrh_6 * little_g[:, 1].reshape(1, 1, 1, -1, 1, 1)
+                + kxrh_6**2 * little_g[:, 2].reshape(1, 1, 1, -1, 1, 1)
+            )
+            krloc = jnp.sqrt(jnp.maximum(krloc_sq, _EPS))
+            krloc_is_zero = jnp.abs(krloc) < 1e-5
+
+            # Gamma_0, Gamma_1 per species
+            sz_6 = jnp.where(jnp.abs(signz_6) < _EPS, 1.0, signz_6)
+            gamma_arg = 0.5 * (mas_6 * vthrat_6 * krloc / (sz_6 * bn_6)) ** 2
+            gamma_arg = jnp.clip(gamma_arg, 0.0, 500.0)
+            from jax.scipy.special import i0e as _i0e
+
+            gamma0 = _i0e(gamma_arg)
+            gamma1 = _i1e(gamma_arg)
+            gamma_diff = jnp.where(krloc_is_zero, 1.0, gamma0 - gamma1)
+
+            # J1_hat = 2*J_1(bessel_arg)/bessel_arg, zero mode → 0.5
+            mugr_bn = jnp.maximum(2.0 * mugr_6 / bn_6, _EPS)
+            bessel_arg = mas_6 * vthrat_6 * krloc * jnp.sqrt(mugr_bn) / sz_6
+            bessel_arg = jnp.where(jnp.isnan(bessel_arg), 0.0, bessel_arg)
+            j1hat = jnp.where(krloc_is_zero, 0.5, _j1_hat(bessel_arg))
+
+            # Coupling coefficients (summed over species)
+            gamma0_for_fsp1 = jnp.where(krloc_is_zero, 1.0, gamma0)
+            F_sp1 = jnp.sum(
+                signz_6**2 * de_6 * (gamma0_for_fsp1 - 1.0) / tmp_6, axis=0, keepdims=True
+            )
+            F_sp2 = jnp.sum(
+                signz_6 * beta * de_6 * gamma_diff / (2.0 * bn_6), axis=0, keepdims=True
+            )
+            B_sp1 = jnp.sum(signz_6 * de_6 * gamma_diff / bn_6, axis=0, keepdims=True)
+            B_sp2 = jnp.sum(tmp_6 * de_6 * beta * gamma_diff / bn_6**2, axis=0, keepdims=True)
+
+            # Coupled diagonal
+            cdiag = F_sp1 * (1.0 + B_sp2) - F_sp2 * B_sp1
+            cdiag_3d = cdiag.reshape(cdiag.shape[-3], cdiag.shape[-2], cdiag.shape[-1])
+            cdiag_3d = jnp.where(jnp.abs(cdiag_3d) < _EPS, 1.0, cdiag_3d)
+
+            # I_sp1 and I_sp2 (per-species numerator weights)
+            I_sp1 = signz_6 * de_6 * bn_6 * sp["bessel"] * intvp_6 * intmu_6
+            I_sp2 = beta * bn_6 * tmp_6 * de_6 * intvp_6 * intmu_6 * mugr_6 * j1hat
+
+            # Override phi_weight and phi_diag with coupled versions
+            out["phi_weight"] = I_sp1 * (1.0 + B_sp2) - I_sp2 * B_sp1
+            out["phi_diag"] = cdiag_3d
+            out["bpar_weight"] = I_sp2 * F_sp1 - I_sp1 * F_sp2
+
+            # chi factor for B_par: gyro_chi += bpar_chi_factor * bpar
+            out["bpar_chi_factor"] = 2.0 * mugr_6 * tmp_6 / signz_6 * j1hat
+
+        # field CFL: Alfvén wave limit (time_est_field, matdat.F90:1859-1919)
+        # ES: sqrt(mir * kmin2 * mer)
+        # EM: sqrt(mir * (beta + kmin2 * mer))  — beta adds shear Alfven coupling
         signz_arr = jnp.asarray(params.signz, dtype=jnp.float64)
         de_arr = jnp.asarray(params.de, dtype=jnp.float64)
         mir = jnp.sum(jnp.where(signz_arr > 0, mas_arr * de_arr, 0.0))
@@ -655,13 +811,10 @@ def linear_precompute(geometry: Dict[str, jnp.ndarray], params: GKParams) -> "GK
         ky_min = jnp.where(nky > 1, ky[1], ky[0])
         kmin2 = ky_min**2 * little_g[:, 0]
         q_val = jnp.asarray(geometry.get("q", getattr(params, "q", 1.0)), dtype=jnp.float64)
+        beta_cfl = jnp.asarray(params.beta, dtype=jnp.float64)
+        field_cfl_arg = mir * (beta_cfl + kmin2 * mer)
         field_period = (
-            2.0
-            * jnp.pi
-            * q_val
-            * params.sgr_dist
-            * bn
-            * jnp.sqrt(jnp.maximum(mir * kmin2 * mer, _EPS))
+            2.0 * jnp.pi * q_val * params.sgr_dist * bn * jnp.sqrt(jnp.maximum(field_cfl_arg, _EPS))
         )
         time_field = jnp.min(jnp.where(field_period > _EPS, field_period, 1e30))
         out["tmax_field"] = jnp.where(time_field < 1e20, 1.0 / time_field, 0.0)
@@ -735,6 +888,29 @@ def linear_precompute(geometry: Dict[str, jnp.ndarray], params: GKParams) -> "GK
         out["phi_has_zonal"] = has_zonal
         out["phi_ixzero"] = ixzero
         out["phi_iyzero"] = iyzero
+
+        # electromagnetic precomputation for adiabatic electrons + A_par
+        if params.nlapar:
+            from gyaradax.integrals import precompute_apar
+
+            apar_w, apar_d, kperp_sq = precompute_apar(geometry, params)
+            out["apar_weight"] = apar_w
+            out["apar_diag"] = apar_d
+            out["kperp_sq"] = kperp_sq
+            # g2f factor for adiabatic (5D single species)
+            signz_b = jnp.asarray(params.signz, dtype=jnp.float64)
+            tmp_b = jnp.asarray(params.tmp, dtype=jnp.float64)
+            vthrat_b = jnp.asarray(params.vthrat, dtype=jnp.float64)
+            vpgr_5 = jnp.reshape(vpgr, (-1, 1, 1, 1, 1))
+            g2f = -2.0 * signz_b * vthrat_b * vpgr_5 * sp["bessel"] * sp["fmaxwl"] / tmp_b
+            out["g2f_factor"] = g2f
+            # correction to Ampere denominator for self-consistent solve from g
+            # apar_diag_modified = apar_diag - einsum(apar_weight * g2f_factor)
+            out["apar_g2f_correction"] = jnp.einsum(
+                "vmjkl,vmjkl->jkl", apar_w[0], g2f  # single species (adiabatic)
+            )
+            # chi factor: gyro_chi = gyro_phi + apar_chi_factor * apar
+            out["apar_chi_factor"] = -2.0 * vthrat_b * vpgr_5 * sp["bessel"]
 
     return GKPre(out)
 
@@ -941,7 +1117,11 @@ def advance_state(
 
 
 def _compute_phi(df, geometry, params, pre):
-    """Compute phi via the appropriate solver."""
+    """Compute phi via the appropriate solver.
+
+    When nlapar=True, df should be the physical distribution (after g2f),
+    NOT the mixed variable g.
+    """
     if params.adiabatic_electrons and "phi_weight" in pre and "phi_corr_weight" in pre:
         return calculate_phi_adiabatic(
             df,
@@ -958,6 +1138,42 @@ def _compute_phi(df, geometry, params, pre):
         )
     else:
         return calculate_phi(geometry, df, params=params, pre=pre)
+
+
+def _compute_fields(dg, geometry, params, pre):
+    """Compute all field variables (phi, apar, bpar) from the evolved variable dg.
+
+    When nlapar=True:
+      1. Solve Ampere: apar = einsum(weight, g) / diag  (bare denominator)
+      2. Compute df = g + g2f_factor * apar  (physical distribution)
+      3. Solve phi from df (coupled weight if nlbpar)
+      4. Solve bpar from df (if nlbpar, shares coupled diagonal with phi)
+
+    Returns (phi, apar, bpar) where apar/bpar are None when disabled.
+    """
+    if not params.nlapar:
+        phi = _compute_phi(dg, geometry, params, pre)
+        return phi, None, None
+
+    # Step 1: Solve Ampere from g (bare denominator, no g2f self-consistency).
+    apar_weight = pre["apar_weight"]
+    apar_diag = pre["apar_diag"]
+    apar_num = jnp.einsum("avmjkl,avmjkl->jkl", apar_weight, dg)
+    apar = apar_num / apar_diag
+
+    # Step 2: Convert g -> f
+    df = g_to_f(dg, apar, params, pre)
+
+    # Step 3: Solve phi from f (uses coupled weight/diag when nlbpar=True)
+    phi = _compute_phi(df, geometry, params, pre)
+
+    # Step 4: Solve bpar from f (shares coupled diagonal with phi)
+    bpar = None
+    if params.nlbpar and "bpar_weight" in pre:
+        bpar_num = jnp.einsum("avmjkl,avmjkl->jkl", pre["bpar_weight"], df)
+        bpar = -bpar_num / pre["phi_diag"]
+
+    return phi, apar, bpar
 
 
 def gkstep_single(
@@ -984,11 +1200,16 @@ def gkstep_single(
 
     dt = dt_override if dt_override is not None else jnp.array(params.dt, dtype=jnp.float64)
 
-    def _rhs(df):
-        phi_local = _compute_phi(df, geometry, params, pre)
-        rhs = ops.linear_rhs(df, phi_local, geometry, params, pre)
+    def _rhs(dg):
+        phi_local, apar_local, bpar_local = _compute_fields(dg, geometry, params, pre)
+        # GKW applies g2f (g -> f) before the linear RHS (exp_integration.F90:800-912),
+        # so the kinetic terms (streaming, mirror, trapping) act on f, not g.
+        df_for_rhs = g_to_f(dg, apar_local, params, pre) if apar_local is not None else dg
+        rhs = ops.linear_rhs(
+            df_for_rhs, phi_local, geometry, params, pre, apar=apar_local, bpar=bpar_local
+        )
         if params.non_linear:
-            rhs = rhs + ops.nonlinear_term_iii(df, phi_local, geometry)
+            rhs = rhs + ops.nonlinear_term_iii(dg, phi_local, geometry)
         return rhs
 
     # RK4 — expanded accumulation lets XLA read k1..k4 and prev_df in one fused kernel
@@ -1005,7 +1226,7 @@ def gkstep_single(
     is_window_end = jnp.equal(jnp.mod(new_step, params.naverage), 0)
 
     if params.non_linear:
-        phi = _compute_phi(next_df_raw, geometry, params, pre)
+        phi, _, _ = _compute_fields(next_df_raw, geometry, params, pre)
         current_amp = mode_amplitude(phi, geometry, params.norm_eps)
         next_df = next_df_raw
         norm_factor = jnp.ones_like(state.accumulated_norm_factor)
@@ -1015,14 +1236,14 @@ def gkstep_single(
             return normalize_per_ky(next_df_raw, geometry, params, pre=pre)
 
         def _skip_norm(_):
-            phi_curr = _compute_phi(next_df_raw, geometry, params, pre)
+            phi_curr, _, _ = _compute_fields(next_df_raw, geometry, params, pre)
             amp_curr = mode_amplitude(phi_curr, geometry, params.norm_eps)
             return (next_df_raw, jnp.ones_like(state.accumulated_norm_factor), amp_curr)
 
         next_df, norm_factor, current_amp = jax.lax.cond(
             is_window_end, _apply_norm, _skip_norm, operand=None
         )
-        phi = _compute_phi(next_df, geometry, params, pre)
+        phi, _, _ = _compute_fields(next_df, geometry, params, pre)
 
     z = jnp.array(0.0, dtype=jnp.float64)
     next_state = advance_state(state, params, is_window_end, current_amp, norm_factor, dt_used=dt)
@@ -1051,6 +1272,14 @@ def gksolve(
     """
     if pre is None:
         pre = linear_precompute(geometry, params)
+
+    # Ensure geometry has correct multi-species arrays for downstream flux calculations
+    if not params.adiabatic_electrons:
+        geometry = dict(geometry)
+        for k in ("mas", "signz", "tmp", "de", "vthrat"):
+            v = getattr(params, k, None)
+            if v is not None:
+                geometry[k] = jnp.atleast_1d(jnp.asarray(v, dtype=jnp.float64))
 
     ops = create_ops(
         pre, backend=params.backend, use_z2z=params.use_z2z, mixed_precision=params.mixed_precision

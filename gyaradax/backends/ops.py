@@ -107,10 +107,13 @@ class SolverOps(ABC):
         geometry: Dict[str, jnp.ndarray],
         params,
         pre,
+        apar: jnp.ndarray = None,
+        bpar: jnp.ndarray = None,
     ) -> jnp.ndarray:
         """Compute linear RHS for 5D (single species) or 6D (multi-species) df.
 
-        Implements Terms I, II, IV, V, VII, VIII + dissipation.
+        Implements Terms I, II, IV, V, VII, VIII, X, XI + dissipation.
+        When apar is provided (EM mode), includes electromagnetic coupling terms.
         Backend must handle both 5D and 6D cases, or raise NotImplementedError/ValueError.
 
         Args:
@@ -119,6 +122,7 @@ class SolverOps(ABC):
             geometry: Geometry dict with grid and metric data
             params: GKParams with physical parameters
             pre: GKPre with precomputed coefficients
+            apar: Parallel vector potential (ns, nkx, nky), None for electrostatic
 
         Returns:
             RHS contribution (same shape as df)

@@ -223,17 +223,40 @@ class JAXOps(SolverOps):
         phi: jnp.ndarray,
         params: GKParams,
         pre: GKPre,
+        apar: jnp.ndarray = None,
+        bpar: jnp.ndarray = None,
     ) -> jnp.ndarray:
         """Fused linear RHS for single species (5D df).
 
         Implements Terms I, II, IV, V, VII, VIII + dissipation.
-        Matches GKW linear_terms.f90 and GKW's calc_linear_terms.
+        When apar/bpar are provided, the generalized potential chi is:
+        chi = J0*phi - 2*vR*vpar*J0*apar + (2*mu*T/Z)*J1hat*bpar
+        This affects drive Terms V, VIII and parallel field Term VII.
+        Term X adds a parallel derivative of the B_par chi correction.
         """
         gyro_phi = pre["bessel"] * phi[None, None, :, :, :]
 
+        # EM: gyro_chi = J0*phi + apar/bpar corrections (for drive Terms V, VIII, XI)
+        # Term VII uses gyro_phi only — GKW's elem%itloc = iphi (line 2765),
+        # the apar coupling to Term VII is rhostar-dependent and off by default.
+        gyro_chi = gyro_phi
+        if apar is not None and "apar_chi_factor" in pre:
+            apar_b = apar[None, None, :, :, :]
+            gyro_chi = gyro_chi + pre["apar_chi_factor"] * apar_b
+        if bpar is not None and "bpar_chi_factor" in pre:
+            bpar_b = bpar[None, None, :, :, :]
+            gyro_chi = gyro_chi + pre["bpar_chi_factor"] * bpar_b
+
+        # Term I (streaming on df) + Term VII (parallel field on gyro_phi, NOT chi)
         term_par, term_vii = self._apply_parallel_dual(
             df, gyro_phi, pre["s_total_upar"], pre["s_total_t7"]
         )
+
+        # Term X: parallel derivative of gyro-averaged B_par (mirror from B1par)
+        term_x = jnp.zeros_like(df)
+        if bpar is not None and "bpar_chi_factor" in pre:
+            gyro_bpar_scaled = pre["bpar_chi_factor"] * bpar_b
+            term_x = self._apply_parallel(gyro_bpar_scaled, pre["s_total_t7"])
 
         out_d1, out_d4 = self._apply_vpar_dual(df, stencils.VPAR_D1, stencils.VPAR_D4)
         term_iv = pre["utrap"] * out_d1 / params.dvp
@@ -241,6 +264,7 @@ class JAXOps(SolverOps):
 
         kdotvd = pre["drift_x"] * pre["kx_b"] + pre["drift_y"] * pre["ky_b"]
 
+        # Terms V + VIII + XI use gyro_chi (drive from generalized potential)
         return (
             term_par
             + term_iv
@@ -253,8 +277,9 @@ class JAXOps(SolverOps):
                 pre["dmaxwel_fm_ek"]
                 - pre["signz0"] * kdotvd * (pre["fmaxwl"] / jnp.maximum(pre["tmp0"], 1e-15))
             )
-            * gyro_phi
+            * gyro_chi
             + term_vii
+            + term_x
         )
 
     def linear_rhs(
@@ -264,18 +289,18 @@ class JAXOps(SolverOps):
         geometry: Dict[str, jnp.ndarray],
         params: GKParams,
         pre: GKPre,
+        apar: jnp.ndarray = None,
+        bpar: jnp.ndarray = None,
     ) -> jnp.ndarray:
         """Linear RHS with shape dispatch.
 
-        Implements Terms I, II, IV, V, VII, VIII + dissipation.
+        Implements Terms I, II, IV, V, VII, VIII, X, XI + dissipation.
         Dispatches on df.ndim: 5D direct, 6D via vmap over species.
+        When apar/bpar are provided, includes EM coupling terms.
         """
         if df.ndim == 5:
-            return self._linear_rhs_core(df, phi, params, pre)
+            return self._linear_rhs_core(df, phi, params, pre, apar=apar, bpar=bpar)
         elif df.ndim == 6:
-            # Per-species arrays: leading axis is nsp, vmap slices along axis 0.
-            # s_total_upar/t7 are (9, nsp, ...) from _fuse_stencils; moveaxis brings
-            # nsp to front so each vmap slice is (9, ...) — correct for _apply_parallel_dual.
             sp_arrays = {
                 "bessel": pre["bessel"],
                 "fmaxwl": pre["fmaxwl"],
@@ -289,12 +314,13 @@ class JAXOps(SolverOps):
                 "s_total_upar": jnp.moveaxis(pre["s_total_upar"], 1, 0),
                 "s_total_t7": jnp.moveaxis(pre["s_total_t7"], 1, 0),
             }
+            # EM: include chi factors in per-species arrays
+            if apar is not None and "apar_chi_factor" in pre:
+                sp_arrays["apar_chi_factor"] = pre["apar_chi_factor"]
+            if bpar is not None and "bpar_chi_factor" in pre:
+                sp_arrays["bpar_chi_factor"] = pre["bpar_chi_factor"]
             sp_in_axes = {k: 0 for k in sp_arrays}
 
-            # kx_b/ky_b in pre are 6D for kinetic (1,1,1,1,nkx,1); squeeze to 5D
-            # so that per-species _linear_rhs_core (with 5D df_sp) stays 5D.
-            # s_shift/kx_shift/valid_shift are read from self.pre by _apply_parallel_dual
-            # and are species-independent, so they don't belong in the vmapped dict.
             shared = {
                 "kx_b": pre["kx_b"].ravel().reshape(1, 1, 1, -1, 1),
                 "ky_b": pre["ky_b"].ravel().reshape(1, 1, 1, 1, -1),
@@ -303,7 +329,7 @@ class JAXOps(SolverOps):
 
             def _per_species(df_sp, sp):
                 sp_pre = {**sp, **shared}
-                return self._linear_rhs_core(df_sp, phi, params, sp_pre)
+                return self._linear_rhs_core(df_sp, phi, params, sp_pre, apar=apar, bpar=bpar)
 
             return jax.vmap(_per_species, in_axes=(0, sp_in_axes))(df, sp_arrays)
         else:

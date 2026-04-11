@@ -378,6 +378,8 @@ class CUDAOps(SolverOps):
         geometry: Dict[str, jnp.ndarray],
         params,
         pre: Dict[str, jnp.ndarray],
+        apar: jnp.ndarray = None,
+        bpar: jnp.ndarray = None,
     ) -> jnp.ndarray:
         """Fused linear RHS for single or multi-species.
 

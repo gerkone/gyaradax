@@ -349,9 +349,9 @@ def _build_mode_connectivity(mode_label, kxrh, krho):
       ixzero: int32 scalar, index of kx=0 mode
       iyzero: int32 scalar, index of ky=0 mode
     """
-    mode_label = np.asarray(mode_label, dtype=np.int32)
-    kxrh_np = np.asarray(kxrh)
-    krho_np = np.asarray(krho)
+    mode_label = np.atleast_1d(np.asarray(mode_label, dtype=np.int32))
+    kxrh_np = np.atleast_1d(np.asarray(kxrh))
+    krho_np = np.atleast_1d(np.asarray(krho))
     nkx = int(kxrh_np.shape[0])
     nky = int(krho_np.shape[0])
 
@@ -359,6 +359,8 @@ def _build_mode_connectivity(mode_label, kxrh, krho):
         mode_label_kxky = mode_label
     elif mode_label.shape == (nky, nkx):
         mode_label_kxky = mode_label.T
+    elif mode_label.size == nkx * nky:
+        mode_label_kxky = mode_label.reshape(nkx, nky)
     else:
         raise ValueError(
             f"mode_label shape {mode_label.shape} incompatible with nkx/nky=({nkx},{nky})"
@@ -366,12 +368,16 @@ def _build_mode_connectivity(mode_label, kxrh, krho):
 
     ixzero = int(np.argmin(np.abs(kxrh_np)))
     iyzero = int(np.argmin(np.abs(krho_np)))
+    # The zonal mode (ky=0) gets periodic parallel BCs; non-zonal modes
+    # use open boundaries determined by the kx connectivity chain.
+    # Only apply the periodic zonal treatment when ky is actually zero.
+    ky_is_truly_zonal = np.abs(krho_np[iyzero]) < 1e-10
 
     ixplus = -np.ones((nkx, nky), dtype=np.int32)
     ixminus = -np.ones((nkx, nky), dtype=np.int32)
 
     for iy in range(nky):
-        if iy == iyzero:
+        if iy == iyzero and ky_is_truly_zonal:
             ix = np.arange(nkx, dtype=np.int32)
             ixplus[:, iy] = ix
             ixminus[:, iy] = ix
@@ -386,7 +392,12 @@ def _build_mode_connectivity(mode_label, kxrh, krho):
             ixplus[chain[:-1], iy] = chain[1:]
             ixminus[chain[1:], iy] = chain[:-1]
 
-    return mode_label_kxky, ixplus, ixminus, ixzero, iyzero
+    # Return iyzero_bc for parallel boundary conditions: -1 when ky=0 is
+    # absent so that _build_parallel_shift_maps never applies periodic wrap
+    # to a non-zonal mode.  The caller-facing iyzero stays as argmin (used
+    # by the Poisson equation where has_zonal gates the correction).
+    iyzero_bc = iyzero if ky_is_truly_zonal else -1
+    return mode_label_kxky, ixplus, ixminus, ixzero, iyzero, iyzero_bc
 
 
 def _build_pos_par_grid_classes(ixplus, ixminus, ns):
@@ -532,9 +543,9 @@ def compute_geometry(
     krho_np = np.asarray(jax.lax.stop_gradient(krho))
     nkx_actual = len(kxrh_np)
     ml = _build_mode_label(nkx_actual, nky, ikxspace)
-    ml_kxky, ixp, ixm, ixz, iyz = _build_mode_connectivity(ml, kxrh_np, krho_np)
+    ml_kxky, ixp, ixm, ixz, iyz, iyz_bc = _build_mode_connectivity(ml, kxrh_np, krho_np)
     pos = _build_pos_par_grid_classes(ixp, ixm, ns)
-    ss, ks, vs = _build_parallel_shift_maps(ixp, ixm, iyz, ns, max_shift=4)
+    ss, ks, vs = _build_parallel_shift_maps(ixp, ixm, iyz_bc, ns, max_shift=4)
 
     return {
         "kthnorm": _f64(kthnorm),
@@ -706,9 +717,9 @@ def geometry_from_geom_dat_and_input(input_dat_path: str) -> Dict[str, Any]:
 
     nkx_actual = len(kxrh)
     ml = _build_mode_label(nkx_actual, nky, ikxspace)
-    ml_kxky, ixp, ixm, ixz, iyz = _build_mode_connectivity(ml, kxrh, krho)
+    ml_kxky, ixp, ixm, ixz, iyz, iyz_bc = _build_mode_connectivity(ml, kxrh, krho)
     pos = _build_pos_par_grid_classes(ixp, ixm, ns)
-    ss, ks, vs = _build_parallel_shift_maps(ixp, ixm, iyz, ns, max_shift=4)
+    ss, ks, vs = _build_parallel_shift_maps(ixp, ixm, iyz_bc, ns, max_shift=4)
 
     # geometry tensors from geom.dat
     bn = np.asarray(gd.get("bn", np.ones(ns)))

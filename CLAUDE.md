@@ -2,6 +2,8 @@
 
 A JAX reimplementation of the GKW Fortran gyrokinetic solver. Supports
 adiabatic and kinetic electrons, nonlinear ExB advection, adaptive CFL,
+electromagnetic A_parallel (shear Alfvén via Ampere's law, mixed variable g)
+and B_parallel (magnetic compression via coupled Poisson-Bpar solve),
 with an optional CUDA backend for fused stencil and cuFFT kernels.
 
 ## File map
@@ -9,7 +11,7 @@ with an optional CUDA backend for fused stencil and cuFFT kernels.
 ```
 gyaradax/
   solver.py      — RK4 integrator, linear RHS (Terms I–VIII), CFL, gksolve
-  integrals.py   — phi solve (adiabatic + kinetic), flux integrals, Bessel functions
+  integrals.py   — phi solve (adiabatic + kinetic), Ampere solve (A_par), Bpar coupled solve, flux integrals, EM flux diagnostics
   geometry.py    — circular/s-alpha geometry model, metric tensors, drift tensors
   params.py      — GKParams dataclass (JAX pytree), YAML/input.dat loading
   simulate.py    — high-level entry points (gksimulate, gk_run, gk_run_batched)
@@ -50,11 +52,13 @@ docs/NOTES.md    — detailed physics notes and validation results
 gksimulate / gk_run_batched          <- entry points (simulate.py)
   +- gksolve                         <- multi-step driver via jax.lax.scan (solver.py)
        +- gkstep_single              <- one RK4 step
-       |    +- _compute_phi          <- field solve
+       |    +- _compute_fields       <- field solve (phi + optional A_par)
        |    |    +- _phi_adiabatic   <- adiabatic: quasineutrality + zonal FSA correction
        |    |    +- _phi_kinetic     <- kinetic: multi-species Poisson
+       |    |    +- calculate_apar   <- EM: Ampere's law for A_parallel (when nlapar=True)
+       |    |    +- g_to_f           <- EM: mixed variable g -> physical f (when nlapar=True)
        |    +- ops.linear_rhs        <- Terms I, II, IV, V, VII, VIII + dissipation (backend dispatch)
-       |    |    +- _linear_rhs_core <- inner RHS (JAX backend, 5D impl, 6D via vmap)
+       |    |    +- _linear_rhs_core <- inner RHS (JAX backend, 5D/6D, uses chi=phi-2*v_R*v_par*A_par)
        |    +- ops.nonlinear_term_iii<- Term III: pseudospectral ExB (backend dispatch)
        |         +- _nonlinear_term_iii_core <- 2D FFT Poisson bracket per s-slice (JAX backend)
        +- estimate_timestep          <- adaptive CFL (nonlinear + von Neumann + field)
@@ -66,11 +70,13 @@ linear_precompute                    <- one-time setup of all static coefficient
   +- _compute_species_coeffs         <- per-species: Bessel, Maxwellian, drifts, drives
   +- _fuse_stencils                  <- merge streaming + dissipation into 9-point stencil
   +- precompute_phi_kinetic          <- static arrays for kinetic field solve
+  +- precompute_apar                 <- EM: Ampere weights, g2f factor, chi factor (when nlapar=True)
 
 get_integrals                        <- diagnostics at block boundaries
   +- calculate_phi                   <- dispatches adiabatic/kinetic
   +- calculate_fluxes                <- adiabatic: (pflux, eflux, vflux)
   +- calculate_fluxes_kinetic        <- kinetic: per-species (nsp, 3) array
+  +- calculate_em_fluxes             <- EM: magnetic flutter pflux/eflux from A_par
 
 compute_geometry                     <- build geometry dict from equilibrium params
   +- _parallel_sgrid                 <- field-line coordinate grid
@@ -97,6 +103,9 @@ SolverOps interface: `linear_rhs()`, `nonlinear_term_iii()`.
 | `_phi_adiabatic` | `calculate_fields` + `poisson_zf` | `fields.F90`, `linear_terms.f90` |
 | `_linear_rhs_core` (JAX) | `calc_linear_terms` | `linear_terms.f90` |
 | `_nonlinear_term_iii_core` (JAX) | `calculate_nonlinear` | `non_linear_terms.F90` |
+| `calculate_apar` | `ampere_int` + `ampere_dia` | `linear_terms.f90` |
+| `g_to_f` / `f_to_g` | `g2f_correct` | `linear_terms.f90` |
+| `_compute_fields` | `calculate_fields` (full EM) | `fields.F90` |
 | `estimate_linear_timestep` | `get_estimated_timestep` | `matdat.F90` |
 | `init_f` | `init_dist` | `init.f90` |
 | `compute_geometry` | `geom_circ` | `geom.f90` |
@@ -110,8 +119,14 @@ SolverOps interface: `linear_rhs()`, `nonlinear_term_iii()`.
 - **Terms I-VIII**: GKW numbering for the gyrokinetic equation RHS.
   Term VI (neoclassical/rotation) is not implemented.
   `drive_scale` controls Terms V and VIII jointly -- do NOT set to 0.
+- **Electromagnetic (A_parallel)**: Enabled by `nlapar=True, beta>0` in GKParams.
+  Evolves the mixed variable g = f + (2Z/T)*v_R*v_par*J0*A_par*F_M.
+  Field solve: self-consistent phi + A_par (Ampere's law with g2f correction).
+  RHS uses generalized potential chi = phi - 2*v_R*v_par*A_par in drive terms.
+  B_parallel not yet implemented (Phase 2).
 - **CFL**: adaptive dt from von Neumann analysis + nonlinear ExB velocity.
   For kinetic electrons, the field CFL (electron Alfven frequency) dominates.
+  With finite beta, the Alfven CFL is tighter: includes beta in field period.
 - **Grid**: 5D `(vpar, mu, s, kx, ky)` for adiabatic; 6D `(species, ...)` for kinetic.
 - **Backends**: JAX (default, differentiable, R2C/Z2Z), CUDA (fused kernels, Z2Z only, ~10x NL speedup).
 

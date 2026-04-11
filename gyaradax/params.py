@@ -15,11 +15,11 @@ from gyaradax.utils import load_scalars
 @dataclass(frozen=True)
 class GKParams:
     """
-    Runtime controls and physical parameters for the electrostatic solver.
+    Runtime controls and physical parameters for the gyrokinetic solver.
 
     This dataclass mirrors the GKW 'control', 'gridsize', and 'species' namelists,
     handling numerical hyperparameters and physical constants required for the
-    gyrokinetic Vlasov-Poisson system.
+    gyrokinetic Vlasov-Poisson system (electrostatic and electromagnetic).
 
     Attributes:
         dt: Small time step for RK4 integration.
@@ -74,6 +74,11 @@ class GKParams:
     backend: str = "jax"
     use_z2z: bool = False
 
+    # electromagnetic controls
+    nlapar: bool = False  # enable A_parallel (shear Alfven)
+    nlbpar: bool = False  # enable B_parallel (magnetic compression)
+    beta: float = 0.0  # reference plasma beta = 2*mu0*n_ref*T_ref/B_ref^2
+
     # physical parameters (typically from the kinetic species)
     rlt: float = 1.0
     rln: float = 1.0
@@ -110,6 +115,8 @@ class GKParams:
         "mixed_precision",
         "backend",
         "use_z2z",
+        "nlapar",
+        "nlbpar",
         "dt",
         "naverage",
         "disp_par",
@@ -173,6 +180,9 @@ def gkparams_from_runtime(runtime: Dict[str, Any], **overrides) -> GKParams:
         "amp_init": float(runtime.get("amp_init", 1.0e-4)),
         "adiabatic_electrons": bool(runtime.get("adiabatic_electrons", True)),
         "backend": str(runtime.get("backend", "jax")),
+        "nlapar": bool(runtime.get("nlapar", False)),
+        "nlbpar": bool(runtime.get("nlbpar", False)),
+        "beta": float(runtime.get("beta", 0.0)),
     }
     # species params may be arrays (multi-species) or scalars
     _SPECIES_PARAMS = {"rlt", "rln", "mas", "tmp", "de", "signz", "vthrat"}
@@ -311,6 +321,9 @@ def gkparams_from_config(config: Any, **overrides) -> GKParams:
         "adaptive_dt": bool(getattr(solver_cfg, "adaptive_dt", False)),
         "cfl_safety": float(getattr(solver_cfg, "cfl_safety", 0.95)),
         "backend": str(getattr(solver_cfg, "backend", "jax")),
+        "nlapar": bool(getattr(solver_cfg, "nlapar", False)),
+        "nlbpar": bool(getattr(solver_cfg, "nlbpar", False)),
+        "beta": float(getattr(physics_cfg, "beta", 0.0)),
     }
 
     # physics scalars (may be arrays for multi-species kinetic configs)

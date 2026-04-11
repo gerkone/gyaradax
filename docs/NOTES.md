@@ -391,7 +391,8 @@ order. Species is the outermost (slowest) index.
 
 ### 7.1 implemented
 
-- electrostatic gyrokinetics (no $A_\parallel$, no $B_\parallel$)
+- electrostatic gyrokinetics
+- electromagnetic $A_\parallel$ (shear Alfvén, Ampere's law, mixed variable $g$)
 - adiabatic and kinetic electron models
 - all 7 linear RHS terms (I, II, III, IV, V, VII, VIII)
 - nonlinear ExB advection (pseudospectral, spectral Poisson bracket)
@@ -406,7 +407,6 @@ order. Species is the outermost (slowest) index.
 
 | feature | GKW module | notes |
 |---------|-----------|-------|
-| electromagnetic ($A_\parallel$) | `fields.F90`, `ampere_*` | shear Alfvén physics |
 | compressional ($B_\parallel$) | `fields.F90`, `bpar_*` | magnetic compression |
 | collisions | `collisions.f90` | Lenard-Bernstein, Lorentz, full FP |
 | neoclassical | `neoclassics.f90` | equilibrium corrections to $F_M$ |
@@ -620,4 +620,354 @@ in the Lapillonne circular model, not numerical error. The radial (eps) componen
 are unaffected.
 
 68 tests in `tests/unit/test_analytic_geometry.py`.
+
+
+## 10. electromagnetic formulation
+
+Extension of the electrostatic solver to include the parallel vector
+potential $A_\parallel$ (shear Alfvén physics) and the parallel magnetic
+field perturbation $B_{1\parallel}$ (magnetic compression). Derived from
+the GKW Fortran source (`fields.F90`, `linear_terms.f90`) and the GKW
+manual (`theory.tex`, `practise.tex`).
+
+### 10.1 mixed variable (g vs f)
+
+GKW evolves the **mixed variable** $\hat{g}$, not the physical
+perturbation $\delta\hat{f}$ directly. The relation is:
+
+$$\hat{g}_s = \delta\hat{f}_s + \frac{2 Z_s}{T_{R,s}}\,v_{R,s}\,v_\parallel\,
+\langle\hat{A}_\parallel\rangle_s\,F_{M,s}$$
+
+where $\langle\hat{A}_\parallel\rangle_s = J_0(k_\perp\rho_s)\,\hat{A}_\parallel$
+is the gyro-averaged vector potential and $v_{R,s} = v_{th,s}/v_{th,ref}$
+(`vthrat` in code).
+
+**g-to-f transform** (from `g2f_correct` in `linear_terms.f90:4587`):
+
+$$\delta\hat{f}_s = \hat{g}_s - \frac{2 Z_s}{T_{R,s}}\,v_{R,s}\,v_\parallel\,
+J_0(k_\perp\rho_s)\,\hat{A}_\parallel\,F_{M,s}$$
+
+The g2f matrix element in GKW is:
+```
+mat_elem = -2.0 * signz(is) * vthrat(is) * vpgr(i,j,k,is) * J0 * fmaxwl / tmp(ix,is)
+```
+
+**Why the mixed variable?** Evolving $g$ instead of $f$ avoids a stiff
+$\partial A_\parallel/\partial t$ cancellation problem that would otherwise
+require implicit time stepping. With $g$, the time derivative of the
+$A_\parallel$ coupling is absorbed into the field equation.
+
+When `nlapar=False`, $g = \delta f$ (identity transform, no EM correction).
+
+The g2f transform is controlled by the `lg2f_correction` flag in GKW
+(`linear_term_switches` namelist). When True (default when `nlapar=True`),
+the correction matrix `matg2f` is applied.
+
+**How GKW applies g2f** (`exp_integration.F90:800–912`):
+
+1. **Field solve** (`calculate_fields`): fields are **zeroed** first, then
+   `mat_poisson * fdis` computes the Poisson/Ampere integrals from $g$
+   alone. Since `matg2f` maps `iapar → ifdis` and $A_\parallel = 0$
+   before the solve, the g2f entries contribute nothing. The field solve
+   uses the **bare Ampere denominator** — no self-consistent g2f correction.
+
+2. **g→f conversion**: after the field solve, `fdis_tmp(i) = g(i) +
+   matg2f%mat(i) * apar` converts the distribution from $g$ to $f$.
+
+3. **Linear RHS**: `mat * fdis_tmp` applies all linear terms (I–VIII)
+   to $f$ (the physical distribution), not $g$.
+
+4. **Nonlinear terms**: use $g$ (not $f$), per the comment at line 875:
+   "distribution g = f + Z v∥ A∥ etc., rather than f".
+
+### 10.2 modified potential χ
+
+The electromagnetic ExB drift uses the generalized potential $\chi$
+instead of $\phi$ alone:
+
+$$\hat{\chi} = \langle\hat{\phi}\rangle
++ \frac{2\mu T_{R,s}}{Z_s}\,\langle\hat{B}_{1\parallel}\rangle
+- 2\,v_{R,s}\,v_\parallel\,\langle\hat{A}_\parallel\rangle$$
+
+The ExB velocity becomes $\mathbf{v}_\chi = (\mathbf{b}\times\nabla\chi)/B_0$.
+This affects the nonlinear Term III (Poisson bracket uses $\chi$ instead
+of just $\phi$) and the drive terms (V, VIII).
+
+### 10.3 Ampere's law for $A_\parallel$
+
+The parallel component of Ampere's law in normalized GKW form
+(`theory.tex` eq. 401–405, `ampere_int` + `ampere_dia` in `linear_terms.f90`):
+
+$$\left[k_{\perp,N}^2 + \beta_\text{ref}\sum_s
+\frac{Z_s^2\,n_{R,s}}{m_{R,s}}\,e^{-\mathcal{E}_s/T_{R,s}}\,
+\Gamma_0(b_s)\right]\hat{A}_\parallel
+= \beta_\text{ref}\sum_s Z_s\,v_{R,s}\,n_{R,s}\;
+2\pi B_N\int v_\parallel\,J_0(k_\perp\rho_s)\,\hat{g}_s\,
+\mathrm{d}v_\parallel\,\mathrm{d}\mu$$
+
+where:
+- $k_{\perp,N}^2 = k_\perp^2\rho_\text{ref}^2$ (`krloc**2` in code)
+- $\beta_\text{ref} = 2\mu_0 n_\text{ref} T_\text{ref}/B_\text{ref}^2$
+- $\Gamma_0(b_s) = I_0(b_s)\,e^{-b_s}$ with $b_s = k_\perp^2\rho_s^2/2$
+- $\mathcal{E}_s$ is the centrifugal energy correction (`cfen` in code)
+- The RHS integrates $v_\parallel J_0 \hat{g}$ over velocity space (the parallel current)
+
+**LHS (diagonal)** from `ampere_dia` (`linear_terms.f90:3753–3789`):
+```
+mat_elem = -krloc^2
+dum = sum_sp[ -veta * signz^2 * de * gamma_num / mas ]
+  where gamma_num = sum_{j,k}[ 2*bn*intmu*intvp * J0^2 * vpgr^2 * fmaxwl ]
+elem%val = -1.0 / (mat_elem + dum)
+```
+
+**RHS (integral)** from `ampere_int` (`linear_terms.f90:3246`):
+```
+elem%val = signz * de * veta * intvp * intmu * vthrat * bn * vpgr * J0
+```
+
+**Key detail:** The Ampere equation is diagonal in $(k_x, k_y)$ space
+(no parallel coupling), so it reduces to a pointwise division at each
+$(s, k_x, k_y)$ grid point. This makes the solve trivial — no matrix
+inversion needed beyond the precomputed inverse denominator.
+
+**Bare denominator (no g2f self-consistency):** GKW's `calculate_fields`
+zeros all field entries before the `mat_poisson` multiply. Since the g2f
+matrix maps `iapar → ifdis`, it produces zero contribution (apar is zero
+at that point). The effective Ampere solve is simply:
+
+$$A_\parallel = \frac{\text{numerator}(g)}{\text{diag}(k_\perp^2 + \beta\sum\ldots)}$$
+
+There is **no** self-consistent g2f correction to the denominator. A
+naive self-consistent solve would replace `diag` with `diag − g2f_correction`,
+where $g2f\_correction = -\text{diag\_em}$ analytically, effectively
+doubling the EM part of the denominator and halving $A_\parallel$. This
+is incorrect for matching GKW.
+
+**Numerical denominator:** GKW uses a numerically computed $\Gamma_\text{num}$
+(`ampere_dia:3768–3777`) rather than the analytical $\Gamma_0(b)$:
+```
+gamma_num = sum_{j,k}[ 2*bn*intmu*intvp * J0^2 * vpgr^2 * fmaxwl ]
+```
+This integral sums $2 B\,J_0^2\,v_\parallel^2\,F_M$ over velocity space.
+It matches the analytical $\Gamma_0$ to $<0.1\%$ at the waltz_linear grid
+resolution but eliminates discretization-dependent discrepancies.
+
+**Zonal mode (ky=0):** When $k_\perp \approx 0$, $\Gamma_0 \to 1$ and
+$J_0 \to 1$. The denominator simplifies but remains well-defined.
+
+### 10.4 $B_{1\parallel}$ equation (perpendicular Ampere)
+
+The perpendicular component of Ampere's law gives the magnetic
+compression equation (`theory.tex` eq. 412–418):
+
+$$\left[1 + \beta_\text{ref}\sum_s
+\frac{T_{R,s}\,n_{R,s}}{B_N^2}\,e^{-\mathcal{E}_s/T_{R,s}}\,
+\bigl(\Gamma_0(b_s) - \Gamma_1(b_s)\bigr)\right]\hat{B}_{1\parallel}$$
+$$= -\beta_\text{ref}\sum_s\left[
+2\pi B_N\,T_{R,s}\,n_{R,s}\int\mu\,\hat{J}_1(k_\perp\rho_s)\,
+\hat{g}_s\,\mathrm{d}v_\parallel\,\mathrm{d}\mu
++ e^{-\mathcal{E}_s/T_{R,s}}\,
+\bigl(\Gamma_0 - \Gamma_1\bigr)\,
+\frac{Z_s\,n_{R,s}}{2B_N}\,\hat{\phi}\right]$$
+
+where:
+- $\Gamma_1(b_s) = I_1(b_s)\,e^{-b_s}$ (modified Bessel of first kind, order 1)
+- $\hat{J}_1 = 2J_1(k_\perp\rho_s)/(k_\perp\rho_s)$ is the **modified J1**
+  (`mod_besselj1_gkw` in code)
+- The $\hat{\phi}$ coupling makes the B_par equation coupled to Poisson
+
+**Coupling structure:** When `nlbpar=True`, the Poisson equation and
+B_par equation are solved as a coupled 2×2 system at each $(s,k_x,k_y)$.
+The coupling is mediated by $(\Gamma_0 - \Gamma_1)$ terms. GKW decouples
+them using intermediate coefficients:
+
+From `poisson_dia` (`linear_terms.f90:3446–3512`):
+```
+F_sp1 = sum_sp[ signz^2 * de * (gamma - 1) / tmp ]
+F_sp2 = sum_sp[ signz * veta * de * gamma_diff / (2*bn) ]
+B_sp1 = sum_sp[ signz * de * gamma_diff / bn ]
+B_sp2 = sum_sp[ tmp * de * veta * gamma_diff / bn^2 ]
+  where gamma_diff = (Gamma_0 - Gamma_1) * exp(-cfen)
+
+diagonal = F_sp1 * (1 + B_sp2) - F_sp2 * B_sp1
+elem%val = -1.0 / diagonal
+```
+
+### 10.5 modified RHS terms with EM
+
+The standard 8-term RHS is modified as follows when `nlapar=True`:
+
+| term | ES formula | EM modification | GKW code |
+|------|-----------|-----------------|----------|
+| I (parallel streaming) | $-v_R v_\parallel \partial_s \delta f$ | acts on $f$ not $g$ (via g2f) | `vpar_grd_df` |
+| II (magnetic drift) | $-i\,\mathbf{k}\cdot\mathbf{v}_d\,\delta f$ | acts on $f$ not $g$ (via g2f) | `vdgradf` |
+| III (nonlinear ExB) | $\{\langle\phi\rangle, \delta f\}$ | bracket uses $\chi$ instead of $\phi$; acts on $g$ | `calculate_nonlinear` |
+| IV (trapping) | $v_{th}\mu B g(s)\,\partial_{v_\parallel}\delta f$ | acts on $f$ not $g$ (via g2f) | `dfdvp_trap` |
+| V (equilibrium drive) | $i k_y E_\alpha J_0\phi(\ldots)F_M$ | add $-2 v_{R,s} v_\parallel$ factor coupling to $A_\parallel$ | `ve_grad_fm:2452` |
+| VII (parallel field drive) | $-\frac{Z}{T}v_{th}v_\parallel F_M\partial_s(J_0\phi)$ | add $\nabla_\parallel(J_0 A_\parallel)$ with rhostar effects | `vpar_grd_phi:2957` |
+| VIII (drift field drive) | $-\frac{Z}{T}\mathbf{k}\cdot\mathbf{v}_d F_M J_0\phi$ | add $-2 v_{R,s} v_\parallel$ factor coupling to $A_\parallel$ | `vd_grad_phi_fm` |
+
+**Note on g2f in kinetic terms:** In GKW, the `matg2f` conversion
+(`exp_integration.F90:805`) produces `fdis_tmp = f` before the linear
+RHS multiply. Terms I, II, IV, and dissipation therefore act on $f$,
+not $g$. Confirmed by running GKW with `lg2f_correction=.false.`:
+the 1-step mode shape changes by 1.1%.
+
+In gyaradax, the linear RHS currently acts on $g$.
+Passing $f$ gives **better 1-step parity** (99.84% vs 99.59% against
+GKW-with-g2f), confirming f-in-RHS is physically correct. However,
+the g2f correction for electrons is ~200% of $g$ (due to $v_{th,e}/v_{th,ref}
+\approx 60$), which amplifies pre-existing finite-difference stencil
+errors by 3×. This causes **exponential eigenvalue drift** at long times:
+500-step parity collapses to 12% with $f$ vs 89% with $g$.
+
+The root cause is that any small systematic difference between our
+stencil and GKW's (e.g., boundary treatment, coefficient rounding) gets
+amplified 3× by the g2f correction, compounding as modified eigenvalue.
+Improving the streaming stencil accuracy would resolve this.
+
+**New terms when `nlbpar=True`:**
+
+| term | formula | description |
+|------|---------|-------------|
+| X | $-2 v_R v_\parallel \mu F_M \mathcal{F}\,\partial_s\langle\hat{B}_{1\parallel}\rangle$ | mirror force from $B_{1\parallel}$ perturbation |
+| XI | $-\frac{i}{Z}F_M\,2T_R\mu\,(\text{drift})\,k\,\langle\hat{B}_{1\parallel}\rangle$ | drift coupling to $B_{1\parallel}$ |
+
+**EM coefficient in Terms V and VIII** (`linear_terms.f90:2452`):
+```
+elem2%val = -2.0 * vthrat(is) * vpgr(i,j,k,is) * [ES_coefficient]
+```
+This multiplies the electrostatic drive by $-2 v_{R,s} v_\parallel$ and
+couples to $A_\parallel$ instead of $\phi$.
+
+**EM coefficient in Term VII** (`linear_terms.f90:2959`):
+```
+dum = -2 * tmp / vthrat / mas * vpgr * (term5+term9) / signz
+```
+This creates $\nabla_\parallel(J_0 A_\parallel)$ using the same parallel
+stencil infrastructure as $\nabla_\parallel(J_0\phi)$.
+
+### 10.6 normalization
+
+Field normalizations from `practise.tex`:
+
+$$\phi = \rho_*\frac{T_\text{ref}}{e}\,\phi_N, \qquad
+A_\parallel = B_\text{ref}R_\text{ref}\rho_*^2\,A_{\parallel,N}, \qquad
+B_{1\parallel} = B_\text{ref}\rho_*\,B_{1\parallel,N}$$
+
+where $\rho_* = \rho_\text{ref}/R_\text{ref}$ is the normalized
+gyroradius. Note that $A_\parallel$ scales as $\rho_*^2$ (one order
+higher in $\rho_*$ than $\phi$), reflecting the subsidiary ordering
+of the parallel vector potential in the gyrokinetic expansion.
+
+### 10.7 Alfvén CFL constraint
+
+When `nlapar=True` with kinetic electrons, the shear Alfvén wave
+introduces a tight CFL constraint. From `matdat.F90:1918`:
+
+$$\Delta t_\text{Alfvén} = 2\pi q\,\Delta s\,B(s)\,
+\sqrt{m_{ir}\,(v_{\eta} + k_{\perp,\min}^2\,m_{er})}$$
+
+where:
+- $m_{ir} = \sum_\text{ion} m_s n_s$ (ion inertial mass)
+- $m_{er} = m_e/n_e$ (electron mass/density ratio)
+- $v_\eta$ = `veta` (plasma $\beta$ at radial point)
+- $k_{\perp,\min}^2 = k_{y,1}^2 g_{\zeta\zeta}(s)$ (smallest nonzero ky mode)
+
+The timestep is $\Delta t_\text{max} = 1/\Delta t_\text{Alfvén}$, minimized
+over all $s$ grid points. This constraint is only active when
+`adiabatic_electrons=False` (kinetic electrons required for Alfvén CFL).
+
+### 10.8 Bessel functions for EM
+
+| function | definition | usage | code |
+|----------|-----------|-------|------|
+| $J_0(k_\perp\rho_s)$ | Bessel first kind, order 0 | gyro-averaging of $\phi$ and $A_\parallel$ | `besselj0_gkw` |
+| $\hat{J}_1 = 2J_1(x)/x$ | modified Bessel, order 1 | $B_{1\parallel}$ gyro-averaging | `mod_besselj1_gkw` |
+| $\Gamma_0(b) = I_0(b)e^{-b}$ | modified Bessel envelope | Poisson and Ampere diagonals | `gamma_gkw` |
+| $\Gamma_1(b) = I_1(b)e^{-b}$ | modified Bessel envelope, order 1 | $B_{1\parallel}$ coupling | `gamma1_gkw` |
+
+where $b_s = k_\perp^2\rho_s^2/2$ is the Bessel argument.
+
+Limits for $k_\perp\rho \to 0$: $J_0 \to 1$, $\hat{J}_1 \to 1$,
+$\Gamma_0 \to 1$, $\Gamma_1 \to 0$, $\Gamma_0 - \Gamma_1 \to 1$.
+
+### 10.9 GKW control flags
+
+| flag | namelist | default | description |
+|------|---------|---------|-------------|
+| `nlapar` | `control` | `.false.` | enable $A_\parallel$ field variable |
+| `nlbpar` | `control` | `.false.` | enable $B_{1\parallel}$ field variable |
+| `lampere` | `linear_term_switches` | `.true.` | enable Ampere coupling in linear RHS |
+| `lbpar` | `linear_term_switches` | `.true.` | enable $B_\parallel$ coupling in linear RHS |
+| `lg2f_correction` | `linear_term_switches` | `.true.` | enable g-to-f transform |
+| `beta_ref` | `spcgeneral` | `0.0` | reference plasma beta |
+
+Auto-downgrade: if `beta_ref ≈ 0` and `nlapar=True`, GKW warns and
+sets `nlapar=False`, `nlbpar=False` (`components.f90:848–853`).
+
+Adiabatic electrons can coexist with `nlapar=True` (test case:
+`adiabat_apar`), but the Alfvén CFL constraint is only active with
+kinetic electrons.
+
+### 10.10 GKW EM reference test cases
+
+Available in `gkw_ref/tests/standard/`:
+
+| test case | nlapar | nlbpar | beta | adiab. e⁻ | species | grid (s×μ×v×modes) | np |
+|-----------|--------|--------|------|-----------|---------|-------------------|-----|
+| `bpar_waltz_linear` | T | T | 0.01 | F | 2 | 112×8×32×1 | 16 |
+| `adiabat_apar` | T | F | 0.234 | **T** | 3 | 45×8×16×1 | 12 |
+| `non_spectral_apar_noampere` | T | F | 0.003 | F | 2 | 8×4×16×1 | 16 |
+| `kin_nl_bpar` | T | T | 0.002 | F | 3 | 12×4×8×11 | 24 |
+| `slab_itg` | F | F | 3e-6 | T | 2 | 11×4×12×1 | 4 |
+
+### 10.11 GKW → gyaradax variable mapping (EM)
+
+| GKW Fortran | gyaradax | shape | description |
+|-------------|----------|-------|-------------|
+| `fdis(iapar,...)` | `apar` | `(ns, nkx, nky)` | parallel vector potential |
+| `fdis(ibpar,...)` | `bpar` | `(ns, nkx, nky)` | parallel magnetic perturbation |
+| `matg2f` | `g2f_factor` | `(nv, nmu, ns, nkx, nky)` | g-to-f correction matrix element |
+| `gamma_gkw` | `gamma` / `phi_gamma` | `(ns, nkx, nky)` | $\Gamma_0 = I_0(b)e^{-b}$ |
+| `gamma1_gkw` | `gamma1` | `(ns, nkx, nky)` | $\Gamma_1 = I_1(b)e^{-b}$ |
+| `mod_besselj1_gkw` | `j1_hat` | `(nv, nmu, ns, nkx, nky)` | $\hat{J}_1 = 2J_1/x$ |
+| `krloc**2` | `kperp_sq` | `(ns, nkx, nky)` | $k_\perp^2\rho_\text{ref}^2$ |
+| `veta` | `beta` (param) | scalar | reference $\beta$ |
+| `vpgr` | `vpar_grid` | `(nv,)` | parallel velocity grid |
+| `ampere_int` weight | `apar_weight` | `(nsp, nv, nmu, ns, nkx, nky)` | Ampere numerator weight |
+| `ampere_dia` inverse | `apar_diag` | `(ns, nkx, nky)` | Ampere denominator (precomputed inverse) |
+
+### 10.12 EM validation results
+
+Test case: `bpar_waltz_linear` (kinetic 2-species, beta=0.01, 112×8×32×1).
+Both codes start from the same evolved ES distribution (GKW FDS file).
+
+**100-step parity (dt=0.001, no normalization, A_par only):**
+
+| metric | ion | electron |
+|--------|-----|----------|
+| ES parity vs GKW | 99.36% | 94.74% |
+| EM parity vs GKW | 98.88% | 94.55% |
+| ES-EM corr (gyaradax) | 90.1% | 22.3% |
+| ES-EM corr (GKW) | 91.5% | 21.0% |
+
+The EM coupling strength matches GKW (22.3% vs 21.0% electron ES-EM).
+The EM parity tracks the ES parity, confirming the EM-specific error
+is <0.2%. The baseline ES kinetic electron gap (~5% at 100 steps)
+dominates; see investigation in section 11.
+
+### 10.13 remaining EM work
+
+| item | status | notes |
+|------|--------|-------|
+| $A_\parallel$ field solve | done | bare denominator, numerical gamma_num |
+| $\chi$ correction (V, VII, VIII) | done | matches GKW elem2 coupling, includes $B_{1\parallel}$ |
+| g2f transform for phi solve | done | vpgr symmetry → zero correction to phi |
+| g2f in linear RHS (f vs g) | **open** | GKW passes f; we pass g (better 1-step parity empirically) |
+| $B_{1\parallel}$ field equation | done | coupled 2×2 Poisson-Bpar solve via F/B coupling coefficients |
+| $B_{1\parallel}$ chi correction | done | $\chi += (2\mu T/Z)\hat{J}_1 B_{1\parallel}$ |
+| $B_{1\parallel}$ RHS Term X | done | parallel derivative of gyro-averaged $B_{1\parallel}$ |
+| EM fluxes (magnetic flutter) | done | pflux_em, eflux_em diagnostics |
+| Alfvén CFL | done | field_cfl with beta correction |
 

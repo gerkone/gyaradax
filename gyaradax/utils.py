@@ -466,6 +466,13 @@ def load_runtime_params(input_dat_path: str) -> Dict[str, Any]:
         "disp_y": _flt("disp_y", 0.0),
         "non_linear": _bool("non_linear", False),
         "nlapar": _bool("nlapar", False),
+        "nlbpar": _bool("nlbpar", False),
+        "beta": float(
+            inp.get("spcgeneral", {}).get(
+                "beta",
+                inp.get("spcgeneral", {}).get("beta_ref", 0.0),
+            )
+        ),
         "method": method,
         "meth": _int("meth", 0),
         "finit": finit,
@@ -608,12 +615,12 @@ def load_geometry(directory):
         )
 
     # grids
-    kxrh = np.loadtxt(os.path.join(directory, "kxrh"))
+    kxrh = np.atleast_1d(np.loadtxt(os.path.join(directory, "kxrh")))
     if kxrh.ndim > 1:
         kxrh = kxrh[0]
     geometry["kxrh"] = jnp.array(kxrh, dtype=jnp.float64)
 
-    krho = np.loadtxt(os.path.join(directory, "krho"))
+    krho = np.atleast_1d(np.loadtxt(os.path.join(directory, "krho")))
     if krho.ndim > 1:
         krho = krho.T[0]
     kthnorm = float(np.asarray(geom["kthnorm"]).reshape(-1)[0]) if "kthnorm" in geom else 1.0
@@ -736,13 +743,13 @@ def load_geometry(directory):
     # spectral connectivity metadata for open-parallel boundary stencils
     mode_label_path = os.path.join(directory, "mode_label")
     if os.path.exists(mode_label_path):
-        mode_label = np.loadtxt(mode_label_path)
-        mode_label_kxky, ixplus, ixminus, ixzero, iyzero = _build_mode_connectivity(
+        mode_label = np.atleast_1d(np.loadtxt(mode_label_path))
+        mode_label_kxky, ixplus, ixminus, ixzero, iyzero, iyzero_bc = _build_mode_connectivity(
             mode_label, kxrh, np.asarray(geometry["krho"])
         )
         pos_classes = _build_pos_par_grid_classes(ixplus, ixminus, len(sgrid))
         s_shift, kx_shift, valid_shift = _build_parallel_shift_maps(
-            ixplus, ixminus, iyzero, len(sgrid), max_shift=4
+            ixplus, ixminus, iyzero_bc, len(sgrid), max_shift=4
         )
 
         geometry["mode_label"] = jnp.array(mode_label_kxky, dtype=jnp.int32)
