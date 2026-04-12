@@ -73,6 +73,7 @@ class SolverOps(ABC):
         fft_prefactor: complex = 1.0 + 0.0j,
         exclude_zero_mode: bool = True,
         bessel: jnp.ndarray = None,
+        chi_correction: jnp.ndarray = None,
     ) -> jnp.ndarray:
         """Compute term III (nonlinear ExB advection) via pseudospectral method.
 

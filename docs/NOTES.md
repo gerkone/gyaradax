@@ -807,24 +807,17 @@ The standard 8-term RHS is modified as follows when `nlapar=True`:
 | VII (parallel field drive) | $-\frac{Z}{T}v_{th}v_\parallel F_M\partial_s(J_0\phi)$ | add $\nabla_\parallel(J_0 A_\parallel)$ with rhostar effects | `vpar_grd_phi:2957` |
 | VIII (drift field drive) | $-\frac{Z}{T}\mathbf{k}\cdot\mathbf{v}_d F_M J_0\phi$ | add $-2 v_{R,s} v_\parallel$ factor coupling to $A_\parallel$ | `vd_grad_phi_fm` |
 
-**Note on g2f in kinetic terms:** In GKW, the `matg2f` conversion
-(`exp_integration.F90:805`) produces `fdis_tmp = f` before the linear
-RHS multiply. Terms I, II, IV, and dissipation therefore act on $f$,
-not $g$. Confirmed by running GKW with `lg2f_correction=.false.`:
-the 1-step mode shape changes by 1.1%.
+**g2f in kinetic terms:** GKW converts $g \to f$ via `matg2f` before
+the linear RHS multiply (`exp_integration.F90:805`). Terms I, II, IV,
+and dissipation act on $f$, not $g$. Confirmed by running GKW with
+`lg2f_correction=.false.`: the 1-step mode shape changes by 1.1%.
+gyaradax matches this: `g_to_f` is applied before `linear_rhs`.
 
-In gyaradax, the linear RHS currently acts on $g$.
-Passing $f$ gives **better 1-step parity** (99.84% vs 99.59% against
-GKW-with-g2f), confirming f-in-RHS is physically correct. However,
-the g2f correction for electrons is ~200% of $g$ (due to $v_{th,e}/v_{th,ref}
-\approx 60$), which amplifies pre-existing finite-difference stencil
-errors by 3×. This causes **exponential eigenvalue drift** at long times:
-500-step parity collapses to 12% with $f$ vs 89% with $g$.
-
-The root cause is that any small systematic difference between our
-stencil and GKW's (e.g., boundary treatment, coefficient rounding) gets
-amplified 3× by the g2f correction, compounding as modified eigenvalue.
-Improving the streaming stencil accuracy would resolve this.
+**Term VII uses $J_0\phi$ only, not $\chi$:** GKW's Term VII has
+`elem%itloc = iphi` — it reads from $\phi$, not $A_\parallel$. The
+EM $A_\parallel$ correction to Term VII (lines 2957–3004) is only active
+when `rhostar_linear > 0`. gyaradax separates `gyro_phi` (for Term VII)
+from `gyro_chi` (for drive terms V, VIII, XI).
 
 **New terms when `nlbpar=True`:**
 
@@ -943,28 +936,26 @@ Available in `gkw_ref/tests/standard/`:
 Test case: `bpar_waltz_linear` (kinetic 2-species, beta=0.01, 112×8×32×1).
 Both codes start from the same evolved ES distribution (GKW FDS file).
 
-**100-step parity (dt=0.001, no normalization, A_par only):**
+**20k-step distribution correlation (dt=0.001, t=20.0):**
 
-| metric | ion | electron |
-|--------|-----|----------|
-| ES parity vs GKW | 99.36% | 94.74% |
-| EM parity vs GKW | 98.88% | 94.55% |
-| ES-EM corr (gyaradax) | 90.1% | 22.3% |
-| ES-EM corr (GKW) | 91.5% | 21.0% |
+| case | ion | electron |
+|------|-----|----------|
+| ES (beta=0) | 99.64% | 99.30% |
+| A_par only | 99.28% | 98.96% |
+| A_par + B_par | 99.36% | 98.98% |
 
-The EM coupling strength matches GKW (22.3% vs 21.0% electron ES-EM).
-The EM parity tracks the ES parity, confirming the EM-specific error
-is <0.2%. The baseline ES kinetic electron gap (~5% at 100 steps)
-dominates; see investigation in section 11.
+EM parity matches ES at all timescales (100–20000 steps). Fluxes
+computed from the same distribution match GKW to machine precision
+after parseval and flux-surface-average corrections.
 
 ### 10.13 remaining EM work
 
 | item | status | notes |
 |------|--------|-------|
 | $A_\parallel$ field solve | done | bare denominator, numerical gamma_num |
-| $\chi$ correction (V, VII, VIII) | done | matches GKW elem2 coupling, includes $B_{1\parallel}$ |
+| $\chi$ correction (V, VIII, XI) | done | Term VII uses $J_0\phi$ only (not $\chi$) |
 | g2f transform for phi solve | done | vpgr symmetry → zero correction to phi |
-| g2f in linear RHS (f vs g) | **open** | GKW passes f; we pass g (better 1-step parity empirically) |
+| g2f in linear RHS | done | kinetic terms act on $f = g + g2f \cdot A_\parallel$ |
 | $B_{1\parallel}$ field equation | done | coupled 2×2 Poisson-Bpar solve via F/B coupling coefficients |
 | $B_{1\parallel}$ chi correction | done | $\chi += (2\mu T/Z)\hat{J}_1 B_{1\parallel}$ |
 | $B_{1\parallel}$ RHS Term X | done | parallel derivative of gyro-averaged $B_{1\parallel}$ |

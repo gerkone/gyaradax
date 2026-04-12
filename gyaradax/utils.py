@@ -626,10 +626,9 @@ def load_geometry(directory):
     kthnorm = float(np.asarray(geom["kthnorm"]).reshape(-1)[0]) if "kthnorm" in geom else 1.0
     geometry["krho"] = jnp.array(krho / kthnorm, dtype=jnp.float64)
 
-    geometry["parseval"] = jnp.array(
-        [1.0] + [2.0] * (len(geometry["krho"]) - 1),
-        dtype=jnp.float64,
-    )
+    # parseval correction: 1 for ky=0, 2 for ky>0 (one-sided spectrum)
+    krho_vals = jnp.asarray(geometry["krho"], dtype=jnp.float64)
+    geometry["parseval"] = jnp.where(jnp.abs(krho_vals) < 1e-10, 1.0, 2.0)
 
     # velocity space
     intvp = np.loadtxt(os.path.join(directory, "intvp.dat"))

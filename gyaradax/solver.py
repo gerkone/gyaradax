@@ -1202,14 +1202,27 @@ def gkstep_single(
 
     def _rhs(dg):
         phi_local, apar_local, bpar_local = _compute_fields(dg, geometry, params, pre)
-        # GKW applies g2f (g -> f) before the linear RHS (exp_integration.F90:800-912),
-        # so the kinetic terms (streaming, mirror, trapping) act on f, not g.
+        # kinetic terms act on f, not g (g2f applied before linear rhs)
         df_for_rhs = g_to_f(dg, apar_local, params, pre) if apar_local is not None else dg
         rhs = ops.linear_rhs(
             df_for_rhs, phi_local, geometry, params, pre, apar=apar_local, bpar=bpar_local
         )
         if params.non_linear:
-            rhs = rhs + ops.nonlinear_term_iii(dg, phi_local, geometry)
+            # nonlinear bracket uses chi = J0*phi + em corrections
+            # the correction is velocity-dependent and added to gyro_phi inside the FFT kernel
+            chi_corr = None
+            if apar_local is not None and "apar_chi_factor" in pre:
+                apar_b = apar_local[jnp.newaxis, jnp.newaxis, :, :, :]
+                if dg.ndim == 6:
+                    apar_b = apar_b[jnp.newaxis]  # (1,1,1,ns,nkx,nky)
+                chi_corr = pre["apar_chi_factor"] * apar_b
+            if bpar_local is not None and "bpar_chi_factor" in pre:
+                bpar_b = bpar_local[jnp.newaxis, jnp.newaxis, :, :, :]
+                if dg.ndim == 6:
+                    bpar_b = bpar_b[jnp.newaxis]
+                bpar_chi = pre["bpar_chi_factor"] * bpar_b
+                chi_corr = bpar_chi if chi_corr is None else chi_corr + bpar_chi
+            rhs = rhs + ops.nonlinear_term_iii(dg, phi_local, geometry, chi_correction=chi_corr)
         return rhs
 
     # RK4 — expanded accumulation lets XLA read k1..k4 and prev_df in one fused kernel

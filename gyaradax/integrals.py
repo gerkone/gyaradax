@@ -643,7 +643,9 @@ def calculate_fluxes(
     eflux = d3v * (vpgr**2 * jnp.imag(dum1) + 2 * mugr * jnp.imag(dum2))
     vflux = d3v * (jnp.imag(dum1) * vpgr * rfun * bt_frac * signB)
 
-    return jnp.sum(pflux), jnp.sum(eflux), jnp.sum(vflux)
+    # flux-surface average (sum(ints) = 1 for nperiod=1)
+    fsa = jnp.sum(ints)
+    return jnp.sum(pflux) / fsa, jnp.sum(eflux) / fsa, jnp.sum(vflux) / fsa
 
 
 def calculate_fluxes_kinetic(
@@ -674,38 +676,36 @@ def calculate_em_fluxes(
     df: jnp.ndarray,
     apar: jnp.ndarray,
     params: Any = None,
+    bpar: jnp.ndarray = None,
+    pre: Dict = None,
 ) -> Tuple[jnp.ndarray, jnp.ndarray]:
+    """Electromagnetic flux contributions from A_parallel and B_parallel.
+
+    A_par flutter: coupling factor -2*vthrat*vpgr*conj(J0*apar)
+    B_par flutter: coupling factor +2*mugr*tmp/signz*conj(J1hat*bpar)
+
+    df: 5D or 6D distribution. apar, bpar: (ns, nkx, nky) or None.
+    Returns: (em_pflux, em_eflux) — scalars for 5D, (nsp, 2) for 6D.
     """
-    Electromagnetic flux contributions from A_parallel (magnetic flutter).
-
-    The EM particle flux: Q_em_p = Im[sum(conj(A_par_gyro) * vpar * vthrat * df * d3v)]
-    The EM heat flux:     Q_em_e = Im[sum(conj(A_par_gyro) * vpar * vthrat * E * df * d3v)]
-
-    where E = vpar^2 + 2*mu*B is the energy.
-
-    df: 5D (nvpar, nmu, ns, nkx, nky) or 6D (nsp, nvpar, nmu, ns, nkx, nky).
-    apar: (ns, nkx, nky).
-    Returns: (em_pflux, em_eflux) scalars or (nsp, 2) for kinetic.
-    """
-    if apar is None:
-        z = jnp.array(0.0, dtype=jnp.float64)
+    z = jnp.array(0.0, dtype=jnp.float64)
+    if apar is None and bpar is None:
         return z, z
 
-    parseval = jnp.asarray(geometry["parseval"], dtype=jnp.float64)
     ints = jnp.asarray(geometry["ints"], dtype=jnp.float64)
-    intvp = jnp.asarray(geometry["intvp"], dtype=jnp.float64)
-    intmu = jnp.asarray(geometry["intmu"], dtype=jnp.float64)
-    vpgr = jnp.asarray(geometry["vpgr"], dtype=jnp.float64)
-    mugr = jnp.asarray(geometry["mugr"], dtype=jnp.float64)
-    bn = jnp.asarray(geometry["bn"], dtype=jnp.float64)
-    efun = jnp.asarray(geometry["efun"], dtype=jnp.float64)
-    krho = jnp.asarray(geometry["krho"], dtype=jnp.float64)
-    d2X = jnp.asarray(geometry.get("d2X", 1.0), dtype=jnp.float64)
+    fsa = jnp.sum(ints)
 
     if df.ndim == 5:
-        # single species (adiabatic)
-        vthrat = float(getattr(params, "vthrat", 1.0)) if params else 1.0
-        apar_b = apar[jnp.newaxis, jnp.newaxis, :, :, :]
+        parseval = jnp.asarray(geometry["parseval"], dtype=jnp.float64)
+        intvp = jnp.asarray(geometry["intvp"], dtype=jnp.float64)
+        intmu = jnp.asarray(geometry["intmu"], dtype=jnp.float64)
+        vpgr = jnp.asarray(geometry["vpgr"], dtype=jnp.float64)
+        mugr = jnp.asarray(geometry["mugr"], dtype=jnp.float64)
+        bn = jnp.asarray(geometry["bn"], dtype=jnp.float64)
+        efun = jnp.asarray(geometry["efun"], dtype=jnp.float64)
+        krho = jnp.asarray(geometry["krho"], dtype=jnp.float64)
+        d2X = jnp.asarray(geometry.get("d2X", 1.0), dtype=jnp.float64)
+
+        vthrat_val = float(getattr(params, "vthrat", 1.0)) if params else 1.0
         vpgr_b = vpgr.reshape(-1, 1, 1, 1, 1)
         mugr_b = mugr.reshape(1, -1, 1, 1, 1)
         bn_b = bn.reshape(1, 1, -1, 1, 1)
@@ -718,16 +718,67 @@ def calculate_em_fluxes(
 
         d3v = d2X * intmu_b * bn_b * intvp_b
         dum = parseval_b * ints_b * (efun_b * krho_b) * df
-        dum_apar = dum * jnp.conj(apar_b) * vthrat * vpgr_b
 
-        em_pflux = jnp.sum(d3v * jnp.imag(dum_apar))
-        em_eflux = jnp.sum(
-            d3v * (vpgr_b**2 * jnp.imag(dum_apar) + 2 * mugr_b * bn_b * jnp.imag(dum_apar))
-        )
-        return em_pflux, em_eflux
+        em_pflux, em_eflux = z, z
+        if apar is not None:
+            apar_b = apar[jnp.newaxis, jnp.newaxis, :, :, :]
+            dum_a = dum * jnp.conj(apar_b) * vthrat_val * vpgr_b
+            em_pflux = em_pflux + jnp.sum(d3v * jnp.imag(dum_a))
+            em_eflux = em_eflux + jnp.sum(
+                d3v * (vpgr_b**2 * jnp.imag(dum_a) + 2 * mugr_b * bn_b * jnp.imag(dum_a))
+            )
+        return em_pflux / fsa, em_eflux / fsa
+
+    elif df.ndim == 6:
+        # kinetic: per-species em fluxes
+        nsp = df.shape[0]
+        results = []
+        for isp in range(nsp):
+            sp_geom = dict(geometry)
+            signz_sp = float(jnp.asarray(geometry["signz"])[isp])
+            tmp_sp = float(jnp.asarray(geometry["tmp"])[isp])
+            vthrat_sp = float(jnp.asarray(geometry["vthrat"])[isp])
+            for k in ("mas", "tmp", "de", "signz", "vthrat", "rlt", "rln"):
+                if k in geometry and jnp.asarray(geometry[k]).ndim > 0:
+                    sp_geom[k] = jnp.asarray(geometry[k])[isp:isp+1]
+            gt = geom_tensors(sp_geom)
+
+            parseval = gt["parseval"]
+            vpgr_6 = gt["vpgr"]
+            mugr_6 = gt["mugr"]
+            bn_6 = gt["bn"]
+            ints_6 = gt["ints"]
+            efun_6 = gt["efun"]
+            krho_6 = gt["krho"]
+            intvp_6 = gt["intvp"]
+            intmu_6 = gt["intmu"]
+            d2X_6 = gt["d2X"]
+            bessel_6 = gt["bessel"]
+
+            d3v = d2X_6 * intmu_6 * bn_6 * intvp_6
+            dum = parseval * ints_6 * (efun_6 * krho_6) * df[isp]
+
+            sp_pf, sp_ef = z, z
+            if apar is not None:
+                apar_b = apar.reshape(1, 1, *apar.shape)
+                apar_ga = bessel_6 * apar_b
+                dum_a = -2.0 * vthrat_sp * vpgr_6 * dum * jnp.conj(apar_ga)
+                sp_pf = sp_pf + jnp.sum(d3v * jnp.imag(dum_a))
+                sp_ef = sp_ef + jnp.sum(
+                    d3v * (vpgr_6**2 * jnp.imag(dum_a) + 2 * mugr_6 * bn_6 * jnp.imag(dum_a))
+                )
+            if bpar is not None and pre is not None and "bpar_chi_factor" in pre:
+                bpar_b = bpar.reshape(1, 1, *bpar.shape)
+                # bpar_chi_factor = 2*mugr*tmp/signz*J1hat, use per-species slice
+                bpar_chi = pre["bpar_chi_factor"][isp]
+                dum_b = dum * bpar_chi * jnp.conj(bpar_b)
+                sp_pf = sp_pf + jnp.sum(d3v * jnp.imag(dum_b))
+                sp_ef = sp_ef + jnp.sum(
+                    d3v * (vpgr_6**2 * jnp.imag(dum_b) + 2 * mugr_6 * bn_6 * jnp.imag(dum_b))
+                )
+            results.append(jnp.stack([sp_pf / fsa, sp_ef / fsa]))
+        return jnp.stack(results)  # (nsp, 2)
     else:
-        # kinetic: sum over species not implemented yet, return zeros
-        z = jnp.array(0.0, dtype=jnp.float64)
         return z, z
 
 

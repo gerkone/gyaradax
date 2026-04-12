@@ -106,8 +106,14 @@ class JAXOps(SolverOps):
         fft_prefactor: complex = 1.0 + 0.0j,
         exclude_zero_mode: bool = True,
         bessel: jnp.ndarray = None,
+        chi_correction: jnp.ndarray = None,
     ) -> jnp.ndarray:
-        """Nonlinear ExB advection (term III) for 5D df. Shared skeleton for R2C and Z2Z."""
+        """Nonlinear ExB advection (term III) for 5D df. Shared skeleton for R2C and Z2Z.
+
+        When chi_correction is provided (EM mode), it is added to gyro_phi
+        to form the generalized potential chi = J0*phi + chi_correction.
+        chi_correction shape: (nvpar, nmu, ns, nkx, nky).
+        """
         pre = self.pre
         mrad, mphi, mphiw3 = pre["nl_mrad"], pre["nl_mphi"], pre["nl_mphiw3"]
         fft_scale, jind = pre["nl_fft_scale"], pre["nl_jind"]
@@ -116,6 +122,14 @@ class JAXOps(SolverOps):
             bessel = pre["bessel"]
         dum_s, ixzero, iyzero = pre["nl_dum_s"], pre["ixzero"], pre["iyzero"]
         nky = df.shape[-1]
+
+        # chi_correction per-s slices: vmap axis 2 (s-axis in 5D arrays)
+        if chi_correction is not None:
+            chi_corr_vmap = chi_correction
+            chi_in_axis = 2
+        else:
+            chi_corr_vmap = jnp.zeros(1)  # dummy, ignored
+            chi_in_axis = None
 
         if self.use_z2z:
             kx_1d = kx2d[:, 0]
@@ -126,12 +140,13 @@ class JAXOps(SolverOps):
                 .set(jnp.arange(len(jind), dtype=jnp.int32))
             )
 
-            def _per_s_wrapper(df_s, phi_s, bessel_s, dum):
+            def _per_s_wrapper(df_s, phi_s, bessel_s, dum, chi_s):
                 return _per_s_z2z(
                     df_s,
                     phi_s,
                     bessel_s,
                     dum,
+                    chi_correction_s=chi_s if chi_correction is not None else None,
                     mixed_precision=self.mixed_precision,
                     efun_sign=efun_sign,
                     fft_prefactor=fft_prefactor,
@@ -150,12 +165,13 @@ class JAXOps(SolverOps):
             ikx_packed = 1j * pack_half_spectrum(kx2d, jind, mrad, mphiw3)
             iky_packed = 1j * pack_half_spectrum(ky2d, jind, mrad, mphiw3)
 
-            def _per_s_wrapper(df_s, phi_s, bessel_s, dum):
+            def _per_s_wrapper(df_s, phi_s, bessel_s, dum, chi_s):
                 return _per_s_r2c(
                     df_s,
                     phi_s,
                     bessel_s,
                     dum,
+                    chi_correction_s=chi_s if chi_correction is not None else None,
                     mixed_precision=self.mixed_precision,
                     efun_sign=efun_sign,
                     fft_prefactor=fft_prefactor,
@@ -169,7 +185,9 @@ class JAXOps(SolverOps):
                     nky=nky,
                 )
 
-        nl = jax.vmap(_per_s_wrapper, in_axes=(2, 0, 2, 0), out_axes=2)(df, phi, bessel, dum_s)
+        nl = jax.vmap(_per_s_wrapper, in_axes=(2, 0, 2, 0, chi_in_axis), out_axes=2)(
+            df, phi, bessel, dum_s, chi_corr_vmap
+        )
         return nl.at[:, :, :, ixzero, iyzero].set(0.0) if exclude_zero_mode else nl
 
     def nonlinear_term_iii(
@@ -182,11 +200,13 @@ class JAXOps(SolverOps):
         fft_prefactor: complex = 1.0 + 0.0j,
         exclude_zero_mode: bool = True,
         bessel: jnp.ndarray = None,
+        chi_correction: jnp.ndarray = None,
     ) -> jnp.ndarray:
         """Nonlinear ExB advection with shape dispatch.
 
         Dispatches on df.ndim: 5D direct, 6D via vmap over species with per-species bessel.
         Mixed precision is controlled by self.mixed_precision (set at construction time).
+        chi_correction: velocity-dependent EM correction added to gyro_phi to form chi.
         """
         if df.ndim == 5:
             return self._nonlinear_term_iii_core(
@@ -197,12 +217,13 @@ class JAXOps(SolverOps):
                 fft_prefactor=fft_prefactor,
                 exclude_zero_mode=exclude_zero_mode,
                 bessel=bessel,
+                chi_correction=chi_correction,
             )
         elif df.ndim == 6:
             if bessel is None:
                 bessel = self.pre["bessel"]
 
-            def _per_species(df_sp, bes_sp):
+            def _per_species(df_sp, bes_sp, chi_sp):
                 return self._nonlinear_term_iii_core(
                     df_sp,
                     phi,
@@ -211,9 +232,14 @@ class JAXOps(SolverOps):
                     fft_prefactor=fft_prefactor,
                     exclude_zero_mode=exclude_zero_mode,
                     bessel=bes_sp,
+                    chi_correction=chi_sp if chi_correction is not None else None,
                 )
 
-            return jax.vmap(_per_species)(df, bessel)
+            if chi_correction is not None:
+                return jax.vmap(_per_species)(df, bessel, chi_correction)
+            else:
+                dummy = jnp.zeros((df.shape[0],))
+                return jax.vmap(_per_species)(df, bessel, dummy)
         else:
             raise ValueError(f"nonlinear_term_iii: expected df with ndim 5 or 6, got {df.ndim}")
 
@@ -236,9 +262,8 @@ class JAXOps(SolverOps):
         """
         gyro_phi = pre["bessel"] * phi[None, None, :, :, :]
 
-        # EM: gyro_chi = J0*phi + apar/bpar corrections (for drive Terms V, VIII, XI)
-        # Term VII uses gyro_phi only — GKW's elem%itloc = iphi (line 2765),
-        # the apar coupling to Term VII is rhostar-dependent and off by default.
+        # chi = J0*phi + apar/bpar corrections (drives V, VIII, XI only)
+        # term VII uses gyro_phi only (apar coupling is rhostar-dependent)
         gyro_chi = gyro_phi
         if apar is not None and "apar_chi_factor" in pre:
             apar_b = apar[None, None, :, :, :]
@@ -247,12 +272,12 @@ class JAXOps(SolverOps):
             bpar_b = bpar[None, None, :, :, :]
             gyro_chi = gyro_chi + pre["bpar_chi_factor"] * bpar_b
 
-        # Term I (streaming on df) + Term VII (parallel field on gyro_phi, NOT chi)
+        # term I (streaming) + term VII (parallel field gradient on gyro_phi)
         term_par, term_vii = self._apply_parallel_dual(
             df, gyro_phi, pre["s_total_upar"], pre["s_total_t7"]
         )
 
-        # Term X: parallel derivative of gyro-averaged B_par (mirror from B1par)
+        # term X: parallel derivative of gyro-averaged bpar
         term_x = jnp.zeros_like(df)
         if bpar is not None and "bpar_chi_factor" in pre:
             gyro_bpar_scaled = pre["bpar_chi_factor"] * bpar_b
@@ -264,7 +289,7 @@ class JAXOps(SolverOps):
 
         kdotvd = pre["drift_x"] * pre["kx_b"] + pre["drift_y"] * pre["ky_b"]
 
-        # Terms V + VIII + XI use gyro_chi (drive from generalized potential)
+        # terms V + VIII + XI use gyro_chi
         return (
             term_par
             + term_iv
@@ -314,7 +339,7 @@ class JAXOps(SolverOps):
                 "s_total_upar": jnp.moveaxis(pre["s_total_upar"], 1, 0),
                 "s_total_t7": jnp.moveaxis(pre["s_total_t7"], 1, 0),
             }
-            # EM: include chi factors in per-species arrays
+            # include chi factors in per-species arrays for em
             if apar is not None and "apar_chi_factor" in pre:
                 sp_arrays["apar_chi_factor"] = pre["apar_chi_factor"]
             if bpar is not None and "bpar_chi_factor" in pre:
@@ -396,6 +421,7 @@ def _per_s_r2c(
     bessel_s,
     dum,
     *,
+    chi_correction_s=None,
     mixed_precision,
     efun_sign,
     fft_prefactor,
@@ -417,6 +443,8 @@ def _per_s_r2c(
     real_dtype = jnp.float32 if mixed_precision else jnp.float64
 
     gyro_phi = bessel_s * phi_s[None, None, :, :]
+    if chi_correction_s is not None:
+        gyro_phi = gyro_phi + chi_correction_s
 
     df_packed = pack_half_spectrum(df_s, jind, mrad, mphiw3).astype(fft_dtype)
     phi_packed = pack_half_spectrum(gyro_phi, jind, mrad, mphiw3).astype(fft_dtype)
@@ -456,6 +484,7 @@ def _per_s_z2z(
     bessel_s,
     dum,
     *,
+    chi_correction_s=None,
     mixed_precision,
     efun_sign,
     fft_prefactor,
@@ -480,6 +509,8 @@ def _per_s_z2z(
     real_dtype = jnp.float32 if mixed_precision else jnp.float64
 
     gyro_phi = bessel_s * phi_s[None, None, :, :]
+    if chi_correction_s is not None:
+        gyro_phi = gyro_phi + chi_correction_s
 
     ws_df = _pack_full_z2z(df_s, kx_vec, ky_vec, jind, rev_jind, mrad, mphi, mphiw3, nky, fft_dtype)
     ws_phi = _pack_full_z2z(
