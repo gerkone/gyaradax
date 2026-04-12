@@ -217,36 +217,20 @@ def estimate_nl_timestep(
     bessel: jnp.ndarray,
     dt_input: float,
     safety_factor: float = 0.95,
+    apar: jnp.ndarray = None,
 ) -> jnp.ndarray:
-    """CFL-adaptive timestep estimate from the nonlinear ExB velocity.
+    """CFL-adaptive timestep from nonlinear ExB velocity.
 
-    Computes max|grad phi| in real space (dealiased grid) and returns
-    dt_est = safety_factor * 2 / max_value, clamped to dt_input.
-
-    Matches GKW's spectral CFL: non_linear_terms.F90 lines 1530-1777.
-
-    Args:
-        phi: Electrostatic potential (ns, nkx, nky).
-        pre: Precomputed dict with FFT metadata and Bessel functions.
-        bessel: Bessel J0 array for gyro-averaging phi. For adiabatic this
-            is pre["bessel"] (nv, nmu, ns, nkx, nky). For kinetic, pass
-            the ion Bessel (first species) since it has the largest FLR.
-        dt_input: Maximum allowed timestep.
-        safety_factor: CFL safety factor (default 0.95).
-
-    Returns:
-        Scalar dt estimate.
+    Computes max|grad(phi)| and (when apar is provided) max|grad(apar)|*vpmax
+    in real space, matching GKW non_linear_terms.F90:1530-1800.
     """
     mrad, mphi, mphiw3 = pre["nl_mrad"], pre["nl_mphi"], pre["nl_mphiw3"]
     jind = pre["nl_jind"]
     kx2d, ky2d = pre["nl_kx2d"], pre["nl_ky2d"]
 
-    bessel_s0 = bessel[0, 0, :, :, :]  # (ns, nkx, nky)
-
-    def _max_grad_per_s(phi_s, bes_s):
-        gyro_phi = bes_s * phi_s
-        grad_y_k = 1j * ky2d * gyro_phi
-        grad_x_k = 1j * kx2d * gyro_phi
+    def _max_grad_per_s(field_s):
+        grad_y_k = 1j * ky2d * field_s
+        grad_x_k = 1j * kx2d * field_s
 
         def _to_real(spec):
             return jnp.fft.irfft2(
@@ -260,8 +244,15 @@ def estimate_nl_timestep(
         max_x = jnp.max(jnp.abs(_to_real(grad_x_k))) * mphi
         return jnp.maximum(max_y, max_x)
 
-    max_vals = jax.vmap(_max_grad_per_s)(phi, bessel_s0)
-    max_value = jnp.max(max_vals)
+    # ES: max|grad(phi)|
+    max_value = jnp.max(jax.vmap(_max_grad_per_s)(phi))
+
+    # EM: max|grad(apar)| * vpmax  (non_linear_terms.F90:1790)
+    if apar is not None:
+        # vpmax = max parallel velocity on grid (GKW grid::vpmax)
+        vpmax = jnp.asarray(pre.get("vpmax", 3.0), dtype=jnp.float64)
+        max_grad_apar = jnp.max(jax.vmap(_max_grad_per_s)(apar))
+        max_value = jnp.maximum(max_value, max_grad_apar * vpmax)
 
     dt_est = jnp.where(
         max_value > _EPS,
@@ -325,6 +316,10 @@ def estimate_linear_timestep(
     # field CFL: ES mode frequency (time_est_field), kinetic only
     tmax1 = jnp.maximum(tmax1, jnp.asarray(pre.get("tmax_field", 0.0), dtype=jnp.float64))
 
+    # em: g2f amplifies effective streaming by ~(1 + beta*vthrat_max^2)
+    em_streaming_factor = jnp.asarray(pre.get("em_streaming_cfl", 1.0), dtype=jnp.float64)
+    tmax1 = tmax1 * em_streaming_factor
+
     # RK4 von Neumann (meth=2): divide by stability boundary, floor at 40
     rk4 = jnp.asarray(2.4, dtype=jnp.float64)
     tmax = jnp.maximum(jnp.maximum(tmax1 / rk4, tmax4 / rk4), jnp.asarray(40.0, dtype=jnp.float64))
@@ -340,9 +335,10 @@ def estimate_timestep(
     dt_input: float,
     safety_factor: float = 0.95,
     params: "GKParams" = None,
+    apar: jnp.ndarray = None,
 ) -> jnp.ndarray:
-    """Combined CFL: min(nonlinear ExB, linear von Neumann)."""
-    dt_nl = estimate_nl_timestep(phi, pre, bessel, dt_input, safety_factor)
+    """Combined CFL: min(nonlinear ExB + EM apar, linear von Neumann)."""
+    dt_nl = estimate_nl_timestep(phi, pre, bessel, dt_input, safety_factor, apar=apar)
     if params is not None:
         dt_lin = estimate_linear_timestep(pre, params=params)
     else:
@@ -383,6 +379,7 @@ def _precompute_shared(
         "s_d4_ipos": _parallel_coefficients(pos_par, stencils.D4_IPW_POS),
         "s_d4_ineg": _parallel_coefficients(pos_par, stencils.D4_IPW_NEG),
         "dvp": params.dvp,
+        "vpmax": jnp.max(jnp.abs(vpgr)),
         "sgr_dist": params.sgr_dist,
         "ixzero": ixzero,
         "iyzero": iyzero,
@@ -818,6 +815,12 @@ def linear_precompute(geometry: Dict[str, jnp.ndarray], params: GKParams) -> "GK
         )
         time_field = jnp.min(jnp.where(field_period > _EPS, field_period, 1e30))
         out["tmax_field"] = jnp.where(time_field < 1e20, 1.0 / time_field, 0.0)
+
+        # g2f amplifies effective streaming; empirical factor from NL stability
+        if params.nlapar:
+            vthrat_max_sq = jnp.max(vthrat_6) ** 2
+            out["em_streaming_cfl"] = (1.0 + beta_cfl * vthrat_max_sq) ** 2
+
     else:
         # adiabatic: scalar species params, 5D arrays
         sp = _compute_species_coeffs(
@@ -1208,13 +1211,11 @@ def gkstep_single(
             df_for_rhs, phi_local, geometry, params, pre, apar=apar_local, bpar=bpar_local
         )
         if params.non_linear:
-            # nonlinear bracket uses chi = J0*phi + em corrections
-            # the correction is velocity-dependent and added to gyro_phi inside the FFT kernel
             chi_corr = None
             if apar_local is not None and "apar_chi_factor" in pre:
                 apar_b = apar_local[jnp.newaxis, jnp.newaxis, :, :, :]
                 if dg.ndim == 6:
-                    apar_b = apar_b[jnp.newaxis]  # (1,1,1,ns,nkx,nky)
+                    apar_b = apar_b[jnp.newaxis]
                 chi_corr = pre["apar_chi_factor"] * apar_b
             if bpar_local is not None and "bpar_chi_factor" in pre:
                 bpar_b = bpar_local[jnp.newaxis, jnp.newaxis, :, :, :]
@@ -1223,16 +1224,71 @@ def gkstep_single(
                 bpar_chi = pre["bpar_chi_factor"] * bpar_b
                 chi_corr = bpar_chi if chi_corr is None else chi_corr + bpar_chi
             rhs = rhs + ops.nonlinear_term_iii(dg, phi_local, geometry, chi_correction=chi_corr)
-        return rhs
+        return rhs, phi_local, apar_local
 
-    # RK4 — expanded accumulation lets XLA read k1..k4 and prev_df in one fused kernel
-    k1 = _rhs(prev_df)
-    k2 = _rhs(prev_df + 0.5 * dt * k1)
-    k3 = _rhs(prev_df + 0.5 * dt * k2)
-    k4 = _rhs(prev_df + dt * k3)
+    # RK4 with inline CFL tracking across substages
+    k1, phi1, apar1 = _rhs(prev_df)
+    k2, phi2, apar2 = _rhs(prev_df + 0.5 * dt * k1)
+    k3, phi3, apar3 = _rhs(prev_df + 0.5 * dt * k2)
+    k4, phi4, apar4 = _rhs(prev_df + dt * k3)
     dt6 = dt / 6.0
     dt3 = dt / 3.0
     next_df_raw = prev_df + dt6 * k1 + dt3 * k2 + dt3 * k3 + dt6 * k4
+
+    # inline NL CFL from RK4 substages (max grad across all 4 stages)
+    if params.non_linear:
+
+        def _max_grad_inline(p):
+            def _per_s(ps):
+                gy = jnp.fft.irfft2(
+                    pack_half_spectrum(
+                        (1j * pre["nl_ky2d"] * ps)[None, None],
+                        pre["nl_jind"],
+                        pre["nl_mrad"],
+                        pre["nl_mphiw3"],
+                    ),
+                    s=(pre["nl_mrad"], pre["nl_mphi"]),
+                    axes=(-2, -1),
+                    norm="backward",
+                )
+                gx = jnp.fft.irfft2(
+                    pack_half_spectrum(
+                        (1j * pre["nl_kx2d"] * ps)[None, None],
+                        pre["nl_jind"],
+                        pre["nl_mrad"],
+                        pre["nl_mphiw3"],
+                    ),
+                    s=(pre["nl_mrad"], pre["nl_mphi"]),
+                    axes=(-2, -1),
+                    norm="backward",
+                )
+                return jnp.maximum(
+                    jnp.max(jnp.abs(gy)) * pre["nl_mrad"],
+                    jnp.max(jnp.abs(gx)) * pre["nl_mphi"],
+                )
+
+            return jnp.max(jax.vmap(_per_s)(p))
+
+        # max grad(phi) across all substages
+        mg_phi = jnp.maximum(
+            jnp.maximum(_max_grad_inline(phi1), _max_grad_inline(phi2)),
+            jnp.maximum(_max_grad_inline(phi3), _max_grad_inline(phi4)),
+        )
+        # em: max grad(apar)*vpmax across substages
+        mg_apar = jnp.array(0.0, dtype=jnp.float64)
+        if params.nlapar:
+            vpmax = pre["vpmax"]
+            _apar_grads = [
+                _max_grad_inline(a) * vpmax for a in [apar1, apar2, apar3, apar4] if a is not None
+            ]
+            if _apar_grads:
+                mg_apar = jnp.maximum(mg_apar, jnp.stack(_apar_grads).max())
+        mg_total = jnp.maximum(mg_phi, mg_apar)
+        substage_dt_est = jnp.where(
+            mg_total > _EPS, 2.0 / mg_total, jnp.array(1e10, dtype=jnp.float64)
+        )
+    else:
+        substage_dt_est = jnp.array(1e10, dtype=jnp.float64)
 
     # post-step: normalization and amplitude tracking
     new_step = state.step + jnp.array(1, dtype=jnp.int32)
@@ -1260,7 +1316,7 @@ def gkstep_single(
 
     z = jnp.array(0.0, dtype=jnp.float64)
     next_state = advance_state(state, params, is_window_end, current_amp, norm_factor, dt_used=dt)
-    return next_df, (phi, (z, z, z)), next_state
+    return next_df, (phi, (z, z, substage_dt_est)), next_state
 
 
 @functools.partial(jax.jit, static_argnames=("n_steps",))
@@ -1308,22 +1364,14 @@ def gksolve(
             next_df, out, next_state = gkstep_single(
                 curr_df, geometry, params, curr_state, pre, ops, dt_override=curr_dt
             )
-            # estimate next dt from current phi (one-step lag)
-            phi_for_cfl = out[0]  # phi from gkstep_single
-            bessel_for_cfl = pre["bessel"]
-            if not params.adiabatic_electrons:
-                bessel_for_cfl = bessel_for_cfl[0]  # ion Bessel (largest FLR), drop species dim
-            next_dt = estimate_timestep(
-                phi_for_cfl,
-                pre,
-                bessel_for_cfl,
-                dt_input=dt_input,
-                safety_factor=cfl_safety,
-                params=params,
-            )
+            # inline substage CFL from gkstep_single + linear CFL
+            substage_dt = out[1][2]
+            dt_lin = estimate_linear_timestep(pre, params=params)
+            dt_cfl = jnp.minimum(jnp.minimum(cfl_safety * substage_dt, dt_input), dt_lin)
+            # allow slow increase, fast decrease
+            next_dt = jnp.where(dt_cfl < curr_dt, dt_cfl, jnp.minimum(dt_cfl, curr_dt * 1.05))
             return (next_df, next_state, next_dt), None
 
-        # conservative cap for the first step (one-step lag has no phi CFL yet)
         init_dt = jnp.minimum(dt_input, estimate_linear_timestep(pre, safety_factor=0.5))
         (final_df, final_state, _), _ = jax.lax.scan(
             _scan_body, (df, state, init_dt), None, length=n_steps

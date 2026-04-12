@@ -448,7 +448,6 @@ def precompute_apar(geometry: Dict[str, jnp.ndarray], params: Any = None):
     mas_6d = mas.reshape(nsp, 1, 1, 1, 1, 1)
     signz_6d = signz.reshape(nsp, 1, 1, 1, 1, 1)
     de_6d = de.reshape(nsp, 1, 1, 1, 1, 1)
-    tmp_6d = tmp.reshape(nsp, 1, 1, 1, 1, 1)
     vthrat_6d = vthrat.reshape(nsp, 1, 1, 1, 1, 1)
 
     intvp = jnp.asarray(geometry["intvp"], dtype=jnp.float64).reshape(1, -1, 1, 1, 1, 1)
@@ -531,7 +530,6 @@ def precompute_bpar(geometry, params):
       j1hat_6d: (nsp, nvpar, nmu, ns, nkx, nky) -- for gyro-averaging B_par
       gamma1_6d: (nsp, 1, 1, ns, nkx, nky) -- Gamma_1 for diagnostics
     """
-    import numpy as np
 
     geom_ = geom_tensors(geometry, params)
     beta = jnp.asarray(getattr(params, "beta", 0.0), dtype=jnp.float64)
@@ -735,12 +733,10 @@ def calculate_em_fluxes(
         results = []
         for isp in range(nsp):
             sp_geom = dict(geometry)
-            signz_sp = float(jnp.asarray(geometry["signz"])[isp])
-            tmp_sp = float(jnp.asarray(geometry["tmp"])[isp])
             vthrat_sp = float(jnp.asarray(geometry["vthrat"])[isp])
             for k in ("mas", "tmp", "de", "signz", "vthrat", "rlt", "rln"):
                 if k in geometry and jnp.asarray(geometry[k]).ndim > 0:
-                    sp_geom[k] = jnp.asarray(geometry[k])[isp:isp+1]
+                    sp_geom[k] = jnp.asarray(geometry[k])[isp : isp + 1]
             gt = geom_tensors(sp_geom)
 
             parseval = gt["parseval"]
