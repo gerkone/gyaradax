@@ -816,10 +816,13 @@ def linear_precompute(geometry: Dict[str, jnp.ndarray], params: GKParams) -> "GK
         time_field = jnp.min(jnp.where(field_period > _EPS, field_period, 1e30))
         out["tmax_field"] = jnp.where(time_field < 1e20, 1.0 / time_field, 0.0)
 
-        # g2f amplifies effective streaming; empirical factor from NL stability
+        # g2f coupling to A_par adds a linear v_A term to the effective streaming.
+        # GKW's time_est_field (matdat.F90:1859-1919) captures this via the
+        # Alfven-wave field CFL; no separate multiplicative (1+beta*vthrat^2)^2
+        # factor is applied. Keep em_streaming_cfl as a pass-through so linear
+        # and NL runs pick dt consistent with GKW's dtim_est.
         if params.nlapar:
-            vthrat_max_sq = jnp.max(vthrat_6) ** 2
-            out["em_streaming_cfl"] = (1.0 + beta_cfl * vthrat_max_sq) ** 2
+            out["em_streaming_cfl"] = jnp.asarray(1.0, dtype=jnp.float64)
 
     else:
         # adiabatic: scalar species params, 5D arrays
@@ -1158,14 +1161,22 @@ def _compute_fields(dg, geometry, params, pre):
         phi = _compute_phi(dg, geometry, params, pre)
         return phi, None, None
 
+    # Support adiabatic + nlapar (GKW's em_adiabat_apar case): promote 5D dg to
+    # 6D with a singleton species axis so the (nsp-indexed) apar/bpar einsums
+    # work uniformly. The physical distribution df is restored to 5D before
+    # the phi solve, which dispatches on ndim.
+    adiabatic_5d = dg.ndim == 5
+    dg_6d = dg[jnp.newaxis] if adiabatic_5d else dg
+
     # Step 1: Solve Ampere from g (bare denominator, no g2f self-consistency).
     apar_weight = pre["apar_weight"]
     apar_diag = pre["apar_diag"]
-    apar_num = jnp.einsum("avmjkl,avmjkl->jkl", apar_weight, dg)
+    apar_num = jnp.einsum("avmjkl,avmjkl->jkl", apar_weight, dg_6d)
     apar = apar_num / apar_diag
 
     # Step 2: Convert g -> f
-    df = g_to_f(dg, apar, params, pre)
+    df_6d = g_to_f(dg_6d, apar, params, pre)
+    df = df_6d[0] if adiabatic_5d else df_6d
 
     # Step 3: Solve phi from f (uses coupled weight/diag when nlbpar=True)
     phi = _compute_phi(df, geometry, params, pre)
@@ -1173,7 +1184,7 @@ def _compute_fields(dg, geometry, params, pre):
     # Step 4: Solve bpar from f (shares coupled diagonal with phi)
     bpar = None
     if params.nlbpar and "bpar_weight" in pre:
-        bpar_num = jnp.einsum("avmjkl,avmjkl->jkl", pre["bpar_weight"], df)
+        bpar_num = jnp.einsum("avmjkl,avmjkl->jkl", pre["bpar_weight"], df_6d)
         bpar = -bpar_num / pre["phi_diag"]
 
     return phi, apar, bpar
@@ -1387,8 +1398,18 @@ def gksolve(
 
         (final_df, final_state), _ = jax.lax.scan(_scan_body, (df, state), None, length=n_steps)
 
+    # diagnostics use the physical distribution f, not the evolved mixed variable g.
+    # GKW's diagnos_fluxes_vspace.F90:444 applies get_f_from_g before every flux and
+    # field integral; we do the same here. Without this, phi, ky_spec, kx_spec and
+    # fluxes for nlapar=True are computed on g and differ from f by the A_par (and
+    # bpar) response term, which is ~vthrat amplified for kinetic electrons.
+    diag_df = final_df
+    if params.nlapar:
+        _, apar_final, _ = _compute_fields(final_df, geometry, params, pre)
+        diag_df = g_to_f(final_df, apar_final, params, pre)
+
     phi, fluxes = get_integrals(
-        final_df,
+        diag_df,
         geometry,
         params=params,
         pre=pre,

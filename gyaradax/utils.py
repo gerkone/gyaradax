@@ -104,6 +104,37 @@ def poten_files(directory):
     return poten_files, np.array(timestep_slices) - 1
 
 
+def _compute_em_fluxes_arr(df, geometry, params, pre, fluxes_shape):
+    """Compute magnetic-flutter EM fluxes as a numpy array shaped like the ES
+    fluxes array. Returns zeros when nlapar is off, params/pre missing, or
+    apar/bpar are unavailable.
+    """
+    zero = np.zeros(fluxes_shape, dtype=np.float64)
+    if params is None or pre is None or not getattr(params, "nlapar", False):
+        return zero
+    # solver imports here to avoid a top-level cycle
+    from gyaradax.solver import _compute_fields, g_to_f
+    from gyaradax.integrals import calculate_em_fluxes
+
+    _, apar, bpar = _compute_fields(df, geometry, params, pre)
+    if apar is None:
+        return zero
+    df_f = g_to_f(df, apar, params, pre)
+    em_pflux, em_eflux = calculate_em_fluxes(
+        geometry, df_f, apar, params=params, bpar=bpar, pre=pre
+    )
+    em_pflux_np = np.asarray(em_pflux, dtype=np.float64)
+    em_eflux_np = np.asarray(em_eflux, dtype=np.float64)
+    out = np.zeros(fluxes_shape, dtype=np.float64)
+    if len(fluxes_shape) == 1:  # (3,)
+        out[0] = float(em_pflux_np)
+        out[1] = float(em_eflux_np)
+    else:  # (nsp, 3)
+        out[..., 0] = em_pflux_np
+        out[..., 1] = em_eflux_np
+    return out
+
+
 def save_dumps(
     output_dir: str,
     df: jnp.ndarray,
@@ -112,10 +143,17 @@ def save_dumps(
     state: Any,
     geometry: Dict[str, jnp.ndarray],
     save_dumps: bool = True,
+    params: Any = None,
+    pre: Any = None,
 ):
     """
     Handle simulation output. Saves heavy 5D distribution snapshots if requested
     and appends diagnostic history to persistent files.
+
+    When ``params`` and ``pre`` are supplied and ``params.nlapar`` is set, also
+    writes a new ``fluxes_em.npz`` with the magnetic-flutter EM fluxes
+    computed from the final (f, A_par, B_par). Existing ``fluxes.npz`` /
+    ``kyspec.npz`` / ``kxspec.npz`` / ``growth.npz`` formats are unchanged.
     """
     os.makedirs(output_dir, exist_ok=True)
 
@@ -136,8 +174,14 @@ def save_dumps(
         # tuple of scalars -> (3,)
         fluxes_arr = np.array([fluxes[0], fluxes[1], fluxes[2]])
 
+    # em fluxes (magnetic-flutter A_par / B_par components). Shape matches ES
+    # fluxes: (3,) for 5D df, (nsp, 3) for 6D. Third slot (vflux) is 0 — EM
+    # momentum flux is not tracked by calculate_em_fluxes.
+    em_fluxes_arr = _compute_em_fluxes_arr(df, geometry, params, pre, fluxes_arr.shape)
+
     diags = {
         "fluxes": fluxes_arr,
+        "fluxes_em": em_fluxes_arr,
         "kx_spec": np.array(kx_spec),
         "ky_spec": np.array(ky_spec),
         "time": np.array(state.time),
@@ -179,6 +223,9 @@ def save_dumps(
     _append_to_npz("kyspec.npz", {"ky_spec": diags["ky_spec"], **common})
     _append_to_npz("kxspec.npz", {"kx_spec": diags["kx_spec"], **common})
     _append_to_npz("growth.npz", {"growth": diags["growth"], **common})
+    # EM flux is saved in a separate file so existing consumers of fluxes.npz
+    # are unaffected. With nlapar off the array is zeros.
+    _append_to_npz("fluxes_em.npz", {"fluxes_em": diags["fluxes_em"], **common})
 
     # 2. Save heavy snapshot if flag is set
     if save_dumps:
@@ -480,7 +527,7 @@ def load_runtime_params(input_dat_path: str) -> Dict[str, Any]:
         "amp_init": float(
             inp.get("spcgeneral", {}).get(
                 "amp_init",
-                inp.get("components", {}).get("amp_init", 1.0e-4),
+                inp.get("components", {}).get("amp_init", 1.0e-3),
             )
         ),
     }

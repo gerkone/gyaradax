@@ -393,21 +393,21 @@ order. Species is the outermost (slowest) index.
 
 - electrostatic gyrokinetics
 - electromagnetic $A_\parallel$ (shear Alfvén, Ampere's law, mixed variable $g$)
+- electromagnetic $B_\parallel$ (magnetic compression, coupled 2×2 Poisson-Bpar solve)
 - adiabatic and kinetic electron models
-- all 7 linear RHS terms (I, II, III, IV, V, VII, VIII)
+- all 7 linear RHS terms (I, II, III, IV, V, VII, VIII) plus EM terms X and XI
 - nonlinear ExB advection (pseudospectral, spectral Poisson bracket)
 - 4th-order parallel and velocity dissipation
 - perpendicular hyper-dissipation
 - RK4 explicit time integration
 - per-$k_y$ normalization (linear mode)
-- CFL-adaptive timestep (nonlinear ExB + linear parallel streaming)
+- CFL-adaptive timestep (nonlinear ExB + linear parallel streaming + EM Alfvén)
 - standalone circular geometry computation (no precomputed GKW files needed)
 
 ### 7.2 not implemented
 
 | feature | GKW module | notes |
 |---------|-----------|-------|
-| compressional ($B_\parallel$) | `fields.F90`, `bpar_*` | magnetic compression |
 | collisions | `collisions.f90` | Lenard-Bernstein, Lorentz, full FP |
 | neoclassical | `neoclassics.f90` | equilibrium corrections to $F_M$ |
 | rotation | `rotation.f90` | centrifugal (`cfen`), Coriolis, toroidal shear |
@@ -417,53 +417,9 @@ order. Species is the outermost (slowest) index.
 | real-space nonlinear | `non_linear_terms.F90` | Arakawa bracket variant |
 | global effects | `global.f90` | radial profile variation |
 | source terms | various | Krook operator, external sources |
+| Miller / general geometry | `geom.f90` | Lapillonne circular and s-alpha are the only supported models |
 
-### 7.3 known limitations
-
-- adaptive CFL uses one-step lag (current step uses previous step's CFL estimate)
-- no multi-species output in `save_dumps` (fluxes are summed over species)
-- **kinetic init from scratch**: the reference cases ARE cold-started
-  (confirmed by reproducing with `read_file=.false.`; output is
-  bit-identical). The earlier 6-12× amplitude deficit was caused by
-  using `configs/kinetic.yaml` parameters (wrong electron mass 0.0003
-  vs 0.000272, wrong rln 3.0 vs 3.031, wrong amp_init 1e-4 vs 0.001).
-  With correct parameters from `parse_input_dat` + adaptive dt:
-  electron max|df| matches within 0.3%, ion within 11%.
-- **NL CFL estimator**: GKW's nonlinear timestep estimator reduces dt
-  from 2.13e-3 to 1.01e-3 mid-run. gyaradax's `estimate_nl_timestep`
-  never triggers (returns dt_input for all 300 steps). The NL gradient
-  computed by gyaradax is too small. Causes flux trajectory divergence
-  (1.5-3.4× by window 3).
-
-### 7.4 bugs fixed (2026-03-28)
-
-1. **Parseval factor** (`geometry.py:507,714`, `utils.py:622`): was
-   `[1, nky, nky, ...]`, now `[1, 2, 2, ...]` (standard half-spectrum,
-   confirmed from GKW `diagnos_generic.f90:572-576`).
-
-2. **Duplicate `ints` in flux d3v** (`integrals.py:303`): was
-   `d3v = ints * d2X * intmu * bn * intvp` (double-counted with `ints`
-   in `dum`), now `d3v = d2X * intmu * bn * intvp` (confirmed from
-   GKW `diagnos_fluxes_vspace.F90:414-517`). Bugs 1 and 2 were
-   compensating: `ints × (nky/2) = 1` for the standard grid.
-
-3. **Init Maxwellian normalization** (`solver.py:946`): the zonal init
-   used `exp(-E)` instead of `exp(-E/T) / (sqrt(T*pi))^3`. Now matches
-   GKW's `fmaxwl` from `components.f90`.
-
-4. **idisp=2 dissipation speed** (`solver.py:640`): used `params.dvp`
-   (grid spacing ≈ 0.047) instead of `vpgr_rms` (RMS velocity ≈ 1.73).
-   Similarly `mu_rms=1.0` → `mugr_rms`. 37× error. Confirmed from GKW
-   `linear_terms.f90:643,911`.
-
-5. **disp_x/disp_y defaults** (`utils.py:460-461`): defaulted to 0.1
-   when GKW input.dat omits them, but GKW defaults to 0.0. Caused
-   spurious perpendicular hyper-dissipation. At `kx=kxmax`: dissipation
-   rate = `0.1 * (kx/kxmax)^4 = 0.1` per unit time. **Root cause of
-   the Rosenbluth-Hinton 38% residual error.** After fix: RH residual
-   converges to Xiao-Catto 0.0711 within 0.1% at t>80.
-
-### 7.4 growth rate convention
+### 7.3 growth rate convention
 
 gyaradax matches the GKW growth rate definition (`diagnos_growth_freq.f90`).
 
@@ -948,17 +904,121 @@ EM parity matches ES at all timescales (100–20000 steps). Fluxes
 computed from the same distribution match GKW to machine precision
 after parseval and flux-surface-average corrections.
 
-### 10.13 remaining EM work
+### 10.13 EM gotchas from GKW benchmarking
 
-| item | status | notes |
-|------|--------|-------|
-| $A_\parallel$ field solve | done | bare denominator, numerical gamma_num |
-| $\chi$ correction (V, VIII, XI) | done | Term VII uses $J_0\phi$ only (not $\chi$) |
-| g2f transform for phi solve | done | vpgr symmetry → zero correction to phi |
-| g2f in linear RHS | done | kinetic terms act on $f = g + g2f \cdot A_\parallel$ |
-| $B_{1\parallel}$ field equation | done | coupled 2×2 Poisson-Bpar solve via F/B coupling coefficients |
-| $B_{1\parallel}$ chi correction | done | $\chi += (2\mu T/Z)\hat{J}_1 B_{1\parallel}$ |
-| $B_{1\parallel}$ RHS Term X | done | parallel derivative of gyro-averaged $B_{1\parallel}$ |
-| EM fluxes (magnetic flutter) | done | pflux_em, eflux_em diagnostics |
-| Alfvén CFL | done | field_cfl with beta correction |
+Collected from the CBC NL-EM vs GKW benchmark (see `docs/em_debug_report.md`
+for full numbers).
 
+**CFL terms add as max-frequencies, not multiplicatively.** The Alfvén CFL
+lives in `tmax_field`; the parallel streaming CFL lives in `tmax1`. GKW
+takes the max — no extra $(1 + \beta v_{th,e}^2)^2$ multiplier on top of
+the streaming bound. For CBC kinetic electrons at $\beta=0.001$ the naive
+squaring mistake is 22× in $\Delta t$ because $v_{th,e} \approx 60.6$ and
+$(1 + 0.001 \cdot 60.6^2)^2 \approx 21.8$. Invisible at low $\beta$ with
+adiabatic electrons; catastrophic once electrons go kinetic.
+
+**Diagnostics use $f$, not $g$.** GKW's `diagnos_fluxes_vspace.F90:444`
+applies `get_f_from_g()` before every flux, field, and k-spectrum. `pflux`
+and `eflux` are unchanged by skipping the transform (the g→f correction
+$-(2Z/T) v_\parallel v_R J_0 A_\parallel F_M$ is odd in $v_\parallel$; the
+flux integrands are even) but `vflux` and phi-based spectra quietly
+differ. `gksolve` applies `g_to_f` before the final `get_integrals` to
+match GKW's convention even for the flux channels that are invariant by
+parity.
+
+**Per-code `geom_type` defaults differ.** GKW defaults to `s-alpha` when
+`input.dat` doesn't set `geom_type`; gyaradax defaults to `circ`
+(Lapillonne). These geometries differ by ~50% in linear γ at finite ε
+(§8.3.2). Set the geometry explicitly on both sides when benchmarking —
+never rely on the default.
+
+**Constant `pred/ref` ratio across windows ≠ physics bug.** In an
+exponentially growing linear phase, a stable `pred/ref ≈ const` signals
+an initialization or normalization difference, not a growth-rate
+difference. Compare log-space slopes of |flux| vs window index instead
+of absolute magnitudes. GKW's default `amp_init` is `1.0e-3`; gyaradax
+had inherited `1.0e-4` in the YAML loader — a clean "constant ratio"
+signature.
+
+**Sub-percent linear perturbations can shift NL saturation by tens of
+percent.** At CBC $\beta=0.001$ the $B_\parallel$ contribution to RHS is
+~0.08% of the total, yet including vs excluding it changes saturated
+flux by ~46% in gyaradax and ~12% in GKW. Both codes are correct; both
+codes are sensitive. Validating $B_\parallel$-related formulas requires
+stateless, hand-rolled comparisons at fixed fields — not saturated-flux
+regression.
+
+**Zonal-vs-drift saturation balance as the first NL suspect.** Once
+matched-geometry runs produce (ky, kx) spectrum Pearson ≥ 0.99 but the
+absolute flux amplitudes still disagree, the next thing to look at is
+the zonal-flow vs drift-wave weight in the saturated state. The CBC
+apar-only benchmark has GKW drift-wave-dominant (zonal/drift = 0.78)
+while gyaradax is zonal-dominant (zonal/drift = 2.4). Zonal flows do
+not transport heat, so the ratio sets the overall amplitude. Tracing
+back, the linear γ(ky) peak is shifted from ky=0.7 (GKW) to ky=0.5
+(gyaradax) with a 20× under-drive at ky=0.1 — a linear spectrum shift
+that the NL mode coupling amplifies into zonal vs drift rebalancing.
+
+## 11. bugs and limitations
+
+Known open issues and limitations of the current implementation,
+grouped by severity/impact.
+
+### 11.1 numerical / solver
+
+- **Adaptive CFL one-step lag.** Each step's $\Delta t$ is estimated
+  from the previous step's $\phi$. Fine in practice for smoothly
+  evolving states; can miss sharp NL bursts.
+- **`estimate_nl_timestep` under-triggers.** On the standard kinetic
+  reference runs, GKW's NL CFL reduces $\Delta t$ from 2.13e-3 to
+  1.01e-3 mid-run while gyaradax's estimator returns `dt_input` for
+  all steps. The computed $\max|\nabla\phi|$ is too small. Contributes
+  to 1.5–3.4× flux trajectory divergence by window 3.
+- **`circ` vs `s-alpha` at extreme ky.** Linear gyaradax runs with
+  `s-alpha` blow up at ky=0.1 (over-drive) and ky=1.0 (under-damped).
+  NL runs use `circ` for this reason. Root cause likely in the
+  finite-ε correction to drift tensors or in missing high-ky
+  dissipation.
+
+### 11.2 electromagnetic
+
+- **apar-only NL flux magnitude ~1.5× GKW at CBC.** Matched geometry,
+  Pearson ≥ 0.99 on both (ky, kx) spectra. Species ratio matches GKW
+  to 5%. The residual amplitude gap is within the window-phase
+  fluctuation band (~60% of mean) for a single-run comparison.
+- **Full EM (apar+bpar) NL flux 0.5–0.7× GKW at CBC.** All
+  $B_\parallel$ formulas (coupled solve, chi factor, Term X) verified
+  to match GKW to machine precision by isolated tests at fixed
+  fields. The discrepancy is NL-dynamics amplification of a ~0.08%
+  RHS perturbation — not a bug in any one formula but a sensitivity
+  difference between codes, likely in upwinding direction during
+  bursts or subtle phase relationships.
+- **Linear γ(ky) peak shift vs GKW.** Clean linear scan at CBC
+  kinetic EM: gyaradax peak at ky=0.5 (γ=0.59), GKW peak at ky=0.7
+  (γ=0.55). At ky=0.1, gyaradax γ=0.005 vs GKW 0.095 (20× under-drive).
+  Suspects: low-ky EM drive (J0/Γ at small b), k_perp definition,
+  high-ky dissipation.
+- **Adiabatic + apar absolute amplitude at high β.** The
+  `em_adiabat_apar` benchmark (β=0.234) has gyaradax ion eflux
+  ~O(90×) smaller than GKW at the same window. Sign and exponential
+  growth are correct. Contributing factors: high-β normalization
+  convention and the Boltzmann-electron's implied flux contribution
+  that GKW reports as 6 columns (both species) while gyaradax
+  reports only the kinetic-ion 3 columns.
+
+### 11.3 diagnostics / I/O
+
+- **`save_dumps` fluxes are per-species but not per-kx/ky.** The
+  saved `fluxes.npz` array is `(nsp, 3)` (time-collapsed). Spectra
+  are saved separately as `kyspec.npz` / `kxspec.npz` from the same
+  final state. There is no per-(kx, ky) flux decomposition output.
+- **EM fluxes are a separate file.** `fluxes_em.npz` sits alongside
+  `fluxes.npz`; it carries `(pflux_em, eflux_em, 0)` shaped like the
+  ES output. `vflux_em` is not tracked (GKW's
+  `calculate_em_fluxes` does not produce it either).
+
+### 11.4 scope / missing features (intentional)
+
+See §7.2 for the full not-implemented list. The most commonly
+requested gaps: collisions, rotation/Coriolis, Miller geometry,
+global/radial-varying profiles, implicit time stepping.

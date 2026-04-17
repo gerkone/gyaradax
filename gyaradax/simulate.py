@@ -64,6 +64,10 @@ def _geometry_from_config(cfg):
         val = getattr(section, key, None)
         if val is not None:
             kwargs[key] = int(val) if key in _int_keys else float(val)
+    # geometry_model: "circ" (Lapillonne) or "s-alpha"
+    gm = getattr(gc, "geometry_model", None)
+    if gm is not None:
+        kwargs["geom_type"] = str(gm)
     return compute_geometry(**kwargs)
 
 
@@ -227,6 +231,8 @@ def gksimulate(
             state,
             geometry,
             save_dumps=save_snapshots,
+            params=params,
+            pre=pre,
         )
 
     start_step = int(state.step)
@@ -267,6 +273,8 @@ def gksimulate(
                 current_state,
                 geometry,
                 save_dumps=save_snapshots or (save_final and is_final),
+                params=params,
+                pre=pre,
             )
 
         log_step(current_fluxes, current_state, wall_time, n_steps=block_steps)

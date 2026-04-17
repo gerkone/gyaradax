@@ -276,6 +276,23 @@ def gkparams_from_input_and_geometry(
         sp_rln = np.array([float(inp[k].get("rln", 0.0)) for k in species_keys])
         sp_vthrat = np.sqrt(sp_tmp / sp_mas)
 
+        # adiabatic electrons: drop Z<0 species — gyaradax's adiabatic path
+        # evolves only kinetic (non-electron) species and couples to an
+        # implicit Boltzmann electron via the quasineutrality denominator.
+        ae_val = inp.get("gridsize", {}).get("adiabatic_electrons")
+        if ae_val is None:
+            ae_val = inp.get("spcgeneral", {}).get("adiabatic_electrons", True)
+        if bool(ae_val):
+            keep = sp_signz > 0
+            if keep.any():
+                sp_mas = sp_mas[keep]
+                sp_tmp = sp_tmp[keep]
+                sp_de = sp_de[keep]
+                sp_signz = sp_signz[keep]
+                sp_rlt = sp_rlt[keep]
+                sp_rln = sp_rln[keep]
+                sp_vthrat = sp_vthrat[keep]
+
         def _maybe_scalar(arr):
             return float(arr[0]) if len(arr) == 1 else arr
 
