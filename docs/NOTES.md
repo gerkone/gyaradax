@@ -404,6 +404,7 @@ order. Species is the outermost (slowest) index.
 - per-$k_y$ normalization (linear mode)
 - CFL-adaptive timestep (nonlinear ExB + linear parallel streaming + EM Alfvén)
 - standalone circular geometry computation (no precomputed GKW files needed)
+- Miller flux-surface parametrisation (elongation κ, triangularity δ, squareness ζ, skappa/sdelta/ssquare, Zmil, dRmil, dZmil) — ports GKW `geom_miller` with Simpson flux-surface integrals; matches GKW `geom.dat` to ≤1e-5 max rel-error
 
 ### 7.2 not implemented
 
@@ -419,7 +420,7 @@ order. Species is the outermost (slowest) index.
 | real-space nonlinear | `non_linear_terms.F90` | Arakawa bracket variant |
 | global effects | `global.f90` | radial profile variation |
 | source terms | various | Krook operator, external sources |
-| Miller / general geometry | `geom.f90` | Lapillonne circular and s-alpha are the only supported models |
+| general geometry (Fourier / MXH / chease) | `geom.f90` | only `s-alpha`, `circ` (Lapillonne), and `miller` supported |
 
 ### 7.3 growth rate convention
 

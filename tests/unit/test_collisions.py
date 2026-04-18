@@ -1,13 +1,4 @@
-"""Unit tests for the Fokker-Planck collision operator.
-
-Sanity checks that do not require a GKW reference run:
-- The full operator (pitch + energy + friction) approximately preserves
-  the Maxwellian (only the discretization error remains).
-- The pitch-angle-only operator preserves any isotropic function f(v),
-  tested with f = v^2.
-- A small perturbation to the Maxwellian relaxes back toward it when
-  stepped with explicit Euler.
-"""
+"""Unit tests for the Fokker-Planck collision operator."""
 
 import jax.numpy as jnp
 import numpy as np
@@ -171,24 +162,20 @@ def test_xu_conservation_zeroes_deltas():
 
 
 def test_coulomb_log_path_runs_and_scales():
-    """freq_override=False should produce a finite stencil scaled by ~6.5e-5·L_ii."""
+    """freq_override=False yields gamma_pref = 6.5e-5 * L_ii for default refs."""
     import jax.numpy as jnp
     from gyaradax.collisions import _coulomb_log_ii, _gamma_pref_self
 
     geom = _geom()
     p = _base_params(
-        geom,
-        coll_freq_override=False,
-        coll_rref=1.0,
-        coll_nref=1.0,
-        coll_tref=1.0,
+        geom, coll_freq_override=False,
+        coll_rref=1.0, coll_nref=1.0, coll_tref=1.0,
     )
-    out = precompute_collisions(geom, p)
-    assert "coll_stencil" in out
+    assert "coll_stencil" in precompute_collisions(geom, p)
     L = float(_coulomb_log_ii(1.0, 1.0, 1.0, 1.0, 1.0))
-    expected = 6.5141e-5 * L  # expected gamma_pref for default refs
+    expected = 6.5141e-5 * L
     gp = float(_gamma_pref_self(p, jnp.asarray(1.0), jnp.asarray(1.0), jnp.asarray(1.0)))
-    assert abs(gp - expected) / expected < 1e-10, f"gamma_pref {gp:.4e} != {expected:.4e}"
+    assert abs(gp - expected) / expected < 1e-13, f"rel = {abs(gp - expected) / expected:.4e}"
 
 
 def test_kinetic_produces_per_species_stencil():

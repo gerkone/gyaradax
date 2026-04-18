@@ -318,42 +318,43 @@ def gkparams_from_input_and_geometry(
         if k in geometry:
             scalars[k] = float(np.asarray(geometry[k]).reshape(-1)[0])
 
-    # species from input.dat — read ALL species (full list, including the
-    # adiabatic electron if present). The kinetic-species set is obtained by
-    # filtering Z>0 in the adiabatic-electrons case; the full list is still
-    # used as collision backgrounds (coll_bg_*).
+    # species from input.dat. target species = first num_sp blocks (GKW
+    # convention for evolved species). collision backgrounds = ALL blocks
+    # found in the input (may include an adiabatic-electron block beyond
+    # num_sp). kinetic-species set comes from filtering Z>0 when adiabatic.
     num_sp = int(inp.get("gridsize", {}).get("number_of_species", 1))
-    species_keys = [k for k in inp if k.startswith("species")][: num_sp + 1]  # allow adiabatic bg
+    all_species_keys = [k for k in inp if k.startswith("species")]
+    species_keys = all_species_keys[:num_sp]
     all_mas = (
-        np.array([float(inp[k].get("mass", 1.0)) for k in species_keys])
-        if species_keys
+        np.array([float(inp[k].get("mass", 1.0)) for k in all_species_keys])
+        if all_species_keys
         else np.array([])
     )
     all_tmp = (
-        np.array([float(inp[k].get("temp", 1.0)) for k in species_keys])
-        if species_keys
+        np.array([float(inp[k].get("temp", 1.0)) for k in all_species_keys])
+        if all_species_keys
         else np.array([])
     )
     all_de = (
-        np.array([float(inp[k].get("dens", 1.0)) for k in species_keys])
-        if species_keys
+        np.array([float(inp[k].get("dens", 1.0)) for k in all_species_keys])
+        if all_species_keys
         else np.array([])
     )
     all_signz = (
-        np.array([float(inp[k].get("z", 1.0)) for k in species_keys])
-        if species_keys
+        np.array([float(inp[k].get("z", 1.0)) for k in all_species_keys])
+        if all_species_keys
         else np.array([])
     )
     all_vthrat = np.sqrt(all_tmp / all_mas) if len(all_mas) else np.array([])
 
     if species_keys:
-        sp_mas = all_mas.copy()
-        sp_tmp = all_tmp.copy()
-        sp_de = all_de.copy()
-        sp_signz = all_signz.copy()
+        sp_mas = np.array([float(inp[k].get("mass", 1.0)) for k in species_keys])
+        sp_tmp = np.array([float(inp[k].get("temp", 1.0)) for k in species_keys])
+        sp_de = np.array([float(inp[k].get("dens", 1.0)) for k in species_keys])
+        sp_signz = np.array([float(inp[k].get("z", 1.0)) for k in species_keys])
         sp_rlt = np.array([float(inp[k].get("rlt", 0.0)) for k in species_keys])
         sp_rln = np.array([float(inp[k].get("rln", 0.0)) for k in species_keys])
-        sp_vthrat = all_vthrat.copy()
+        sp_vthrat = np.sqrt(sp_tmp / sp_mas)
 
         # adiabatic electrons: drop Z<0 species from the *target* list —
         # gyaradax's adiabatic path evolves only kinetic (non-electron)
