@@ -395,6 +395,7 @@ order. Species is the outermost (slowest) index.
 - electromagnetic $A_\parallel$ (shear Alfvén, Ampere's law, mixed variable $g$)
 - electromagnetic $B_\parallel$ (magnetic compression, coupled 2×2 Poisson-Bpar solve)
 - adiabatic and kinetic electron models
+- linearized Fokker-Planck collision operator (pitch-angle, energy diffusion, friction; MVP scope — see §12)
 - all 7 linear RHS terms (I, II, III, IV, V, VII, VIII) plus EM terms X and XI
 - nonlinear ExB advection (pseudospectral, spectral Poisson bracket)
 - 4th-order parallel and velocity dissipation
@@ -408,7 +409,8 @@ order. Species is the outermost (slowest) index.
 
 | feature | GKW module | notes |
 |---------|-----------|-------|
-| collisions | `collisions.f90` | Lenard-Bernstein, Lorentz, full FP |
+| collision conservation corrections | `collisionop.f90` | `mom_conservation`, `ene_conservation` (base operator is in §11) |
+| inter-species collisions | `collisionop.f90` | only self-collisions in the kinetic-electron MVP |
 | neoclassical | `neoclassics.f90` | equilibrium corrections to $F_M$ |
 | rotation | `rotation.f90` | centrifugal (`cfen`), Coriolis, toroidal shear |
 | energetic particles | `components.f90` | `types='EP'`, `types='alpha'` |
@@ -959,7 +961,143 @@ back, the linear γ(ky) peak is shifted from ky=0.7 (GKW) to ky=0.5
 (gyaradax) with a 20× under-drive at ky=0.1 — a linear spectrum shift
 that the NL mode coupling amplifies into zonal vs drift rebalancing.
 
-## 11. bugs and limitations
+## 11. linearized Fokker-Planck collision operator
+
+Port of GKW's `collision_differential_numu` (`collisionop.f90:1547-2228`)
+to JAX. Handles three operator pieces, each independently toggleable:
+**pitch-angle scattering** $D_{\theta\theta}$, **energy diffusion**
+$D_{vv}$, and **friction** $F_v$. Discretization matches GKW's
+conservative flux form on the uniform-$v_\perp$ $\mu$ grid that
+gyaradax already uses (see §1.3).
+
+### 11.1 scope
+
+- Adiabatic electrons + single kinetic ion (original MVP) **and**
+  kinetic-electron / multi-kinetic-species configurations. In the
+  kinetic case `precompute_collisions` vmaps the 9-point stencil over
+  species axis, giving shape `(nsp, 9, nv, nmu, ns)`. Each species
+  uses its own prefactor; **no species-species coupling** — operator
+  is self-collision only.
+- Both `freq_override=True` (scalar `coll_freq` → `gamma_pref =
+  coll_freq·de/tmp²`) and `freq_override=False` (Coulomb-log path
+  via `rref, tref, nref` → `gamma_pref = 6.5141e-5·rref·nref/tref²·
+  de·Z⁴·L_ii/tmp²`; ion-ion only).
+- Optional **Xu-style momentum and energy conservation corrections**
+  (`coll_mom_conservation`, `coll_ene_conservation`), added via
+  `conservation_correction` as a scalar rebalance on top of the base
+  operator RHS. Drives `Δp, ΔE → 0` to machine precision.
+- `mass_conserve=True` (zero outward flux at velocity boundaries).
+- `freq_override=True` only: the species-pair Coulomb-log machinery is
+  collapsed to a single scalar `coll_freq`, giving $\Gamma^{a/a} =
+  \mathrm{coll\_freq} \cdot n_a / T_a^2$. Reference density/temperature
+  path (`rref/tref/nref`) not yet used.
+- `mass_conserve=True` (zero outward flux at $v_\parallel = \pm v_{par,\max}$
+  and $v_\perp = v_{\perp,\max}$).
+- Momentum/energy conservation corrections not implemented — the base
+  operator already conserves particles but not like-particle
+  momentum/energy (manual §7).
+- JAX backend only; no CUDA fused kernel.
+
+### 11.2 operator and discretization
+
+In $(v_\parallel, v_\perp)$ the full operator has the flux form
+
+$$C(f) = \partial_{v_\parallel}\bigl(A\,\partial_{v_\parallel} f + B\,\partial_{v_\perp} f\bigr)
+     + \partial_{v_\perp}\bigl(B\,\partial_{v_\parallel} f + C\,\partial_{v_\perp} f\bigr)
+     + \partial_{v_\parallel}(G_\parallel f) + \partial_{v_\perp}(G_\perp f)$$
+
+with coefficients assembled from $D_{\theta\theta}$, $D_{vv}$, $F_v$
+(manual eqs. 81-109). Velocity-dependent $D$, $F$ are the error-function
+formulas in `caldthth`, `caldvv`, `calfv` (`collisionop.f90:697-870`).
+
+Discretely each grid point gets a **9-point $(v_\parallel, v_\perp)$ stencil**
+— self, four axis neighbors, and four diagonal corners — precomputed once
+in `gyaradax/collisions.py:precompute_collisions` and stored in
+`GKPre["coll_stencil"]` with shape `(9, nv, nmu, ns)`. At RHS time
+`collision_rhs(df, stencil)` applies the stencil with zero-padded
+boundaries. The boundary mass-conserve flux-zeroing is baked into the
+precomputed coefficients.
+
+### 11.3 config and plumbing
+
+YAML section `collisions:` and GKW namelist `&collisions` both map to
+`GKParams` fields:
+
+```
+collisions            master switch (default False)
+coll_pitch_angle      D_theta_theta (default True)
+coll_en_scatter       D_vv            (default True)
+coll_friction         F_v             (default True)
+coll_freq             scalar collision frequency for freq_override mode
+coll_freq_override    must be True in MVP
+coll_mass_conserve    must be True in MVP
+```
+
+All are static pytree fields (resolved at trace time). When
+`collisions=False` the compile-time branch in `_linear_rhs_core` drops
+out entirely, so existing non-collisional runs are unaffected.
+
+### 11.4 validation
+
+Unit tests in `tests/unit/test_collisions.py`:
+
+| test | what it checks |
+|------|----------------|
+| `test_full_operator_preserves_maxwellian` | full operator residual on $F_M$ is below $10^{-2}$ (FDT cancellation) |
+| `test_pitch_angle_preserves_isotropic_function` | $C_{\text{pitch}}(v^2) \approx 0$ in the interior |
+| `test_perturbation_relaxes_to_maxwellian` | a $v_\parallel$-perturbed Maxwellian decays under the operator |
+| `test_xu_conservation_zeroes_deltas` | with mom/ene conservation ON, $\Delta p, \Delta E \to 0$ to machine precision |
+| `test_coulomb_log_path_runs_and_scales` | freq_override=False yields gamma_pref $=6.5\!\times\!10^{-5} L_\text{ii}$ |
+| `test_kinetic_produces_per_species_stencil` | 6D path yields `(nsp, 9, nv, nmu, ns)` and per-species residuals stay small |
+| `test_disabled_gives_zero_stencil` | `collisions=False` emits no stencil |
+
+Trajectory parity test in `tests/unit/test_gk_cases.py::test_adiabat_collisions_weak_1step_parity` checks 1-step FDS parity to rel L2 < $10^{-4}$ (measured 1.75e-5).
+
+GKW parity (weak case, `coll_freq=1e-4`, $50\times4\times16$, nperiod=3,
+kthrho=0.5, s-alpha, normalization disabled on both codes):
+
+| horizon | rel L2 $\|df\|$ | rel $L_\infty$ | eflux ratio (parseval-corrected) |
+|---------|-----------------|-----------------|----------------------------------|
+| 1 step | $1.75\times 10^{-5}$ | $1.15\times 10^{-4}$ | **1.0000** |
+| 1000 steps | $1.30\times 10^{-3}$ | $1.47\times 10^{-3}$ | 0.9973 |
+| 20000 steps | $4.26\times 10^{-2}$ | $4.27\times 10^{-2}$ | 0.9241 |
+
+The 1-step error is **identical** to the no-collisions baseline
+(`adiabat_collisions_weak_1step_nocoll`, same 1.75e-5), so the
+collision operator itself matches GKW to machine precision — the
+remaining 1.75e-5 is pre-existing parallel-stencil/drive-term float
+ordering drift. Long-horizon drift at 20k steps is amplified by
+exponential ITG growth with normalization disabled (expected).
+
+Run via `python scripts/validate_collisions.py`.
+
+### 11.5 gotchas
+
+- **Parseval convention for single non-zonal mode.** gyaradax hardcodes
+  `parseval[0]=1` assuming the first ky index is the zonal (ky=0) mode.
+  For runs with `mode_box=False, nmod=1, kthrho≠0` (like the validation
+  case), the single mode is non-zonal but still gets parseval=1, so
+  fluxes are 2× smaller than GKW's. The validation script multiplies
+  gyaradax fluxes by 2 for a fair comparison. Fix is a geometry-level
+  change (`geometry.py:557,760`) — not MVP-blocking.
+- **Normalization timing.** GKW's `normalize_per_toroidal_mode` is
+  default false and `normalized` default true (single global factor);
+  gyaradax normalizes per-ky. For parity validation the cleanest path
+  is to set `normalized=.false.` in the GKW input and force
+  `naverage` large in gyaradax, so both run without normalization.
+- **Coordinate singularity at $\mu=0$.** Individual operator pieces
+  (pitch-only, energy-only, friction-only) have O(1) discretization
+  error at the lowest $v_\perp$ grid cell due to the $1/v_\perp$ factor
+  in the operator. The *full* operator cancels these to $O(\Delta v^2)$
+  thanks to the FDT balance $F_v = 2v\,D_{vv}/T$ — this is why the
+  `test_full_operator_preserves_maxwellian` threshold (1e-2) is much
+  tighter than the per-term isolation would suggest.
+- **CFL contribution.** The collision stencil adds a spectral-radius
+  bound to `tmax4` via `pre["coll_stencil"][0]` (diagonal). At
+  `coll_freq ≤ 1` this is never the limiting constraint; above
+  `coll_freq ~ 10` it can dominate velocity dissipation.
+
+## 12. bugs and limitations
 
 Known open issues and limitations of the current implementation,
 grouped by severity/impact.

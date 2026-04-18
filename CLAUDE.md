@@ -4,7 +4,9 @@ A JAX reimplementation of the GKW Fortran gyrokinetic solver. Supports
 adiabatic and kinetic electrons, nonlinear ExB advection, adaptive CFL,
 electromagnetic A_parallel (shear Alfvén via Ampere's law, mixed variable g)
 and B_parallel (magnetic compression via coupled Poisson-Bpar solve),
-with an optional CUDA backend for fused stencil and cuFFT kernels.
+linearized Fokker-Planck collision operator (pitch-angle, energy, friction;
+adiabatic + single ion MVP), and an optional CUDA backend for fused
+stencil and cuFFT kernels.
 
 ## File map
 
@@ -15,6 +17,7 @@ gyaradax/
   geometry.py    — circular/s-alpha geometry model, metric tensors, drift tensors
   params.py      — GKParams dataclass (JAX pytree), YAML/input.dat loading
   simulate.py    — high-level entry points (gksimulate, gk_run, gk_run_batched)
+  collisions.py  — Fokker-Planck stencil precompute + apply (9-point in (vpar, mu))
   diag.py        — diagnostics: growth rates, spectra, term_iii_rhs
   types.py       — GKPre (precomputed coeffs pytree), GKState (diagnostic state)
   stencils.py    — 4th-order FD stencil coefficients (parallel + velocity)
@@ -106,6 +109,7 @@ SolverOps interface: `linear_rhs()`, `nonlinear_term_iii()`.
 | `calculate_apar` | `ampere_int` + `ampere_dia` | `linear_terms.f90` |
 | `g_to_f` / `f_to_g` | `g2f_correct` | `linear_terms.f90` |
 | `_compute_fields` | `calculate_fields` (full EM) | `fields.F90` |
+| `precompute_collisions` / `collision_rhs` | `collision_differential_numu` | `collisionop.f90` |
 | `estimate_linear_timestep` | `get_estimated_timestep` | `matdat.F90` |
 | `init_f` | `init_dist` | `init.f90` |
 | `compute_geometry` | `geom_circ` | `geom.f90` |
@@ -119,6 +123,14 @@ SolverOps interface: `linear_rhs()`, `nonlinear_term_iii()`.
 - **Terms I-VIII**: GKW numbering for the gyrokinetic equation RHS.
   Term VI (neoclassical/rotation) is not implemented.
   `drive_scale` controls Terms V and VIII jointly -- do NOT set to 0.
+- **Collisions**: Enabled by `collisions=True, coll_freq>0` in GKParams.
+  Linearized Fokker-Planck via 9-point `(vpar, mu)` stencil precomputed
+  in `gyaradax/collisions.py` and applied as an additive RHS in
+  `_linear_rhs_core`. MVP scope: adiabatic electrons + 1 kinetic ion,
+  `freq_override=True` only, `mass_conserve=True`, no momentum/energy
+  conservation corrections. Kinetic-electron path raises clearly.
+  Flags `coll_pitch_angle`, `coll_en_scatter`, `coll_friction` toggle
+  the three pieces independently.
 - **Electromagnetic (A_parallel)**: Enabled by `nlapar=True, beta>0` in GKParams.
   Evolves the mixed variable g = f + (2Z/T)*v_R*v_par*J0*A_par*F_M.
   Field solve: self-consistent phi + A_par (Ampere's law with g2f correction).
