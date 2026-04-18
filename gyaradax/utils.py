@@ -120,18 +120,17 @@ def _compute_em_fluxes_arr(df, geometry, params, pre, fluxes_shape):
     if apar is None:
         return zero
     df_f = g_to_f(df, apar, params, pre)
-    em_pflux, em_eflux = calculate_em_fluxes(
-        geometry, df_f, apar, params=params, bpar=bpar, pre=pre
-    )
-    em_pflux_np = np.asarray(em_pflux, dtype=np.float64)
-    em_eflux_np = np.asarray(em_eflux, dtype=np.float64)
-    out = np.zeros(fluxes_shape, dtype=np.float64)
+    res = calculate_em_fluxes(geometry, df_f, apar, params=params, bpar=bpar, pre=pre)
     if len(fluxes_shape) == 1:  # (3,)
-        out[0] = float(em_pflux_np)
-        out[1] = float(em_eflux_np)
-    else:  # (nsp, 3)
-        out[..., 0] = em_pflux_np
-        out[..., 1] = em_eflux_np
+        em_p, em_e, em_v = (np.asarray(r, dtype=np.float64) for r in res)
+        out = np.zeros(fluxes_shape, dtype=np.float64)
+        out[0] = float(em_p)
+        out[1] = float(em_e)
+        out[2] = float(em_v)
+    else:  # 6D path returns (nsp, 3)
+        arr = np.asarray(res, dtype=np.float64)
+        out = np.zeros(fluxes_shape, dtype=np.float64)
+        out[..., :3] = arr
     return out
 
 

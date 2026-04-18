@@ -676,18 +676,23 @@ def calculate_em_fluxes(
     params: Any = None,
     bpar: jnp.ndarray = None,
     pre: Dict = None,
-) -> Tuple[jnp.ndarray, jnp.ndarray]:
+) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Electromagnetic flux contributions from A_parallel and B_parallel.
 
     A_par flutter: coupling factor -2*vthrat*vpgr*conj(J0*apar)
     B_par flutter: coupling factor +2*mugr*tmp/signz*conj(J1hat*bpar)
 
+    Adds the EM parts of the generalised-potential flux formula
+    `f * conj(chi)` with `chi = phi - 2·vthrat·vpar·apar + ...` used by
+    GKW's calc_fluxes_full_detail (diagnos_fluxes_vspace.F90:458-469).
+
     df: 5D or 6D distribution. apar, bpar: (ns, nkx, nky) or None.
-    Returns: (em_pflux, em_eflux) — scalars for 5D, (nsp, 2) for 6D.
+    Returns: (em_pflux, em_eflux, em_vflux) — scalars for 5D,
+    (nsp, 3) for 6D.
     """
     z = jnp.array(0.0, dtype=jnp.float64)
     if apar is None and bpar is None:
-        return z, z
+        return z, z, z
 
     ints = jnp.asarray(geometry["ints"], dtype=jnp.float64)
     fsa = jnp.sum(ints)
@@ -701,6 +706,9 @@ def calculate_em_fluxes(
         bn = jnp.asarray(geometry["bn"], dtype=jnp.float64)
         efun = jnp.asarray(geometry["efun"], dtype=jnp.float64)
         krho = jnp.asarray(geometry["krho"], dtype=jnp.float64)
+        rfun = jnp.asarray(geometry["rfun"], dtype=jnp.float64)
+        bt_frac = jnp.asarray(geometry["bt_frac"], dtype=jnp.float64)
+        signB = jnp.asarray(geometry["signB"], dtype=jnp.float64)
         d2X = jnp.asarray(geometry.get("d2X", 1.0), dtype=jnp.float64)
 
         vthrat_val = float(getattr(params, "vthrat", 1.0)) if params else 1.0
@@ -713,19 +721,25 @@ def calculate_em_fluxes(
         krho_b = krho.reshape(1, 1, 1, 1, -1)
         intvp_b = intvp.reshape(-1, 1, 1, 1, 1)
         intmu_b = intmu.reshape(1, -1, 1, 1, 1)
+        rfun_b = rfun.reshape(1, 1, -1, 1, 1)
+        bt_frac_b = bt_frac.reshape(1, 1, -1, 1, 1)
 
         d3v = d2X * intmu_b * bn_b * intvp_b
         dum = parseval_b * ints_b * (efun_b * krho_b) * df
 
-        em_pflux, em_eflux = z, z
+        em_pflux, em_eflux, em_vflux = z, z, z
         if apar is not None:
             apar_b = apar[jnp.newaxis, jnp.newaxis, :, :, :]
-            dum_a = dum * jnp.conj(apar_b) * vthrat_val * vpgr_b
+            # matches GKW diagnos_fluxes_vspace.F90:464 (-2·vthrat·vpar in χ)
+            dum_a = -2.0 * vthrat_val * vpgr_b * dum * jnp.conj(apar_b)
             em_pflux = em_pflux + jnp.sum(d3v * jnp.imag(dum_a))
             em_eflux = em_eflux + jnp.sum(
                 d3v * (vpgr_b**2 * jnp.imag(dum_a) + 2 * mugr_b * bn_b * jnp.imag(dum_a))
             )
-        return em_pflux / fsa, em_eflux / fsa
+            em_vflux = em_vflux + jnp.sum(
+                d3v * (jnp.imag(dum_a) * vpgr_b * rfun_b * bt_frac_b * signB)
+            )
+        return em_pflux / fsa, em_eflux / fsa, em_vflux / fsa
 
     elif df.ndim == 6:
         # kinetic: per-species em fluxes
@@ -754,7 +768,11 @@ def calculate_em_fluxes(
             d3v = d2X_6 * intmu_6 * bn_6 * intvp_6
             dum = parseval * ints_6 * (efun_6 * krho_6) * df[isp]
 
-            sp_pf, sp_ef = z, z
+            rfun_6 = gt["rfun"]
+            bt_frac_6 = gt["bt_frac"]
+            signB_6 = gt["signB"]
+
+            sp_pf, sp_ef, sp_vf = z, z, z
             if apar is not None:
                 apar_b = apar.reshape(1, 1, *apar.shape)
                 apar_ga = bessel_6 * apar_b
@@ -762,6 +780,9 @@ def calculate_em_fluxes(
                 sp_pf = sp_pf + jnp.sum(d3v * jnp.imag(dum_a))
                 sp_ef = sp_ef + jnp.sum(
                     d3v * (vpgr_6**2 * jnp.imag(dum_a) + 2 * mugr_6 * bn_6 * jnp.imag(dum_a))
+                )
+                sp_vf = sp_vf + jnp.sum(
+                    d3v * (jnp.imag(dum_a) * vpgr_6 * rfun_6 * bt_frac_6 * signB_6)
                 )
             if bpar is not None and pre is not None and "bpar_chi_factor" in pre:
                 bpar_b = bpar.reshape(1, 1, *bpar.shape)
@@ -772,8 +793,11 @@ def calculate_em_fluxes(
                 sp_ef = sp_ef + jnp.sum(
                     d3v * (vpgr_6**2 * jnp.imag(dum_b) + 2 * mugr_6 * bn_6 * jnp.imag(dum_b))
                 )
-            results.append(jnp.stack([sp_pf / fsa, sp_ef / fsa]))
-        return jnp.stack(results)  # (nsp, 2)
+                sp_vf = sp_vf + jnp.sum(
+                    d3v * (jnp.imag(dum_b) * vpgr_6 * rfun_6 * bt_frac_6 * signB_6)
+                )
+            results.append(jnp.stack([sp_pf / fsa, sp_ef / fsa, sp_vf / fsa]))
+        return jnp.stack(results)  # (nsp, 3)
     else:
         return z, z
 

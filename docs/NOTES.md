@@ -208,9 +208,18 @@ RK4-specific stability factors:
    $$t_{max,4} = \max\!\left(\frac{\nu_\parallel\, |u_\parallel|_\infty \cdot c_{D4}}{\Delta s},\;
    \frac{\nu_v\, |u_{trap}|_\infty \cdot c_{V4}}{\Delta v_\parallel}\right)$$
 
-4. **Nonlinear ExB CFL**: $\Delta t_{NL} = \sigma \times 2 / \max|\nabla\phi|$,
-   computed from the dealiased real-space potential gradient. Safety factor
-   $\sigma = 0.95$ by default (`cfl_safety` parameter).
+4. **Nonlinear ExB CFL**: $\Delta t_{NL} = \sigma \times 2 / \max_\text{NL}$
+   with $\max_\text{NL} = \max(\max|\partial_y\phi|\cdot m_\text{rad}^2 m_\text{phi}/L_x,\,
+   \max|\partial_x\phi|\cdot m_\text{rad} m_\text{phi}^2/L_y) + 2 v_{th,\max} v_{pmax} \cdot (\text{same for } A_\parallel)$,
+   computed from the dealiased real-space potential gradients. The factors
+   $m_\text{rad}^2 m_\text{phi}/L_x$ (y-branch) and $m_\text{rad} m_\text{phi}^2/L_y$
+   (x-branch) match GKW's FFTW-unnormalized scaling
+   (`non_linear_terms.F90:1538`); since gyaradax uses
+   `jnp.fft.irfft2(norm="backward")` which applies $1/N$ on the inverse,
+   an extra $N \cdot l_\text{inv}$ factor is needed per branch.
+   Safety factor $\sigma = 0.5$ by default (`cfl_safety` parameter — GKW
+   uses 0.95 in analogous place but lacks a per-substage check, so
+   gyaradax's tighter safety is equivalent in practice).
 
 The combined constraint for RK4 (`meth=2` in GKW):
 $$t_{max} = \max\!\left(\frac{\max(t_{max,1},\, t_{max,\text{field}})}{2.4},\;
@@ -460,6 +469,12 @@ consecutive windows. See `solver.py:advance_state`.
 | CFL vs GKW dtim | all 3 cases | `ratio(dt_est, dtim)` | `0.3 – 3.0` |
 | adaptive CFL 20 steps | all 3 cases | finiteness (dt=0.004) | pass |
 | adiabatic fallback | 4 iterations | shapes + finiteness | pass |
+| **nl_em_apar** (β=0.001, 30k steps) | ion eflux | `ratio(gyra, GKW)` | **1.04** |
+| **nl_em_apar** (β=0.001, 30k steps) | elec eflux | `ratio(gyra, GKW)` | **1.02** |
+| **nl_em_apar** (β=0.001) | φ(ky) Pearson lin/log | rel L2 log | **1.000 / 0.999, 0.034** |
+| **nl_em_beta01** (β=0.01, 420k steps adaptive) | ion eflux | `ratio(gyra, GKW)` | **0.97** |
+| **nl_em_beta01** (β=0.01) | elec eflux | `ratio(gyra, GKW)` | **0.95** |
+| **nl_em_beta01** (β=0.01) | adaptive dt range | `min / mean / max` | `0.00038 / 0.00107 / 0.00297` (GKW: `0.00064 / 0.00202 / 0.00432`) |
 
 ### 8.3 analytical benchmarks
 
@@ -962,6 +977,64 @@ back, the linear γ(ky) peak is shifted from ky=0.7 (GKW) to ky=0.5
 (gyaradax) with a 20× under-drive at ky=0.1 — a linear spectrum shift
 that the NL mode coupling amplifies into zonal vs drift rebalancing.
 
+**Re-audit 2026-04-18 — CFL bugs fixed, flux parity achieved.**
+A four-axis line-by-line audit against GKW source (RHS / field solve /
+mode connectivity / CFL) found five concrete bugs, all since fixed:
+
+1. **NL A_∥ CFL missing `2·vthrat_s`** (`solver.py:251-256`). GKW bakes
+   `2·vthrat(is)` into `a_apar` at `non_linear_terms.F90:1241`;
+   gyaradax used only `vpmax`. Fixed via `pre["vthrat_max"]`.
+2. **Collisions in wrong CFL bucket** (`solver.py:320-333`). Moved
+   from `tmax4/2.4` to an independent `tmax2` bucket (undivided),
+   matching GKW `matdat.F90:1498` for `meth=2`.
+3. **`tmax_field` missing `min(2π·lxinv, ky_min²·g_yy)`**
+   (`solver.py:817` vs `matdat.F90:1911-1914`). Added.
+4. **`calculate_em_fluxes` missing `em_vflux`** + wrong-sign 5D path
+   (`integrals.py:672`). Now returns `(em_pflux, em_eflux, em_vflux)`
+   and 5D path matches GKW `diagnos_fluxes_vspace.F90:464` with
+   `-2·vthrat·vpgr`.
+5. **NL CFL FFT-normalisation mismatch (the big one).** GKW uses FFTW
+   c2r unnormalized (`|ar| = N·|∂phi|_real` with `N = mrad·mphi`);
+   gyaradax uses `jnp.fft.irfft2(norm="backward")` which returns
+   `|∂phi|_real` directly. GKW's formula `max|ar|·mrad·lxinv` scales
+   as `mrad²·mphi·lxinv·|∂phi|`; gyaradax was scaling as `mrad·|∂phi|`
+   — under-conservative by factor `N·lxinv ≈ 15`. Fix: added
+   `pre["nl_lxinv"]`, `pre["nl_lyinv"]` and multiplied
+   `estimate_nl_timestep` and `gkstep_single::_max_grad_inline` by
+   `ycorr = mrad²·mphi·lxinv` (y-branch) and
+   `xcorr = mrad·mphi²·lyinv` (x-branch), matching GKW exactly.
+
+What is NOT a bug (audited clean): linear RHS formulas for all terms
+I–VIII+X, field solves for φ/A_∥/coupled-B_∥, parallel boundary/mode
+connectivity.
+
+**Post-fix validation (2026-04-18).** All EM unit tests (67) pass.
+
+| case | metric | pre-fix | post-fix | GKW |
+|------|--------|---------|----------|-----|
+| nl_em_apar (β=0.001) | ion eflux | 76.6 | **49.5** | 47.8 |
+| nl_em_apar (β=0.001) | elec eflux | 32.2 | **22.1** | 21.6 |
+| nl_em_apar (β=0.001) | φ(ky) Pearson | 0.984 | **1.000** | — |
+| nl_em_beta01 10× (β=0.01) | ion eflux | 113* | **124** | 128 |
+| nl_em_beta01 10× (β=0.01) | elec eflux | 61* | **67** | 70 |
+| nl_em_beta01 10× (β=0.01) | dt adaptive range | 0.001 capped | **[0.00038, 0.00297]** | [0.00064, 0.00432] |
+
+*: with `dt=0.001` hard cap (pre-fix blew up otherwise).
+
+Both codes now adapt dt similarly through the linear-to-NL crossover
+at β=0.01 (gyra mean dt is 0.53× GKW's, consistent with gyra's
+`cfl_safety=0.5` vs GKW's `fac_dtim_est=0.95`). The previously
+reported "1.5× over at β=0.001, 0.87× under at β=0.01" flux gap was
+a CFL artefact of the FFT-normalisation mismatch, not a physics
+issue. The `configs/nl_em_beta01.yaml` `dt=0.001` cap is removed.
+
+**The §10.13 §7 "linear γ(ky) peak shift" narrative remains
+unverified**: it was inferred from NL saturation spectra and never
+confirmed with a controlled single-mode γ scan. With the CFL fix
+closing most of the flux gap, that narrative is likely wrong.
+
+Full investigation trail in `docs/em_debug_report.md` §11.
+
 ## 11. linearized Fokker-Planck collision operator
 
 Port of GKW's `collision_differential_numu` (`collisionop.f90:1547-2228`)
@@ -1105,14 +1178,12 @@ grouped by severity/impact.
 
 ### 11.1 numerical / solver
 
-- **Adaptive CFL one-step lag.** Each step's $\Delta t$ is estimated
-  from the previous step's $\phi$. Fine in practice for smoothly
-  evolving states; can miss sharp NL bursts.
-- **`estimate_nl_timestep` under-triggers.** On the standard kinetic
-  reference runs, GKW's NL CFL reduces $\Delta t$ from 2.13e-3 to
-  1.01e-3 mid-run while gyaradax's estimator returns `dt_input` for
-  all steps. The computed $\max|\nabla\phi|$ is too small. Contributes
-  to 1.5–3.4× flux trajectory divergence by window 3.
+- **Adaptive CFL one-step lag (minor).** Each step's $\Delta t$ is
+  estimated from the previous step's $\phi$/$A_\parallel$. Fine in
+  practice for smoothly evolving states; post-2026-04-18 FFT-norm
+  fix, the estimator binds correctly at high β and reproduces GKW's
+  adaptive dt trajectory. A potential "pre-step clamp" refinement
+  was designed but not needed in practice.
 - **`circ` vs `s-alpha` at extreme ky.** Linear gyaradax runs with
   `s-alpha` blow up at ky=0.1 (over-drive) and ky=1.0 (under-damped).
   NL runs use `circ` for this reason. Root cause likely in the
@@ -1121,22 +1192,22 @@ grouped by severity/impact.
 
 ### 11.2 electromagnetic
 
-- **apar-only NL flux magnitude ~1.5× GKW at CBC.** Matched geometry,
-  Pearson ≥ 0.99 on both (ky, kx) spectra. Species ratio matches GKW
-  to 5%. The residual amplitude gap is within the window-phase
-  fluctuation band (~60% of mean) for a single-run comparison.
+- **apar-only NL flux (β=0.001, CBC)** — matches GKW within 4% on
+  both species' eflux after the FFT-norm fix (2026-04-18). Previously
+  reported "1.5× over" was a CFL artefact. φ(ky,kx) Pearson = 1.00/0.97.
+- **β=0.01 apar-only NL** — matches GKW within 3-5% on eflux after
+  the FFT-norm fix. Adaptive dt works without a cap and tracks GKW's
+  dt trajectory (gyra mean 0.53× GKW, consistent with
+  `cfl_safety=0.5` vs GKW's `fac_dtim_est=0.95`).
 - **Full EM (apar+bpar) NL flux 0.5–0.7× GKW at CBC.** All
   $B_\parallel$ formulas (coupled solve, chi factor, Term X) verified
   to match GKW to machine precision by isolated tests at fixed
-  fields. The discrepancy is NL-dynamics amplification of a ~0.08%
-  RHS perturbation — not a bug in any one formula but a sensitivity
-  difference between codes, likely in upwinding direction during
-  bursts or subtle phase relationships.
-- **Linear γ(ky) peak shift vs GKW.** Clean linear scan at CBC
-  kinetic EM: gyaradax peak at ky=0.5 (γ=0.59), GKW peak at ky=0.7
-  (γ=0.55). At ky=0.1, gyaradax γ=0.005 vs GKW 0.095 (20× under-drive).
-  Suspects: low-ky EM drive (J0/Γ at small b), k_perp definition,
-  high-ky dissipation.
+  fields. May also be a CFL-related artefact now that the
+  normalisation is fixed — re-benchmark needed.
+- **Linear γ(ky) peak shift vs GKW** (old, unverified). Never
+  confirmed via a controlled single-mode γ scan; with the CFL fix
+  closing the flux gap, the narrative is likely wrong. Re-run if
+  the issue resurfaces.
 - **Adiabatic + apar absolute amplitude at high β.** The
   `em_adiabat_apar` benchmark (β=0.234) has gyaradax ion eflux
   ~O(90×) smaller than GKW at the same window. Sign and exponential

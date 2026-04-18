@@ -228,6 +228,12 @@ def estimate_nl_timestep(
     mrad, mphi, mphiw3 = pre["nl_mrad"], pre["nl_mphi"], pre["nl_mphiw3"]
     jind = pre["nl_jind"]
     kx2d, ky2d = pre["nl_kx2d"], pre["nl_ky2d"]
+    # matches GKW non_linear_terms.F90:1538. GKW's `ar` is FFTW-unnormalized
+    # (|ar| = N·|∂phi|_real with N = mrad·mphi); gyra's `irfft2(norm="backward")`
+    # returns `|∂phi|_real` directly. Multiply by `N·mrad·lxinv` (y-branch) and
+    # `N·mphi·lyinv` (x-branch) to match GKW's `max|ar|·mrad·lxinv` scaling.
+    ycorr = mrad * mrad * mphi * pre["nl_lxinv"]
+    xcorr = mrad * mphi * mphi * pre["nl_lyinv"]
 
     def _max_grad_per_s(field_s):
         grad_y_k = 1j * ky2d * field_s
@@ -241,19 +247,20 @@ def estimate_nl_timestep(
                 norm="backward",
             )
 
-        max_y = jnp.max(jnp.abs(_to_real(grad_y_k))) * mrad
-        max_x = jnp.max(jnp.abs(_to_real(grad_x_k))) * mphi
+        max_y = jnp.max(jnp.abs(_to_real(grad_y_k))) * ycorr
+        max_x = jnp.max(jnp.abs(_to_real(grad_x_k))) * xcorr
         return jnp.maximum(max_y, max_x)
 
     # ES: max|grad(phi)|
     max_value = jnp.max(jax.vmap(_max_grad_per_s)(phi))
 
-    # EM: max|grad(apar)| * vpmax  (non_linear_terms.F90:1790)
+    # EM: 2*vthrat_max * max|grad(apar)| * vpmax  (non_linear_terms.F90:1241,1790)
+    # GKW bakes 2*vthrat(is) into a_apar/b_apar so maxvalapar inherits it.
     if apar is not None:
-        # vpmax = max parallel velocity on grid (GKW grid::vpmax)
         vpmax = jnp.asarray(pre.get("vpmax", 3.0), dtype=jnp.float64)
+        vthrat_max = jnp.asarray(pre.get("vthrat_max", 1.0), dtype=jnp.float64)
         max_grad_apar = jnp.max(jax.vmap(_max_grad_per_s)(apar))
-        max_value = jnp.maximum(max_value, max_grad_apar * vpmax)
+        max_value = jnp.maximum(max_value, 2.0 * vthrat_max * max_grad_apar * vpmax)
 
     dt_est = jnp.where(
         max_value > _EPS,
@@ -314,12 +321,11 @@ def estimate_linear_timestep(
         disp_vp_val * jnp.where(max_abs_vp > _EPS, max_abs_vp * _D4V / dvp, 0.0),
     )
 
-    # collision operator: 2nd-derivative in velocity space. Use max|c_self| as
-    # spectral-radius bound; this goes into the same bucket as the 4th-order
-    # dissipation since both are diffusive.
+    # ideriv=2: collision 2nd-derivative. GKW keeps tmax2 undivided in the
+    # RK4 max (matdat.F90:1498), separate from the ideriv=1/4 buckets.
+    tmax2 = jnp.asarray(0.0, dtype=jnp.float64)
     if "coll_stencil" in pre:
-        max_coll = jnp.max(jnp.abs(pre["coll_stencil"][0]))
-        tmax4 = jnp.maximum(tmax4, max_coll)
+        tmax2 = jnp.max(jnp.abs(pre["coll_stencil"][0]))
 
     # field CFL: ES mode frequency (time_est_field), kinetic only
     tmax1 = jnp.maximum(tmax1, jnp.asarray(pre.get("tmax_field", 0.0), dtype=jnp.float64))
@@ -328,9 +334,13 @@ def estimate_linear_timestep(
     em_streaming_factor = jnp.asarray(pre.get("em_streaming_cfl", 1.0), dtype=jnp.float64)
     tmax1 = tmax1 * em_streaming_factor
 
-    # RK4 von Neumann (meth=2): divide by stability boundary, floor at 40
+    # RK4 von Neumann (meth=2, matdat.F90:1498):
+    #   tmax = max(tmax1/2.4, tmax2, tmax4/2.4)
     rk4 = jnp.asarray(2.4, dtype=jnp.float64)
-    tmax = jnp.maximum(jnp.maximum(tmax1 / rk4, tmax4 / rk4), jnp.asarray(40.0, dtype=jnp.float64))
+    tmax = jnp.maximum(
+        jnp.maximum(jnp.maximum(tmax1 / rk4, tmax2), tmax4 / rk4),
+        jnp.asarray(40.0, dtype=jnp.float64),
+    )
 
     fac = jnp.asarray(fac_dtim_est, dtype=jnp.float64)
     return jnp.where(tmax > _EPS, fac / tmax, jnp.asarray(1e10, dtype=jnp.float64))
@@ -371,6 +381,21 @@ def _precompute_shared(
     kx_b = jnp.reshape(kx, (1, 1, 1, -1, 1))
     ky_b = jnp.reshape(ky, (1, 1, 1, 1, -1))
 
+    # NL CFL length-inverse factors, matching GKW's `lxinv = 1/lx` with
+    # `lx = 2π/kx_min` (mode.f90:740). Under mode_box, `kx_min = kx[ixzero+1]`
+    # and `ky_min = ky[1]`; for single-mode runs fall back to the grid max.
+    ixz = int(jnp.asarray(geometry.get("ixzero", 0)).item())
+    lxinv = (
+        jnp.abs(kx[ixz + 1]) / (2.0 * jnp.pi)
+        if nkx > ixz + 1
+        else jnp.asarray(params.kxmax / (2.0 * jnp.pi), dtype=jnp.float64)
+    )
+    lyinv = (
+        ky[1] / (2.0 * jnp.pi)
+        if nky > 1
+        else jnp.asarray(params.kymax / (2.0 * jnp.pi), dtype=jnp.float64)
+    )
+
     hyper = -(
         jnp.abs(params.disp_y)
         * (ky_b / jnp.maximum(params.kymax, _EPS)) ** jnp.where(params.disp_y < 0.0, 2.0, 4.0)
@@ -388,6 +413,7 @@ def _precompute_shared(
         "s_d4_ineg": _parallel_coefficients(pos_par, stencils.D4_IPW_NEG),
         "dvp": params.dvp,
         "vpmax": jnp.max(jnp.abs(vpgr)),
+        "vthrat_max": jnp.max(jnp.abs(jnp.asarray(params.vthrat, dtype=jnp.float64))),
         "sgr_dist": params.sgr_dist,
         "ixzero": ixzero,
         "iyzero": iyzero,
@@ -395,6 +421,8 @@ def _precompute_shared(
         "nl_mphiw3": mphiw3,
         "nl_mrad": mrad,
         "nl_fft_scale": jnp.asarray(float(mrad * mphi), dtype=jnp.float64),
+        "nl_lxinv": jnp.asarray(lxinv, dtype=jnp.float64),
+        "nl_lyinv": jnp.asarray(lyinv, dtype=jnp.float64),
         "nl_jind": build_jind(nkx, mrad, ixzero),
         "nl_kx2d": jnp.broadcast_to(jnp.reshape(kx, (nkx, 1)), (nkx, nky)),
         "nl_ky2d": jnp.broadcast_to(jnp.reshape(ky, (1, nky)), (nkx, nky)),
@@ -815,6 +843,12 @@ def linear_precompute(geometry: Dict[str, jnp.ndarray], params: GKParams) -> "GK
         mer = jnp.sum(jnp.where(signz_arr < 0, mas_arr / jnp.maximum(de_arr, _EPS), 0.0))
         ky_min = jnp.where(nky > 1, ky[1], ky[0])
         kmin2 = ky_min**2 * little_g[:, 0]
+        # matdat.F90:1911-1914: under mode_box, fall back to 2π*lxinv = kx_min
+        # when that is smaller than ky_min²·g_yy.
+        ixz = int(jnp.asarray(geometry["ixzero"]).item())
+        if nkx > ixz + 1:
+            kx_min_abs = jnp.abs(kx[ixz + 1])
+            kmin2 = jnp.where(kx_min_abs > _EPS, jnp.minimum(kx_min_abs, kmin2), kmin2)
         q_val = jnp.asarray(geometry.get("q", getattr(params, "q", 1.0)), dtype=jnp.float64)
         beta_cfl = jnp.asarray(params.beta, dtype=jnp.float64)
         field_cfl_arg = mir * (beta_cfl + kmin2 * mer)
@@ -1255,8 +1289,11 @@ def gkstep_single(
     dt3 = dt / 3.0
     next_df_raw = prev_df + dt6 * k1 + dt3 * k2 + dt3 * k3 + dt6 * k4
 
-    # inline NL CFL from RK4 substages (max grad across all 4 stages)
+    # inline NL CFL from RK4 substages (max grad across all 4 stages).
+    # scaling matches GKW non_linear_terms.F90:1538 (see estimate_nl_timestep).
     if params.non_linear:
+        _ycorr = pre["nl_mrad"] * pre["nl_mrad"] * pre["nl_mphi"] * pre["nl_lxinv"]
+        _xcorr = pre["nl_mrad"] * pre["nl_mphi"] * pre["nl_mphi"] * pre["nl_lyinv"]
 
         def _max_grad_inline(p):
             def _per_s(ps):
@@ -1283,8 +1320,8 @@ def gkstep_single(
                     norm="backward",
                 )
                 return jnp.maximum(
-                    jnp.max(jnp.abs(gy)) * pre["nl_mrad"],
-                    jnp.max(jnp.abs(gx)) * pre["nl_mphi"],
+                    jnp.max(jnp.abs(gy)) * _ycorr,
+                    jnp.max(jnp.abs(gx)) * _xcorr,
                 )
 
             return jnp.max(jax.vmap(_per_s)(p))
@@ -1294,12 +1331,15 @@ def gkstep_single(
             jnp.maximum(_max_grad_inline(phi1), _max_grad_inline(phi2)),
             jnp.maximum(_max_grad_inline(phi3), _max_grad_inline(phi4)),
         )
-        # em: max grad(apar)*vpmax across substages
+        # em: 2*vthrat_max * max grad(apar) * vpmax across substages
+        # (non_linear_terms.F90:1241,1790 — vthrat is baked into a_apar/b_apar)
         mg_apar = jnp.array(0.0, dtype=jnp.float64)
         if params.nlapar:
             vpmax = pre["vpmax"]
+            vthrat_max = pre.get("vthrat_max", jnp.asarray(1.0, dtype=jnp.float64))
+            apar_fac = 2.0 * vthrat_max * vpmax
             _apar_grads = [
-                _max_grad_inline(a) * vpmax for a in [apar1, apar2, apar3, apar4] if a is not None
+                _max_grad_inline(a) * apar_fac for a in [apar1, apar2, apar3, apar4] if a is not None
             ]
             if _apar_grads:
                 mg_apar = jnp.maximum(mg_apar, jnp.stack(_apar_grads).max())
@@ -1392,7 +1432,15 @@ def gksolve(
             next_dt = jnp.where(dt_cfl < curr_dt, dt_cfl, jnp.minimum(dt_cfl, curr_dt * 1.05))
             return (next_df, next_state, next_dt), None
 
-        init_dt = jnp.minimum(dt_input, estimate_linear_timestep(pre, safety_factor=0.5))
+        # init_dt must reflect the CURRENT NL amplitude, not just params.dt,
+        # to avoid resetting dt at every block boundary when gksolve is called
+        # in a block loop with growing NL fields (blow-up observed at β=0.01).
+        phi_init, apar_init, _ = _compute_fields(df, geometry, params, pre)
+        dt_nl_init = estimate_nl_timestep(
+            phi_init, pre, pre["bessel"], dt_input, cfl_safety, apar=apar_init
+        )
+        dt_lin_init = estimate_linear_timestep(pre, params=params)
+        init_dt = jnp.minimum(jnp.minimum(dt_input, dt_lin_init), dt_nl_init)
         (final_df, final_state, _), _ = jax.lax.scan(
             _scan_body, (df, state, init_dt), None, length=n_steps
         )
