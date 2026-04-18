@@ -79,6 +79,28 @@ class GKParams:
     nlbpar: bool = False  # enable B_parallel (magnetic compression)
     beta: float = 0.0  # reference plasma beta = 2*mu0*n_ref*T_ref/B_ref^2
 
+    # collision operator controls (GKW &collisions namelist)
+    collisions: bool = False
+    coll_pitch_angle: bool = True
+    coll_en_scatter: bool = True
+    coll_friction: bool = True
+    coll_freq: float = 0.0
+    coll_freq_override: bool = True
+    coll_mass_conserve: bool = True
+    coll_rref: float = 1.0  # reference major radius [m] for Coulomb log
+    coll_tref: float = 1.0  # reference temperature [keV]
+    coll_nref: float = 1.0  # reference density [1e19 m^-3]
+    # full species-pair collision backgrounds (ALL species incl. adiabatic).
+    # Default None: fall back to self-collision only.
+    coll_bg_mas: Any = None
+    coll_bg_signz: Any = None
+    coll_bg_tmp: Any = None
+    coll_bg_de: Any = None
+    coll_bg_vthrat: Any = None
+    # conservation corrections (Xu variant only; GKW default cons_type='Xu')
+    coll_mom_conservation: bool = False
+    coll_ene_conservation: bool = False
+
     # physical parameters (typically from the kinetic species)
     rlt: float = 1.0
     rln: float = 1.0
@@ -117,6 +139,23 @@ class GKParams:
         "use_z2z",
         "nlapar",
         "nlbpar",
+        "collisions",
+        "coll_pitch_angle",
+        "coll_en_scatter",
+        "coll_friction",
+        "coll_freq",
+        "coll_freq_override",
+        "coll_mass_conserve",
+        "coll_mom_conservation",
+        "coll_ene_conservation",
+        "coll_rref",
+        "coll_tref",
+        "coll_nref",
+        "coll_bg_mas",
+        "coll_bg_signz",
+        "coll_bg_tmp",
+        "coll_bg_de",
+        "coll_bg_vthrat",
         "dt",
         "naverage",
         "disp_par",
@@ -183,7 +222,22 @@ def gkparams_from_runtime(runtime: Dict[str, Any], **overrides) -> GKParams:
         "nlapar": bool(runtime.get("nlapar", False)),
         "nlbpar": bool(runtime.get("nlbpar", False)),
         "beta": float(runtime.get("beta", 0.0)),
+        "collisions": bool(runtime.get("collisions", False)),
+        "coll_pitch_angle": bool(runtime.get("coll_pitch_angle", True)),
+        "coll_en_scatter": bool(runtime.get("coll_en_scatter", True)),
+        "coll_friction": bool(runtime.get("coll_friction", True)),
+        "coll_freq": float(runtime.get("coll_freq", 0.0)),
+        "coll_freq_override": bool(runtime.get("coll_freq_override", True)),
+        "coll_mass_conserve": bool(runtime.get("coll_mass_conserve", True)),
+        "coll_mom_conservation": bool(runtime.get("coll_mom_conservation", False)),
+        "coll_ene_conservation": bool(runtime.get("coll_ene_conservation", False)),
+        "coll_rref": float(runtime.get("coll_rref", 1.0)),
+        "coll_tref": float(runtime.get("coll_tref", 1.0)),
+        "coll_nref": float(runtime.get("coll_nref", 1.0)),
     }
+    for k in ("coll_bg_mas", "coll_bg_signz", "coll_bg_tmp", "coll_bg_de", "coll_bg_vthrat"):
+        if k in runtime:
+            params_dict[k] = runtime[k]
     # species params may be arrays (multi-species) or scalars
     _SPECIES_PARAMS = {"rlt", "rln", "mas", "tmp", "de", "signz", "vthrat"}
     for k in _SPECIES_PARAMS:
@@ -264,21 +318,47 @@ def gkparams_from_input_and_geometry(
         if k in geometry:
             scalars[k] = float(np.asarray(geometry[k]).reshape(-1)[0])
 
-    # species from input.dat
+    # species from input.dat — read ALL species (full list, including the
+    # adiabatic electron if present). The kinetic-species set is obtained by
+    # filtering Z>0 in the adiabatic-electrons case; the full list is still
+    # used as collision backgrounds (coll_bg_*).
     num_sp = int(inp.get("gridsize", {}).get("number_of_species", 1))
-    species_keys = [k for k in inp if k.startswith("species")][:num_sp]
+    species_keys = [k for k in inp if k.startswith("species")][: num_sp + 1]  # allow adiabatic bg
+    all_mas = (
+        np.array([float(inp[k].get("mass", 1.0)) for k in species_keys])
+        if species_keys
+        else np.array([])
+    )
+    all_tmp = (
+        np.array([float(inp[k].get("temp", 1.0)) for k in species_keys])
+        if species_keys
+        else np.array([])
+    )
+    all_de = (
+        np.array([float(inp[k].get("dens", 1.0)) for k in species_keys])
+        if species_keys
+        else np.array([])
+    )
+    all_signz = (
+        np.array([float(inp[k].get("z", 1.0)) for k in species_keys])
+        if species_keys
+        else np.array([])
+    )
+    all_vthrat = np.sqrt(all_tmp / all_mas) if len(all_mas) else np.array([])
+
     if species_keys:
-        sp_mas = np.array([float(inp[k].get("mass", 1.0)) for k in species_keys])
-        sp_tmp = np.array([float(inp[k].get("temp", 1.0)) for k in species_keys])
-        sp_de = np.array([float(inp[k].get("dens", 1.0)) for k in species_keys])
-        sp_signz = np.array([float(inp[k].get("z", 1.0)) for k in species_keys])
+        sp_mas = all_mas.copy()
+        sp_tmp = all_tmp.copy()
+        sp_de = all_de.copy()
+        sp_signz = all_signz.copy()
         sp_rlt = np.array([float(inp[k].get("rlt", 0.0)) for k in species_keys])
         sp_rln = np.array([float(inp[k].get("rln", 0.0)) for k in species_keys])
-        sp_vthrat = np.sqrt(sp_tmp / sp_mas)
+        sp_vthrat = all_vthrat.copy()
 
-        # adiabatic electrons: drop Z<0 species — gyaradax's adiabatic path
-        # evolves only kinetic (non-electron) species and couples to an
-        # implicit Boltzmann electron via the quasineutrality denominator.
+        # adiabatic electrons: drop Z<0 species from the *target* list —
+        # gyaradax's adiabatic path evolves only kinetic (non-electron)
+        # species and couples to an implicit Boltzmann electron via the
+        # quasineutrality denominator.
         ae_val = inp.get("gridsize", {}).get("adiabatic_electrons")
         if ae_val is None:
             ae_val = inp.get("spcgeneral", {}).get("adiabatic_electrons", True)
@@ -307,6 +387,17 @@ def gkparams_from_input_and_geometry(
                 "vthrat": _maybe_scalar(sp_vthrat),
             }
         )
+        # collision backgrounds = ALL species (kinetic + adiabatic)
+        if len(all_mas) > 0:
+            scalars.update(
+                {
+                    "coll_bg_mas": all_mas,
+                    "coll_bg_tmp": all_tmp,
+                    "coll_bg_de": all_de,
+                    "coll_bg_signz": all_signz,
+                    "coll_bg_vthrat": all_vthrat,
+                }
+            )
 
     scalars.update(runtime)
     if overrides:
@@ -342,6 +433,25 @@ def gkparams_from_config(config: Any, **overrides) -> GKParams:
         "nlbpar": bool(getattr(solver_cfg, "nlbpar", False)),
         "beta": float(getattr(physics_cfg, "beta", 0.0)),
     }
+
+    # collision operator: optional 'collisions' section in the YAML config
+    coll_cfg = getattr(config, "collisions", None)
+    if coll_cfg is not None:
+        params_dict.update(
+            {
+                "collisions": bool(getattr(coll_cfg, "enabled", True)),
+                "coll_pitch_angle": bool(getattr(coll_cfg, "pitch_angle", True)),
+                "coll_en_scatter": bool(getattr(coll_cfg, "en_scatter", True)),
+                "coll_friction": bool(getattr(coll_cfg, "friction", True)),
+                "coll_freq": float(getattr(coll_cfg, "freq", 0.0)),
+                "coll_freq_override": bool(getattr(coll_cfg, "freq_override", True)),
+                "coll_mass_conserve": bool(getattr(coll_cfg, "mass_conserve", True)),
+                "coll_mom_conservation": bool(getattr(coll_cfg, "mom_conservation", False)),
+                "coll_ene_conservation": bool(getattr(coll_cfg, "ene_conservation", False)),
+            }
+        )
+        if not params_dict["coll_freq_override"]:
+            raise NotImplementedError("collisions: only freq_override=True is supported in MVP")
 
     # physics scalars (may be arrays for multi-species kinetic configs)
     _SPECIES_PARAMS = {"rlt", "rln", "mas", "tmp", "de", "signz", "vthrat"}

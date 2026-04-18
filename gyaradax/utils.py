@@ -504,6 +504,23 @@ def load_runtime_params(input_dat_path: str) -> Dict[str, Any]:
         ae_val = inp.get("spcgeneral", {}).get("adiabatic_electrons", True)
     adiabatic_electrons = bool(ae_val)
 
+    # collisions namelist parsing
+    coll = inp.get("collisions", {})
+
+    def _coll_bool(name, default):
+        val = coll.get(name, default)
+        if isinstance(val, bool):
+            return val
+        if isinstance(val, str):
+            lv = val.strip().lower()
+            if lv in (".true.", "true", "t"):
+                return True
+            if lv in (".false.", "false", "f"):
+                return False
+        return bool(default)
+
+    collisions_on = _bool("collisions", False)
+
     return {
         "dtim": _flt("dtim", 0.01),
         "naverage": _int("naverage", 40),
@@ -530,6 +547,18 @@ def load_runtime_params(input_dat_path: str) -> Dict[str, Any]:
                 inp.get("components", {}).get("amp_init", 1.0e-3),
             )
         ),
+        "collisions": collisions_on,
+        "coll_pitch_angle": _coll_bool("pitch_angle", True),
+        "coll_en_scatter": _coll_bool("en_scatter", True),
+        "coll_friction": _coll_bool("friction_coll", True),
+        "coll_freq": float(coll.get("coll_freq", 0.0)),
+        "coll_freq_override": _coll_bool("freq_override", True),
+        "coll_mass_conserve": _coll_bool("mass_conserve", True),
+        "coll_mom_conservation": _coll_bool("mom_conservation", False),
+        "coll_ene_conservation": _coll_bool("ene_conservation", False),
+        "coll_rref": float(coll.get("rref", 1.0)),
+        "coll_tref": float(coll.get("tref", 1.0)),
+        "coll_nref": float(coll.get("nref", 1.0)),
     }
 
 

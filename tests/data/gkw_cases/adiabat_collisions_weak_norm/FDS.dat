@@ -1,0 +1,21 @@
+ !Dump filename: FDS
+ !Written with restart file version:            2
+ !Write status error code:            0
+ !Restart file written with GKW version: 0.4-b1-1250-gd3c02d8a-dirty                                     
+ !Executable name: gkw_pike-DP_0.4-b1-1250-gd3c02d8a-dirty.x                       
+ !Run on            1 processor(s)
+ !Values in this file will override input.dat
+&RESTART
+ DTIM=  1.2000000000000000E-002,
+ TIME=  5.9999999999999307     ,
+ NT_COMPLETE=5          ,
+ NT_REMAIN=0          ,
+ NX_RST=1          ,
+ NMOD_RST=1          ,
+ NUMBER_OF_SPECIES_RST=1          ,
+ FILE_COUNT=5          ,
+ /
+&KX_SHIFT
+ T_SHEAR_BEGIN=  0.0000000000000000     ,
+ KXSHFT= 512*0          ,
+ /

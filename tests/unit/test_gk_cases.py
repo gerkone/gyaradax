@@ -97,6 +97,53 @@ def test_rosenbluth_hinton_residual(backend, use_z2z, mixed_precision):
     )
 
 
+def test_adiabat_collisions_weak_1step_parity():
+    """gyaradax vs GKW adiabat_collisions_weak at 1 step, no normalization.
+
+    Tests the collision stencil + baseline ES operator against GKW's FDS.
+    With normalization disabled in both codes the comparison is a clean
+    stencil-for-stencil match.
+    """
+    from gyaradax.utils import load_gkw_dump
+    from gyaradax.params import gkparams_from_input_and_geometry
+
+    case_dir = os.path.join(GKW_CASES_DIR, "adiabat_collisions_weak_1step")
+    input_dat = os.path.join(case_dir, "input.dat")
+    if not os.path.exists(input_dat):
+        pytest.skip("adiabat_collisions_weak_1step data not available")
+
+    geom = compute_geometry(
+        q=1.57,
+        shat=1.07,
+        eps=0.177,
+        ns=50,
+        nkx=1,
+        nky=1,
+        nvpar=16,
+        nmu=4,
+        vpar_max=3.0,
+        nperiod=3,
+        krhomax=0.5,
+        geom_type="s-alpha",
+    )
+    params = gkparams_from_input_and_geometry(input_dat, geom)
+    params = replace(params, non_linear=False, naverage=10**7)
+
+    pre = linear_precompute(geom, params)
+    df0 = init_f(geom, finit=params.finit, amp_init_real=params.amp_init)
+    state = default_state(nky=1)
+
+    df, _, _, _ = gk_run(df0, geom, params, state, 1, pre=pre)
+    df_gkw, _ = load_gkw_dump(os.path.join(case_dir, "FDS"), (16, 4, 50, 1, 1), n_species=1)
+
+    df_np = np.asarray(df)
+    df_gkw_np = np.asarray(df_gkw)
+    num = np.linalg.norm(df_np.ravel() - df_gkw_np.ravel())
+    den = np.linalg.norm(df_gkw_np.ravel())
+    rel_l2 = num / den
+    assert rel_l2 < 1e-4, f"1-step rel L2 error {rel_l2:.4e} > 1e-4"
+
+
 @pytest.mark.parametrize("backend, use_z2z, mixed_precision", ALL_BACKENDS)
 def test_cbc_linear_itg_peak_growth(backend, use_z2z, mixed_precision):
     """CBC linear ITG at kt=0.5: growth rate matches GKW benchmark.

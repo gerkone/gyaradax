@@ -12,6 +12,7 @@ import jax.numpy as jnp
 
 from gyaradax import stencils
 from gyaradax.backends.ops import SolverOps
+from gyaradax.collisions import collision_rhs, conservation_correction
 from gyaradax.params import GKParams
 from gyaradax.types import GKPre
 from gyaradax.utils import pack_half_spectrum, unpack_half_spectrum
@@ -289,6 +290,21 @@ class JAXOps(SolverOps):
 
         kdotvd = pre["drift_x"] * pre["kx_b"] + pre["drift_y"] * pre["ky_b"]
 
+        # optional collision contribution (Fokker-Planck, acts on f not g)
+        term_coll = jnp.zeros_like(df)
+        if params.collisions and "coll_stencil" in pre:
+            term_coll = collision_rhs(df, pre["coll_stencil"])
+            if (
+                params.coll_mom_conservation or params.coll_ene_conservation
+            ) and "coll_mom_factor" in pre:
+                term_coll = term_coll + conservation_correction(
+                    term_coll,
+                    pre["coll_mom_factor"],
+                    pre["coll_ene_factor"],
+                    pre["coll_vpar_weight"],
+                    pre["coll_vsq_weight"],
+                )
+
         # terms V + VIII + XI use gyro_chi
         return (
             term_par
@@ -305,6 +321,7 @@ class JAXOps(SolverOps):
             * gyro_chi
             + term_vii
             + term_x
+            + term_coll
         )
 
     def linear_rhs(
@@ -344,6 +361,15 @@ class JAXOps(SolverOps):
                 sp_arrays["apar_chi_factor"] = pre["apar_chi_factor"]
             if bpar is not None and "bpar_chi_factor" in pre:
                 sp_arrays["bpar_chi_factor"] = pre["bpar_chi_factor"]
+            # per-species collision stencil: pre["coll_stencil"] has shape
+            # (nsp, 9, nv, nmu, ns); axis 0 is the mapped species dim
+            if params.collisions and "coll_stencil" in pre:
+                sp_arrays["coll_stencil"] = pre["coll_stencil"]
+                if "coll_mom_factor" in pre:
+                    sp_arrays["coll_mom_factor"] = pre["coll_mom_factor"]
+                    sp_arrays["coll_ene_factor"] = pre["coll_ene_factor"]
+                    sp_arrays["coll_vpar_weight"] = pre["coll_vpar_weight"]
+                    sp_arrays["coll_vsq_weight"] = pre["coll_vsq_weight"]
             sp_in_axes = {k: 0 for k in sp_arrays}
 
             shared = {

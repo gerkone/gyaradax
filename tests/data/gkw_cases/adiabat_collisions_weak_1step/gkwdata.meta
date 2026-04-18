@@ -1,0 +1,509 @@
+
+
+logical unit name : NS
+group : geom
+type : real
+dimensions :      1
+
+
+logical unit name : Rref
+group : geom
+type : real
+dimensions :      1
+
+
+logical unit name : R0
+group : geom
+type : real
+dimensions :      1
+
+
+logical unit name : lfun
+group : geom
+type : real
+dimensions :      1
+
+
+logical unit name : Bref
+group : geom
+type : real
+dimensions :      1
+
+
+logical unit name : eps
+group : geom
+type : real
+dimensions :      1
+
+
+logical unit name : q
+group : geom
+type : real
+dimensions :      1
+
+
+logical unit name : shat
+group : geom
+type : real
+dimensions :      1
+
+
+logical unit name : bmin
+group : geom
+type : real
+dimensions :      1
+
+
+logical unit name : bmax
+group : geom
+type : real
+dimensions :      1
+
+
+logical unit name : kthnorm
+group : geom
+type : real
+dimensions :      1
+
+
+logical unit name : krnorm
+group : geom
+type : real
+dimensions :      1
+
+
+logical unit name : beta_eq
+group : geom
+type : real
+dimensions :      1
+
+
+logical unit name : betaprime_eq
+group : geom
+type : real
+dimensions :      1
+
+
+logical unit name : jfunh
+group : geom
+type : real
+dimensions :      1
+
+
+logical unit name : jfunl
+group : geom
+type : real
+dimensions :      1
+
+
+logical unit name : Jacobian
+group : geom
+type : real
+dimensions :      1
+
+
+logical unit name : s_grid
+group : geom
+type : real
+dimensions :     50
+
+
+logical unit name : bn
+group : geom
+type : real
+dimensions :     50
+
+
+logical unit name : poloidal_angle
+group : geom
+type : real
+dimensions :     50
+
+
+logical unit name : g_eps_eps
+group : geom
+type : real
+dimensions :     50
+
+
+logical unit name : g_eps_zeta
+group : geom
+type : real
+dimensions :     50
+
+
+logical unit name : g_eps_s
+group : geom
+type : real
+dimensions :     50
+
+
+logical unit name : g_zeta_zeta
+group : geom
+type : real
+dimensions :     50
+
+
+logical unit name : g_zeta_s
+group : geom
+type : real
+dimensions :     50
+
+
+logical unit name : g_s_s
+group : geom
+type : real
+dimensions :     50
+
+
+logical unit name : D_eps
+group : geom
+type : real
+dimensions :     50
+
+
+logical unit name : D_zeta
+group : geom
+type : real
+dimensions :     50
+
+
+logical unit name : D_s
+group : geom
+type : real
+dimensions :     50
+
+
+logical unit name : E_eps_zeta
+group : geom
+type : real
+dimensions :     50
+
+
+logical unit name : E_eps_s
+group : geom
+type : real
+dimensions :     50
+
+
+logical unit name : E_zeta_s
+group : geom
+type : real
+dimensions :     50
+
+
+logical unit name : F
+group : geom
+type : real
+dimensions :     50
+
+
+logical unit name : G
+group : geom
+type : real
+dimensions :     50
+
+
+logical unit name : H_eps
+group : geom
+type : real
+dimensions :     50
+
+
+logical unit name : H_zeta
+group : geom
+type : real
+dimensions :     50
+
+
+logical unit name : H_s
+group : geom
+type : real
+dimensions :     50
+
+
+logical unit name : I_eps
+group : geom
+type : real
+dimensions :     50
+
+
+logical unit name : I_zeta
+group : geom
+type : real
+dimensions :     50
+
+
+logical unit name : I_s
+group : geom
+type : real
+dimensions :     50
+
+
+logical unit name : J
+group : geom
+type : real
+dimensions :     50
+
+
+logical unit name : K
+group : geom
+type : real
+dimensions :     50
+
+
+logical unit name : Bt_frac
+group : geom
+type : real
+dimensions :     50
+
+
+logical unit name : R
+group : geom
+type : real
+dimensions :     50
+
+
+logical unit name : Z
+group : geom
+type : real
+dimensions :     50
+
+
+logical unit name : CoulombLog
+group : collisionop
+type : real
+dimensions :  n     3
+description : Coulomb Logarithms: scattered, scattering, value
+
+
+logical unit name : CollFreqs
+group : collisionop
+type : real
+dimensions :  n     3
+description_2 : Collision Frequencies: scattered, scattering, Freq (Vth(sp1)/Rref)
+
+
+logical unit name : D_theta_theta
+group : collisionop
+type : real
+dimensions :  n     2
+
+
+logical unit name : D_nu_nu
+group : collisionop
+type : real
+dimensions :  n     2
+
+
+logical unit name : F_nu
+group : collisionop
+type : real
+dimensions :  n     2
+
+
+logical unit name : time.dat
+group : diagnostic/diagnos_growth_freq
+type : real
+dimensions :  n     3
+
+
+logical unit name : growth.dat
+group : diagnostic/diagnos_growth_freq
+type : real
+dimensions :  n     1
+
+
+logical unit name : growth_rates_all_modes
+group : diagnostic/diagnos_growth_freq
+type : real
+dimensions :  n     1
+grid1 : time
+grid2 : mode_label
+physical unit : v_{th,ref}/R_{ref}
+description : Growth rates of all individual modes, with any kx at the LFS.
+comments : Enumeration is according to mode_label.
+
+
+logical unit name : frequencies_all_modes
+group : diagnostic/diagnos_growth_freq
+type : real
+dimensions :  n     1
+grid1 : time
+grid2 : mode_label
+physical unit : v_{th,ref}/R_{ref}
+description : Real frequencies of all individual modes, with any kx at the LFS.
+comments : Enumeration is according to mode_label.
+
+
+logical unit name : frequencies.dat
+group : diagnostic/diagnos_growth_freq
+type : real
+dimensions :  n     1
+grid1 : time
+grid2 : krho
+physical unit : v_{th,ref}/R_{ref}
+description : Real frequencies of the individual modes
+comments : n.a.
+
+
+logical unit name : time_fine
+group : grid
+type : real
+dimensions :  n     1
+physical unit : R_{ref}/v_{th,ref}
+description : The time grid, including all small timesteps.
+comments : GKW performs naverage "small timesteps" of length dtim per  "large timestep". (For every higher order explicit integration  a scheme with substeps is used, but those do not appear anywhere in  the output data.)
+
+
+logical unit name : file_count
+group : grid
+type : real
+dimensions :  n     1
+description : File number used in per time step diagnostic outputs.
+
+
+logical unit name : fluxes.dat
+group : diagnostic/diagnos_fluxes
+type : real
+dimensions :  n     3
+
+
+logical unit name : fluxes_lab.dat
+group : diagnostic/diagnos_fluxes
+type : real
+dimensions :  n     3
+
+
+logical unit name : eflux_sup.dat
+group : diagnostic/diagnos_fluxes
+type : real
+dimensions :  n     1
+grid1 : time
+grid2 : nmod*number_of_species
+physical unit : n.a.
+description : n.a.
+comments : n.a.
+
+
+logical unit name : pflux_sup.dat
+group : diagnostic/diagnos_fluxes
+type : real
+dimensions :  n     1
+grid1 : time
+grid2 : nmod*number_of_species
+physical unit : n.a.
+description : n.a.
+comments : n.a.
+
+
+logical unit name : den_spectra.dat
+group : diagnostic/diagnos_moments
+type : real
+dimensions :  n     1
+
+
+logical unit name : ene_spectra.dat
+group : diagnostic/diagnos_moments
+type : real
+dimensions :  n     1
+
+
+logical unit name : mode_label
+group : diagnostic/diagnos_grid
+type : real
+dimensions :      1     1
+physical unit : n.a.
+description : n.a.
+comments : n.a.
+
+
+logical unit name : krloc
+group : grid
+type : real
+dimensions :      1     1    50
+physical unit : n.a.
+description : local perpendicular wavenumber
+comments : kzeta
+
+
+logical unit name : kxrh
+group : grid
+type : real
+dimensions :      1     1
+physical unit : n.a.
+description : n.a.
+comments : n.a.
+
+
+logical unit name : krho
+group : grid
+type : real
+dimensions :      1     1
+
+
+logical unit name : kzeta
+group : grid
+type : real
+dimensions :      1     1
+
+
+logical unit name : mrad_G
+group : diagnostic/diagnos_grid
+type : real
+dimensions :      1
+description : global radial size of the higher resolved grid which is used in the computation of nonlinear terms
+
+
+logical unit name : mrad_l
+group : diagnostic/diagnos_grid
+type : real
+dimensions :      1
+description : local radial size of the higher resolved grid which is used in the computation of nonlinear terms
+
+
+logical unit name : mphi
+group : diagnostic/diagnos_grid
+type : real
+dimensions :      1
+description : binormal size of the higher resolved grid, which  is used in the computation of the nonlinear terms
+
+
+logical unit name : mphiw3
+group : diagnostic/diagnos_grid
+type : real
+dimensions :      1
+description : binormal size of the higher resolved grid, which  is used in the computation of the nonlinear terms, in k-space.
+
+
+logical unit name : sgrid
+group : diagnostic/diagnos_grid
+type : real
+dimensions :     50
+physical unit : dimensionless
+description : parallel coordinate s
+comments : The s coordinate is zero at the LFS midplane and increasing upward from this position
+
+
+logical unit name : intvp.dat
+group : diagnostic/diagnos_grid
+type : real
+dimensions :     16     4
+
+
+logical unit name : vperp.dat
+group : grid
+type : real
+dimensions :     16     4
+
+
+logical unit name : intmu.dat
+group : diagnostic/diagnos_grid
+type : real
+dimensions :     16     4
+
+
+logical unit name : vpgr.dat
+group : grid
+type : real
+dimensions :     16     4

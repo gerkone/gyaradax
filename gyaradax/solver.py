@@ -42,6 +42,7 @@ from gyaradax.integrals import (
     calculate_phi_adiabatic,
 )
 from gyaradax.backends import create_ops
+from gyaradax.collisions import precompute_collisions
 from gyaradax.params import GKParams
 from gyaradax.types import GKPre, GKState
 from gyaradax.backends.ops import SolverOps
@@ -312,6 +313,13 @@ def estimate_linear_timestep(
         disp_par_val * jnp.where(max_abs_par > _EPS, max_abs_par * _D4S / sgr_dist, 0.0),
         disp_vp_val * jnp.where(max_abs_vp > _EPS, max_abs_vp * _D4V / dvp, 0.0),
     )
+
+    # collision operator: 2nd-derivative in velocity space. Use max|c_self| as
+    # spectral-radius bound; this goes into the same bucket as the 4th-order
+    # dissipation since both are diffusive.
+    if "coll_stencil" in pre:
+        max_coll = jnp.max(jnp.abs(pre["coll_stencil"][0]))
+        tmax4 = jnp.maximum(tmax4, max_coll)
 
     # field CFL: ES mode frequency (time_est_field), kinetic only
     tmax1 = jnp.maximum(tmax1, jnp.asarray(pre.get("tmax_field", 0.0), dtype=jnp.float64))
@@ -878,6 +886,7 @@ def linear_precompute(geometry: Dict[str, jnp.ndarray], params: GKParams) -> "GK
             stencil_ndim=5,
         )
         out.update(sp)
+        out.update(precompute_collisions(geometry, params))
         out["geom_tensors"] = geom_tensors(geometry, params=params)
 
         # precompute adiabatic phi solve arrays
