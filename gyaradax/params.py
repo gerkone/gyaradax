@@ -127,6 +127,13 @@ class GKParams:
     dgrid: float = 1.0
     tgrid: float = 1.0
 
+    # multi-GPU grid parallelism; defaults to 1 (single-device). All sharding
+    # logic lives in gyaradax/sharding.py — these fields only carry the mesh
+    # shape and are static (part of the trace signature).
+    n_gpus_sp: int = 1
+    n_gpus_vp: int = 1
+    n_gpus_mu: int = 1
+
     # fields that are not JAX-traceable (strings, booleans used for control flow)
     # and must be stored as pytree auxiliary data rather than leaves.
     _STATIC_FIELDS = (
@@ -156,6 +163,9 @@ class GKParams:
         "coll_bg_tmp",
         "coll_bg_de",
         "coll_bg_vthrat",
+        "n_gpus_sp",
+        "n_gpus_vp",
+        "n_gpus_mu",
         "dt",
         "naverage",
         "disp_par",
@@ -234,6 +244,9 @@ def gkparams_from_runtime(runtime: Dict[str, Any], **overrides) -> GKParams:
         "coll_rref": float(runtime.get("coll_rref", 1.0)),
         "coll_tref": float(runtime.get("coll_tref", 1.0)),
         "coll_nref": float(runtime.get("coll_nref", 1.0)),
+        "n_gpus_sp": int(runtime.get("n_gpus_sp", 1)),
+        "n_gpus_vp": int(runtime.get("n_gpus_vp", 1)),
+        "n_gpus_mu": int(runtime.get("n_gpus_mu", 1)),
     }
     for k in ("coll_bg_mas", "coll_bg_signz", "coll_bg_tmp", "coll_bg_de", "coll_bg_vthrat"):
         if k in runtime:
@@ -434,6 +447,13 @@ def gkparams_from_config(config: Any, **overrides) -> GKParams:
         "nlbpar": bool(getattr(solver_cfg, "nlbpar", False)),
         "beta": float(getattr(physics_cfg, "beta", 0.0)),
     }
+
+    # optional sharding: config.sharding.{n_gpus_sp, n_gpus_vp, n_gpus_mu}
+    shard_cfg = getattr(config, "sharding", None)
+    if shard_cfg is not None:
+        params_dict["n_gpus_sp"] = int(getattr(shard_cfg, "n_gpus_sp", 1))
+        params_dict["n_gpus_vp"] = int(getattr(shard_cfg, "n_gpus_vp", 1))
+        params_dict["n_gpus_mu"] = int(getattr(shard_cfg, "n_gpus_mu", 1))
 
     # collision operator: optional 'collisions' section in the YAML config
     coll_cfg = getattr(config, "collisions", None)

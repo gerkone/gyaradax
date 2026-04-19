@@ -22,11 +22,14 @@ from dataclasses import replace
 
 import numpy as np
 
-# parse --device before any jax import so cuda sees the right gpu
+# parse --device / --device-list before any jax import so cuda sees the right gpus
 _parser = argparse.ArgumentParser(add_help=False)
 _parser.add_argument("--device", type=int, default=-1)
+_parser.add_argument("--device-list", type=str, default=None)
 _early_args, _ = _parser.parse_known_args()
-if _early_args.device != -1:
+if _early_args.device_list:
+    os.environ["CUDA_VISIBLE_DEVICES"] = _early_args.device_list
+elif _early_args.device != -1:
     os.environ["CUDA_VISIBLE_DEVICES"] = str(_early_args.device)
 os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
 
@@ -101,6 +104,12 @@ def _setup_run(config_path, args):
         overrides["backend"] = args.backend
     if kinetic:
         overrides["adaptive_dt"] = True
+    if args.n_gpus_sp > 1:
+        overrides["n_gpus_sp"] = args.n_gpus_sp
+    if args.n_gpus_vp > 1:
+        overrides["n_gpus_vp"] = args.n_gpus_vp
+    if args.n_gpus_mu > 1:
+        overrides["n_gpus_mu"] = args.n_gpus_mu
     params = gkparams_from_config(cfg, **overrides)
 
     if _has_geom_dat(data_dir):
@@ -148,6 +157,16 @@ def _setup_run(config_path, args):
         df, geometry, state = gk_init(geometry, params, n_species=n_species)
 
     pre = linear_precompute(geometry, params)
+
+    # multi-GPU: place df and pre on the device mesh (no-op on single device).
+    # shard_pre calls .delete() on the source buffer after device_put to avoid
+    # the temporary 2× memory on the builder device.
+    from gyaradax import sharding
+    mesh = sharding.build_mesh(params)
+    if mesh is not None:
+        grid = sharding.grid_shape_from(params, geometry)
+        df = sharding.shard_df(df, mesh, grid)
+        pre = sharding.shard_pre(pre, mesh, grid)
 
     block_size = args.block_size
     if not kinetic:
@@ -409,6 +428,15 @@ def main():
     parser.add_argument("--output-dir", type=str, default=None, help="override output directory")
     parser.add_argument(
         "--save-dumps", action="store_true", help="save full 5D df snapshots at each checkpoint"
+    )
+    parser.add_argument("--n-gpus-sp", type=int, default=1, help="species-axis mesh size (>=1)")
+    parser.add_argument("--n-gpus-vp", type=int, default=1, help="vpar-axis mesh size (>=1)")
+    parser.add_argument("--n-gpus-mu", type=int, default=1, help="mu-axis mesh size (>=1)")
+    parser.add_argument(
+        "--device-list",
+        type=str,
+        default=None,
+        help="comma-separated CUDA device ids for multi-GPU (overrides --device)",
     )
 
     args = parser.parse_args()
