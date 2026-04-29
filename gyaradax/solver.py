@@ -333,7 +333,7 @@ def _precompute_shared(
         jnp.abs(params.disp_y)
         * (ky_b / jnp.maximum(params.kymax, _EPS)) ** jnp.where(params.disp_y < 0.0, 2.0, 4.0)
         + jnp.abs(params.disp_x)
-        * (kx_b / jnp.maximum(params.kxmax, _EPS)) ** jnp.where(params.disp_x < 0.0, 2.0, 4.0)
+        * (kx_b / jnp.maximum(jnp.max(jnp.abs(kx)), _EPS)) ** jnp.where(params.disp_x < 0.0, 2.0, 4.0)
     )
 
     return {
@@ -344,8 +344,8 @@ def _precompute_shared(
         "s_d1_ineg": _parallel_coefficients(pos_par, stencils.D1_IPW_NEG),
         "s_d4_ipos": _parallel_coefficients(pos_par, stencils.D4_IPW_POS),
         "s_d4_ineg": _parallel_coefficients(pos_par, stencils.D4_IPW_NEG),
-        "dvp": params.dvp,
-        "sgr_dist": params.sgr_dist,
+        "dvp": geometry["dvp"],
+        "sgr_dist": geometry["sgr_dist"],
         "ixzero": ixzero,
         "iyzero": iyzero,
         "nl_mphi": mphi,
@@ -433,6 +433,8 @@ def _compute_species_coeffs(
     little_g,
     params,
     ndim,
+    dgrid=1.0,
+    tgrid=1.0,
 ):
     """Compute species-dependent RHS coefficients.
 
@@ -507,9 +509,9 @@ def _compute_species_coeffs(
     bessel = j0(b_arg)
 
     # Maxwellian
-    t_rat = tmp / jnp.asarray(params.tgrid, dtype=jnp.float64)
+    t_rat = tmp / jnp.asarray(tgrid, dtype=jnp.float64)
     fmax = (
-        (de / jnp.asarray(params.dgrid, dtype=jnp.float64))
+        (de / jnp.asarray(dgrid, dtype=jnp.float64))
         * jnp.exp(-(vp2 + 2.0 * bn_b * mu) / t_rat)
         / (jnp.sqrt(t_rat * jnp.pi) ** 3)
     )
@@ -581,12 +583,17 @@ def linear_precompute(geometry: Dict[str, jnp.ndarray], params: GKParams) -> "GK
     if not params.adiabatic_electrons:
         # kinetic: per-species arrays with leading nsp dimension
         mas_arr = jnp.asarray(params.mas, dtype=jnp.float64)
+        tmp_arr = jnp.asarray(params.tmp, dtype=jnp.float64)
         nsp = int(mas_arr.shape[0])
+        # vthrat is derived from species temperatures and masses
+        vthrat_arr = jnp.sqrt(tmp_arr / jnp.maximum(mas_arr, _EPS))
+        dgrid = float(jnp.asarray(geometry.get("dgrid", 1.0)).reshape(-1)[0])
+        tgrid = float(jnp.asarray(geometry.get("tgrid", 1.0)).reshape(-1)[0])
         sp = _compute_species_coeffs(
             mas_arr,
             jnp.asarray(params.signz, dtype=jnp.float64),
-            jnp.asarray(params.vthrat, dtype=jnp.float64),
-            jnp.asarray(params.tmp, dtype=jnp.float64),
+            vthrat_arr,
+            tmp_arr,
             jnp.asarray(params.de, dtype=jnp.float64),
             jnp.asarray(params.rln, dtype=jnp.float64),
             jnp.asarray(params.rlt, dtype=jnp.float64),
@@ -602,12 +609,14 @@ def linear_precompute(geometry: Dict[str, jnp.ndarray], params: GKParams) -> "GK
             little_g,
             params,
             ndim=6,
+            dgrid=dgrid,
+            tgrid=tgrid,
         )
         # override vpgr_rms/mugr_rms if available
         if "vpgr_rms" in geometry:
             vp_rms = jnp.asarray(geometry["vpgr_rms"], dtype=jnp.float64)
             mu_rms = jnp.asarray(geometry.get("mugr_rms", 1.0), dtype=jnp.float64)
-            vthrat_6 = jnp.asarray(params.vthrat, dtype=jnp.float64).reshape(nsp, 1, 1, 1, 1, 1)
+            vthrat_6 = vthrat_arr.reshape(nsp, 1, 1, 1, 1, 1)
             ffun_6 = jnp.reshape(ffun, (1, 1, 1, -1, 1, 1))
             bn_6 = jnp.reshape(bn, (1, 1, 1, -1, 1, 1))
             gfun_6 = jnp.reshape(gfun, (1, 1, 1, -1, 1, 1))
@@ -627,7 +636,7 @@ def linear_precompute(geometry: Dict[str, jnp.ndarray], params: GKParams) -> "GK
             sp["abs_dum2_par"],
             sp["term7_fac"],
             params.disp_par,
-            params.sgr_dist,
+            geometry["sgr_dist"],
             out["s_d1_ipos"],
             out["s_d1_ineg"],
             out["s_d4_ipos"],
@@ -659,7 +668,7 @@ def linear_precompute(geometry: Dict[str, jnp.ndarray], params: GKParams) -> "GK
             2.0
             * jnp.pi
             * q_val
-            * params.sgr_dist
+            * jnp.asarray(geometry["sgr_dist"], dtype=jnp.float64)
             * bn
             * jnp.sqrt(jnp.maximum(mir * kmin2 * mer, _EPS))
         )
@@ -667,10 +676,16 @@ def linear_precompute(geometry: Dict[str, jnp.ndarray], params: GKParams) -> "GK
         out["tmax_field"] = jnp.where(time_field < 1e20, 1.0 / time_field, 0.0)
     else:
         # adiabatic: scalar species params, 5D arrays
+        mas_val = jnp.asarray(params.mas, dtype=jnp.float64)
+        tmp_val = jnp.asarray(params.tmp, dtype=jnp.float64)
+        # vthrat is derived from species temperatures and masses
+        vthrat_val = jnp.sqrt(tmp_val / jnp.maximum(mas_val, _EPS))
+        dgrid = float(jnp.asarray(geometry.get("dgrid", 1.0)).reshape(-1)[0])
+        tgrid = float(jnp.asarray(geometry.get("tgrid", 1.0)).reshape(-1)[0])
         sp = _compute_species_coeffs(
             params.mas,
             params.signz,
-            params.vthrat,
+            vthrat_val,
             params.tmp,
             params.de,
             params.rln,
@@ -687,6 +702,8 @@ def linear_precompute(geometry: Dict[str, jnp.ndarray], params: GKParams) -> "GK
             little_g,
             params,
             ndim=5,
+            dgrid=dgrid,
+            tgrid=tgrid,
         )
         # override vpgr_rms/mugr_rms if available
         if "vpgr_rms" in geometry:
@@ -698,12 +715,12 @@ def linear_precompute(geometry: Dict[str, jnp.ndarray], params: GKParams) -> "GK
             idisp = jnp.asarray(params.idisp, dtype=jnp.int32)
             use_abs = jnp.logical_or(jnp.equal(idisp, 1), jnp.equal(idisp, -1))
             sp["abs_dum2_par"] = jnp.where(
-                use_abs, jnp.abs(sp["upar"]), jnp.abs(ffun_b * params.vthrat * vp_rms)
+                use_abs, jnp.abs(sp["upar"]), jnp.abs(ffun_b * vthrat_val * vp_rms)
             )
             sp["abs_dum2_vp"] = jnp.where(
                 use_abs,
                 jnp.abs(sp["utrap"]),
-                jnp.abs(params.vthrat * bn_b * gfun_b * mu_rms),
+                jnp.abs(vthrat_val * bn_b * gfun_b * mu_rms),
             )
 
         sp["s_total_upar"], sp["s_total_t7"] = _fuse_stencils(
@@ -711,7 +728,7 @@ def linear_precompute(geometry: Dict[str, jnp.ndarray], params: GKParams) -> "GK
             sp["abs_dum2_par"],
             sp["term7_fac"],
             params.disp_par,
-            params.sgr_dist,
+            geometry["sgr_dist"],
             out["s_d1_ipos"],
             out["s_d1_ineg"],
             out["s_d4_ipos"],

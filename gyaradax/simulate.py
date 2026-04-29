@@ -91,7 +91,9 @@ def _ensure_species_arrays(
     arrays in the geometry dict.  This helper copies them from params when the
     geometry arrays are too short.
     """
-    _SPECIES_KEYS = ("mas", "signz", "de", "tmp", "vthrat", "rlt", "rln")
+    from gyaradax import _EPS
+
+    _SPECIES_KEYS = ("mas", "signz", "de", "tmp", "rlt", "rln")
     mas = jnp.asarray(params.mas, dtype=jnp.float64)
     nsp = int(mas.shape[0]) if mas.ndim > 0 else 1
     if nsp <= 1:
@@ -106,6 +108,10 @@ def _ensure_species_arrays(
         val = getattr(params, k, None)
         if val is not None:
             geometry[k] = jnp.asarray(val, dtype=jnp.float64)
+    # vthrat is derived from species temperatures and masses
+    tmp_arr = jnp.asarray(params.tmp, dtype=jnp.float64)
+    mas_arr = jnp.asarray(params.mas, dtype=jnp.float64)
+    geometry["vthrat"] = jnp.sqrt(tmp_arr / jnp.maximum(mas_arr, _EPS))
     return geometry
 
 

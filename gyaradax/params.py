@@ -38,20 +38,12 @@ class GKParams:
         tmp: Temperature of the kinetic species.
         de: Density of the kinetic species.
         signz: Charge sign of the species.
-        vthrat: Thermal velocity ratio.
         shat: Magnetic shear parameter.
         q: Safety factor.
         eps: Local aspect ratio.
-        kthnorm: Wavevector normalization factor.
         Rref: Reference major radius.
-        d2X: Geometry-dependent scaling factor.
         signB: Direction of the magnetic field.
-        dvp: Parallel velocity grid spacing.
-        sgr_dist: Field-line grid spacing.
-        kxmax: Maximum radial wavevector.
         kymax: Maximum binormal wavevector.
-        dgrid: Global density scaling.
-        tgrid: Global temperature scaling.
     """
 
     # runtime controls
@@ -81,24 +73,16 @@ class GKParams:
     tmp: float = 1.0
     de: float = 1.0
     signz: float = 1.0
-    vthrat: float = 1.0
 
     # geometry scalars
     shat: float = 0.0
     q: float = 1.0
     eps: float = 0.0
-    kthnorm: float = 1.0
     Rref: float = 1.0
-    d2X: float = 1.0
     signB: float = 1.0
 
     # grid metadata and scaling
-    dvp: float = 1.0
-    sgr_dist: float = 1.0
-    kxmax: float = 1.0
     kymax: float = 1.0
-    dgrid: float = 1.0
-    tgrid: float = 1.0
 
     # fields that are not JAX-traceable (strings, booleans used for control flow)
     # and must be stored as pytree auxiliary data rather than leaves.
@@ -121,17 +105,11 @@ class GKParams:
         "norm_eps",
         "cfl_safety",
         "amp_init",
-        "dvp",
-        "sgr_dist",
-        "kxmax",
         "kymax",
         "mas",
         "tmp",
         "de",
         "signz",
-        "vthrat",
-        "dgrid",
-        "tgrid",
     )
 
     def tree_flatten(self):
@@ -175,7 +153,7 @@ def gkparams_from_runtime(runtime: Dict[str, Any], **overrides) -> GKParams:
         "backend": str(runtime.get("backend", "jax")),
     }
     # species params may be arrays (multi-species) or scalars
-    _SPECIES_PARAMS = {"rlt", "rln", "mas", "tmp", "de", "signz", "vthrat"}
+    _SPECIES_PARAMS = {"rlt", "rln", "mas", "tmp", "de", "signz"}
     for k in _SPECIES_PARAMS:
         if k in runtime:
             v = runtime[k]
@@ -186,16 +164,9 @@ def gkparams_from_runtime(runtime: Dict[str, Any], **overrides) -> GKParams:
         "shat",
         "q",
         "eps",
-        "kthnorm",
         "Rref",
-        "d2X",
         "signB",
-        "dvp",
-        "sgr_dist",
-        "kxmax",
         "kymax",
-        "dgrid",
-        "tgrid",
     ]:
         if k in runtime:
             params_dict[k] = float(runtime[k])
@@ -242,13 +213,8 @@ def gkparams_from_input_and_geometry(
         "shat",
         "q",
         "eps",
-        "kthnorm",
         "Rref",
-        "d2X",
         "signB",
-        "dvp",
-        "sgr_dist",
-        "kxmax",
         "kymax",
     ):
         if k in geometry:
@@ -264,7 +230,6 @@ def gkparams_from_input_and_geometry(
         sp_signz = np.array([float(inp[k].get("z", 1.0)) for k in species_keys])
         sp_rlt = np.array([float(inp[k].get("rlt", 0.0)) for k in species_keys])
         sp_rln = np.array([float(inp[k].get("rln", 0.0)) for k in species_keys])
-        sp_vthrat = np.sqrt(sp_tmp / sp_mas)
 
         def _maybe_scalar(arr):
             return float(arr[0]) if len(arr) == 1 else arr
@@ -277,7 +242,6 @@ def gkparams_from_input_and_geometry(
                 "signz": _maybe_scalar(sp_signz),
                 "rlt": _maybe_scalar(sp_rlt),
                 "rln": _maybe_scalar(sp_rln),
-                "vthrat": _maybe_scalar(sp_vthrat),
             }
         )
 
@@ -314,8 +278,8 @@ def gkparams_from_config(config: Any, **overrides) -> GKParams:
     }
 
     # physics scalars (may be arrays for multi-species kinetic configs)
-    _SPECIES_PARAMS = {"rlt", "rln", "mas", "tmp", "de", "signz", "vthrat"}
-    for k in ["rlt", "rln", "mas", "tmp", "de", "signz", "vthrat", "dgrid", "tgrid"]:
+    _SPECIES_PARAMS = {"rlt", "rln", "mas", "tmp", "de", "signz"}
+    for k in ["rlt", "rln", "mas", "tmp", "de", "signz"]:
         if hasattr(physics_cfg, k):
             v = getattr(physics_cfg, k)
             if k in _SPECIES_PARAMS and hasattr(v, "__iter__") and not isinstance(v, str):
@@ -324,12 +288,12 @@ def gkparams_from_config(config: Any, **overrides) -> GKParams:
                 params_dict[k] = float(v)
 
     # geometry scalars
-    for k in ["shat", "q", "eps", "kthnorm", "Rref", "d2X", "signB"]:
+    for k in ["shat", "q", "eps", "Rref", "signB"]:
         if hasattr(geometry_cfg, k):
             params_dict[k] = float(getattr(geometry_cfg, k))
 
-    # scaling/grid scalars
-    for k in ["dvp", "sgr_dist", "kxmax", "kymax"]:
+    # kymax is kept for hyper-dissipation normalisation
+    for k in ["kymax"]:
         if hasattr(geometry_cfg, k):
             params_dict[k] = float(getattr(geometry_cfg, k))
 

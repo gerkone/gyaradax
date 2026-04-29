@@ -365,7 +365,7 @@ class CUDAOps(SolverOps):
             }
 
             result_sp = self._linear_rhs_fused(
-                df_sp, phi, sp_pre, params.dvp, params.disp_vp, params.drive_scale
+                df_sp, phi, sp_pre, float(pre["dvp"]), params.disp_vp, params.drive_scale
             )
             results.append(result_sp)
 
@@ -387,7 +387,7 @@ class CUDAOps(SolverOps):
         """
         if df.ndim == 5:
             return self._linear_rhs_fused(
-                df, phi, pre, params.dvp, params.disp_vp, params.drive_scale
+                df, phi, pre, float(pre["dvp"]), params.disp_vp, params.drive_scale
             )
 
         # 6D kinetic: always use per-species loop (ions and electrons have different params)

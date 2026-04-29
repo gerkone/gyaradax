@@ -236,8 +236,8 @@ class JAXOps(SolverOps):
         )
 
         out_d1, out_d4 = self._apply_vpar_dual(df, stencils.VPAR_D1, stencils.VPAR_D4)
-        term_iv = pre["utrap"] * out_d1 / params.dvp
-        term_vp_diss = params.disp_vp * pre["abs_dum2_vp"] * out_d4 / params.dvp
+        term_iv = pre["utrap"] * out_d1 / pre["dvp"]
+        term_vp_diss = params.disp_vp * pre["abs_dum2_vp"] * out_d4 / pre["dvp"]
 
         kdotvd = pre["drift_x"] * pre["kx_b"] + pre["drift_y"] * pre["ky_b"]
 

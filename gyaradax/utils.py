@@ -221,9 +221,9 @@ def print_params(params, grid_shape=None):
         "mixed_precision",
     ]
     dissipation_keys = ["disp_par", "disp_vp", "disp_x", "disp_y", "idisp"]
-    species_keys = ["rlt", "rln", "mas", "tmp", "de", "signz", "vthrat"]
-    geometry_keys = ["shat", "q", "eps", "kthnorm", "Rref", "d2X", "signB"]
-    grid_keys = ["dvp", "sgr_dist", "kxmax", "kymax", "dgrid", "tgrid"]
+    species_keys = ["rlt", "rln", "mas", "tmp", "de", "signz"]
+    geometry_keys = ["shat", "q", "eps", "Rref", "signB"]
+    grid_keys = ["kymax"]
 
     def _fmt(v):
         if hasattr(v, "shape") and v.shape:

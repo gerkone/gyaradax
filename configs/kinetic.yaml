@@ -20,21 +20,13 @@ physics:
   tmp: [1.0, 1.0]
   de: [1.0, 1.0]
   signz: [1.0, -1.0]
-  vthrat: [1.0, 60.6]
-  dgrid: 1.0
-  tgrid: 1.0
 geometry:
   geometry_model: circ
   shat: 2.74913
   q: 3.48731
   eps: 0.19
-  kthnorm: 2.41376
   Rref: 100.0
-  d2X: 1.0
   signB: 1.0
-  dvp: 0.1875
-  sgr_dist: 0.0625
-  kxmax: 7.93021
   kymax: 0.5800079543948031
 grid:
   nvpar: 32
