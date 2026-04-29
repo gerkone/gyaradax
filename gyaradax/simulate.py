@@ -24,6 +24,7 @@ from gyaradax.solver import (
     default_state,
     linear_precompute,
     mode_amplitude,
+    _derive_vthrat,
 )
 from gyaradax.utils import save_dumps as save_dumps_fn
 
@@ -91,8 +92,6 @@ def _ensure_species_arrays(
     arrays in the geometry dict.  This helper copies them from params when the
     geometry arrays are too short.
     """
-    from gyaradax import _EPS
-
     # _SPECIES_KEYS lists per-species params to copy from params to geometry.
     # 'vthrat' is intentionally excluded: it is derived from tmp/mas below.
     _SPECIES_KEYS = ("mas", "signz", "de", "tmp", "rlt", "rln")
@@ -111,9 +110,7 @@ def _ensure_species_arrays(
         if val is not None:
             geometry[k] = jnp.asarray(val, dtype=jnp.float64)
     # vthrat is derived from species temperatures and masses
-    tmp_arr = jnp.asarray(params.tmp, dtype=jnp.float64)
-    mas_arr = jnp.asarray(params.mas, dtype=jnp.float64)
-    geometry["vthrat"] = jnp.sqrt(tmp_arr / jnp.maximum(mas_arr, _EPS))
+    geometry["vthrat"] = _derive_vthrat(params.tmp, params.mas)
     return geometry
 
 

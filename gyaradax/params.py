@@ -10,6 +10,9 @@ from dataclasses import dataclass
 from typing import Dict, Any
 from gyaradax.utils import load_scalars
 
+# Species parameters that can be per-species arrays in multi-species (kinetic) configs.
+_SPECIES_PARAMS = frozenset({"rlt", "rln", "mas", "tmp", "de", "signz"})
+
 
 @jax.tree_util.register_pytree_node_class
 @dataclass(frozen=True)
@@ -153,7 +156,6 @@ def gkparams_from_runtime(runtime: Dict[str, Any], **overrides) -> GKParams:
         "backend": str(runtime.get("backend", "jax")),
     }
     # species params may be arrays (multi-species) or scalars
-    _SPECIES_PARAMS = {"rlt", "rln", "mas", "tmp", "de", "signz"}
     for k in _SPECIES_PARAMS:
         if k in runtime:
             v = runtime[k]
@@ -278,8 +280,7 @@ def gkparams_from_config(config: Any, **overrides) -> GKParams:
     }
 
     # physics scalars (may be arrays for multi-species kinetic configs)
-    _SPECIES_PARAMS = {"rlt", "rln", "mas", "tmp", "de", "signz"}
-    for k in ["rlt", "rln", "mas", "tmp", "de", "signz"]:
+    for k in _SPECIES_PARAMS:
         if hasattr(physics_cfg, k):
             v = getattr(physics_cfg, k)
             if k in _SPECIES_PARAMS and hasattr(v, "__iter__") and not isinstance(v, str):

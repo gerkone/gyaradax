@@ -417,6 +417,15 @@ def _fuse_stencils(
     return s_total_upar, s_total_t7
 
 
+def _derive_vthrat(tmp, mas):
+    """Derive thermal velocity ratio: vthrat = sqrt(tmp / mas).
+
+    This is a derived quantity — it must not appear as a user input parameter.
+    Works with scalar or array inputs; the result has the same shape as the inputs.
+    """
+    return jnp.sqrt(jnp.asarray(tmp, dtype=jnp.float64) / jnp.maximum(jnp.asarray(mas, dtype=jnp.float64), _EPS))
+
+
 def _compute_species_coeffs(
     mas,
     signz,
@@ -595,7 +604,7 @@ def linear_precompute(geometry: Dict[str, jnp.ndarray], params: GKParams) -> "GK
         tmp_arr = jnp.asarray(params.tmp, dtype=jnp.float64)
         nsp = int(mas_arr.shape[0])
         # vthrat is derived from species temperatures and masses
-        vthrat_arr = jnp.sqrt(tmp_arr / jnp.maximum(mas_arr, _EPS))
+        vthrat_arr = _derive_vthrat(tmp_arr, mas_arr)
         sp = _compute_species_coeffs(
             mas_arr,
             jnp.asarray(params.signz, dtype=jnp.float64),
@@ -686,7 +695,7 @@ def linear_precompute(geometry: Dict[str, jnp.ndarray], params: GKParams) -> "GK
         mas_val = jnp.asarray(params.mas, dtype=jnp.float64)
         tmp_val = jnp.asarray(params.tmp, dtype=jnp.float64)
         # vthrat is derived from species temperatures and masses
-        vthrat_val = jnp.sqrt(tmp_val / jnp.maximum(mas_val, _EPS))
+        vthrat_val = _derive_vthrat(tmp_val, mas_val)
         sp = _compute_species_coeffs(
             params.mas,
             params.signz,
