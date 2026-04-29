@@ -93,6 +93,8 @@ def _ensure_species_arrays(
     """
     from gyaradax import _EPS
 
+    # _SPECIES_KEYS lists per-species params to copy from params to geometry.
+    # 'vthrat' is intentionally excluded: it is derived from tmp/mas below.
     _SPECIES_KEYS = ("mas", "signz", "de", "tmp", "rlt", "rln")
     mas = jnp.asarray(params.mas, dtype=jnp.float64)
     nsp = int(mas.shape[0]) if mas.ndim > 0 else 1

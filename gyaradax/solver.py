@@ -329,17 +329,21 @@ def _precompute_shared(
     kx_b = jnp.reshape(kx, (1, 1, 1, -1, 1))
     ky_b = jnp.reshape(ky, (1, 1, 1, 1, -1))
 
+    # kxmax is the maximum absolute kx value, used for hyper-dissipation normalisation
+    kxmax = jnp.max(jnp.abs(kx))
+
     hyper = -(
         jnp.abs(params.disp_y)
         * (ky_b / jnp.maximum(params.kymax, _EPS)) ** jnp.where(params.disp_y < 0.0, 2.0, 4.0)
         + jnp.abs(params.disp_x)
-        * (kx_b / jnp.maximum(jnp.max(jnp.abs(kx)), _EPS)) ** jnp.where(params.disp_x < 0.0, 2.0, 4.0)
+        * (kx_b / jnp.maximum(kxmax, _EPS)) ** jnp.where(params.disp_x < 0.0, 2.0, 4.0)
     )
 
     return {
         "kx_b": kx_b,
         "ky_b": ky_b,
         "hyper": hyper,
+        "kxmax": kxmax,
         "s_d1_ipos": _parallel_coefficients(pos_par, stencils.D1_IPW_POS),
         "s_d1_ineg": _parallel_coefficients(pos_par, stencils.D1_IPW_NEG),
         "s_d4_ipos": _parallel_coefficients(pos_par, stencils.D4_IPW_POS),
@@ -575,6 +579,11 @@ def linear_precompute(geometry: Dict[str, jnp.ndarray], params: GKParams) -> "GK
     efun = jnp.asarray(geometry.get("efun", jnp.ones_like(bn)), dtype=jnp.float64)
     little_g = jnp.asarray(geometry["little_g"], dtype=jnp.float64)
 
+    # normalisation scalars for the Maxwellian — sourced from GKW data files when
+    # available, otherwise default to 1.0 (no rescaling)
+    dgrid = float(geometry.get("dgrid", 1.0))
+    tgrid = float(geometry.get("tgrid", 1.0))
+
     # species-independent shared quantities
     out = _precompute_shared(
         geometry, params, kx, ky, ns, nkx, nky, vpgr, mugr, bn, ffun, gfun, dfun, efun
@@ -587,8 +596,6 @@ def linear_precompute(geometry: Dict[str, jnp.ndarray], params: GKParams) -> "GK
         nsp = int(mas_arr.shape[0])
         # vthrat is derived from species temperatures and masses
         vthrat_arr = jnp.sqrt(tmp_arr / jnp.maximum(mas_arr, _EPS))
-        dgrid = float(jnp.asarray(geometry.get("dgrid", 1.0)).reshape(-1)[0])
-        tgrid = float(jnp.asarray(geometry.get("tgrid", 1.0)).reshape(-1)[0])
         sp = _compute_species_coeffs(
             mas_arr,
             jnp.asarray(params.signz, dtype=jnp.float64),
@@ -680,8 +687,6 @@ def linear_precompute(geometry: Dict[str, jnp.ndarray], params: GKParams) -> "GK
         tmp_val = jnp.asarray(params.tmp, dtype=jnp.float64)
         # vthrat is derived from species temperatures and masses
         vthrat_val = jnp.sqrt(tmp_val / jnp.maximum(mas_val, _EPS))
-        dgrid = float(jnp.asarray(geometry.get("dgrid", 1.0)).reshape(-1)[0])
-        tgrid = float(jnp.asarray(geometry.get("tgrid", 1.0)).reshape(-1)[0])
         sp = _compute_species_coeffs(
             params.mas,
             params.signz,

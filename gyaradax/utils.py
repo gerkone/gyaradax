@@ -760,6 +760,23 @@ def load_geometry(directory):
         float(np.max(np.abs(np.asarray(geometry["krho"])))), dtype=jnp.float64
     )
 
+    # Maxwellian normalisation scalars — read from GKW output files when present
+    dgrid_val = 1.0
+    if os.path.exists(os.path.join(directory, "dgrid.dat")):
+        dg = np.loadtxt(os.path.join(directory, "dgrid.dat"))
+        dgrid_val = float(np.asarray(dg).reshape(-1)[0])
+    elif "dgrid" in geom:
+        dgrid_val = float(np.asarray(geom["dgrid"]).reshape(-1)[0])
+    geometry["dgrid"] = dgrid_val
+
+    tgrid_val = 1.0
+    if os.path.exists(os.path.join(directory, "tgrid.dat")):
+        tg = np.loadtxt(os.path.join(directory, "tgrid.dat"))
+        tgrid_val = float(np.asarray(tg).reshape(-1)[0])
+    elif "tgrid" in geom:
+        tgrid_val = float(np.asarray(geom["tgrid"]).reshape(-1)[0])
+    geometry["tgrid"] = tgrid_val
+
     return geometry
 
 
