@@ -15,7 +15,7 @@ from gyaradax.integrals import (
     get_integrals,
     calculate_phi,
 )
-from gyaradax.params import gkparams_from_config, load_config, GKParams
+from gyaradax.params import gkparams_from_config, load_config, GKParams, _SPECIES_PARAMS
 from gyaradax.solver import (
     gksolve,
     init_f,
@@ -92,9 +92,8 @@ def _ensure_species_arrays(
     arrays in the geometry dict.  This helper copies them from params when the
     geometry arrays are too short.
     """
-    # _SPECIES_KEYS lists per-species params to copy from params to geometry.
+    # Species params are copied from params to geometry dict.
     # 'vthrat' is intentionally excluded: it is derived from tmp/mas below.
-    _SPECIES_KEYS = ("mas", "signz", "de", "tmp", "rlt", "rln")
     mas = jnp.asarray(params.mas, dtype=jnp.float64)
     nsp = int(mas.shape[0]) if mas.ndim > 0 else 1
     if nsp <= 1:
@@ -105,7 +104,7 @@ def _ensure_species_arrays(
         return geometry
 
     geometry = dict(geometry)  # shallow copy
-    for k in _SPECIES_KEYS:
+    for k in _SPECIES_PARAMS:
         val = getattr(params, k, None)
         if val is not None:
             geometry[k] = jnp.asarray(val, dtype=jnp.float64)
