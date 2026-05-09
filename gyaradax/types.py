@@ -24,7 +24,8 @@ class GKPre:
                 for dk, dv in sorted(v.items()):
                     leaves.append(dv)
                     leaf_keys.append(f"{k}.{dk}")
-            elif isinstance(v, jnp.ndarray):
+            elif hasattr(v, "shape") and hasattr(v, "dtype"):
+                # jax arrays AND abstract ShapeDtypeStruct (jax.eval_shape)
                 leaves.append(v)
                 leaf_keys.append(k)
             else:

@@ -26,12 +26,27 @@ import numpy as np
 _parser = argparse.ArgumentParser(add_help=False)
 _parser.add_argument("--device", type=int, default=-1)
 _parser.add_argument("--device-list", type=str, default=None)
+_parser.add_argument("--n-gpus-sp", type=int, default=1)
+_parser.add_argument("--n-gpus-vp", type=int, default=1)
+_parser.add_argument("--n-gpus-mu", type=int, default=1)
 _early_args, _ = _parser.parse_known_args()
 if _early_args.device_list:
     os.environ["CUDA_VISIBLE_DEVICES"] = _early_args.device_list
 elif _early_args.device != -1:
     os.environ["CUDA_VISIBLE_DEVICES"] = str(_early_args.device)
 os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
+
+# latency-hiding + pipelined collective flags: overlap NCCL ops with compute.
+# Note: in JAX ≥ 0.9 the old `enable_async_*` flags are removed (async is the
+# default). Keep only the pipelining / scheduler hints that still parse.
+if _early_args.n_gpus_sp * _early_args.n_gpus_vp * _early_args.n_gpus_mu > 1:
+    _async_flags = " ".join([
+        "--xla_gpu_enable_latency_hiding_scheduler=true",
+        "--xla_gpu_enable_pipelined_all_reduce=true",
+        "--xla_gpu_enable_pipelined_all_gather=true",
+        "--xla_gpu_enable_while_loop_double_buffering=true",
+    ])
+    os.environ["XLA_FLAGS"] = (os.environ.get("XLA_FLAGS", "") + " " + _async_flags).strip()
 
 import jax
 import jax.numpy as jnp
@@ -156,17 +171,17 @@ def _setup_run(config_path, args):
     else:
         df, geometry, state = gk_init(geometry, params, n_species=n_species)
 
-    pre = linear_precompute(geometry, params)
-
-    # multi-GPU: place df and pre on the device mesh (no-op on single device).
-    # shard_pre calls .delete() on the source buffer after device_put to avoid
-    # the temporary 2× memory on the builder device.
-    from gyaradax import sharding
-    mesh = sharding.build_mesh(params)
+    from gyaradax import sharding as _sharding
+    mesh = _sharding.build_mesh(params)
     if mesh is not None:
-        grid = sharding.grid_shape_from(params, geometry)
-        df = sharding.shard_df(df, mesh, grid)
-        pre = sharding.shard_pre(pre, mesh, grid)
+        grid = _sharding.grid_shape_from(params, geometry)
+        # precompute_sharded compiles linear_precompute with out_shardings so
+        # full-size arrays never materialise on a single device — the only safe
+        # path when the grid doesn't fit on one GPU.
+        pre = _sharding.precompute_sharded(geometry, params, mesh, grid)
+        df = _sharding.shard_df(df, mesh, grid)
+    else:
+        pre = linear_precompute(geometry, params)
 
     block_size = args.block_size
     if not kinetic:

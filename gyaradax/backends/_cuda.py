@@ -406,7 +406,14 @@ class CUDAOps(SolverOps):
         fft_prefactor: complex = 1.0 + 0.0j,
         exclude_zero_mode: bool = True,
         bessel: Optional[jnp.ndarray] = None,
+        chi_correction: Optional[jnp.ndarray] = None,
     ) -> jnp.ndarray:
+        if chi_correction is not None:
+            raise NotImplementedError(
+                "CUDA backend does not implement the EM chi_correction "
+                "branch of nonlinear_term_iii — use backend='jax' when "
+                "running with apar/bpar."
+            )
         """Nonlinear bracket via CUDA graph-captured cuFFT pipeline.
 
         Uses z2z 2-for-1 packing with phi at its natural (nmu*ns) batch

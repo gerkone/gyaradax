@@ -200,6 +200,44 @@ are auto-detected by CMake — look for `CUDA::cufft from pip:` in configure out
 - **CUDA backend**: Z2Z only (use_z2z flag ignored). FFI custom calls are not
   AD-differentiable; gradient tests use JAX backend for nonlinear path.
 
+## Multi-GPU Sharding
+
+Velocity-space grid parallelism is supported via JAX GSPMD. Set via params:
+
+```python
+params = GKParams(
+    n_gpus_sp=1,   # Shard species axis (for kinetic multi-species)
+    n_gpus_vp=2,   # Shard vparallel axis
+    n_gpus_mu=1,   # Shard mu axis
+    ...
+)
+```
+
+Or via YAML config:
+
+```yaml
+sharding:
+  n_gpus_sp: 1
+  n_gpus_vp: 2
+  n_gpus_mu: 1
+```
+
+When `n_gpus_sp * n_gpus_vp * n_gpus_mu > 1`, the following automatically use
+sharding:
+
+- `init_f()` - Creates df already distributed across devices (no single-GPU OOM)
+- `linear_precompute()` - Precomputes coefficients sharded
+- `gksolve()` - Runs simulation with sharded arrays
+
+The mesh is built automatically from available GPUs. Arrays are sharded as:
+- 5D df (vpar, mu, s, kx, ky): ("vp", "mu", None, None, None)
+- 6D df (sp, vpar, mu, s, kx, ky): ("sp", "vp", "mu", None, None, None)
+- Fields (phi, A_par): Replicated across all devices
+
+**Note**: Field solves require all-reduce operations over velocity axes,
+which can limit scaling for small grids. Sharding is most beneficial for
+large grids (≥128×32 velocity space) that don't fit on a single GPU.
+
 ## Skills
 
 | command | description |

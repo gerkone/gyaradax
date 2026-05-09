@@ -476,13 +476,26 @@ def gkparams_from_config(config: Any, **overrides) -> GKParams:
 
     # physics scalars (may be arrays for multi-species kinetic configs)
     _SPECIES_PARAMS = {"rlt", "rln", "mas", "tmp", "de", "signz", "vthrat"}
+    _vthrat_explicit = hasattr(physics_cfg, "vthrat")
     for k in ["rlt", "rln", "mas", "tmp", "de", "signz", "vthrat", "dgrid", "tgrid"]:
         if hasattr(physics_cfg, k):
             v = getattr(physics_cfg, k)
             if k in _SPECIES_PARAMS and hasattr(v, "__iter__") and not isinstance(v, str):
                 params_dict[k] = jnp.array([float(x) for x in v])
+            elif hasattr(v, "__iter__") and not isinstance(v, str):
+                # scalar param stored as list in yaml (e.g. dgrid: [1.0, 1.0]) — take first
+                params_dict[k] = float(list(v)[0])
             else:
                 params_dict[k] = float(v)
+
+    # compute vthrat from sqrt(tmp/mas) when not explicitly specified in config.
+    # GKW defines vthrat = sqrt(T_s/m_s) per species; old configs used sqrt(tgrid/mas)
+    # which was wrong for electrons (missing the T_e factor).
+    if not _vthrat_explicit and "tmp" in params_dict and "mas" in params_dict:
+        import numpy as _np
+        _tmp = _np.asarray(params_dict["tmp"], dtype=float)
+        _mas = _np.asarray(params_dict["mas"], dtype=float)
+        params_dict["vthrat"] = _np.sqrt(_tmp / _mas)
 
     # geometry scalars
     for k in ["shat", "q", "eps", "kthnorm", "Rref", "d2X", "signB"]:

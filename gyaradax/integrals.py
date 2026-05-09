@@ -455,7 +455,7 @@ def precompute_apar(geometry: Dict[str, jnp.ndarray], params: Any = None):
     vpgr = jnp.asarray(geometry["vpgr"], dtype=jnp.float64).reshape(1, -1, 1, 1, 1, 1)
     bn = jnp.asarray(geometry["bn"], dtype=jnp.float64).reshape(1, 1, 1, -1, 1, 1)
 
-    beta = float(params.beta) if params is not None else 0.0
+    beta = jnp.asarray(params.beta if params is not None else 0.0, dtype=jnp.float64)
 
     # k_perp^2 (same computation as in _species_bessel_gamma)
     krho = jnp.asarray(geometry["krho"], dtype=jnp.float64).reshape(1, 1, 1, 1, 1, -1)
@@ -467,10 +467,10 @@ def precompute_apar(geometry: Dict[str, jnp.ndarray], params: Any = None):
     kperp_sq = krho**2 * g0 + 2 * krho * kxrh * g1 + kxrh**2 * g2
 
     # --- Ampere numerator weight ---
-    # RHS = beta * sum_sp [ Z * vthrat * n * integral(vpar * J0 * g * B * dvpar * dmu) ]
-    # Weight applied to g: signz * de * vthrat * vpgr * J0 * bn * intvp * intmu
-    # (matches GKW ampere_int: signz*de*veta*intvp*intmu*vthrat*bn*vpgr*bes)
-    # Note: veta in GKW is effectively beta. We multiply by beta outside.
+    # Matches GKW ampere_int (linear_terms.f90:3246):
+    # elem = signz*de*veta*intvp*intmu*vthrat*bn*vpgr*J0
+    # vthrat^1 converts vpgr (in v_ths units) to physical velocity in v_thi units.
+    # GKW uses the same shared velocity grid for all species (velocitygrid.f90:197).
     apar_weight = beta * signz_6d * de_6d * vthrat_6d * vpgr * bessel * bn * intvp * intmu
     apar_weight = jnp.where(jnp.abs(intvp) < _EPS, 0.0, apar_weight)
 

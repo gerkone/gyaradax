@@ -138,6 +138,7 @@ def gk_init(
         amp_init_real=params.amp_init,
         norm_eps=params.norm_eps,
         n_species=n_species,
+        params=params,
     )
     phi0 = _compute_phi_for_init(df, geometry, params)
     amp0 = mode_amplitude(phi0, geometry, params.norm_eps)

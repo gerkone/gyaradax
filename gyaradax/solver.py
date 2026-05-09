@@ -384,12 +384,17 @@ def _precompute_shared(
     # NL CFL length-inverse factors, matching GKW's `lxinv = 1/lx` with
     # `lx = 2π/kx_min` (mode.f90:740). Under mode_box, `kx_min = kx[ixzero+1]`
     # and `ky_min = ky[1]`; for single-mode runs fall back to the grid max.
-    ixz = int(jnp.asarray(geometry.get("ixzero", 0)).item())
-    lxinv = (
-        jnp.abs(kx[ixz + 1]) / (2.0 * jnp.pi)
-        if nkx > ixz + 1
-        else jnp.asarray(params.kxmax / (2.0 * jnp.pi), dtype=jnp.float64)
-    )
+    # use dynamic indexing so this block traces under jit (sharded precompute).
+    ixz_arr = jnp.asarray(geometry.get("ixzero", 0), dtype=jnp.int32)
+    if nkx > 1:
+        idx = jnp.clip(ixz_arr + 1, 0, nkx - 1)
+        lxinv = jnp.where(
+            ixz_arr + 1 < nkx,
+            jnp.abs(kx[idx]) / (2.0 * jnp.pi),
+            jnp.asarray(params.kxmax / (2.0 * jnp.pi), dtype=jnp.float64),
+        )
+    else:
+        lxinv = jnp.asarray(params.kxmax / (2.0 * jnp.pi), dtype=jnp.float64)
     lyinv = (
         ky[1] / (2.0 * jnp.pi)
         if nky > 1
@@ -577,20 +582,25 @@ def _compute_species_coeffs(
     )
     bessel = j0(b_arg)
 
-    # Maxwellian
-    t_rat = tmp / jnp.asarray(params.tgrid, dtype=jnp.float64)
+    # Maxwellian — matches GKW (init.f90:1977-1979).
+    # fmaxwl = (de/dgrid) * exp(-(vpgr² + 2*B*mugr) / (tmp/tgrid)) / sqrt(pi*tmp/tgrid)³
+    # GKW always sets tmp/tgrid = 1 (tgrid = temperature of velocity-grid reference = tmp).
+    # So: fmax = (de/dgrid) * exp(-vp² - 2*B*mu) / π^{3/2}  (no t_rat, no vthrat in denom).
+    # vpgr is in species-normalized units (v_ths), streaming = vthrat*vpgr gives v in v_thi.
     fmax = (
         (de / jnp.asarray(params.dgrid, dtype=jnp.float64))
-        * jnp.exp(-(vp2 + 2.0 * bn_b * mu) / t_rat)
-        / (jnp.sqrt(t_rat * jnp.pi) ** 3)
+        * jnp.exp(-(vp2 + 2.0 * bn_b * mu))
+        / jnp.pi ** 1.5
     )
-    et = (vp2 + 2.0 * bn_b * mu) / t_rat - 1.5
+    et = (vp2 + 2.0 * bn_b * mu) - 1.5
     dmax_ek = (rln + rlt * et) * fmax * (efun_b * ky_b)
 
-    # drifts
+    # drifts — GKW drift() in linear_terms.f90:4154-4156 scales by tgrid(is)
+    # = tmp(is). Without this factor any species with tmp != 1 has a
+    # mis-scaled curvature/grad-B drift.
     ed = vp2 + bn_b * mu
-    drift_x = ed * d_shape(dfun[:, 0]) / sz
-    drift_y = ed * d_shape(dfun[:, 1]) / sz
+    drift_x = tmp * ed * d_shape(dfun[:, 0]) / sz
+    drift_y = tmp * ed * d_shape(dfun[:, 1]) / sz
 
     # characteristic speeds
     upar = -ffun_b * vthrat * vp
@@ -628,8 +638,8 @@ def _compute_species_coeffs(
     }
 
 
-def linear_precompute(geometry: Dict[str, jnp.ndarray], params: GKParams) -> "GKPre":
-    """Precompute static geometry-dependent coefficients and Bessel terms."""
+def _linear_precompute_core(geometry: Dict[str, jnp.ndarray], params: GKParams) -> "GKPre":
+    """Core implementation of linear_precompute (no auto-sharding logic)."""
     kx, ky = kx_ky_grids(geometry)
     ns, nkx, nky = len(geometry["ints"]), int(kx.shape[0]), int(ky.shape[0])
 
@@ -744,7 +754,8 @@ def linear_precompute(geometry: Dict[str, jnp.ndarray], params: GKParams) -> "GK
             intvp_6 = jnp.asarray(geometry["intvp"], dtype=jnp.float64).reshape(1, -1, 1, 1, 1, 1)
             bn_6 = jnp.reshape(bn, (1, 1, 1, -1, 1, 1))
 
-            # Override Ampere denominator with GKW-matching numerical integral:
+            # Ampere denominator: GKW-matching numerical integral.
+            # GKW uses a shared velocity grid for all species (velocitygrid.f90:197).
             # gamma_num = sum(2*B*intmu*intvp * J0^2 * vpgr^2 * fmaxwl) per species
             # (GKW ampere_dia, linear_terms.f90:3760-3785)
             gamma_num = jnp.sum(
@@ -844,11 +855,13 @@ def linear_precompute(geometry: Dict[str, jnp.ndarray], params: GKParams) -> "GK
         ky_min = jnp.where(nky > 1, ky[1], ky[0])
         kmin2 = ky_min**2 * little_g[:, 0]
         # matdat.F90:1911-1914: under mode_box, fall back to 2π*lxinv = kx_min
-        # when that is smaller than ky_min²·g_yy.
-        ixz = int(jnp.asarray(geometry["ixzero"]).item())
-        if nkx > ixz + 1:
-            kx_min_abs = jnp.abs(kx[ixz + 1])
-            kmin2 = jnp.where(kx_min_abs > _EPS, jnp.minimum(kx_min_abs, kmin2), kmin2)
+        # when that is smaller than ky_min²·g_yy. dynamic-indexed for jit.
+        ixz_arr = jnp.asarray(geometry["ixzero"], dtype=jnp.int32)
+        if nkx > 1:
+            idx = jnp.clip(ixz_arr + 1, 0, nkx - 1)
+            kx_min_abs = jnp.abs(kx[idx])
+            in_range = (ixz_arr + 1 < nkx) & (kx_min_abs > _EPS)
+            kmin2 = jnp.where(in_range, jnp.minimum(kx_min_abs, kmin2), kmin2)
         q_val = jnp.asarray(geometry.get("q", getattr(params, "q", 1.0)), dtype=jnp.float64)
         beta_cfl = jnp.asarray(params.beta, dtype=jnp.float64)
         field_cfl_arg = mir * (beta_cfl + kmin2 * mer)
@@ -964,6 +977,26 @@ def linear_precompute(geometry: Dict[str, jnp.ndarray], params: GKParams) -> "GK
     return GKPre(out)
 
 
+def linear_precompute(geometry: Dict[str, jnp.ndarray], params: GKParams) -> "GKPre":
+    """Precompute static geometry-dependent coefficients and Bessel terms.
+    
+    Automatically uses sharded computation if params indicates multi-GPU config.
+    """
+    # Auto-detect and use sharded precompute if multi-GPU config is active
+    n_gpus_sp = int(getattr(params, "n_gpus_sp", 1))
+    n_gpus_vp = int(getattr(params, "n_gpus_vp", 1))
+    n_gpus_mu = int(getattr(params, "n_gpus_mu", 1))
+    if n_gpus_sp * n_gpus_vp * n_gpus_mu > 1:
+        from gyaradax import sharding
+        mesh = sharding.build_mesh(params)
+        if mesh is not None:
+            grid = sharding.grid_shape_from(params, geometry)
+            return sharding.precompute_sharded(geometry, params, mesh, grid)
+    
+    # Single-device path
+    return _linear_precompute_core(geometry, params)
+
+
 def init_f(
     geometry: Dict[str, jnp.ndarray],
     finit: str = "cosine2",
@@ -973,6 +1006,9 @@ def init_f(
     norm_eps: float = 1.0e-14,
     n_species: int = 1,
     seed: int = 42,
+    *,
+    params=None,
+    out_sharding=None,
 ) -> jnp.ndarray:
     """Initialize the distribution function.
 
@@ -984,7 +1020,39 @@ def init_f(
         noise:   uniform random on [-1, 1] (real + imag)
         gnoise:  gaussian random (Box-Muller transform)
         zonal:   Rosenbluth-Hinton test — only ky=0, kx=±1 with Maxwellian weight
+    
+    Args:
+        geometry: Geometry dictionary
+        finit: Initialization mode
+        amp_init_real: Initial amplitude (real part)
+        amp_init_imag: Initial amplitude (imaginary part)
+        normalize_per_toroidal_mode: Whether to normalize per toroidal mode
+        norm_eps: Normalization epsilon
+        n_species: Number of species
+        seed: Random seed for noise modes
+        params: Optional params object. If provided with n_gpus_* > 1, uses sharded init.
+        out_sharding: Optional JAX sharding to apply to output. If None and params
+            indicates multi-GPU, auto-detects and applies sharding.
     """
+    # Auto-detect and use sharded initialization if params indicates multi-GPU
+    # (but don't override explicitly provided out_sharding)
+    if out_sharding is None and params is not None:
+        n_gpus_sp = int(getattr(params, "n_gpus_sp", 1))
+        n_gpus_vp = int(getattr(params, "n_gpus_vp", 1))
+        n_gpus_mu = int(getattr(params, "n_gpus_mu", 1))
+        if n_gpus_sp * n_gpus_vp * n_gpus_mu > 1:
+            from gyaradax import sharding
+            from jax.sharding import NamedSharding, PartitionSpec
+            mesh = sharding.build_mesh(params)
+            if mesh is not None:
+                grid = sharding.grid_shape_from(params, geometry)
+                # Build output sharding spec
+                if n_species > 1:
+                    spec = PartitionSpec(sharding._AXIS_SP, sharding._AXIS_VP, sharding._AXIS_MU, None, None, None)
+                else:
+                    spec = PartitionSpec(sharding._AXIS_VP, sharding._AXIS_MU, None, None, None)
+                out_sharding = NamedSharding(mesh, spec)
+    
     nv, nmu, ns, nkx, nky = (
         len(geometry["intvp"]),
         len(geometry["intmu"]),
@@ -1106,6 +1174,11 @@ def init_f(
 
     if normalize_per_toroidal_mode:
         df, _, _ = normalize_per_ky(df, geometry, GKParams(norm_eps=norm_eps))
+    
+    # Apply output sharding if specified (for multi-GPU)
+    if out_sharding is not None:
+        df = jax.device_put(df, out_sharding)
+    
     return df
 
 
@@ -1259,7 +1332,8 @@ def gkstep_single(
 
     def _rhs(dg):
         phi_local, apar_local, bpar_local = _compute_fields(dg, geometry, params, pre)
-        # kinetic terms act on f, not g (g2f applied before linear rhs)
+        # GKW converts g→f before linear terms (exp_integration.F90:802-814: fdis_tmp = f).
+        # All linear terms (streaming, drift, trapping) act on f, not g.
         df_for_rhs = g_to_f(dg, apar_local, params, pre) if apar_local is not None else dg
         rhs = ops.linear_rhs(
             df_for_rhs, phi_local, geometry, params, pre, apar=apar_local, bpar=bpar_local

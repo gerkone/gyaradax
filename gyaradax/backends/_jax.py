@@ -244,6 +244,100 @@ class JAXOps(SolverOps):
         else:
             raise ValueError(f"nonlinear_term_iii: expected df with ndim 5 or 6, got {df.ndim}")
 
+    def _linear_rhs_terms(
+        self,
+        df: jnp.ndarray,
+        phi: jnp.ndarray,
+        params: GKParams,
+        pre: GKPre,
+        apar: jnp.ndarray = None,
+        bpar: jnp.ndarray = None,
+    ) -> dict:
+        """Return each linear-RHS term as a dict entry.
+
+        Implements Terms I, II, IV, V, VII, VIII, X, XI + dissipation + collisions.
+        The total RHS is the sum of all values in the returned dict.
+
+        chi = J0*phi - 2*vR*vpar*J0*apar + (2*mu*T/Z)*J1hat*bpar
+        Drive terms V, VIII use chi/phi; Term VII uses gyro_phi only.
+
+        Term I (streaming) and parallel dissipation share a fused 9-point stencil
+        ('s_total_upar') — exposed together in the dict as 'I_par_streaming_plus_diss'.
+        """
+        gyro_phi = pre["bessel"] * phi[None, None, :, :, :]
+
+        gyro_chi = gyro_phi
+        if apar is not None and "apar_chi_factor" in pre:
+            apar_b = apar[None, None, :, :, :]
+            gyro_chi = gyro_chi + pre["apar_chi_factor"] * apar_b
+        if bpar is not None and "bpar_chi_factor" in pre:
+            bpar_b = bpar[None, None, :, :, :]
+            gyro_chi = gyro_chi + pre["bpar_chi_factor"] * bpar_b
+
+        # parallel stencil (fused: streaming + parallel dissipation, plus Landau)
+        term_I_par, term_VII_landau = self._apply_parallel_dual(
+            df, gyro_phi, pre["s_total_upar"], pre["s_total_t7"]
+        )
+
+        # vpar stencil (trapping + vpar dissipation, both 5-point central)
+        out_d1, out_d4 = self._apply_vpar_dual(df, stencils.VPAR_D1, stencils.VPAR_D4)
+        term_IV_trapping = pre["utrap"] * out_d1 / params.dvp
+        term_IV_vp_diss = params.disp_vp * pre["abs_dum2_vp"] * out_d4 / params.dvp
+
+        # drift coupling factor
+        kdotvd = pre["drift_x"] * pre["kx_b"] + pre["drift_y"] * pre["ky_b"]
+
+        # Term II: drift acting on perturbed distribution (β-independent)
+        term_II_drift_df = -1j * kdotvd * df
+
+        # Term V: gradient drive on chi (= J0·(phi − 2·vthrat·vpar·Apar + bpar correction))
+        term_V_drive_chi = (
+            1j * params.drive_scale * pre["dmaxwel_fm_ek"] * gyro_chi
+        )
+
+        # Term VIII: curvature drift × F_M × phi (NOT chi — verified vs GKW iphi_ga)
+        term_VIII_curv_phi = (
+            -1j * params.drive_scale * pre["signz0"] * kdotvd
+            * (pre["fmaxwl"] / jnp.maximum(pre["tmp0"], 1e-15)) * gyro_phi
+        )
+
+        # Term X: parallel derivative of gyro-averaged bpar (B_par compression)
+        term_X_bpar_par = jnp.zeros_like(df)
+        if bpar is not None and "bpar_chi_factor" in pre:
+            gyro_bpar_scaled = pre["bpar_chi_factor"] * bpar_b
+            term_X_bpar_par = self._apply_parallel(gyro_bpar_scaled, pre["s_total_t7"])
+
+        # perpendicular hyperdissipation (kx, ky high-k damping)
+        term_hyper_diss = pre["hyper"] * df
+
+        # collision operator (Fokker-Planck, acts on f)
+        term_collisions = jnp.zeros_like(df)
+        if params.collisions and "coll_stencil" in pre:
+            term_collisions = collision_rhs(df, pre["coll_stencil"])
+            if (
+                params.coll_mom_conservation or params.coll_ene_conservation
+            ) and "coll_mom_factor" in pre:
+                term_collisions = term_collisions + conservation_correction(
+                    term_collisions,
+                    pre["coll_mom_factor"],
+                    pre["coll_ene_factor"],
+                    pre["coll_vpar_weight"],
+                    pre["coll_vsq_weight"],
+                )
+
+        return {
+            "I_par_streaming_plus_diss": term_I_par,
+            "II_drift_df": term_II_drift_df,
+            "IV_trapping": term_IV_trapping,
+            "IV_vp_diss": term_IV_vp_diss,
+            "V_drive_chi": term_V_drive_chi,
+            "VII_landau_phi": term_VII_landau,
+            "VIII_curv_phi": term_VIII_curv_phi,
+            "X_bpar_par": term_X_bpar_par,
+            "hyper_diss": term_hyper_diss,
+            "collisions": term_collisions,
+        }
+
     def _linear_rhs_core(
         self,
         df: jnp.ndarray,
@@ -253,76 +347,18 @@ class JAXOps(SolverOps):
         apar: jnp.ndarray = None,
         bpar: jnp.ndarray = None,
     ) -> jnp.ndarray:
-        """Fused linear RHS for single species (5D df).
+        """Total linear RHS = sum of all linear terms.
 
-        Implements Terms I, II, IV, V, VII, VIII + dissipation.
-        When apar/bpar are provided, the generalized potential chi is:
-        chi = J0*phi - 2*vR*vpar*J0*apar + (2*mu*T/Z)*J1hat*bpar
-        This affects drive Terms V, VIII and parallel field Term VII.
-        Term X adds a parallel derivative of the B_par chi correction.
+        Convenience wrapper around _linear_rhs_terms; numerically identical to
+        the fused expression. JAX/XLA will fuse term computations under JIT.
         """
-        gyro_phi = pre["bessel"] * phi[None, None, :, :, :]
-
-        # chi = J0*phi + apar/bpar corrections (drives V, VIII, XI only)
-        # term VII uses gyro_phi only (apar coupling is rhostar-dependent)
-        gyro_chi = gyro_phi
-        if apar is not None and "apar_chi_factor" in pre:
-            apar_b = apar[None, None, :, :, :]
-            gyro_chi = gyro_chi + pre["apar_chi_factor"] * apar_b
-        if bpar is not None and "bpar_chi_factor" in pre:
-            bpar_b = bpar[None, None, :, :, :]
-            gyro_chi = gyro_chi + pre["bpar_chi_factor"] * bpar_b
-
-        # term I (streaming) + term VII (parallel field gradient on gyro_phi)
-        term_par, term_vii = self._apply_parallel_dual(
-            df, gyro_phi, pre["s_total_upar"], pre["s_total_t7"]
-        )
-
-        # term X: parallel derivative of gyro-averaged bpar
-        term_x = jnp.zeros_like(df)
-        if bpar is not None and "bpar_chi_factor" in pre:
-            gyro_bpar_scaled = pre["bpar_chi_factor"] * bpar_b
-            term_x = self._apply_parallel(gyro_bpar_scaled, pre["s_total_t7"])
-
-        out_d1, out_d4 = self._apply_vpar_dual(df, stencils.VPAR_D1, stencils.VPAR_D4)
-        term_iv = pre["utrap"] * out_d1 / params.dvp
-        term_vp_diss = params.disp_vp * pre["abs_dum2_vp"] * out_d4 / params.dvp
-
-        kdotvd = pre["drift_x"] * pre["kx_b"] + pre["drift_y"] * pre["ky_b"]
-
-        # optional collision contribution (Fokker-Planck, acts on f not g)
-        term_coll = jnp.zeros_like(df)
-        if params.collisions and "coll_stencil" in pre:
-            term_coll = collision_rhs(df, pre["coll_stencil"])
-            if (
-                params.coll_mom_conservation or params.coll_ene_conservation
-            ) and "coll_mom_factor" in pre:
-                term_coll = term_coll + conservation_correction(
-                    term_coll,
-                    pre["coll_mom_factor"],
-                    pre["coll_ene_factor"],
-                    pre["coll_vpar_weight"],
-                    pre["coll_vsq_weight"],
-                )
-
-        # terms V + VIII + XI use gyro_chi
-        return (
-            term_par
-            + term_iv
-            + term_vp_diss
-            - 1j * kdotvd * df
-            + pre["hyper"] * df
-            + 1j
-            * params.drive_scale
-            * (
-                pre["dmaxwel_fm_ek"]
-                - pre["signz0"] * kdotvd * (pre["fmaxwl"] / jnp.maximum(pre["tmp0"], 1e-15))
-            )
-            * gyro_chi
-            + term_vii
-            + term_x
-            + term_coll
-        )
+        terms = self._linear_rhs_terms(df, phi, params, pre, apar=apar, bpar=bpar)
+        total = terms["I_par_streaming_plus_diss"]
+        for k, v in terms.items():
+            if k == "I_par_streaming_plus_diss":
+                continue
+            total = total + v
+        return total
 
     def linear_rhs(
         self,

@@ -157,3 +157,52 @@ def test_equivalence_4gpu_vpmu():
 
     assert rel_l2(np.asarray(df_ref), np.asarray(df_sh)) < 1e-8
     assert rel_l2(np.asarray(phi_ref), np.asarray(phi_sh)) < 1e-8
+
+
+CONFIG_KINETIC = os.path.join(
+    os.path.dirname(__file__), "..", "..", "configs", "nl_em_apar.yaml"
+)
+
+
+def _build_kinetic(params_overrides=None):
+    cfg = load_config(CONFIG_KINETIC)
+    overrides = {"non_linear": True, "adaptive_dt": False, "dt": 0.002}
+    if params_overrides:
+        overrides.update(params_overrides)
+    params = gkparams_from_config(cfg, **overrides)
+    grid = cfg.grid
+    geometry = compute_geometry(
+        q=params.q, shat=params.shat, eps=params.eps,
+        ns=grid.ns, nkx=grid.nkx, nky=grid.nky, nvpar=grid.nvpar, nmu=grid.nmu,
+        vpar_max=grid.vpar_max, nperiod=grid.nperiod, krhomax=grid.krhomax,
+        ikxspace=grid.ikxspace, adiabatic_electrons=False,
+        geom_type=getattr(cfg.geometry, "geometry_model", "circ"),
+        signB=params.signB,
+    )
+    for k in ("mas", "signz", "tmp", "de", "vthrat"):
+        geometry[k] = jnp.atleast_1d(jnp.asarray(getattr(params, k), dtype=jnp.float64))
+    pre = linear_precompute(geometry, params)
+    df, geometry, state = gk_init(geometry, params, n_species=2)
+    return df, geometry, params, state, pre
+
+
+@pytest.mark.skipif(len(jax.devices()) < 2, reason="requires ≥2 GPUs")
+def test_equivalence_2gpu_sp_kinetic():
+    """50-step kinetic with (sp=2) vs single-device. Trivial species split."""
+    df0, geom0, p0, st0, pre0 = _build_kinetic()
+    df_ref, phi_ref, flx_ref, _ = gk_run(df0, geom0, p0, st0, n_steps=50, pre=pre0)
+
+    df1, geom1, p1, st1, pre1 = _build_kinetic({"n_gpus_sp": 2})
+    mesh = sharding.build_mesh(p1)
+    assert mesh is not None
+    grid = sharding.grid_shape_from(p1, geom1)
+    df1 = sharding.shard_df(df1, mesh, grid)
+    pre1 = sharding.shard_pre(pre1, mesh, grid)
+    df_sh, phi_sh, flx_sh, _ = gk_run(df1, geom1, p1, st1, n_steps=50, pre=pre1)
+
+    def rel_l2(a, b):
+        return float(np.linalg.norm(a - b) / max(np.linalg.norm(a), 1e-30))
+
+    assert rel_l2(np.asarray(df_ref), np.asarray(df_sh)) < 1e-8, \
+        f"df rel L2 = {rel_l2(np.asarray(df_ref), np.asarray(df_sh)):.3e}"
+    assert rel_l2(np.asarray(phi_ref), np.asarray(phi_sh)) < 1e-8

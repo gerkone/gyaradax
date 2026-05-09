@@ -1192,6 +1192,69 @@ grouped by severity/impact.
 
 ### 11.2 electromagnetic
 
+- **Term VIII potential fix (2026-05-08).** GKW's `vd_grad_phi_fm`
+  (Term VIII, curvature drift × F_M) acts on `phi` only, not on
+  `chi = phi − 2·vthrat·vpar·Apar`. The GKW source has
+  `elem%itloc = iphi_ga` with no second `iapar_ga` element for this
+  term (linear_terms.f90 lines 2572–2611). Gyaradax incorrectly
+  used `gyro_chi` for both Term V and Term VIII. After the fix
+  (Term V → chi, Term VIII → phi):
+  - ES γ = 0.611 vs GKW 0.589 (+4%, acceptable — needs ~12k steps to converge)
+  - EM γ = 0.939 vs GKW 1.132 (−17%, explained by shared grid below)
+  - EM−ES Δγ = 0.328 vs GKW 0.543 — KBM NOW ACTIVATES at physical mass ✓
+  All 25 EM unit tests and all 67 non-sharding tests pass after the fix.
+
+- **KBM at physical mass ratio: partial, limited by shared velocity grid.**
+  The kinetic-electron Alfvénic (KBM) mode at β=0.01 Waltz benchmark
+  partially activates after the Term VIII fix.
+  GKW gives γ_EM = 1.132 (above the ES γ_ES = 0.589), while
+  gyaradax gives γ_EM ≈ 0.939 (−17% vs GKW, EM−ES Δγ = 0.328 vs 0.543).
+
+  **Root cause of the remaining 17% gap** — shared ion velocity grid.
+  All species evolve on the same vpgr ∈ [−3, 3] v_thi grid. For electrons
+  with v_the = vthrat_e × v_thi ≈ 60.6 v_thi this covers only
+  [−0.05, 0.05] v_the — the electron Alfvénic resonance at
+  v_par ≈ 1 v_the is outside the grid. Two mutually exclusive
+  requirements cannot both be satisfied on the truncated grid:
+
+  1. ∫ F_M^e d³v ≈ n_e (quasineutrality → Γ₀_e ≈ 1 → correct Poisson)
+  2. ∫ v_par² F_M^e d³v ≈ v_the²/2 (Ampere current → KBM drive)
+
+  With the current effective Maxwellian (t_rat = T_e/T_i ≈ 1.2),
+  requirement 1 is met but the electron Ampere current is ~3000×
+  too small compared to the physical value.
+  The captured 60% of the KBM enhancement (Δγ = 0.328 vs 0.543)
+  comes from the ion electromagnetic drive (chi coupling in Term V).
+
+  **Fix**: per-species velocity grids, where each species s gets
+  its own vpgr_s ∈ [−3, 3] v_ths with integration weights
+  intvp_s = vthrat_s × intvp_base, intmu_s = vthrat_s² × intmu_base
+  and Maxwellian F_Ms = exp(−vp²−2Bμ)/(π^{3/2} vthrat_s³).
+  This is how GKW handles multi-species kinetic electrons.
+  Status: not yet implemented (major architectural change).
+
+  **Convergence note**: both ES and EM growth rates require ~12000 steps
+  (t ≈ 12) to converge at these parameters. Measurements at ≤4000 steps
+  give transient values (ES: 0.51, EM: 0.94) that underestimate the true
+  asymptotic rates. Use block=1000 and ≥15k total steps for diagnostics.
+
+  **Streaming-on-g hypothesis (2026-05-08, ruled out).** GKW's
+  `exp_integration.F90:802-814` explicitly converts g→f before
+  computing linear terms (`fdis_tmp = g + matg2f * Apar = f`).
+  All GKW terms act on f, not g. Gyaradax correctly converts g→f
+  before `linear_rhs`. The 17% gap is NOT from streaming-on-g;
+  the shared velocity grid explanation stands.
+
+  **Alfvén wave test**: direct ω ∝ 1/√β measurement in flux-tube
+  s-alpha geometry is not feasible — toroidal curvature drives
+  ITG-like modes even at rlt=rln=0 (Term VIII depends on kdotvd
+  which is non-zero in curved geometry). The `em_analytical.ipynb`
+  notebook uses a γ vs β sweep instead.
+
+  **What works**: kinetic ES (+4% vs GKW with 15k steps),
+  NL EM at β=0.001 (ITG-dominated, small EM corrections),
+  linear EM with m_i/m_e=100 (full KBM, Δγ ≈ +0.46).
+
 - **apar-only NL flux (β=0.001, CBC)** — matches GKW within 4% on
   both species' eflux after the FFT-norm fix (2026-04-18). Previously
   reported "1.5× over" was a CFL artefact. φ(ky,kx) Pearson = 1.00/0.97.
