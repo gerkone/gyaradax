@@ -65,6 +65,8 @@ class GKParams:
     drive_scale: float = 1.0
     norm_eps: float = 1.0e-14
     non_linear: bool = False
+    # when True, skip the per-ky mode-amplitude renormalization in gksolve
+    disable_per_ky_norm: bool = False
     finit: str = "cosine2"
     amp_init: float = 1.0e-4
     adiabatic_electrons: bool = True
@@ -140,6 +142,7 @@ class GKParams:
         "finit",
         "adiabatic_electrons",
         "non_linear",
+        "disable_per_ky_norm",
         "adaptive_dt",
         "mixed_precision",
         "backend",
