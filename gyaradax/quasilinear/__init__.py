@@ -12,6 +12,8 @@ Public API:
   fit_cn                           scalar amplitude calibration
   fit_cn_parametric                affine C_n(ŝ, q, R/L_T, R/L_n) calibration
   ParametricCn                     fitted parametric C_n with .predict(X, F)
+  fit_cn_polynomial                polynomial C_n(features) calibration (degree tunable)
+  PolynomialCn                     fitted polynomial C_n with .predict(X, F)
 """
 
 from .saturation import (
@@ -35,9 +37,19 @@ from .calibration import (
     fit_cn,
     fit_cn_log,
     fit_cn_parametric,
+    fit_cn_polynomial,
     ParametricCn,
+    PolynomialCn,
     r2_score,
     DEFAULT_PARAM_FEATURES,
+)
+from .calibration_advanced import (
+    fit_cn_ridge_polynomial,
+    fit_cn_gbm,
+    fit_cn_gp_log,
+    RidgePolynomialCn,
+    GBMCn,
+    GPLogCn,
 )
 from .linear_pipeline import linear_from_fds, linear_run, harvest, root_mse, root_mse_log
 
@@ -58,7 +70,15 @@ __all__ = [
     "fit_cn",
     "fit_cn_log",
     "fit_cn_parametric",
+    "fit_cn_polynomial",
+    "fit_cn_ridge_polynomial",
+    "fit_cn_gbm",
+    "fit_cn_gp_log",
     "ParametricCn",
+    "PolynomialCn",
+    "RidgePolynomialCn",
+    "GBMCn",
+    "GPLogCn",
     "r2_score",
     "DEFAULT_PARAM_FEATURES",
     "linear_from_fds",

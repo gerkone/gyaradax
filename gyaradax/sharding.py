@@ -13,15 +13,15 @@ Public API
 - ``is_active(mesh)`` — helper for single-device early return.
 
 Single-device path: all helpers are idempotent no-ops when
-``n_gpus_sp * n_gpus_vp * n_gpus_mu == 1``.
+``n_gpus_sp * n_gpus_vp * n_gpus_mu * n_gpus_s == 1``.
 
-Partition convention (velocity-space sharding on the adiabatic path):
+Partition convention (velocity-space + s sharding):
 
-    (nvpar,  nmu,  ns,  nkx,  nky)            5D: ("vp", "mu", None, None, None)
-    (nsp,   nvpar, nmu, ns,  nkx,  nky)      6D: ("sp", "vp", "mu", None, None, None)
-    (ns,    nkx,   nky)                       field: replicated
-    (9,     nvpar, nmu, ns)                   coll 5D: (None, "vp", "mu", None)
-    (nsp,   9,     nvpar, nmu, ns)            coll 6D: (None, None, "vp", "mu", None)
+    (nvpar,  nmu,  ns,  nkx,  nky)            5D: ("vp", "mu", "s", None, None)
+    (nsp,   nvpar, nmu, ns,  nkx,  nky)      6D: ("sp", "vp", "mu", "s", None, None)
+    (ns,    nkx,   nky)                       field: ("s", None, None)
+    (9,     nvpar, nmu, ns)                   coll 5D: (None, "vp", "mu", "s")
+    (nsp,   9,     nvpar, nmu, ns)            coll 6D: (None, None, "vp", "mu", "s")
 
 Arrays whose shape doesn't match any of the above stay replicated.
 """
@@ -46,6 +46,7 @@ class GridShape(NamedTuple):
 _AXIS_SP = "sp"
 _AXIS_VP = "vp"
 _AXIS_MU = "mu"
+_AXIS_S = "s"
 
 
 def get_device_count() -> int:
@@ -62,18 +63,19 @@ def build_mesh(params) -> Optional[Mesh]:
     p_sp = int(getattr(params, "n_gpus_sp", 1))
     p_vp = int(getattr(params, "n_gpus_vp", 1))
     p_mu = int(getattr(params, "n_gpus_mu", 1))
-    total = p_sp * p_vp * p_mu
+    p_s = int(getattr(params, "n_gpus_s", 1))
+    total = p_sp * p_vp * p_mu * p_s
     if total == 1:
         return None
     devices = jax.devices()
     if total > len(devices):
         raise RuntimeError(
-            f"requested {total} devices ({p_sp}×{p_vp}×{p_mu}) but "
+            f"requested {total} devices ({p_sp}×{p_vp}×{p_mu}×{p_s}) but "
             f"only {len(devices)} are visible to JAX"
         )
     import numpy as np
-    dev_np = np.asarray(devices[:total], dtype=object).reshape((p_sp, p_vp, p_mu))
-    return Mesh(dev_np, (_AXIS_SP, _AXIS_VP, _AXIS_MU))
+    dev_np = np.asarray(devices[:total], dtype=object).reshape((p_sp, p_vp, p_mu, p_s))
+    return Mesh(dev_np, (_AXIS_SP, _AXIS_VP, _AXIS_MU, _AXIS_S))
 
 
 def is_active(mesh: Optional[Mesh]) -> bool:
@@ -90,25 +92,34 @@ def _spec_for_shape(shape, grid: GridShape) -> PartitionSpec:
     """
     s = tuple(shape)
     if s == (grid.nvpar, grid.nmu, grid.ns, grid.nkx, grid.nky):
-        return PartitionSpec(_AXIS_VP, _AXIS_MU, None, None, None)
+        return PartitionSpec(_AXIS_VP, _AXIS_MU, _AXIS_S, None, None)
     if s == (grid.nsp, grid.nvpar, grid.nmu, grid.ns, grid.nkx, grid.nky):
-        return PartitionSpec(_AXIS_SP, _AXIS_VP, _AXIS_MU, None, None, None)
+        return PartitionSpec(_AXIS_SP, _AXIS_VP, _AXIS_MU, _AXIS_S, None, None)
     if len(s) >= 3 and s[:3] == (grid.ns, grid.nkx, grid.nky):
-        return PartitionSpec()
+        # field arrays (ns, nkx, nky, ...): shard s axis only
+        rest = (None,) * (len(s) - 3)
+        return PartitionSpec(_AXIS_S, None, None, *rest)
     if len(s) == 4 and s == (9, grid.nvpar, grid.nmu, grid.ns):
-        return PartitionSpec(None, _AXIS_VP, _AXIS_MU, None)
+        return PartitionSpec(None, _AXIS_VP, _AXIS_MU, _AXIS_S)
     if len(s) == 5 and s == (grid.nsp, 9, grid.nvpar, grid.nmu, grid.ns):
-        return PartitionSpec(None, None, _AXIS_VP, _AXIS_MU, None)
+        return PartitionSpec(None, None, _AXIS_VP, _AXIS_MU, _AXIS_S)
     # fused-stencil arrays from _fuse_stencils: 6D adiabatic (9, vp, mu, s, kx, ky)
     # and 7D kinetic (9, sp, vp, mu, s, kx, ky), with broadcast singletons allowed
     # on mu/kx/ky (mu becomes 1 after jnp.sign(upar)).
     if len(s) == 6 and s[0] == 9 and s[1] == grid.nvpar:
-        return PartitionSpec(None, _AXIS_VP, _AXIS_MU if s[2] == grid.nmu else None, None, None, None)
+        return PartitionSpec(
+            None,
+            _AXIS_VP,
+            _AXIS_MU if s[2] == grid.nmu else None,
+            _AXIS_S if s[3] == grid.ns else None,
+            None, None,
+        )
     if len(s) == 7 and s[0] == 9 and s[1] == grid.nsp and s[2] == grid.nvpar:
         return PartitionSpec(
             None, _AXIS_SP, _AXIS_VP,
             _AXIS_MU if s[3] == grid.nmu else None,
-            None, None, None,
+            _AXIS_S if s[4] == grid.ns else None,
+            None, None,
         )
     # velocity-broadcast pre arrays produced by _compute_species_coeffs often
     # have the full 5D shape; handled above. Handle collapsed velocity shapes
@@ -207,16 +218,30 @@ def precompute_sharded(geometry, params, mesh: Optional[Mesh], grid: GridShape):
             geom_rep[k] = _replicate(v)
     params_rep = jax.tree_util.tree_map(_replicate, params)
 
-    # Return pre._items (plain dict) so the jit output pytree is a clean
-    # dict/array structure — GKPre's custom flatten routes non-array leaves
-    # into aux, which trips up tree_map(_leaf_sharding, ...).
-    # Use _linear_precompute_core to avoid auto-sharding recursion.
-    def _wrapped(geom, p):
-        from gyaradax.solver import _linear_precompute_core
-        pre = _linear_precompute_core({**geom, **int_scalars}, p)
-        return pre._items
+    # Split GKPre into (array leaves, aux). Aux fields (nl_m*, ixzero, iyzero,
+    # nsp) MUST stay as concrete Python values — under jax.grad(jit(...)) any
+    # Python int returned from the inner jit gets reified into a traced int
+    # array, which then breaks pack_half_spectrum's shape allocation.
+    #
+    # Strategy: do one eager run of _linear_precompute_core (cheap; metadata
+    # only depends on grid sizes + geometry, not on traced AD inputs) to grab
+    # the aux. Then jit only the array leaves with sharding, and reassemble
+    # GKPre outside the jit so aux flows through tree_unflatten's aux slot.
+    from gyaradax.solver import _linear_precompute_core
+    from gyaradax.types import GKPre
 
-    shapes = jax.eval_shape(_wrapped, geom_rep, params_rep)
+    geom_full = {**geometry, **int_scalars}  # use concrete (non-replicated) geom
+    pre_eager = _linear_precompute_core(geom_full, params)
+    _eager_leaves, eager_meta = pre_eager.tree_flatten()
+    eager_aux = eager_meta["aux"]
+    leaf_keys = eager_meta["leaf_keys"]
+
+    def _wrapped_leaves(geom, p):
+        pre = _linear_precompute_core({**geom, **int_scalars}, p)
+        leaves, _meta = pre.tree_flatten()
+        return leaves
+
+    shapes = jax.eval_shape(_wrapped_leaves, geom_rep, params_rep)
 
     def _leaf_sharding(leaf):
         if hasattr(leaf, "shape") and hasattr(leaf, "dtype") and len(leaf.shape) > 0:
@@ -224,10 +249,11 @@ def precompute_sharded(geometry, params, mesh: Optional[Mesh], grid: GridShape):
         return None
 
     out_shardings = jax.tree_util.tree_map(_leaf_sharding, shapes)
-    result_dict = jax.jit(_wrapped, out_shardings=out_shardings)(geom_rep, params_rep)
+    sharded_leaves = jax.jit(_wrapped_leaves, out_shardings=out_shardings)(geom_rep, params_rep)
 
-    from gyaradax.types import GKPre
-    return GKPre(result_dict)
+    # reassemble through GKPre.tree_unflatten so aux stays as concrete Python.
+    meta = {"leaf_keys": leaf_keys, "aux": eager_aux}
+    return GKPre.tree_unflatten(meta, sharded_leaves)
 
 
 def grid_shape_from(params, geometry) -> GridShape:
@@ -270,9 +296,9 @@ def init_f_sharded(
     
     # Build output sharding from mesh and grid
     if n_species > 1:
-        spec = PartitionSpec(_AXIS_SP, _AXIS_VP, _AXIS_MU, None, None, None)
+        spec = PartitionSpec(_AXIS_SP, _AXIS_VP, _AXIS_MU, _AXIS_S, None, None)
     else:
-        spec = PartitionSpec(_AXIS_VP, _AXIS_MU, None, None, None)
+        spec = PartitionSpec(_AXIS_VP, _AXIS_MU, _AXIS_S, None, None)
     out_sharding = NamedSharding(mesh, spec)
     
     # Delegate to unified init_f

@@ -986,7 +986,8 @@ def linear_precompute(geometry: Dict[str, jnp.ndarray], params: GKParams) -> "GK
     n_gpus_sp = int(getattr(params, "n_gpus_sp", 1))
     n_gpus_vp = int(getattr(params, "n_gpus_vp", 1))
     n_gpus_mu = int(getattr(params, "n_gpus_mu", 1))
-    if n_gpus_sp * n_gpus_vp * n_gpus_mu > 1:
+    n_gpus_s = int(getattr(params, "n_gpus_s", 1))
+    if n_gpus_sp * n_gpus_vp * n_gpus_mu * n_gpus_s > 1:
         from gyaradax import sharding
         mesh = sharding.build_mesh(params)
         if mesh is not None:
@@ -1040,7 +1041,8 @@ def init_f(
         n_gpus_sp = int(getattr(params, "n_gpus_sp", 1))
         n_gpus_vp = int(getattr(params, "n_gpus_vp", 1))
         n_gpus_mu = int(getattr(params, "n_gpus_mu", 1))
-        if n_gpus_sp * n_gpus_vp * n_gpus_mu > 1:
+        n_gpus_s = int(getattr(params, "n_gpus_s", 1))
+        if n_gpus_sp * n_gpus_vp * n_gpus_mu * n_gpus_s > 1:
             from gyaradax import sharding
             from jax.sharding import NamedSharding, PartitionSpec
             mesh = sharding.build_mesh(params)
@@ -1048,9 +1050,9 @@ def init_f(
                 grid = sharding.grid_shape_from(params, geometry)
                 # Build output sharding spec
                 if n_species > 1:
-                    spec = PartitionSpec(sharding._AXIS_SP, sharding._AXIS_VP, sharding._AXIS_MU, None, None, None)
+                    spec = PartitionSpec(sharding._AXIS_SP, sharding._AXIS_VP, sharding._AXIS_MU, sharding._AXIS_S, None, None)
                 else:
-                    spec = PartitionSpec(sharding._AXIS_VP, sharding._AXIS_MU, None, None, None)
+                    spec = PartitionSpec(sharding._AXIS_VP, sharding._AXIS_MU, sharding._AXIS_S, None, None)
                 out_sharding = NamedSharding(mesh, spec)
     
     nv, nmu, ns, nkx, nky = (
