@@ -138,7 +138,8 @@ def _circular_geometry(theta, q, shat, eps, signB=1.0, signJ=1.0, geom_type="cir
         "bups": bups,
         "dpfdpsi": dpfdpsi,
         "metric": metric,
-        "dzetadeps": dzde,
+        # s-alpha reuses the metric off-diagonal (geom.f90:1375-1392), matches OLD
+        "dzetadeps": metric[:, 0, 1] if geom_type == "s-alpha" else dzde,
         "dBdpsi": dBdpsi,
         "dBds": dBds,
         "dRdpsi": dRdpsi,

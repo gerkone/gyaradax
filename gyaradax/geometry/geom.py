@@ -4,6 +4,20 @@ Holds the parallel / velocity / wavevector grids, the open-boundary
 topology maps, the E/D/H/I/J/K tensor builder, and the dispatchers that
 pick the geometry model (circ, s-alpha, miller) and assemble the dict
 consumed by the solver.
+
+The build is split in two stages so the continuous-geometry path is
+jit/AD-compatible:
+
+- ``build_topology(nkx, nky, ikxspace, ns)`` is pure python/numpy and
+  returns a frozen pytree of int32 arrays (mode labels, connectivity,
+  pos-class, shift maps). Topology depends only on grid shape, not on
+  (q, shat, eps, miller_params), so it is safe to close over inside
+  ``@jax.jit``.
+- ``compute_continuous_geometry(...)`` is pure JAX and differentiable
+  w.r.t. ``q, shat, eps`` and the Miller shape parameters.
+
+``compute_geometry(...)`` is a thin wrapper that calls both stages and
+merges the dicts.
 """
 
 import os
@@ -119,12 +133,17 @@ def _build_wavevector_grids(
     krho_norm = jnp.arange(nky) * dky / kthnorm
 
     half = (nkx - 1) // 2
-    if half > 0 and abs(shat) > 1e-10 and eps > 1e-10:
-        kxspace = abs(q * shat * krho_norm[1] / (eps * ikxspace))
-    elif half > 0:
-        kxspace = kxmax / half
+    # static (python) fallbacks; eps/shat-safe branch is traced
+    if half == 0:
+        kxspace = jnp.asarray(0.0)
     else:
-        kxspace = 0.0
+        # eps tiny safe via where (kxmax / half is the static fallback)
+        # but in practice the shear branch is the one TORAX uses (eps>0).
+        eps_safe = jnp.where(jnp.abs(eps) > 1e-30, eps, 1.0)
+        shat_safe = jnp.where(jnp.abs(shat) > 1e-30, shat, 1.0)
+        kxspace_shear = jnp.abs(q * shat_safe * krho_norm[1] / (eps_safe * ikxspace))
+        use_shear = (jnp.abs(shat) > 1e-10) & (jnp.abs(eps) > 1e-10)
+        kxspace = jnp.where(use_shear, kxspace_shear, kxmax / half)
 
     kxrh = jnp.arange(-half, half + 1) * kxspace
     return kxrh, jnp.arange(nky) * dky
@@ -274,13 +293,54 @@ def _build_parallel_shift_maps(ixplus, ixminus, iyzero, ns, max_shift=4):
     return s_shift, kx_shift, valid
 
 
-# ─── public entry points ──────────────────────────────────────────────────
+# ─── stage 1: topology (pure python/numpy; built once, jit-safe) ─────────
 
 
-def compute_geometry(
-    q: float,
-    shat: float,
-    eps: float,
+def build_topology(nkx, nky, ikxspace, ns, max_shift=4):
+    """Build the discrete-topology pytree for a (nkx, nky, ikxspace, ns) grid.
+
+    Topology depends only on grid shape, not on (q, shat, eps, miller). The
+    centered kx grid puts zero at index (nkx-1)//2; the ky grid starts at
+    zero, so ixzero/iyzero are determined by shape alone.
+
+    Returns a dict of jnp.int32/bool/int8 arrays plus concrete python ints.
+    Safe to close over inside ``@jax.jit``.
+    """
+    half = (nkx - 1) // 2
+    # surrogate grids for connectivity: zero positions are all that matters
+    kxrh_surrogate = np.arange(-half, half + 1, dtype=np.float64)
+    krho_surrogate = np.arange(nky, dtype=np.float64)
+    nkx_actual = kxrh_surrogate.shape[0]
+
+    ml = _build_mode_label(nkx_actual, nky, ikxspace)
+    ml_kxky, ixp, ixm, ixz, iyz, iyz_bc = _build_mode_connectivity(
+        ml, kxrh_surrogate, krho_surrogate
+    )
+    pos = _build_pos_par_grid_classes(ixp, ixm, ns)
+    ss, ks, vs = _build_parallel_shift_maps(ixp, ixm, iyz_bc, ns, max_shift=max_shift)
+
+    return {
+        "mode_label": _i32(ml_kxky),
+        "ixplus": _i32(ixp),
+        "ixminus": _i32(ixm),
+        "ixzero": _i32(ixz),
+        "iyzero": _i32(iyz),
+        "iyzero_bc": int(iyz_bc),
+        "pos_par_grid_class": jnp.array(pos, dtype=jnp.int8),
+        "s_shift": _i32(ss),
+        "kx_shift": _i32(ks),
+        "valid_shift": jnp.array(vs, dtype=jnp.bool_),
+        "nkx_actual": int(nkx_actual),
+    }
+
+
+# ─── stage 2: continuous geometry (pure JAX; differentiable, jittable) ────
+
+
+def compute_continuous_geometry(
+    q,
+    shat,
+    eps,
     ns: int,
     nkx: int,
     nky: int,
@@ -294,20 +354,14 @@ def compute_geometry(
     signB: float = 1.0,
     Rref: float = 100.0,
     geom_type: str = "circ",
+    topology: Dict[str, Any] = None,
     **miller_params,
 ) -> Dict[str, Any]:
-    """Compute the geometry dict from equilibrium parameters.
+    """Pure-JAX continuous geometry. Safe inside ``@jax.jit``.
 
-    Continuous geometry is JAX (differentiable w.r.t. q, shat, eps and the
-    Miller shape parameters). Discrete topology (mode labels, connectivity)
-    uses numpy.
-
-    geom_type:
-      'circ'    full Lapillonne circular model
-      's-alpha' simplified theta=2*pi*s, B=1/(1+eps*cos(theta))
-      'miller'  Miller parametrisation with elongation/triangularity/
-                squareness (see gyaradax.geometry.miller for the shape
-                parameters, passed through **miller_params).
+    Differentiable w.r.t. ``q, shat, eps`` and Miller shape parameters.
+    ``topology`` is the dict from ``build_topology(...)`` and is treated
+    as a static input (its entries are passed through unchanged).
     """
     assert geom_type in ("circ", "s-alpha", "miller"), f"unknown geom_type: {geom_type}"
 
@@ -336,7 +390,7 @@ def compute_geometry(
         g_zz_mid = (q / (2 * jnp.pi * eps)) ** 2
     elif geom_type == "circ":
         g_zz_mid = (1 / (2 * jnp.pi * (1 + eps))) ** 2 * (1 + (1 - eps**2) * (q / eps) ** 2)
-    else:  # miller
+    else:
         g_zz_mid = cg.get("g_zz_mid", cg["metric"][ns // 2, 1, 1])
     kthnorm = jnp.sqrt(g_zz_mid)
 
@@ -347,15 +401,7 @@ def compute_geometry(
     )
     krho = krho_raw / kthnorm
 
-    kxrh_np = np.asarray(jax.lax.stop_gradient(kxrh))
-    krho_np = np.asarray(jax.lax.stop_gradient(krho))
-    nkx_actual = len(kxrh_np)
-    ml = _build_mode_label(nkx_actual, nky, ikxspace)
-    ml_kxky, ixp, ixm, ixz, iyz, iyz_bc = _build_mode_connectivity(ml, kxrh_np, krho_np)
-    pos = _build_pos_par_grid_classes(ixp, ixm, ns)
-    ss, ks, vs = _build_parallel_shift_maps(ixp, ixm, iyz_bc, ns, max_shift=4)
-
-    return {
+    out = {
         "kthnorm": _f64(kthnorm),
         "shat": _f64(shat),
         "q": _f64(q),
@@ -397,18 +443,64 @@ def compute_geometry(
         "rln": _f64([1.0]),
         "d2X": _f64(1.0),
         "signB": _f64(signB),
-        "mode_label": _i32(ml_kxky),
-        "ixplus": _i32(ixp),
-        "ixminus": _i32(ixm),
-        "ixzero": _i32(ixz),
-        "iyzero": _i32(iyz),
-        "pos_par_grid_class": jnp.array(pos, dtype=jnp.int8),
-        "s_shift": _i32(ss),
-        "kx_shift": _i32(ks),
-        "valid_shift": jnp.array(vs, dtype=jnp.bool_),
         "kxmax": _f64(jnp.max(jnp.abs(kxrh))),
         "kymax": _f64(jnp.max(jnp.abs(krho))),
     }
+    if topology is not None:
+        # merge topology entries (jnp arrays of discrete int/bool data)
+        for k in ("mode_label", "ixplus", "ixminus", "ixzero", "iyzero",
+                  "pos_par_grid_class", "s_shift", "kx_shift", "valid_shift"):
+            out[k] = topology[k]
+    return out
+
+
+# ─── public entry points ──────────────────────────────────────────────────
+
+
+def compute_geometry(
+    q: float,
+    shat: float,
+    eps: float,
+    ns: int,
+    nkx: int,
+    nky: int,
+    nvpar: int,
+    nmu: int,
+    vpar_max: float = 3.0,
+    nperiod: int = 1,
+    kxmax: float = 0.0,
+    krhomax: float = 1.4,
+    ikxspace: int = 5,
+    signB: float = 1.0,
+    Rref: float = 100.0,
+    geom_type: str = "circ",
+    **miller_params,
+) -> Dict[str, Any]:
+    """Compute the geometry dict from equilibrium parameters.
+
+    Thin wrapper: builds the discrete topology once (numpy) and the
+    continuous geometry once (JAX), then merges the dicts.
+
+    Continuous geometry is differentiable w.r.t. ``q, shat, eps`` and the
+    Miller shape parameters.
+
+    geom_type:
+      'circ'    full Lapillonne circular model
+      's-alpha' simplified theta=2*pi*s, B=1/(1+eps*cos(theta))
+      'miller'  Miller parametrisation with elongation/triangularity/
+                squareness (see gyaradax.geometry.miller for the shape
+                parameters, passed through **miller_params).
+    """
+    # kx grid actual length matches what _build_wavevector_grids returns
+    nkx_actual = 2 * ((nkx - 1) // 2) + 1
+    topology = build_topology(nkx_actual, nky, ikxspace, ns)
+    return compute_continuous_geometry(
+        q=q, shat=shat, eps=eps, ns=ns, nkx=nkx, nky=nky,
+        nvpar=nvpar, nmu=nmu, vpar_max=vpar_max, nperiod=nperiod,
+        kxmax=kxmax, krhomax=krhomax, ikxspace=ikxspace,
+        signB=signB, Rref=Rref, geom_type=geom_type,
+        topology=topology, **miller_params,
+    )
 
 
 def compute_geometry_from_input(input_dat_path: str) -> Dict[str, Any]:
@@ -536,10 +628,14 @@ def geometry_from_geom_dat_and_input(input_dat_path: str) -> Dict[str, Any]:
     sgrid = _parallel_grid(ns, nperiod)
 
     nkx_actual = len(kxrh)
-    ml = _build_mode_label(nkx_actual, nky, ikxspace)
-    ml_kxky, ixp, ixm, ixz, iyz, iyz_bc = _build_mode_connectivity(ml, kxrh, krho)
-    pos = _build_pos_par_grid_classes(ixp, ixm, ns)
-    ss, ks, vs = _build_parallel_shift_maps(ixp, ixm, iyz_bc, ns, max_shift=4)
+    topology = build_topology(nkx_actual, nky, ikxspace, ns)
+    ml_kxky = np.asarray(topology["mode_label"])
+    ixp = np.asarray(topology["ixplus"])
+    ixm = np.asarray(topology["ixminus"])
+    pos = np.asarray(topology["pos_par_grid_class"])
+    ss = np.asarray(topology["s_shift"])
+    ks = np.asarray(topology["kx_shift"])
+    vs = np.asarray(topology["valid_shift"])
 
     bn = np.asarray(gd.get("bn", np.ones(ns)))
     ffun = np.asarray(gd.get("F", np.ones(ns)))
@@ -610,8 +706,8 @@ def geometry_from_geom_dat_and_input(input_dat_path: str) -> Dict[str, Any]:
         "mode_label": _i32(ml_kxky),
         "ixplus": _i32(ixp),
         "ixminus": _i32(ixm),
-        "ixzero": _i32(ixz),
-        "iyzero": _i32(iyz),
+        "ixzero": _i32(topology["ixzero"]),
+        "iyzero": _i32(topology["iyzero"]),
         "pos_par_grid_class": jnp.array(pos, dtype=jnp.int8),
         "s_shift": _i32(ss),
         "kx_shift": _i32(ks),
