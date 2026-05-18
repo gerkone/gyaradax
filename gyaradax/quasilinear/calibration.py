@@ -59,6 +59,8 @@ class ParametricCn:
     """Fitted parametric C_n = a + Σ_i β_i · feature_i.
 
     Apply via `.predict(X, F)` → returns X · C_n(F).
+    `.cn_jax(F)` evaluates in JAX so the head can be used inside a jit'd path
+    (e.g. the TORAX plug-in's per-radius call).
     """
 
     coef: np.ndarray
@@ -70,6 +72,15 @@ class ParametricCn:
         out = float(self.coef[0]) * np.ones(F.shape[0])
         for i, ii in enumerate(idx):
             out = out + float(self.coef[i + 1]) * np.asarray(F[:, ii])
+        return out
+
+    def cn_jax(self, F):
+        """JAX-native C_n(F). F is (n, len(FEATURE_NAMES))."""
+        idx = [FEATURE_NAMES.index(nm) for nm in self.feature_names]
+        Fsub = jnp.asarray(F)
+        out = jnp.full((Fsub.shape[0],), float(self.coef[0]))
+        for i, ii in enumerate(idx):
+            out = out + float(self.coef[i + 1]) * Fsub[:, ii]
         return out
 
     def predict(self, X, F):
@@ -138,17 +149,21 @@ class PolynomialCn:
     Higher degree captures cross-terms (e.g. shat * rlt_i) and curvature in
     individual features. With more coefficients the fit is more flexible on
     train, more prone to OOD overshoot — track held-out RMSE.
+
+    `log_space=True` means the polynomial fits log(C_n), so C_n = exp(poly(F))
+    and the head is strictly positive. Useful when Y spans many decades.
     """
 
     coef: np.ndarray
     feature_names: Tuple[str, ...]
     degree: int
+    log_space: bool = False
 
     def _terms(self):
         return _poly_terms(len(self.feature_names), self.degree)
 
     def cn(self, F):
-        """Evaluate poly_d(F) for a feature matrix F (n, len(FEATURE_NAMES))."""
+        """Evaluate C_n(F) = poly_d(F) (or exp(poly_d(F)) if log_space)."""
         idx = [FEATURE_NAMES.index(nm) for nm in self.feature_names]
         Fsub = np.asarray(F)[:, idx]
         terms = self._terms()
@@ -158,7 +173,20 @@ class PolynomialCn:
             for i in t:
                 prod = prod * Fsub[:, i]
             out = out + float(c) * prod
-        return out
+        return np.exp(out) if self.log_space else out
+
+    def cn_jax(self, F):
+        """JAX-native C_n(F). Polynomial-term loop is unrolled at trace time."""
+        idx = [FEATURE_NAMES.index(nm) for nm in self.feature_names]
+        Fsub = jnp.asarray(F)[:, idx]
+        terms = self._terms()
+        out = jnp.zeros(Fsub.shape[0])
+        for c, t in zip(self.coef, terms):
+            prod = jnp.ones(Fsub.shape[0])
+            for i in t:
+                prod = prod * Fsub[:, i]
+            out = out + float(c) * prod
+        return jnp.exp(out) if self.log_space else out
 
     def predict(self, X, F):
         """Y_pred = X · poly_d(F)."""
@@ -172,36 +200,55 @@ class PolynomialCn:
             for i in range(n_show)
         ]
         suffix = f" + {len(terms) - n_show} more" if len(terms) > n_show else ""
-        return f"PolynomialCn(degree={self.degree}, n_coef={len(terms)}: " + " ".join(parts) + suffix + ")"
+        tag = "log " if self.log_space else ""
+        return f"PolynomialCn({tag}degree={self.degree}, n_coef={len(terms)}: " + " ".join(parts) + suffix + ")"
 
 
-def fit_cn_polynomial(X, Y, F, feature_names=DEFAULT_PARAM_FEATURES, degree=2):
-    """Fit polynomial C_n by linear least squares.
-
-    Args:
-        X: (n,) QL prediction (un-normalized).
-        Y: (n,) nonlinear target.
-        F: (n, len(FEATURE_NAMES)) physics features in the order of FEATURE_NAMES.
-        feature_names: subset of FEATURE_NAMES to use as polynomial variables.
-        degree: max total degree of the polynomial. degree=1 is equivalent to
-            fit_cn_parametric. degree=2 adds quadratic and bilinear cross-terms.
-
-    Returns: PolynomialCn instance.
-    """
-    if degree < 1:
-        raise ValueError(f"degree must be >= 1 (got {degree})")
-    X = np.asarray(X)
-    Y = np.asarray(Y)
-    F = np.asarray(F)
+def _poly_design(F, feature_names, degree):
     idx = [FEATURE_NAMES.index(nm) for nm in feature_names]
-    Fsub = F[:, idx]
+    Fsub = np.asarray(F)[:, idx]
     terms = _poly_terms(len(feature_names), degree)
     cols = []
     for t in terms:
         prod = np.ones(Fsub.shape[0])
         for i in t:
             prod = prod * Fsub[:, i]
-        cols.append(X * prod)
-    A = np.stack(cols, axis=1)
+        cols.append(prod)
+    return np.stack(cols, axis=1), terms
+
+
+def fit_cn_polynomial(X, Y, F, feature_names=DEFAULT_PARAM_FEATURES, degree=2):
+    """Fit polynomial C_n by linear least squares: Y ≈ X · poly_d(F).
+
+    degree=1 is equivalent to fit_cn_parametric. degree=2 adds quadratic
+    and bilinear cross-terms (15 coefficients on 4 features — overfits fast
+    on small training sets).
+    """
+    if degree < 1:
+        raise ValueError(f"degree must be >= 1 (got {degree})")
+    X = np.asarray(X); Y = np.asarray(Y)
+    Phi, _ = _poly_design(F, feature_names, degree)
+    A = np.asarray(X)[:, None] * Phi
     coef, *_ = np.linalg.lstsq(A, Y, rcond=None)
-    return PolynomialCn(coef=coef, feature_names=tuple(feature_names), degree=degree)
+    return PolynomialCn(coef=coef, feature_names=tuple(feature_names),
+                        degree=degree, log_space=False)
+
+
+def fit_cn_polynomial_log(X, Y, F, feature_names=DEFAULT_PARAM_FEATURES,
+                          degree=1, eps=1e-12):
+    """Fit log-space polynomial: log(Y/X) ≈ poly_d(F) → C_n = exp(poly_d(F)).
+
+    Robust to the wide dynamic range of Y typical in QL-vs-NL flux datasets
+    (Y can span 10+ decades). Always strictly positive C_n. degree=1 is the
+    log-space analogue of the parametric fit; bigger degrees overfit just as
+    fast as the linear-space version on small data.
+    """
+    if degree < 1:
+        raise ValueError(f"degree must be >= 1 (got {degree})")
+    X = np.maximum(np.asarray(X), eps)
+    Y = np.maximum(np.asarray(Y), eps)
+    Phi, _ = _poly_design(F, feature_names, degree)
+    rhs = np.log(Y) - np.log(X)
+    coef, *_ = np.linalg.lstsq(Phi, rhs, rcond=None)
+    return PolynomialCn(coef=coef, feature_names=tuple(feature_names),
+                        degree=degree, log_space=True)
