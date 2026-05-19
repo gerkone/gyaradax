@@ -23,6 +23,7 @@ from gyaradax.quasilinear.saturation import ql_flux
 from gyaradax.torax_plugin.gyaradax_based_transport_model import (
     GyaradaxBasedTransportModel,
     RuntimeParams as _BaseRuntimeParams,
+    _get_topology_cached,
 )
 
 
@@ -79,7 +80,9 @@ class GyaradaxQLTransportModel(GyaradaxBasedTransportModel):
 
     @classmethod
     def from_config(cls, cfg) -> "GyaradaxQLTransportModel":
-        # warm caches outside any jit
+        # warm caches outside any jit; build_topology allocates int8 arrays
+        # that would otherwise become tracers inside torax's jit
+        _get_topology_cached(cfg.nkx, cfg.nky, cfg.ikxspace, cfg.ns)
         _get_cn_head(cfg.cn_calibration_path or "")
         return cls(
             rho_match=tuple(cfg.rho_match),

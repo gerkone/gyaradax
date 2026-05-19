@@ -28,6 +28,7 @@ from gyaradax.params import GKParams
 from gyaradax.torax_plugin.gyaradax_based_transport_model import (
     GyaradaxBasedTransportModel,
     RuntimeParams as _BaseRuntimeParams,
+    _get_topology_cached,
     build_quasilinear_inputs,
     face_indices_for_radii,
     gkparams_for_radius,
@@ -72,6 +73,9 @@ class GyaradaxNLTransportModel(GyaradaxBasedTransportModel):
 
     @classmethod
     def from_config(cls, cfg) -> "GyaradaxNLTransportModel":
+        # warm caches outside any jit; build_topology allocates int8 arrays
+        # that would otherwise become tracers inside torax's jit
+        _get_topology_cached(cfg.nkx, cfg.nky, cfg.ikxspace, cfg.ns)
         _get_flux_table(cfg.flux_table_path or "")
         return cls(
             rho_match=tuple(cfg.rho_match),
