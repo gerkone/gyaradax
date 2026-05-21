@@ -87,11 +87,12 @@ class GKParams:
     coll_freq: float = 0.0
     coll_freq_override: bool = True
     coll_mass_conserve: bool = True
-    coll_rref: float = 1.0  # reference major radius [m] for Coulomb log
-    coll_tref: float = 1.0  # reference temperature [keV]
-    coll_nref: float = 1.0  # reference density [1e19 m^-3]
-    # full species-pair collision backgrounds (ALL species incl. adiabatic).
-    # Default None: fall back to self-collision only.
+    # references for Coulomb log: Rref [m], Tref [keV], Nref [1e19 m^-3]
+    coll_rref: float = 1.0
+    coll_tref: float = 1.0
+    coll_nref: float = 1.0
+    # full species-pair collision backgrounds (incl. adiabatic species).
+    # default None falls back to self-collision only.
     coll_bg_mas: Any = None
     coll_bg_signz: Any = None
     coll_bg_tmp: Any = None
@@ -127,15 +128,14 @@ class GKParams:
     dgrid: float = 1.0
     tgrid: float = 1.0
 
-    # multi-GPU grid parallelism; defaults to 1 (single-device). All sharding
-    # logic lives in gyaradax/sharding.py — these fields only carry the mesh
-    # shape and are static (part of the trace signature).
+    # multi-GPU grid parallelism; sharding logic lives in gyaradax/sharding.py.
+    # These fields only carry mesh shape and are static (part of trace signature).
     n_gpus_sp: int = 1
     n_gpus_vp: int = 1
     n_gpus_mu: int = 1
 
-    # fields that are not JAX-traceable (strings, booleans used for control flow)
-    # and must be stored as pytree auxiliary data rather than leaves.
+    # non-JAX-traceable fields (strings, control-flow booleans) — stored as
+    # pytree auxiliary data rather than leaves.
     _STATIC_FIELDS = (
         "finit",
         "adiabatic_electrons",
@@ -198,7 +198,7 @@ class GKParams:
         for k, v in d.items():
             if k.startswith("_"):
                 continue
-            # arrays must be leaves (not hashable for aux)
+            # arrays must be leaves (aux entries need to be hashable)
             if k in self._STATIC_FIELDS and not hasattr(v, "shape"):
                 aux[k] = v
             else:
@@ -283,8 +283,7 @@ def gkparams_from_runtime(runtime: Dict[str, Any], **overrides) -> GKParams:
 
 
 def gkparams_from_input_dat(input_dat_path: str, **overrides) -> GKParams:
-    """
-    Load all runtime, physics, and geometry scalars from a GKW run directory.
+    """Load all runtime, physics, and geometry scalars from a GKW run directory.
 
     Args:
         input_dat_path: Path to the GKW input.dat file.
@@ -293,7 +292,6 @@ def gkparams_from_input_dat(input_dat_path: str, **overrides) -> GKParams:
     Returns:
         Configured GKParams instance.
     """
-
     directory = os.path.dirname(input_dat_path)
     scalars = load_scalars(directory)
     return gkparams_from_runtime(scalars, **overrides)
@@ -313,7 +311,6 @@ def gkparams_from_input_and_geometry(
     runtime = load_runtime_params(input_dat_path)
     inp = parse_input_dat(input_dat_path)
 
-    # geometry scalars from the computed geometry
     scalars = {}
     for k in (
         "shat",
@@ -331,10 +328,9 @@ def gkparams_from_input_and_geometry(
         if k in geometry:
             scalars[k] = float(np.asarray(geometry[k]).reshape(-1)[0])
 
-    # species from input.dat. target species = first num_sp blocks (GKW
-    # convention for evolved species). collision backgrounds = ALL blocks
-    # found in the input (may include an adiabatic-electron block beyond
-    # num_sp). kinetic-species set comes from filtering Z>0 when adiabatic.
+    # target species = first num_sp blocks (GKW convention). Collision backgrounds
+    # = all species blocks (may include adiabatic-electron block beyond num_sp).
+    # Kinetic-species set filters Z>0 when adiabatic.
     num_sp = int(inp.get("gridsize", {}).get("number_of_species", 1))
     all_species_keys = [k for k in inp if k.startswith("species")]
     species_keys = all_species_keys[:num_sp]
@@ -369,10 +365,8 @@ def gkparams_from_input_and_geometry(
         sp_rln = np.array([float(inp[k].get("rln", 0.0)) for k in species_keys])
         sp_vthrat = np.sqrt(sp_tmp / sp_mas)
 
-        # adiabatic electrons: drop Z<0 species from the *target* list —
-        # gyaradax's adiabatic path evolves only kinetic (non-electron)
-        # species and couples to an implicit Boltzmann electron via the
-        # quasineutrality denominator.
+        # adiabatic path evolves only kinetic (non-electron) species, dropping Z<0
+        # from the target list; Boltzmann electron lives in the QN denominator.
         ae_val = inp.get("gridsize", {}).get("adiabatic_electrons")
         if ae_val is None:
             ae_val = inp.get("spcgeneral", {}).get("adiabatic_electrons", True)
@@ -490,11 +484,11 @@ def gkparams_from_config(config: Any, **overrides) -> GKParams:
             else:
                 params_dict[k] = float(v)
 
-    # compute vthrat from sqrt(tmp/mas) when not explicitly specified in config.
-    # GKW defines vthrat = sqrt(T_s/m_s) per species; old configs used sqrt(tgrid/mas)
-    # which was wrong for electrons (missing the T_e factor).
+    # GKW defines vthrat = sqrt(T_s/m_s); old configs used sqrt(tgrid/mas) which
+    # was wrong for electrons (missing T_e factor). Default to sqrt(tmp/mas).
     if not _vthrat_explicit and "tmp" in params_dict and "mas" in params_dict:
         import numpy as _np
+
         _tmp = _np.asarray(params_dict["tmp"], dtype=float)
         _mas = _np.asarray(params_dict["mas"], dtype=float)
         params_dict["vthrat"] = _np.sqrt(_tmp / _mas)
@@ -509,11 +503,9 @@ def gkparams_from_config(config: Any, **overrides) -> GKParams:
         if hasattr(geometry_cfg, k):
             params_dict[k] = float(getattr(geometry_cfg, k))
 
-    # derive sgr_dist and dvp from grid params when not specified in geometry
-    # (matches compute_geometry's internal calculation). without these, the
-    # parallel stencil divides by sgr_dist=1.0 (default) instead of 1/ns,
-    # making term I (streaming) and term VII (Landau damping) ~ns times too
-    # weak. same issue for dvp, kxmax, kymax.
+    # derive sgr_dist/dvp from grid params when missing (matches compute_geometry).
+    # Without these, the parallel stencil divides by sgr_dist=1.0 instead of 1/ns,
+    # making terms I and VII ~ns times too weak. Same applies to dvp/kxmax/kymax.
     grid_cfg = getattr(config, "grid", None)
     if "sgr_dist" not in params_dict and grid_cfg is not None:
         ns = int(getattr(grid_cfg, "ns", 16))
@@ -526,10 +518,8 @@ def gkparams_from_config(config: Any, **overrides) -> GKParams:
         if nvpar > 0:
             params_dict["dvp"] = 2.0 * vpar_max / nvpar
 
-    # derive kxmax/kymax from grid params (max kx/ky in INTERNAL units the
-    # hyperdissipation formula uses; the matrix uses krho/kthnorm and
-    # kxrh, so kymax must also be in those units). fallback to GKParams
-    # default (1.0) if not derivable.
+    # derive kxmax/kymax from grid params (internal units: krho/kthnorm and kxrh).
+    # Fallback is GKParams default 1.0.
     if grid_cfg is not None:
         nkx = int(getattr(grid_cfg, "nkx", 1))
         nky = int(getattr(grid_cfg, "nky", 1))
@@ -540,17 +530,17 @@ def gkparams_from_config(config: Any, **overrides) -> GKParams:
         ikxspace = int(getattr(grid_cfg, "ikxspace", 5))
         geom_type = str(getattr(geometry_cfg, "geometry_model", "s-alpha"))
         import math
+
         if geom_type == "s-alpha":
             kthnorm = q / (2.0 * math.pi * eps)
         elif geom_type == "circ":
-            # Lapillonne kthnorm: 1/(2π(1+eps)) * sqrt(1 + (1-eps²)*(q/eps)²)
+            # Lapillonne: kthnorm = 1/(2π(1+eps)) * sqrt(1 + (1-eps²)*(q/eps)²)
             kthnorm = (1.0 / (2.0 * math.pi * (1.0 + eps))) * math.sqrt(
                 1.0 + (1.0 - eps**2) * (q / max(eps, 1e-12)) ** 2
             )
         else:
             kthnorm = 1.0
         if "kymax" not in params_dict and krhomax > 0 and nky > 1:
-            # max ky in internal units (matches geometry["krho"])
             params_dict["kymax"] = krhomax / kthnorm
         if (
             "kxmax" not in params_dict

@@ -95,8 +95,6 @@ class JAXOps(SolverOps):
             out2 = out2 + coeffs2[i] * shifted2
         return out1, out2
 
-    # ── nonlinear term III ──────────────────────────────────────────────
-
     def _nonlinear_term_iii_core(
         self,
         df: jnp.ndarray,
@@ -274,43 +272,42 @@ class JAXOps(SolverOps):
             bpar_b = bpar[None, None, :, :, :]
             gyro_chi = gyro_chi + pre["bpar_chi_factor"] * bpar_b
 
-        # parallel stencil (fused: streaming + parallel dissipation, plus Landau)
+        # parallel stencil (fused: streaming + parallel dissipation + Landau)
         term_I_par, term_VII_landau = self._apply_parallel_dual(
             df, gyro_phi, pre["s_total_upar"], pre["s_total_t7"]
         )
 
-        # vpar stencil (trapping + vpar dissipation, both 5-point central)
+        # vpar stencil (trapping + vpar dissipation; 5-point central)
         out_d1, out_d4 = self._apply_vpar_dual(df, stencils.VPAR_D1, stencils.VPAR_D4)
         term_IV_trapping = pre["utrap"] * out_d1 / params.dvp
         term_IV_vp_diss = params.disp_vp * pre["abs_dum2_vp"] * out_d4 / params.dvp
 
-        # drift coupling factor
         kdotvd = pre["drift_x"] * pre["kx_b"] + pre["drift_y"] * pre["ky_b"]
 
-        # Term II: drift acting on perturbed distribution (β-independent)
+        # term II: drift on perturbed distribution (β-independent)
         term_II_drift_df = -1j * kdotvd * df
 
-        # Term V: gradient drive on chi (= J0·(phi − 2·vthrat·vpar·Apar + bpar correction))
-        term_V_drive_chi = (
-            1j * params.drive_scale * pre["dmaxwel_fm_ek"] * gyro_chi
-        )
+        # term V: gradient drive on chi
+        term_V_drive_chi = 1j * params.drive_scale * pre["dmaxwel_fm_ek"] * gyro_chi
 
-        # Term VIII: curvature drift × F_M × phi (NOT chi — verified vs GKW iphi_ga)
+        # term VIII: curvature drift × F_M × phi (NOT chi -- verified vs GKW iphi_ga)
         term_VIII_curv_phi = (
-            -1j * params.drive_scale * pre["signz0"] * kdotvd
-            * (pre["fmaxwl"] / jnp.maximum(pre["tmp0"], 1e-15)) * gyro_phi
+            -1j
+            * params.drive_scale
+            * pre["signz0"]
+            * kdotvd
+            * (pre["fmaxwl"] / jnp.maximum(pre["tmp0"], 1e-15))
+            * gyro_phi
         )
 
-        # Term X: parallel derivative of gyro-averaged bpar (B_par compression)
+        # term X: parallel derivative of gyro-averaged bpar (B_par compression)
         term_X_bpar_par = jnp.zeros_like(df)
         if bpar is not None and "bpar_chi_factor" in pre:
             gyro_bpar_scaled = pre["bpar_chi_factor"] * bpar_b
             term_X_bpar_par = self._apply_parallel(gyro_bpar_scaled, pre["s_total_t7"])
 
-        # perpendicular hyperdissipation (kx, ky high-k damping)
         term_hyper_diss = pre["hyper"] * df
 
-        # collision operator (Fokker-Planck, acts on f)
         term_collisions = jnp.zeros_like(df)
         if params.collisions and "coll_stencil" in pre:
             term_collisions = collision_rhs(df, pre["coll_stencil"])
@@ -392,13 +389,12 @@ class JAXOps(SolverOps):
                 "s_total_upar": jnp.moveaxis(pre["s_total_upar"], 1, 0),
                 "s_total_t7": jnp.moveaxis(pre["s_total_t7"], 1, 0),
             }
-            # include chi factors in per-species arrays for em
+            # chi factors for em
             if apar is not None and "apar_chi_factor" in pre:
                 sp_arrays["apar_chi_factor"] = pre["apar_chi_factor"]
             if bpar is not None and "bpar_chi_factor" in pre:
                 sp_arrays["bpar_chi_factor"] = pre["bpar_chi_factor"]
-            # per-species collision stencil: pre["coll_stencil"] has shape
-            # (nsp, 9, nv, nmu, ns); axis 0 is the mapped species dim
+            # per-species collision stencil shape (nsp, 9, nv, nmu, ns); axis 0 mapped
             if params.collisions and "coll_stencil" in pre:
                 sp_arrays["coll_stencil"] = pre["coll_stencil"]
                 if "coll_mom_factor" in pre:

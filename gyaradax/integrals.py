@@ -36,10 +36,9 @@ def i1e(b):
 
 
 def geom_tensors(geometry: Dict[str, jnp.ndarray], params: Any = None) -> Dict[str, jnp.ndarray]:
-    """
-    Expand geometry constants for broadcasting and compute Bessel terms.
+    """Expand geometry constants for broadcasting and compute Bessel terms.
 
-    Single-species version. Species params are scalars reshaped to (1,1,1,1,1,1).
+    Single-species. Species params are scalars reshaped to (1,1,1,1,1,1).
     """
     geom_ = {}
     geom_["krho"] = rearrange(geometry["krho"], "y -> 1 1 1 1 1 y")
@@ -95,7 +94,6 @@ def geom_tensors(geometry: Dict[str, jnp.ndarray], params: Any = None) -> Dict[s
     gamma_arg = jnp.clip(gamma_arg, 0.0, 500.0)
     geom_["gamma"] = i0e(gamma_arg)
 
-    # zonal mode detection
     krho_flat = jnp.asarray(geometry["krho"], dtype=jnp.float64)
     kxrh_flat = jnp.asarray(geometry["kxrh"], dtype=jnp.float64)
     iyzero = jnp.argmin(jnp.abs(krho_flat))
@@ -196,8 +194,7 @@ def precompute_phi_adiabatic(geometry: Dict[str, jnp.ndarray], params: Any):
     ixzero = jnp.argmin(jnp.abs(kxrh_flat))
     has_zonal = jnp.where(jnp.abs(krho_flat[iyzero]) < 1e-10, 1.0, 0.0)
 
-    # weight for the second reduction (zonal mode correction, sum over ns)
-    # zero matz for all ky except the zonal mode
+    # zonal mode correction (sum over ns); zero matz for non-zonal ky
     ky_is_zonal = jnp.arange(matz.shape[-1]) == iyzero
     matz = matz * ky_is_zonal[None, None, None, None, :] * has_zonal
     phi_corr_weight = matz
@@ -218,37 +215,26 @@ def calculate_phi_adiabatic(
     ixzero: int,
     iyzero: int,
 ) -> jnp.ndarray:
-    """Newly structured hot path for adiabatic phi solve."""
-    # df: (nv, nmu, ns, nkx, nky)
-    # phi_weight: (nv, nmu, ns, nkx, nky)
-    phi_raw = jnp.sum(phi_weight * df, axis=(0, 1), keepdims=True)  # (1, 1, ns, nkx, nky)
-
-    # zonal mode correction (sum over ns)
-    # phi_corr_weight: (1, 1, ns, 1, 1)
-    bufphi = jnp.sum(phi_corr_weight * phi_raw, axis=2, keepdims=True)  # (1, 1, 1, nkx, nky)
+    """Hot path for adiabatic phi solve."""
+    phi_raw = jnp.sum(phi_weight * df, axis=(0, 1), keepdims=True)
+    bufphi = jnp.sum(phi_corr_weight * phi_raw, axis=2, keepdims=True)
 
     cfen = 0.0
     exp_cfen = jnp.exp(-cfen)
 
-    # factor 1: maty_val correction (applies only to ky=0)
+    # maty_val correction (ky=0 only)
     maty_sum = jnp.sum(-phi_corr_weight * exp_cfen, axis=2, keepdims=True)
     maty = tmp / (de * exp_cfen) + maty_sum / exp_cfen
 
     nkx, nky = phi_raw.shape[3], phi_raw.shape[4]
-
-    # zonal (ky=iyzero) mask
     y_mask = jnp.zeros((1, 1, 1, 1, nky), dtype=phi_raw.dtype).at[..., iyzero].set(has_zonal)
-    # kx=ixzero mask
     x_mask = jnp.zeros((1, 1, 1, nkx, 1), dtype=phi_raw.dtype).at[..., ixzero, :].set(1.0)
 
     maty_val = jnp.where(x_mask > 0, 1.0 + 0j, maty)
     maty_val = jnp.where(jnp.abs(maty_val) < 1e-15, 1.0, maty_val)
-
     phi_corr = phi_raw + (1.0 / maty_val) * bufphi * y_mask
 
-    # factor 2: poisson_diag (pdiag)
     poisson_diag = exp_cfen * (signz**2) * de * (gamma - 1.0) / tmp
-    # zonal mask (kx=ixzero, ky=iyzero)
     zonal_mask = x_mask * y_mask
     norm_mask = jnp.ones_like(zonal_mask) - zonal_mask
 
@@ -256,7 +242,6 @@ def calculate_phi_adiabatic(
     pdiag = jnp.where(jnp.abs(pdiag) < 1e-15, -1.0, pdiag)
 
     phi = phi_corr * (-1.0 / pdiag)
-    # squeeze leading (1, 1) from keepdims but keep (ns, nkx, nky)
     return phi.reshape(phi.shape[2], phi.shape[3], phi.shape[4])
 
 
@@ -298,12 +283,11 @@ def _species_bessel_gamma(geometry):
 
 
 def precompute_phi_kinetic(geometry: Dict[str, jnp.ndarray]):
-    """
-    Precompute static arrays for the kinetic phi solve.
+    """Precompute static arrays for the kinetic phi solve.
 
-    returns (phi_weight, phi_diag) where:
-        phi_weight: (nsp, nvpar, nmu, ns, nkx, nky) — poisson integral weight
-        phi_diag: (ns, nkx, nky) — poisson diagonal (with zonal mode set to 1)
+    Returns (phi_weight, phi_diag) where:
+        phi_weight: (nsp, nvpar, nmu, ns, nkx, nky) — Poisson integral weight
+        phi_diag: (ns, nkx, nky) — Poisson diagonal (zonal mode set to 1)
     """
     bessel, gamma = _species_bessel_gamma(geometry)
 
@@ -321,26 +305,22 @@ def precompute_phi_kinetic(geometry: Dict[str, jnp.ndarray]):
     intmu = jnp.asarray(geometry["intmu"], dtype=jnp.float64).reshape(1, 1, -1, 1, 1, 1)
     bn = jnp.asarray(geometry["bn"], dtype=jnp.float64).reshape(1, 1, 1, -1, 1, 1)
 
-    # poisson integral weight: sum(weight * df) over (species, vpar, mu) gives phi numerator
     weight = signz_6d * de_6d * intmu * intvp * bessel * bn
     weight = jnp.where(jnp.abs(intvp) < _EPS, 0.0, weight)
 
-    # poisson diagonal: sum over species of Z^2 * n * (Gamma0 - 1) / T
+    # Poisson diagonal: sum_sp Z^2*n*(Gamma_0 - 1)/T
     diag_per_sp = signz_6d**2 * de_6d * (gamma - 1.0) / tmp_6d
     diag = jnp.sum(diag_per_sp, axis=0)
-    # reshape to (ns, nkx, nky), dropping summed velocity axes
     diag = diag.reshape(diag.shape[-3], diag.shape[-2], diag.shape[-1])
 
     kxrh = jnp.asarray(geometry["kxrh"], dtype=jnp.float64)
     krho = jnp.asarray(geometry["krho"], dtype=jnp.float64)
     ixzero = jnp.argmin(jnp.abs(kxrh))
     iyzero = jnp.argmin(jnp.abs(krho))
-    # only set zonal diagonal to 1 if a real ky=0 mode exists
     has_zonal = jnp.abs(krho[iyzero]) < 1e-10
     diag_with_zonal = diag.at[:, ixzero, iyzero].set(1.0)
     diag = jnp.where(has_zonal, diag_with_zonal, diag)
     diag = jnp.where(jnp.abs(diag) < _EPS, -1.0, diag)
-
     return weight, diag
 
 
@@ -382,7 +362,7 @@ def calculate_phi(
         params: GKParams (used to determine adiabatic vs kinetic and species scalars).
         pre: precomputed arrays from linear_precompute (optional, for performance).
     """
-    # legacy: calculate_phi(geom_tensors_dict, df) — detect by presence of "bessel"
+    # legacy entry: calculate_phi(geom_tensors_dict, df) detected via "bessel" key
     if "bessel" in geometry:
         return _phi_adiabatic(geometry, df)
 
@@ -390,17 +370,12 @@ def calculate_phi(
     if adiabatic:
         gt = pre["geom_tensors"] if pre is not None else geom_tensors(geometry, params=params)
         return _phi_adiabatic(gt, df)
-    else:
-        pw = pre.get("phi_weight") if pre is not None else None
-        pd = pre.get("phi_diag") if pre is not None else None
-        return _phi_kinetic(geometry, df, pw, pd)
+    pw = pre.get("phi_weight") if pre is not None else None
+    pd = pre.get("phi_diag") if pre is not None else None
+    return _phi_kinetic(geometry, df, pw, pd)
 
 
-# backward-compatible aliases
 calculate_phi_kinetic = _phi_kinetic
-
-
-# ── Ampere's law for A_parallel ──────────────────────────────────────────────
 
 
 def precompute_apar(geometry: Dict[str, jnp.ndarray], params: Any = None):
@@ -436,7 +411,6 @@ def precompute_apar(geometry: Dict[str, jnp.ndarray], params: Any = None):
     vthrat = _sp_arr("vthrat")
     nsp = mas.shape[0]
 
-    # Build geometry with proper species arrays for Bessel computation
     geom_sp = dict(geometry)
     geom_sp["mas"] = mas
     geom_sp["signz"] = signz
@@ -457,7 +431,6 @@ def precompute_apar(geometry: Dict[str, jnp.ndarray], params: Any = None):
 
     beta = jnp.asarray(params.beta if params is not None else 0.0, dtype=jnp.float64)
 
-    # k_perp^2 (same computation as in _species_bessel_gamma)
     krho = jnp.asarray(geometry["krho"], dtype=jnp.float64).reshape(1, 1, 1, 1, 1, -1)
     kxrh = jnp.asarray(geometry["kxrh"], dtype=jnp.float64).reshape(1, 1, 1, 1, -1, 1)
     little_g = jnp.asarray(geometry["little_g"], dtype=jnp.float64)
@@ -466,17 +439,13 @@ def precompute_apar(geometry: Dict[str, jnp.ndarray], params: Any = None):
     g2 = little_g[:, 2].reshape(1, 1, 1, -1, 1, 1)
     kperp_sq = krho**2 * g0 + 2 * krho * kxrh * g1 + kxrh**2 * g2
 
-    # --- Ampere numerator weight ---
-    # Matches GKW ampere_int (linear_terms.f90:3246):
-    # elem = signz*de*veta*intvp*intmu*vthrat*bn*vpgr*J0
-    # vthrat^1 converts vpgr (in v_ths units) to physical velocity in v_thi units.
-    # GKW uses the same shared velocity grid for all species (velocitygrid.f90:197).
+    # Ampere numerator (GKW ampere_int, linear_terms.f90:3246).
+    # vthrat converts vpgr (v_ths units) to physical velocity in v_thi units.
     apar_weight = beta * signz_6d * de_6d * vthrat_6d * vpgr * bessel * bn * intvp * intmu
     apar_weight = jnp.where(jnp.abs(intvp) < _EPS, 0.0, apar_weight)
 
-    # --- Ampere denominator ---
-    # Computed as analytical fallback here; solver.py overrides with
-    # numerical gamma_num (using properly normalized fmaxwl) for GKW parity.
+    # Ampere denominator. Analytical fallback; solver.py overrides with numerical
+    # gamma_num using properly normalized fmaxwl for GKW parity.
     diag_per_sp = signz_6d**2 * de_6d / mas_6d * gamma
     diag_em = beta * jnp.sum(diag_per_sp, axis=0)
     diag_em = diag_em.reshape(diag_em.shape[-3], diag_em.shape[-2], diag_em.shape[-1])
@@ -484,7 +453,6 @@ def precompute_apar(geometry: Dict[str, jnp.ndarray], params: Any = None):
 
     apar_diag = kperp_sq_3d + diag_em
     apar_diag = jnp.where(jnp.abs(apar_diag) < _EPS, 1.0, apar_diag)
-
     return apar_weight, apar_diag, kperp_sq
 
 
@@ -508,8 +476,6 @@ def calculate_apar(
         apar_diag = pre["apar_diag"]
     else:
         apar_weight, apar_diag, _ = precompute_apar(geometry, params)
-
-    # numerator: integral of weight * df over (species, vpar, mu)
     apar_num = jnp.einsum("avmjkl,avmjkl->jkl", apar_weight, df)
     return apar_num / apar_diag
 
@@ -542,10 +508,9 @@ def precompute_bpar(geometry, params):
     intvp = geom_["intvp"]
     intmu = geom_["intmu"]
 
-    bessel_j0 = geom_["bessel"]  # J0(bessel_arg)
-    gamma0 = geom_["gamma"]  # Gamma_0 = I_0(b)*exp(-b)
+    bessel_j0 = geom_["bessel"]
+    gamma0 = geom_["gamma"]
 
-    # --- Gamma_1 and J1_hat ---
     kxrh = rearrange(jnp.asarray(geometry["kxrh"], dtype=jnp.float64), "x -> 1 1 1 1 x 1")
     little_g = rearrange(
         jnp.asarray(geometry["little_g"], dtype=jnp.float64), "s three -> three 1 1 1 s 1 1"
@@ -557,64 +522,41 @@ def precompute_bpar(geometry, params):
     )
     krloc = jnp.sqrt(jnp.maximum(krloc_sq, _EPS))
 
-    # Gamma_1(b) = I_1(b)*exp(-b) where b = 0.5*(mas*vthrat*krloc/(signz*bn))^2
+    # Gamma_1(b) = I_1(b)*exp(-b) with b = 0.5*(mas*vthrat*krloc/(signz*bn))^2
     sz = jnp.where(jnp.abs(signz_6d) < _EPS, 1.0, signz_6d)
     gamma_arg = 0.5 * (geom_["mas"] * geom_["vthrat"] * krloc / (sz * bn)) ** 2
     gamma_arg = jnp.clip(gamma_arg, 0.0, 500.0)
     gamma1_6d = i1e(gamma_arg)
 
-    # gamma_diff = (Gamma_0 - Gamma_1) * exp(-cfen)
-    # Without rotation: cfen=0, so gamma_diff = Gamma_0 - Gamma_1
-    # Zero-mode limit: gamma_diff = 1 (Gamma_0=1, Gamma_1=0)
+    # gamma_diff = (Gamma_0 - Gamma_1)*exp(-cfen); zero-mode limit = 1
     krloc_is_zero = jnp.abs(krloc) < 1e-5
     gamma_diff = jnp.where(krloc_is_zero, 1.0, gamma0 - gamma1_6d)
 
-    # J1_hat: 2*J_1(bessel_arg) / bessel_arg
     mugr_bn = jnp.maximum(2.0 * mugr / bn, _EPS)
     bessel_arg = geom_["mas"] * geom_["vthrat"] * krloc * jnp.sqrt(mugr_bn) / sz
     bessel_arg = jnp.where(jnp.isnan(bessel_arg), 0.0, bessel_arg)
-    # GKW returns 0.5 for zero mode (krloc < 1e-5)
+    # GKW returns 0.5 for the zero mode (krloc < 1e-5)
     j1hat_6d = jnp.where(krloc_is_zero, 0.5, j1_hat(bessel_arg))
 
-    # --- Coupling coefficients (summed over species) ---
-    # F_sp1 = sum_sp[ signz^2 * de * (Gamma_0 - 1) / tmp ]
-    # F_sp2 = sum_sp[ signz * beta * de * gamma_diff / (2*bn) ]
-    # B_sp1 = sum_sp[ signz * de * gamma_diff / bn ]
-    # B_sp2 = sum_sp[ tmp * de * beta * gamma_diff / bn^2 ]
-    # Note: GKW uses gamma*exp(-cfen) for F_sp1; without rotation gamma_0 already
-    # includes exp(-cfen)=1. For the zero mode, gamma=1.
+    # coupling coefficients (summed over species)
     gamma0_for_fsp1 = jnp.where(krloc_is_zero, 1.0, gamma0)
     F_sp1 = jnp.sum(signz_6d**2 * de_6d * (gamma0_for_fsp1 - 1.0) / tmp_6d, axis=0, keepdims=True)
     F_sp2 = jnp.sum(signz_6d * beta * de_6d * gamma_diff / (2.0 * bn), axis=0, keepdims=True)
     B_sp1 = jnp.sum(signz_6d * de_6d * gamma_diff / bn, axis=0, keepdims=True)
     B_sp2 = jnp.sum(tmp_6d * de_6d * beta * gamma_diff / bn**2, axis=0, keepdims=True)
 
-    # --- Coupled diagonal ---
-    # diagonal = F_sp1 * (1 + B_sp2) - F_sp2 * B_sp1
     coupled_diag = F_sp1 * (1.0 + B_sp2) - F_sp2 * B_sp1
-
-    # Squeeze to (ns, nkx, nky) — remove species/vpar/mu dims
     coupled_diag = coupled_diag.reshape(
         coupled_diag.shape[-3], coupled_diag.shape[-2], coupled_diag.shape[-1]
     )
     coupled_diag = jnp.where(jnp.abs(coupled_diag) < _EPS, 1.0, coupled_diag)
 
-    # --- Coupled phi weight (modified Poisson numerator) ---
-    # I_sp1 = signz * de * bn * J0 * intvp * intmu   (standard Poisson weight)
-    # I_sp2 = beta * bn * tmp * de * intvp * intmu * mugr * J1_hat
-    # coupled_phi_weight = I_sp1 * (1 + B_sp2) - I_sp2 * B_sp1
     I_sp1 = signz_6d * de_6d * bn * bessel_j0 * intvp * intmu
     I_sp2 = beta * bn * tmp_6d * de_6d * intvp * intmu * mugr * j1hat_6d
-
     coupled_phi_weight = I_sp1 * (1.0 + B_sp2) - I_sp2 * B_sp1
-
-    # --- Bpar weight ---
-    # bpar_weight = I_sp2 * F_sp1 - I_sp1 * F_sp2
     bpar_weight = I_sp2 * F_sp1 - I_sp1 * F_sp2
 
-    # Squeeze gamma1 to (nsp, 1, 1, ns, nkx, nky) for diagnostics
     gamma1_out = gamma1_6d[:, :1, :1, :, :, :]
-
     return coupled_phi_weight, bpar_weight, coupled_diag, j1hat_6d, gamma1_out
 
 
@@ -641,16 +583,14 @@ def calculate_fluxes(
     eflux = d3v * (vpgr**2 * jnp.imag(dum1) + 2 * mugr * jnp.imag(dum2))
     vflux = d3v * (jnp.imag(dum1) * vpgr * rfun * bt_frac * signB)
 
-    # flux-surface average (sum(ints) = 1 for nperiod=1)
-    fsa = jnp.sum(ints)
+    fsa = jnp.sum(ints)  # = 1 for nperiod=1
     return jnp.sum(pflux) / fsa, jnp.sum(eflux) / fsa, jnp.sum(vflux) / fsa
 
 
 def calculate_fluxes_kinetic(
     geometry: Dict[str, jnp.ndarray], df: jnp.ndarray, phi: jnp.ndarray
 ) -> jnp.ndarray:
-    """
-    Per-species fluxes for kinetic case.
+    """Per-species fluxes for the kinetic case.
 
     df: (nsp, nvpar, nmu, ns, nkx, nky).
     Returns: (nsp, 3) array of [pflux, eflux, vflux] per species.
@@ -742,7 +682,6 @@ def calculate_em_fluxes(
         return em_pflux / fsa, em_eflux / fsa, em_vflux / fsa
 
     elif df.ndim == 6:
-        # kinetic: per-species em fluxes
         nsp = df.shape[0]
         results = []
         for isp in range(nsp):
@@ -786,7 +725,6 @@ def calculate_em_fluxes(
                 )
             if bpar is not None and pre is not None and "bpar_chi_factor" in pre:
                 bpar_b = bpar.reshape(1, 1, *bpar.shape)
-                # bpar_chi_factor = 2*mugr*tmp/signz*J1hat, use per-species slice
                 bpar_chi = pre["bpar_chi_factor"][isp]
                 dum_b = dum * bpar_chi * jnp.conj(bpar_b)
                 sp_pf = sp_pf + jnp.sum(d3v * jnp.imag(dum_b))

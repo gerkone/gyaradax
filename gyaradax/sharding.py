@@ -72,6 +72,7 @@ def build_mesh(params) -> Optional[Mesh]:
             f"only {len(devices)} are visible to JAX"
         )
     import numpy as np
+
     dev_np = np.asarray(devices[:total], dtype=object).reshape((p_sp, p_vp, p_mu))
     return Mesh(dev_np, (_AXIS_SP, _AXIS_VP, _AXIS_MU))
 
@@ -103,30 +104,27 @@ def _spec_for_shape(shape, grid: GridShape) -> PartitionSpec:
     # and 7D kinetic (9, sp, vp, mu, s, kx, ky), with broadcast singletons allowed
     # on mu/kx/ky (mu becomes 1 after jnp.sign(upar)).
     if len(s) == 6 and s[0] == 9 and s[1] == grid.nvpar:
-        return PartitionSpec(None, _AXIS_VP, _AXIS_MU if s[2] == grid.nmu else None, None, None, None)
+        return PartitionSpec(
+            None, _AXIS_VP, _AXIS_MU if s[2] == grid.nmu else None, None, None, None
+        )
     if len(s) == 7 and s[0] == 9 and s[1] == grid.nsp and s[2] == grid.nvpar:
         return PartitionSpec(
-            None, _AXIS_SP, _AXIS_VP,
+            None,
+            _AXIS_SP,
+            _AXIS_VP,
             _AXIS_MU if s[3] == grid.nmu else None,
-            None, None, None,
+            None,
+            None,
+            None,
         )
     # velocity-broadcast pre arrays produced by _compute_species_coeffs often
     # have the full 5D shape; handled above. Handle collapsed velocity shapes
     # that retain nvpar/nmu as leading dims with broadcast singletons for s,
     # kx, ky (shape (nvpar, nmu, 1, 1, 1), etc.) — these are reshapes of the
     # per-species arrays, same vp/mu sharding.
-    if (
-        len(s) == 5
-        and s[0] == grid.nvpar
-        and s[1] == grid.nmu
-    ):
+    if len(s) == 5 and s[0] == grid.nvpar and s[1] == grid.nmu:
         return PartitionSpec(_AXIS_VP, _AXIS_MU, None, None, None)
-    if (
-        len(s) == 6
-        and s[0] == grid.nsp
-        and s[1] == grid.nvpar
-        and s[2] == grid.nmu
-    ):
+    if len(s) == 6 and s[0] == grid.nsp and s[1] == grid.nvpar and s[2] == grid.nmu:
         return PartitionSpec(_AXIS_SP, _AXIS_VP, _AXIS_MU, None, None, None)
     return PartitionSpec()
 
@@ -213,6 +211,7 @@ def precompute_sharded(geometry, params, mesh: Optional[Mesh], grid: GridShape):
     # Use _linear_precompute_core to avoid auto-sharding recursion.
     def _wrapped(geom, p):
         from gyaradax.solver import _linear_precompute_core
+
         pre = _linear_precompute_core({**geom, **int_scalars}, p)
         return pre._items
 
@@ -227,6 +226,7 @@ def precompute_sharded(geometry, params, mesh: Optional[Mesh], grid: GridShape):
     result_dict = jax.jit(_wrapped, out_shardings=out_shardings)(geom_rep, params_rep)
 
     from gyaradax.types import GKPre
+
     return GKPre(result_dict)
 
 
@@ -259,22 +259,22 @@ def init_f_sharded(
     seed: int = 42,
 ):
     """Initialize distribution function directly sharded across the mesh.
-    
+
     DEPRECATED: This is now a thin wrapper around solver.init_f.
     Use solver.init_f with params for automatic sharding detection.
-    
+
     Returns sharded df with the same values as init_f would produce.
     """
     from jax.sharding import NamedSharding, PartitionSpec
     from gyaradax.solver import init_f
-    
+
     # Build output sharding from mesh and grid
     if n_species > 1:
         spec = PartitionSpec(_AXIS_SP, _AXIS_VP, _AXIS_MU, None, None, None)
     else:
         spec = PartitionSpec(_AXIS_VP, _AXIS_MU, None, None, None)
     out_sharding = NamedSharding(mesh, spec)
-    
+
     # Delegate to unified init_f
     return init_f(
         geometry,

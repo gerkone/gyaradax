@@ -89,11 +89,9 @@ def _ensure_species_arrays(
 ) -> Dict[str, jnp.ndarray]:
     """Ensure geometry carries multi-species arrays consistent with params.
 
-    ``compute_geometry`` always creates single-element species placeholders
-    (``mas=[1.0]``, etc.).  When params describes multiple species the
-    downstream flux diagnostics (``calculate_fluxes_kinetic``) need per-species
-    arrays in the geometry dict.  This helper copies them from params when the
-    geometry arrays are too short.
+    ``compute_geometry`` always creates single-element placeholders. Multi-species
+    runs need per-species arrays in the geometry dict for downstream flux
+    diagnostics (``calculate_fluxes_kinetic``); copy them over from params.
     """
     _SPECIES_KEYS = ("mas", "signz", "de", "tmp", "vthrat", "rlt", "rln")
     mas = jnp.asarray(params.mas, dtype=jnp.float64)
@@ -105,7 +103,7 @@ def _ensure_species_arrays(
     if geom_nsp >= nsp:
         return geometry
 
-    geometry = dict(geometry)  # shallow copy
+    geometry = dict(geometry)
     for k in _SPECIES_KEYS:
         val = getattr(params, k, None)
         if val is not None:
@@ -120,11 +118,10 @@ def gk_init(
 ) -> Tuple[jnp.ndarray, Dict[str, jnp.ndarray], GKState]:
     """Create initial (df, geometry, state) from geometry and params. No IO.
 
-    When *params* indicates kinetic electrons, the geometry dict is
-    augmented with per-species arrays from *params* if they are missing
-    (e.g. when using ``compute_geometry`` which only creates single-species
-    placeholders).  The **returned** geometry must be used for all
-    subsequent calls (``gksolve``, ``linear_precompute``, fluxes, etc.).
+    For kinetic electrons the geometry dict is augmented with per-species arrays
+    from ``params`` when they are missing (e.g. when using ``compute_geometry``
+    which only creates single-species placeholders). The returned geometry
+    must be used for all subsequent calls.
     """
     if not params.adiabatic_electrons:
         mas = jnp.asarray(params.mas, dtype=jnp.float64)
@@ -254,8 +251,8 @@ def gksimulate(
     current_phi = None
     current_fluxes = None
 
-    # warmup (compilation) — request the same trailing dt_info as the body
-    # loop so we compile the right specialization and avoid a second cache miss
+    # warmup compile with the same return_dt_info as the body loop, otherwise
+    # the first block hits a second cache miss for a different specialization
     if n_steps > 0:
         print("warmup (compilation)...")
         w_t0 = time.time()

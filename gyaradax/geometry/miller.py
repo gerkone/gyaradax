@@ -17,9 +17,6 @@ forms skappa, sdelta, ssquare, dRmil, dZmil.
 import jax.numpy as jnp
 
 
-# ─── quadrature / interpolation helpers ───────────────────────────────────
-
-
 def _interpquad(x_fine, y_fine, x_out):
     """3-point quadratic Lagrange interpolation (GKW interpquad).
 
@@ -58,11 +55,7 @@ def _simpson_total(x, y):
     return jnp.sum(_simpson_segments(x, y))
 
 
-# ─── flux-surface parametrisation ─────────────────────────────────────────
-
-
-def _miller_surface(theta, eps, kappa, delta, square, Zmil, dRmil, dZmil,
-                    skappa, sdelta, ssquare):
+def _miller_surface(theta, eps, kappa, delta, square, Zmil, dRmil, dZmil, skappa, sdelta, ssquare):
     """R, Z and the analytic first/second derivatives at each theta.
 
     Returns a dict with rfun, z_fs, dRdpsi, dZdpsi, dRdth, dZdth, d2Rdth,
@@ -86,14 +79,10 @@ def _miller_surface(theta, eps, kappa, delta, square, Zmil, dRmil, dZmil,
     dRdth = -eps * x2 * jnp.sin(x1)
     dZdth = kappa * eps * x3 * jnp.cos(x4)
 
-    d2Rdth = (
-        eps * asd * jnp.sin(theta) * jnp.sin(x1)
-        - eps * x2**2 * jnp.cos(x1)
-    )
-    d2Zdth = (
-        -4.0 * kappa * eps * square * jnp.sin(2.0 * theta) * jnp.cos(x4)
-        - kappa * eps * x3**2 * jnp.sin(x4)
-    )
+    d2Rdth = eps * asd * jnp.sin(theta) * jnp.sin(x1) - eps * x2**2 * jnp.cos(x1)
+    d2Zdth = -4.0 * kappa * eps * square * jnp.sin(2.0 * theta) * jnp.cos(
+        x4
+    ) - kappa * eps * x3**2 * jnp.sin(x4)
     d2Rdpsidth = (
         -x2 * jnp.sin(x1)
         - sdelta * jnp.cos(theta) * jnp.sin(x1)
@@ -106,13 +95,17 @@ def _miller_surface(theta, eps, kappa, delta, square, Zmil, dRmil, dZmil,
     )
 
     return dict(
-        rfun=rfun, z_fs=z_fs, dRdpsi=dRdpsi, dZdpsi=dZdpsi,
-        dRdth=dRdth, dZdth=dZdth, d2Rdth=d2Rdth, d2Zdth=d2Zdth,
-        d2Rdpsidth=d2Rdpsidth, d2Zdpsidth=d2Zdpsidth,
+        rfun=rfun,
+        z_fs=z_fs,
+        dRdpsi=dRdpsi,
+        dZdpsi=dZdpsi,
+        dRdth=dRdth,
+        dZdth=dZdth,
+        d2Rdth=d2Rdth,
+        d2Zdth=d2Zdth,
+        d2Rdpsidth=d2Rdpsidth,
+        d2Zdpsidth=d2Zdpsidth,
     )
-
-
-# ─── main entry point ─────────────────────────────────────────────────────
 
 
 def _miller_geometry(
@@ -149,22 +142,24 @@ def _miller_geometry(
     N = 501 * span
     theta = jnp.linspace(-span * jnp.pi, span * jnp.pi, N)
 
-    s = _miller_surface(theta, eps, kappa, delta, square, Zmil, dRmil, dZmil,
-                        skappa, sdelta, ssquare)
+    s = _miller_surface(
+        theta, eps, kappa, delta, square, Zmil, dRmil, dZmil, skappa, sdelta, ssquare
+    )
     R_, Z_ = s["rfun"], s["z_fs"]
     dRp, dZp = s["dRdpsi"], s["dZdpsi"]
     dRt, dZt = s["dRdth"], s["dZdth"]
     d2Rt, d2Zt = s["d2Rdth"], s["d2Zdth"]
     d2Rpt, d2Zpt = s["d2Rdpsidth"], s["d2Zdpsidth"]
 
-    # Jacobian and (psi, theta) contravariant metric
+    # covariant metric (psi, theta)
     Jpsi = R_ * (dRp * dZt - dRt * dZp)
-    gpp = dRp**2 + dZp**2          # g_{psi psi} (covariant)
-    gtt = dRt**2 + dZt**2          # g_{theta theta}
-    gpt = dRp * dRt + dZp * dZt    # g_{psi theta}
-    g_pp = gtt * R_**2 / Jpsi**2          # g^{psi psi}
-    g_tt = gpp * R_**2 / Jpsi**2          # g^{theta theta}
-    g_pt = -gpt * R_**2 / Jpsi**2         # g^{psi theta}
+    gpp = dRp**2 + dZp**2
+    gtt = dRt**2 + dZt**2
+    gpt = dRp * dRt + dZp * dZt
+    # contravariant metric g^{i j} = cof / Jpsi²
+    g_pp = gtt * R_**2 / Jpsi**2
+    g_tt = gpp * R_**2 / Jpsi**2
+    g_pt = -gpt * R_**2 / Jpsi**2
 
     # Mercier-Luc: arc length, (cos u, sin u), |grad psi|, radius of curvature
     dldt = jnp.sqrt(gtt)
@@ -198,13 +193,13 @@ def _miller_geometry(
 
     # volume + radial derivative -> pressure-gradient coupling grdp
     vol = 2.0 * jnp.pi * i3 * i4
-    dvoldpsi = (
-        2.0 * jnp.pi * ((i5 + i6) / i_ds - i11 * i4 / i_ds) * i3
-        + 2.0 * jnp.pi * i4 * i7
-    )
+    dvoldpsi = 2.0 * jnp.pi * ((i5 + i6) / i_ds - i11 * i4 / i_ds) * i3 + 2.0 * jnp.pi * i4 * i7
     if gradp_type == "alpha":
         grdp = (
-            gradp * (4.0 * jnp.pi**2) * dpfdpsi * jnp.sqrt(2.0 * jnp.pi**2)
+            gradp
+            * (4.0 * jnp.pi**2)
+            * dpfdpsi
+            * jnp.sqrt(2.0 * jnp.pi**2)
             / (dvoldpsi * jnp.sqrt(vol))
         )
     elif gradp_type == "beta_prime_input":
@@ -222,23 +217,21 @@ def _miller_geometry(
     pf1 = R_ * Bp
 
     # d|grad psi|/dtheta (needed for dpf1/dl)
-    dabs_gradpsi_dth = (
-        (d2Rt * dRt + d2Zt * dZt) * R_ / (Jpsi * dldt)
-        - dldt * R_**2 * (d2Rpt * dZt + dRp * d2Zt - d2Rt * dZp - dRt * d2Zpt)
-        / Jpsi**2
-    )
+    dabs_gradpsi_dth = (d2Rt * dRt + d2Zt * dZt) * R_ / (Jpsi * dldt) - dldt * R_**2 * (
+        d2Rpt * dZt + dRp * d2Zt - d2Rt * dZp - dRt * d2Zpt
+    ) / Jpsi**2
     dpf1dl = dpfdpsi * dabs_gradpsi_dth / dldt
 
     # F' and grad(zeta) via three integrals (integ8, integ9, integ1 in GKW)
     f1 = (
-        dldt * signB * signJ * F
+        dldt
+        * signB
+        * signJ
+        * F
         * (1.0 / (rc * R_ * Bp * jnp.pi) - cosu / (R_**2 * Bp * jnp.pi))
         / (R_**2 * Bp)
     )
-    f2 = (
-        dldt * signB * signJ * (F / (R_**2 * Bp**2) + 1.0 / F)
-        / (2.0 * jnp.pi * R_**2 * Bp)
-    )
+    f2 = dldt * signB * signJ * (F / (R_**2 * Bp**2) + 1.0 / F) / (2.0 * jnp.pi * R_**2 * Bp)
     f3 = dldt * signB * signJ * F / (R_**2 * Bp**3 * 2.0 * jnp.pi)
 
     cum_f1 = _simpson_cumulative(theta, f1)
@@ -265,34 +258,40 @@ def _miller_geometry(
     dzetadpsi = dzetadth * dldpsi / dldt + zeta1 * drhodpsi
     dsdpsi = dsdpf * dpfdpsi + dsdth * dldpsi / dldt
 
-    # (psi, zeta, s) contravariant metric — upper-triangular entries only
+    # (psi, zeta, s) contravariant metric, upper-triangular entries
     m11 = g_pp
     m12 = dzetadpsi * g_pp + dzetadth * g_pt
     m13 = dsdth * g_pt + dsdpsi * g_pp
     m22 = (
-        dzetadpsi**2 * g_pp + dzetadth**2 * g_tt
+        dzetadpsi**2 * g_pp
+        + dzetadth**2 * g_tt
         + 1.0 / (R_**2 * 4.0 * jnp.pi**2)
         + 2.0 * dzetadpsi * dzetadth * g_pt
     )
     m23 = (
-        dzetadpsi * dsdpsi * g_pp + dzetadth * dsdth * g_tt
+        dzetadpsi * dsdpsi * g_pp
+        + dzetadth * dsdth * g_tt
         + (dsdpsi * dzetadth + dsdth * dzetadpsi) * g_pt
     )
     m33 = dsdpsi**2 * g_pp + dsdth**2 * g_tt + 2.0 * dsdpsi * dsdth * g_pt
 
-    # B, R, Z derivatives along s (theta → s coordinate change)
-    dBdl = 0.5 * (
-        2.0 * pf1 * dpf1dl
-        + 2.0 * sinu * pf1**2 / R_
-        - 2.0 * F**2 * dRt / (dldt * R_)
-    ) / (bn * R_**2)
+    # B, R, Z derivatives along s (theta -> s coordinate change)
+    dBdl = (
+        0.5
+        * (2.0 * pf1 * dpf1dl + 2.0 * sinu * pf1**2 / R_ - 2.0 * F**2 * dRt / (dldt * R_))
+        / (bn * R_**2)
+    )
     dBds_fine = dBdl * dldt / dsdth
-    dBdrho = 0.5 * (
-        -2.0 * F**2 * cosu / R_**3
-        + 2.0 * F * Fprime * Bp / R_
-        - 2.0 * Bp**2 * cosu / R_
-        + 4.0 * Bp * pf2 / R_
-    ) / bn
+    dBdrho = (
+        0.5
+        * (
+            -2.0 * F**2 * cosu / R_**3
+            + 2.0 * F * Fprime * Bp / R_
+            - 2.0 * Bp**2 * cosu / R_
+            + 4.0 * Bp * pf2 / R_
+        )
+        / bn
+    )
     dBdpsi_fine = drhodpsi * dBdrho + dldpsi * dBdl - dBds_fine * dsdpsi
 
     dRds_fine = dRt / dsdth
@@ -300,7 +299,6 @@ def _miller_geometry(
     dRdpsi_fine = dRp - dRds_fine * dsdpsi
     dZdpsi_fine = dZp - dZds_fine * dsdpsi
 
-    # interpolate everything onto the solver's s grid
     def interp(y):
         return _interpquad(s_of_theta, y, sgrid)
 
@@ -313,13 +311,16 @@ def _miller_geometry(
     dBdpsi = interp(dBdpsi_fine)
     dRdpsi = interp(dRdpsi_fine)
     dZdpsi = interp(dZdpsi_fine)
-    metric = jnp.stack([
-        jnp.stack([interp(m11), interp(m12), interp(m13)], axis=-1),
-        jnp.stack([interp(m12), interp(m22), interp(m23)], axis=-1),
-        jnp.stack([interp(m13), interp(m23), interp(m33)], axis=-1),
-    ], axis=1)
+    metric = jnp.stack(
+        [
+            jnp.stack([interp(m11), interp(m12), interp(m13)], axis=-1),
+            jnp.stack([interp(m12), interp(m22), interp(m23)], axis=-1),
+            jnp.stack([interp(m13), interp(m23), interp(m33)], axis=-1),
+        ],
+        axis=1,
+    )
 
-    # finite-epsilon F, G (matches _circular_geometry's `finite_epsilon=True` path)
+    # finite-epsilon F, G (matches _circular_geometry finite_epsilon=True path)
     ffun = bups / bn_out
     gfun = ffun * dBds / bn_out
 

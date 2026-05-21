@@ -372,13 +372,11 @@ def _collect_species_arrays(params):
 def precompute_collisions(geometry: Dict, params: GKParams) -> Dict[str, jnp.ndarray]:
     """Build the 9-point collision stencil.
 
-    Output stencil has shape (9, nv, nmu, ns) when there is a single target
-    species (adiabatic MVP), (nsp, 9, nv, nmu, ns) otherwise.
-
-    Per-target stencil is a sum over all background species (kinetic +
-    adiabatic), each contributing via the full species-pair Fokker-Planck
-    operator with Γ^(a/b), vtb = v·vthrat_a/vthrat_b and mass ratio
-    m_a/m_b (friction).
+    Output stencil shape: (9, nv, nmu, ns) for a single target species (adiabatic
+    MVP), (nsp, 9, nv, nmu, ns) otherwise. Each target stencil is a sum over all
+    background species (kinetic + adiabatic), each contributing the full
+    species-pair Fokker-Planck operator with Gamma^(a/b), vtb = v*vthrat_a/vthrat_b,
+    and mass ratio m_a/m_b (friction).
     """
     if not params.collisions:
         return {}
@@ -411,9 +409,8 @@ def precompute_collisions(geometry: Dict, params: GKParams) -> Dict[str, jnp.nda
         ne19,
     ) = _collect_species_arrays(params)
 
-    # reference Coulomb log for freq_override normalization: use the first
-    # ion-ion pair found in the species list (first bg-bg where both Z>0),
-    # falling back to (0,0) if all species are electrons.
+    # reference Coulomb log for freq_override normalization: first ion-ion pair
+    # in the species list, falling back to (0,0) when all species are electrons.
     def _first_ion(signz_arr):
         idx = jnp.argmax(signz_arr > 0)
         return jnp.where(jnp.any(signz_arr > 0), idx, 0)
@@ -449,7 +446,6 @@ def precompute_collisions(geometry: Dict, params: GKParams) -> Dict[str, jnp.nda
         return jnp.sum(bg_stencils, axis=0)
 
     if params.adiabatic_electrons and tgt_signz.shape[0] == 1:
-        # single target species → 5D stencil
         stencil = stencil_for_target(tgt_mas[0], tgt_signz[0], tgt_tmp[0], tgt_de[0], tgt_vthrat[0])
     else:
         stencil = jax.vmap(stencil_for_target)(tgt_mas, tgt_signz, tgt_tmp, tgt_de, tgt_vthrat)

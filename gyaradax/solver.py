@@ -62,7 +62,6 @@ def g_to_f(dg, apar, params, pre):
     if not params.nlapar:
         return dg
     g2f = pre["g2f_factor"]
-    # apar shape: (ns, nkx, nky) -> broadcast to match df shape
     if dg.ndim == 5:
         apar_b = apar[jnp.newaxis, jnp.newaxis, :, :, :]
     else:
@@ -74,7 +73,7 @@ def f_to_g(df, apar, params, pre):
     """Convert physical distribution f to mixed variable g.
 
     g = f + (2Z/T) * vthrat * vpar * J0 * A_par * F_M
-    => g = f - g2f_factor * A_par  (since g2f_factor = -(2Z/T)*vthrat*vpar*J0*F_M/T)
+    => g = f - g2f_factor * A_par  (g2f_factor = -(2Z/T)*vthrat*vpar*J0*F_M/T)
 
     When nlapar=False, returns df unchanged (identity).
     """
@@ -116,13 +115,9 @@ def mode_amplitude(phi: jnp.ndarray, geometry: Dict[str, jnp.ndarray], eps: floa
     the same mode_label as kx=0 contribute to the amplitude for each ky.
     """
     ds = jnp.asarray(geometry["ints"], dtype=jnp.float64)[0]
-    mode_label = jnp.asarray(geometry["mode_label"], dtype=jnp.int32)  # (nkx, nky)
+    mode_label = jnp.asarray(geometry["mode_label"], dtype=jnp.int32)
     ixzero = jnp.asarray(geometry["ixzero"], dtype=jnp.int32)
-
-    # mask: kx modes in the same chain as kx=0, per ky
-    chain_mask = mode_label == mode_label[ixzero, :]  # (nkx, nky)
-
-    # sum |phi|^2 over s and chain kx only
+    chain_mask = mode_label == mode_label[ixzero, :]
     amp2 = ds * jnp.sum(jnp.abs(phi) ** 2 * chain_mask[None, :, :], axis=(0, 1))
     return jnp.sqrt(jnp.maximum(amp2, eps))
 
@@ -135,7 +130,7 @@ def normalize_per_ky(
 ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     phi = calculate_phi(geometry, df, params=params, pre=pre)
     amp_per_ky = mode_amplitude(phi, geometry, params.norm_eps)
-    # only normalize modes with meaningful amplitude; leave dormant modes unchanged
+    # only normalize modes with meaningful amplitude
     active = amp_per_ky > jnp.sqrt(params.norm_eps)
     inv = jnp.where(active, 1.0 / amp_per_ky, 1.0)
     inv_shape = (1,) * (df.ndim - 1) + (-1,)
@@ -223,15 +218,13 @@ def estimate_nl_timestep(
     """CFL-adaptive timestep from nonlinear ExB velocity.
 
     Computes max|grad(phi)| and (when apar is provided) max|grad(apar)|*vpmax
-    in real space, matching GKW non_linear_terms.F90:1530-1800.
+    in real space, matching GKW non_linear_terms.F90:1530-1800. The y/x
+    correction factors absorb FFTW's unnormalized magnitude (N·|∂phi|_real)
+    so `irfft2(norm="backward")` outputs match GKW's `max|ar|·mrad·lxinv`.
     """
     mrad, mphi, mphiw3 = pre["nl_mrad"], pre["nl_mphi"], pre["nl_mphiw3"]
     jind = pre["nl_jind"]
     kx2d, ky2d = pre["nl_kx2d"], pre["nl_ky2d"]
-    # matches GKW non_linear_terms.F90:1538. GKW's `ar` is FFTW-unnormalized
-    # (|ar| = N·|∂phi|_real with N = mrad·mphi); gyra's `irfft2(norm="backward")`
-    # returns `|∂phi|_real` directly. Multiply by `N·mrad·lxinv` (y-branch) and
-    # `N·mphi·lyinv` (x-branch) to match GKW's `max|ar|·mrad·lxinv` scaling.
     ycorr = mrad * mrad * mphi * pre["nl_lxinv"]
     xcorr = mrad * mphi * mphi * pre["nl_lyinv"]
 
@@ -251,11 +244,9 @@ def estimate_nl_timestep(
         max_x = jnp.max(jnp.abs(_to_real(grad_x_k))) * xcorr
         return jnp.maximum(max_y, max_x)
 
-    # ES: max|grad(phi)|
     max_value = jnp.max(jax.vmap(_max_grad_per_s)(phi))
 
-    # EM: 2*vthrat_max * max|grad(apar)| * vpmax  (non_linear_terms.F90:1241,1790)
-    # GKW bakes 2*vthrat(is) into a_apar/b_apar so maxvalapar inherits it.
+    # em: 2*vthrat_max * max|grad(apar)| * vpmax (non_linear_terms.F90:1241,1790)
     if apar is not None:
         vpmax = jnp.asarray(pre.get("vpmax", 3.0), dtype=jnp.float64)
         vthrat_max = jnp.asarray(pre.get("vthrat_max", 1.0), dtype=jnp.float64)
@@ -321,8 +312,7 @@ def estimate_linear_timestep(
         disp_vp_val * jnp.where(max_abs_vp > _EPS, max_abs_vp * _D4V / dvp, 0.0),
     )
 
-    # ideriv=2: collision 2nd-derivative. GKW keeps tmax2 undivided in the
-    # RK4 max (matdat.F90:1498), separate from the ideriv=1/4 buckets.
+    # ideriv=2: collision 2nd-derivative; kept undivided in the RK4 max (matdat.F90:1498)
     tmax2 = jnp.asarray(0.0, dtype=jnp.float64)
     if "coll_stencil" in pre:
         tmax2 = jnp.max(jnp.abs(pre["coll_stencil"][0]))
@@ -330,12 +320,10 @@ def estimate_linear_timestep(
     # field CFL: ES mode frequency (time_est_field), kinetic only
     tmax1 = jnp.maximum(tmax1, jnp.asarray(pre.get("tmax_field", 0.0), dtype=jnp.float64))
 
-    # em: g2f amplifies effective streaming by ~(1 + beta*vthrat_max^2)
     em_streaming_factor = jnp.asarray(pre.get("em_streaming_cfl", 1.0), dtype=jnp.float64)
     tmax1 = tmax1 * em_streaming_factor
 
-    # RK4 von Neumann (meth=2, matdat.F90:1498):
-    #   tmax = max(tmax1/2.4, tmax2, tmax4/2.4)
+    # RK4 von Neumann (meth=2, matdat.F90:1498): tmax = max(tmax1/2.4, tmax2, tmax4/2.4)
     rk4 = jnp.asarray(2.4, dtype=jnp.float64)
     tmax = jnp.maximum(
         jnp.maximum(jnp.maximum(tmax1 / rk4, tmax2), tmax4 / rk4),
@@ -381,10 +369,8 @@ def _precompute_shared(
     kx_b = jnp.reshape(kx, (1, 1, 1, -1, 1))
     ky_b = jnp.reshape(ky, (1, 1, 1, 1, -1))
 
-    # NL CFL length-inverse factors, matching GKW's `lxinv = 1/lx` with
-    # `lx = 2π/kx_min` (mode.f90:740). Under mode_box, `kx_min = kx[ixzero+1]`
-    # and `ky_min = ky[1]`; for single-mode runs fall back to the grid max.
-    # use dynamic indexing so this block traces under jit (sharded precompute).
+    # NL CFL length-inverse factors: lxinv = 1/lx with lx = 2π/kx_min
+    # (GKW mode.f90:740). Single-mode runs fall back to the grid max.
     ixz_arr = jnp.asarray(geometry.get("ixzero", 0), dtype=jnp.int32)
     if nkx > 1:
         idx = jnp.clip(ixz_arr + 1, 0, nkx - 1)
@@ -568,7 +554,6 @@ def _compute_species_coeffs(
 
         sz = jnp.where(jnp.abs(signz) < _EPS, 1.0, signz)
 
-    # krloc
     krloc_sq = (
         ky_b**2 * g_shape(little_g[:, 0])
         + 2.0 * ky_b * kx_b * g_shape(little_g[:, 1])
@@ -576,37 +561,31 @@ def _compute_species_coeffs(
     )
     krloc = jnp.sqrt(jnp.maximum(krloc_sq, _EPS))
 
-    # Bessel J0
     b_arg = (
         mas * vthrat * krloc * jnp.sqrt(jnp.maximum(2.0 * mu / jnp.maximum(bn_b, _EPS), _EPS)) / sz
     )
     bessel = j0(b_arg)
 
-    # Maxwellian — matches GKW (init.f90:1977-1979).
-    # fmaxwl = (de/dgrid) * exp(-(vpgr² + 2*B*mugr) / (tmp/tgrid)) / sqrt(pi*tmp/tgrid)³
-    # GKW always sets tmp/tgrid = 1 (tgrid = temperature of velocity-grid reference = tmp).
-    # So: fmax = (de/dgrid) * exp(-vp² - 2*B*mu) / π^{3/2}  (no t_rat, no vthrat in denom).
-    # vpgr is in species-normalized units (v_ths), streaming = vthrat*vpgr gives v in v_thi.
+    # Maxwellian (GKW init.f90:1977-1979): fmax = (de/dgrid)*exp(-vp²-2*B*mu)/π^{3/2}.
+    # GKW always sets tmp/tgrid = 1, so no t_rat appears. vpgr is in species-normalized
+    # units (v_ths); streaming = vthrat*vpgr gives v in v_thi.
     fmax = (
         (de / jnp.asarray(params.dgrid, dtype=jnp.float64))
         * jnp.exp(-(vp2 + 2.0 * bn_b * mu))
-        / jnp.pi ** 1.5
+        / jnp.pi**1.5
     )
     et = (vp2 + 2.0 * bn_b * mu) - 1.5
     dmax_ek = (rln + rlt * et) * fmax * (efun_b * ky_b)
 
-    # drifts — GKW drift() in linear_terms.f90:4154-4156 scales by tgrid(is)
-    # = tmp(is). Without this factor any species with tmp != 1 has a
-    # mis-scaled curvature/grad-B drift.
+    # drifts: GKW drift() scales by tgrid(is) = tmp(is) (linear_terms.f90:4154-4156).
     ed = vp2 + bn_b * mu
     drift_x = tmp * ed * d_shape(dfun[:, 0]) / sz
     drift_y = tmp * ed * d_shape(dfun[:, 1]) / sz
 
-    # characteristic speeds
     upar = -ffun_b * vthrat * vp
     utrap = vthrat * mu * bn_b * gfun_b
 
-    # dissipation speeds for idisp=2: RMS velocity (matches GKW linear_terms.f90:643,911)
+    # idisp=2: RMS velocity (GKW linear_terms.f90:643,911)
     vp_rms = jnp.asarray(
         params.vpgr_rms if hasattr(params, "vpgr_rms") else jnp.sqrt(jnp.mean(vpgr**2)),
         dtype=jnp.float64,
@@ -654,13 +633,11 @@ def _linear_precompute_core(geometry: Dict[str, jnp.ndarray], params: GKParams) 
     efun = jnp.asarray(geometry.get("efun", jnp.ones_like(bn)), dtype=jnp.float64)
     little_g = jnp.asarray(geometry["little_g"], dtype=jnp.float64)
 
-    # species-independent shared quantities
     out = _precompute_shared(
         geometry, params, kx, ky, ns, nkx, nky, vpgr, mugr, bn, ffun, gfun, dfun, efun
     )
 
     if not params.adiabatic_electrons:
-        # kinetic: per-species arrays with leading nsp dimension
         mas_arr = jnp.asarray(params.mas, dtype=jnp.float64)
         nsp = int(mas_arr.shape[0])
         sp = _compute_species_coeffs(
@@ -684,7 +661,6 @@ def _linear_precompute_core(geometry: Dict[str, jnp.ndarray], params: GKParams) 
             params,
             ndim=6,
         )
-        # override vpgr_rms/mugr_rms if available
         if "vpgr_rms" in geometry:
             vp_rms = jnp.asarray(geometry["vpgr_rms"], dtype=jnp.float64)
             mu_rms = jnp.asarray(geometry.get("mugr_rms", 1.0), dtype=jnp.float64)
@@ -719,14 +695,12 @@ def _linear_precompute_core(geometry: Dict[str, jnp.ndarray], params: GKParams) 
         out.update(precompute_collisions(geometry, params))
         out["geom_tensors"] = None
         out["nsp"] = nsp
-        # kx_b/ky_b computed in _compute_species_coeffs but not returned - add them here
-        # For kinetic case, need 6D shape (1, 1, 1, 1, nkx, 1) to broadcast with 6D drift arrays
+        # 6D broadcast shape so kx_b/ky_b align with kinetic drift arrays
         out["kx_b"] = jnp.reshape(kx, (1, 1, 1, 1, -1, 1))
         out["ky_b"] = jnp.reshape(ky, (1, 1, 1, 1, 1, -1))
 
-        # precompute kinetic phi solve arrays (avoids recomputing bessel/gamma per RHS call)
-        # Ensure geometry has correct multi-species arrays from params
-        # (compute_geometry_from_input may only have single-species defaults)
+        # ensure multi-species arrays present (compute_geometry_from_input may only
+        # have single-species defaults)
         geom_sp = dict(geometry)
         geom_sp["mas"] = jnp.asarray(params.mas, dtype=jnp.float64).reshape(-1)
         geom_sp["signz"] = jnp.asarray(params.signz, dtype=jnp.float64).reshape(-1)
@@ -737,7 +711,6 @@ def _linear_precompute_core(geometry: Dict[str, jnp.ndarray], params: GKParams) 
         out["phi_weight"] = phi_w
         out["phi_diag"] = phi_d
 
-        # electromagnetic precomputation (A_parallel)
         if params.nlapar:
             from gyaradax.integrals import precompute_apar
 
@@ -755,15 +728,14 @@ def _linear_precompute_core(geometry: Dict[str, jnp.ndarray], params: GKParams) 
             intvp_6 = jnp.asarray(geometry["intvp"], dtype=jnp.float64).reshape(1, -1, 1, 1, 1, 1)
             bn_6 = jnp.reshape(bn, (1, 1, 1, -1, 1, 1))
 
-            # Ampere denominator: GKW-matching numerical integral.
-            # GKW uses a shared velocity grid for all species (velocitygrid.f90:197).
-            # gamma_num = sum(2*B*intmu*intvp * J0^2 * vpgr^2 * fmaxwl) per species
-            # (GKW ampere_dia, linear_terms.f90:3760-3785)
+            # Ampere denominator (GKW ampere_dia, linear_terms.f90:3760-3785):
+            # gamma_num = sum(2*B*intmu*intvp * J0^2 * vpgr^2 * fmaxwl) per species,
+            # shared velocity grid for all species (velocitygrid.f90:197).
             gamma_num = jnp.sum(
                 2.0 * bn_6 * intmu_6 * intvp_6 * sp["bessel"] ** 2 * vpgr_6**2 * sp["fmaxwl"],
                 axis=(1, 2),
                 keepdims=True,
-            )  # (nsp, 1, 1, ns, nkx, nky)
+            )
             diag_per_sp = signz_6**2 * de_6 * gamma_num / mas_6
             diag_em = params.beta * jnp.sum(diag_per_sp, axis=0)
             diag_em = diag_em.reshape(diag_em.shape[-3], diag_em.shape[-2], diag_em.shape[-1])
@@ -773,25 +745,21 @@ def _linear_precompute_core(geometry: Dict[str, jnp.ndarray], params: GKParams) 
             apar_d = kperp_sq_3d + diag_em
             apar_d = jnp.where(jnp.abs(apar_d) < _EPS, 1.0, apar_d)
             out["apar_diag"] = apar_d
+
             # g2f_factor matches GKW g2f_correct: -2*signz*vthrat*vpgr*J0*fmaxwl/tmp
             g2f = -2.0 * signz_6 * vthrat_6 * vpgr_6 * sp["bessel"] * sp["fmaxwl"] / tmp_6
             out["g2f_factor"] = g2f
-            # correction to Ampere denominator for self-consistent solve from g
-            # When solving from g: (apar_diag - g2f_correction) * apar = einsum(apar_weight, g)
             out["apar_g2f_correction"] = jnp.einsum("avmjkl,avmjkl->jkl", apar_w, g2f)
-            # chi factor: gyro_chi = gyro_phi + apar_chi_factor * apar
-            # where chi = phi - 2*v_R*v_par*A_par (the generalized EM potential)
-            # apar_chi_factor = -2 * vthrat * vpgr * J0 (shape: 6D per-species)
+            # chi factor: gyro_chi = gyro_phi + apar_chi_factor*apar with
+            # chi = phi - 2*v_R*v_par*A_par (generalized EM potential)
             out["apar_chi_factor"] = -2.0 * vthrat_6 * vpgr_6 * sp["bessel"]
 
-        # B_parallel precomputation (coupled Poisson-Bpar system)
         if params.nlbpar:
             from gyaradax.integrals import i1e as _i1e, j1_hat as _j1_hat
 
             beta = jnp.asarray(params.beta, dtype=jnp.float64)
             mugr_6 = jnp.asarray(geometry["mugr"], dtype=jnp.float64).reshape(1, 1, -1, 1, 1, 1)
 
-            # krloc for zero-mode detection
             kxrh_6 = jnp.reshape(kx, (1, 1, 1, 1, -1, 1))
             ky_6 = jnp.reshape(ky, (1, 1, 1, 1, 1, -1))
             krloc_sq = (
@@ -802,7 +770,6 @@ def _linear_precompute_core(geometry: Dict[str, jnp.ndarray], params: GKParams) 
             krloc = jnp.sqrt(jnp.maximum(krloc_sq, _EPS))
             krloc_is_zero = jnp.abs(krloc) < 1e-5
 
-            # Gamma_0, Gamma_1 per species
             sz_6 = jnp.where(jnp.abs(signz_6) < _EPS, 1.0, signz_6)
             gamma_arg = 0.5 * (mas_6 * vthrat_6 * krloc / (sz_6 * bn_6)) ** 2
             gamma_arg = jnp.clip(gamma_arg, 0.0, 500.0)
@@ -812,13 +779,12 @@ def _linear_precompute_core(geometry: Dict[str, jnp.ndarray], params: GKParams) 
             gamma1 = _i1e(gamma_arg)
             gamma_diff = jnp.where(krloc_is_zero, 1.0, gamma0 - gamma1)
 
-            # J1_hat = 2*J_1(bessel_arg)/bessel_arg, zero mode → 0.5
             mugr_bn = jnp.maximum(2.0 * mugr_6 / bn_6, _EPS)
             bessel_arg = mas_6 * vthrat_6 * krloc * jnp.sqrt(mugr_bn) / sz_6
             bessel_arg = jnp.where(jnp.isnan(bessel_arg), 0.0, bessel_arg)
             j1hat = jnp.where(krloc_is_zero, 0.5, _j1_hat(bessel_arg))
 
-            # Coupling coefficients (summed over species)
+            # coupling coefficients (summed over species)
             gamma0_for_fsp1 = jnp.where(krloc_is_zero, 1.0, gamma0)
             F_sp1 = jnp.sum(
                 signz_6**2 * de_6 * (gamma0_for_fsp1 - 1.0) / tmp_6, axis=0, keepdims=True
@@ -829,34 +795,28 @@ def _linear_precompute_core(geometry: Dict[str, jnp.ndarray], params: GKParams) 
             B_sp1 = jnp.sum(signz_6 * de_6 * gamma_diff / bn_6, axis=0, keepdims=True)
             B_sp2 = jnp.sum(tmp_6 * de_6 * beta * gamma_diff / bn_6**2, axis=0, keepdims=True)
 
-            # Coupled diagonal
             cdiag = F_sp1 * (1.0 + B_sp2) - F_sp2 * B_sp1
             cdiag_3d = cdiag.reshape(cdiag.shape[-3], cdiag.shape[-2], cdiag.shape[-1])
             cdiag_3d = jnp.where(jnp.abs(cdiag_3d) < _EPS, 1.0, cdiag_3d)
 
-            # I_sp1 and I_sp2 (per-species numerator weights)
             I_sp1 = signz_6 * de_6 * bn_6 * sp["bessel"] * intvp_6 * intmu_6
             I_sp2 = beta * bn_6 * tmp_6 * de_6 * intvp_6 * intmu_6 * mugr_6 * j1hat
 
-            # Override phi_weight and phi_diag with coupled versions
+            # phi/bpar form a coupled 2x2 system; override phi_weight/phi_diag
             out["phi_weight"] = I_sp1 * (1.0 + B_sp2) - I_sp2 * B_sp1
             out["phi_diag"] = cdiag_3d
             out["bpar_weight"] = I_sp2 * F_sp1 - I_sp1 * F_sp2
-
-            # chi factor for B_par: gyro_chi += bpar_chi_factor * bpar
             out["bpar_chi_factor"] = 2.0 * mugr_6 * tmp_6 / signz_6 * j1hat
 
-        # field CFL: Alfvén wave limit (time_est_field, matdat.F90:1859-1919)
-        # ES: sqrt(mir * kmin2 * mer)
-        # EM: sqrt(mir * (beta + kmin2 * mer))  — beta adds shear Alfven coupling
+        # field CFL: Alfvén wave limit (time_est_field, matdat.F90:1859-1919).
+        # ES: sqrt(mir*kmin2*mer); EM: sqrt(mir*(beta+kmin2*mer)) -- beta adds Alfven coupling
         signz_arr = jnp.asarray(params.signz, dtype=jnp.float64)
         de_arr = jnp.asarray(params.de, dtype=jnp.float64)
         mir = jnp.sum(jnp.where(signz_arr > 0, mas_arr * de_arr, 0.0))
         mer = jnp.sum(jnp.where(signz_arr < 0, mas_arr / jnp.maximum(de_arr, _EPS), 0.0))
         ky_min = jnp.where(nky > 1, ky[1], ky[0])
         kmin2 = ky_min**2 * little_g[:, 0]
-        # matdat.F90:1911-1914: under mode_box, fall back to 2π*lxinv = kx_min
-        # when that is smaller than ky_min²·g_yy. dynamic-indexed for jit.
+        # matdat.F90:1911-1914: fall back to 2π*lxinv = kx_min when smaller than ky_min²·g_yy
         ixz_arr = jnp.asarray(geometry["ixzero"], dtype=jnp.int32)
         if nkx > 1:
             idx = jnp.clip(ixz_arr + 1, 0, nkx - 1)
@@ -872,16 +832,12 @@ def _linear_precompute_core(geometry: Dict[str, jnp.ndarray], params: GKParams) 
         time_field = jnp.min(jnp.where(field_period > _EPS, field_period, 1e30))
         out["tmax_field"] = jnp.where(time_field < 1e20, 1.0 / time_field, 0.0)
 
-        # g2f coupling to A_par adds a linear v_A term to the effective streaming.
-        # GKW's time_est_field (matdat.F90:1859-1919) captures this via the
-        # Alfven-wave field CFL; no separate multiplicative (1+beta*vthrat^2)^2
-        # factor is applied. Keep em_streaming_cfl as a pass-through so linear
-        # and NL runs pick dt consistent with GKW's dtim_est.
+        # g2f -> A_par Alfven coupling is captured by tmax_field; em_streaming_cfl
+        # is kept as a pass-through so dt matches GKW's dtim_est.
         if params.nlapar:
             out["em_streaming_cfl"] = jnp.asarray(1.0, dtype=jnp.float64)
 
     else:
-        # adiabatic: scalar species params, 5D arrays
         sp = _compute_species_coeffs(
             params.mas,
             params.signz,
@@ -903,7 +859,6 @@ def _linear_precompute_core(geometry: Dict[str, jnp.ndarray], params: GKParams) 
             params,
             ndim=5,
         )
-        # override vpgr_rms/mugr_rms if available
         if "vpgr_rms" in geometry:
             vp_rms = jnp.asarray(geometry["vpgr_rms"], dtype=jnp.float64)
             mu_rms = jnp.asarray(geometry.get("mugr_rms", 1.0), dtype=jnp.float64)
@@ -937,7 +892,6 @@ def _linear_precompute_core(geometry: Dict[str, jnp.ndarray], params: GKParams) 
         out.update(precompute_collisions(geometry, params))
         out["geom_tensors"] = geom_tensors(geometry, params=params)
 
-        # precompute adiabatic phi solve arrays
         pw, pcw, tmp, de, signz, gamma, ints, has_zonal, ixzero, iyzero = precompute_phi_adiabatic(
             geometry, params
         )
@@ -952,7 +906,6 @@ def _linear_precompute_core(geometry: Dict[str, jnp.ndarray], params: GKParams) 
         out["phi_ixzero"] = ixzero
         out["phi_iyzero"] = iyzero
 
-        # electromagnetic precomputation for adiabatic electrons + A_par
         if params.nlapar:
             from gyaradax.integrals import precompute_apar
 
@@ -960,19 +913,13 @@ def _linear_precompute_core(geometry: Dict[str, jnp.ndarray], params: GKParams) 
             out["apar_weight"] = apar_w
             out["apar_diag"] = apar_d
             out["kperp_sq"] = kperp_sq
-            # g2f factor for adiabatic (5D single species)
             signz_b = jnp.asarray(params.signz, dtype=jnp.float64)
             tmp_b = jnp.asarray(params.tmp, dtype=jnp.float64)
             vthrat_b = jnp.asarray(params.vthrat, dtype=jnp.float64)
             vpgr_5 = jnp.reshape(vpgr, (-1, 1, 1, 1, 1))
             g2f = -2.0 * signz_b * vthrat_b * vpgr_5 * sp["bessel"] * sp["fmaxwl"] / tmp_b
             out["g2f_factor"] = g2f
-            # correction to Ampere denominator for self-consistent solve from g
-            # apar_diag_modified = apar_diag - einsum(apar_weight * g2f_factor)
-            out["apar_g2f_correction"] = jnp.einsum(
-                "vmjkl,vmjkl->jkl", apar_w[0], g2f  # single species (adiabatic)
-            )
-            # chi factor: gyro_chi = gyro_phi + apar_chi_factor * apar
+            out["apar_g2f_correction"] = jnp.einsum("vmjkl,vmjkl->jkl", apar_w[0], g2f)
             out["apar_chi_factor"] = -2.0 * vthrat_b * vpgr_5 * sp["bessel"]
 
     return GKPre(out)
@@ -980,21 +927,19 @@ def _linear_precompute_core(geometry: Dict[str, jnp.ndarray], params: GKParams) 
 
 def linear_precompute(geometry: Dict[str, jnp.ndarray], params: GKParams) -> "GKPre":
     """Precompute static geometry-dependent coefficients and Bessel terms.
-    
+
     Automatically uses sharded computation if params indicates multi-GPU config.
     """
-    # Auto-detect and use sharded precompute if multi-GPU config is active
     n_gpus_sp = int(getattr(params, "n_gpus_sp", 1))
     n_gpus_vp = int(getattr(params, "n_gpus_vp", 1))
     n_gpus_mu = int(getattr(params, "n_gpus_mu", 1))
     if n_gpus_sp * n_gpus_vp * n_gpus_mu > 1:
         from gyaradax import sharding
+
         mesh = sharding.build_mesh(params)
         if mesh is not None:
             grid = sharding.grid_shape_from(params, geometry)
             return sharding.precompute_sharded(geometry, params, mesh, grid)
-    
-    # Single-device path
     return _linear_precompute_core(geometry, params)
 
 
@@ -1021,7 +966,7 @@ def init_f(
         noise:   uniform random on [-1, 1] (real + imag)
         gnoise:  gaussian random (Box-Muller transform)
         zonal:   Rosenbluth-Hinton test — only ky=0, kx=±1 with Maxwellian weight
-    
+
     Args:
         geometry: Geometry dictionary
         finit: Initialization mode
@@ -1035,8 +980,7 @@ def init_f(
         out_sharding: Optional JAX sharding to apply to output. If None and params
             indicates multi-GPU, auto-detects and applies sharding.
     """
-    # Auto-detect and use sharded initialization if params indicates multi-GPU
-    # (but don't override explicitly provided out_sharding)
+    # auto-detect multi-GPU sharding when params indicates it (don't override explicit)
     if out_sharding is None and params is not None:
         n_gpus_sp = int(getattr(params, "n_gpus_sp", 1))
         n_gpus_vp = int(getattr(params, "n_gpus_vp", 1))
@@ -1044,16 +988,17 @@ def init_f(
         if n_gpus_sp * n_gpus_vp * n_gpus_mu > 1:
             from gyaradax import sharding
             from jax.sharding import NamedSharding, PartitionSpec
+
             mesh = sharding.build_mesh(params)
             if mesh is not None:
-                grid = sharding.grid_shape_from(params, geometry)
-                # Build output sharding spec
                 if n_species > 1:
-                    spec = PartitionSpec(sharding._AXIS_SP, sharding._AXIS_VP, sharding._AXIS_MU, None, None, None)
+                    spec = PartitionSpec(
+                        sharding._AXIS_SP, sharding._AXIS_VP, sharding._AXIS_MU, None, None, None
+                    )
                 else:
                     spec = PartitionSpec(sharding._AXIS_VP, sharding._AXIS_MU, None, None, None)
                 out_sharding = NamedSharding(mesh, spec)
-    
+
     nv, nmu, ns, nkx, nky = (
         len(geometry["intvp"]),
         len(geometry["intmu"]),
@@ -1074,9 +1019,9 @@ def init_f(
     shape_6d = (n_species, nv, nmu, ns, nkx, nky)
     full_shape = shape_6d if n_species > 1 else shape_5d
 
-    # velocity-space Maxwellian: (n/n_grid) * exp(-(vpar^2 + 2*mu*B)/T) / (sqrt(T*pi))^3
-    # matches GKW's fmaxwl in components.f90 (with dens=dref=tref=1).
-    vp2 = vpgr**2  # (nv,)
+    # velocity-space Maxwellian (GKW components.f90, dens=dref=tref=1):
+    # (n/n_grid) * exp(-(vpar^2 + 2*mu*B)/T) / (sqrt(T*pi))^3
+    vp2 = vpgr**2
     tmp_val = jnp.asarray(geometry.get("tmp", jnp.ones(1)), dtype=jnp.float64)
     if tmp_val.ndim > 0:
         tmp_val = tmp_val[0]
@@ -1085,7 +1030,7 @@ def init_f(
         tgrid_val = tgrid_val[0]
     t_rat = tmp_val / tgrid_val
     energy = vp2[:, None, None] + 2.0 * mugr[None, :, None] * bn[None, None, :]
-    maxwellian_env = jnp.exp(-energy / t_rat) / (jnp.sqrt(t_rat * jnp.pi) ** 3)  # (nv, nmu, ns)
+    maxwellian_env = jnp.exp(-energy / t_rat) / (jnp.sqrt(t_rat * jnp.pi) ** 3)
 
     if finit in ("noise", "gnoise"):
         key = jax.random.PRNGKey(seed)
@@ -1099,8 +1044,7 @@ def init_f(
         df = amp * (noise_real + 1j * noise_imag)
 
     elif finit == "cosine2":
-        # amp * (cos(2*pi*s) + 1), uniform in velocity
-        prof_s = amp * (jnp.cos(2.0 * jnp.pi * sgrid) + 1.0)  # (ns,)
+        prof_s = amp * (jnp.cos(2.0 * jnp.pi * sgrid) + 1.0)
         df = _broadcast_profile(prof_s, None, n_species, nv, nmu, ns, nkx, nky)
 
     elif finit == "cosine":
@@ -1108,16 +1052,13 @@ def init_f(
         df = _broadcast_profile(prof_s, None, n_species, nv, nmu, ns, nkx, nky)
 
     elif finit == "cosine3":
-        # amp * (cos(2*pi*s) + 1) * exp(-(vpar^2 + 2*mu*B))
         prof_s = amp * (jnp.cos(2.0 * jnp.pi * sgrid) + 1.0)
         df = _broadcast_profile(prof_s, maxwellian_env, n_species, nv, nmu, ns, nkx, nky)
 
     elif finit == "sine":
-        # amp * de(is) * (sin(2*pi*s) + 1)
         de = jnp.asarray(geometry.get("de", jnp.ones(max(n_species, 1))), dtype=jnp.float64)
         prof_s = amp * (jnp.sin(2.0 * jnp.pi * sgrid) + 1.0)
         if n_species > 1 and de.ndim >= 1 and de.shape[0] > 1:
-            # (nsp, ns)
             prof_2d = prof_s[None, :] * de[:, None]
             df = jnp.broadcast_to(prof_2d[:, None, None, :, None, None], shape_6d)
         else:
@@ -1126,10 +1067,8 @@ def init_f(
             df = _broadcast_profile(prof_s, None, n_species, nv, nmu, ns, nkx, nky)
 
     elif finit == "zonal":
-        # Rosenbluth-Hinton test: only the zonal mode (ky=0) is initialized.
-        # in spectral space, set kx = ±1 around kx=0 with ±i*amp*fmaxwl/2
-        # to produce a sin(kx*x) radial density perturbation.  Only ions
-        # (signz > 0) are initialized.  (GKW init.f90:1471-1514)
+        # Rosenbluth-Hinton: spectral kx = ±1 around kx=0 with ±i*amp*fmaxwl/2,
+        # ions only (signz > 0). GKW init.f90:1471-1514.
         kxrh = jnp.asarray(geometry["kxrh"], dtype=jnp.float64)
         ixzero = int(jnp.argmin(jnp.abs(kxrh)).item())
         iy0 = int(
@@ -1175,34 +1114,27 @@ def init_f(
 
     if normalize_per_toroidal_mode:
         df, _, _ = normalize_per_ky(df, geometry, GKParams(norm_eps=norm_eps))
-    
-    # Apply output sharding if specified (for multi-GPU)
+
     if out_sharding is not None:
         df = jax.device_put(df, out_sharding)
-    
     return df
 
 
 def _broadcast_profile(prof_s, vel_env, n_species, nv, nmu, ns, nkx, nky):
     """Broadcast a parallel profile (and optional velocity envelope) to full shape."""
     if vel_env is not None:
-        # vel_env: (nv, nmu, ns), prof_s: (ns,)
-        base = vel_env * prof_s[None, None, :]  # (nv, nmu, ns)
+        base = vel_env * prof_s[None, None, :]
         if n_species > 1:
             return jnp.broadcast_to(
                 base[None, :, :, :, None, None], (n_species, nv, nmu, ns, nkx, nky)
             )
-        else:
-            return jnp.broadcast_to(base[:, :, :, None, None], (nv, nmu, ns, nkx, nky))
-    else:
-        # flat in velocity
-        if n_species > 1:
-            prof = jnp.broadcast_to(prof_s[None, :], (n_species, ns))
-            return jnp.broadcast_to(
-                prof[:, None, None, :, None, None], (n_species, nv, nmu, ns, nkx, nky)
-            )
-        else:
-            return jnp.broadcast_to(prof_s[None, None, :, None, None], (nv, nmu, ns, nkx, nky))
+        return jnp.broadcast_to(base[:, :, :, None, None], (nv, nmu, ns, nkx, nky))
+    if n_species > 1:
+        prof = jnp.broadcast_to(prof_s[None, :], (n_species, ns))
+        return jnp.broadcast_to(
+            prof[:, None, None, :, None, None], (n_species, nv, nmu, ns, nkx, nky)
+        )
+    return jnp.broadcast_to(prof_s[None, None, :, None, None], (nv, nmu, ns, nkx, nky))
 
 
 def advance_state(
@@ -1266,44 +1198,32 @@ def _compute_phi(df, geometry, params, pre):
 def _compute_fields(dg, geometry, params, pre):
     """Compute all field variables (phi, apar, bpar) from the evolved variable dg.
 
-    When nlapar=True:
-      1. Solve Ampere: apar = einsum(weight, g) / diag  (bare denominator)
-      2. Compute df = g + g2f_factor * apar  (physical distribution)
-      3. Solve phi from df (coupled weight if nlbpar)
-      4. Solve bpar from df (if nlbpar, shares coupled diagonal with phi)
-
-    Returns (phi, apar, bpar) where apar/bpar are None when disabled.
+    When nlapar=True: solves Ampere from g, transforms g->f, then solves phi
+    (coupled weight if nlbpar) and bpar from f. Returns (phi, apar, bpar) with
+    apar/bpar=None when disabled.
     """
     if not params.nlapar:
         phi = _compute_phi(dg, geometry, params, pre)
         return phi, None, None
 
-    # Support adiabatic + nlapar (GKW's em_adiabat_apar case): promote 5D dg to
-    # 6D with a singleton species axis so the (nsp-indexed) apar/bpar einsums
-    # work uniformly. The physical distribution df is restored to 5D before
-    # the phi solve, which dispatches on ndim.
+    # adiabatic + nlapar (GKW em_adiabat_apar): promote 5D dg to 6D so the
+    # (nsp-indexed) apar/bpar einsums work uniformly, restore to 5D for phi.
     adiabatic_5d = dg.ndim == 5
     dg_6d = dg[jnp.newaxis] if adiabatic_5d else dg
 
-    # Step 1: Solve Ampere from g (bare denominator, no g2f self-consistency).
     apar_weight = pre["apar_weight"]
     apar_diag = pre["apar_diag"]
     apar_num = jnp.einsum("avmjkl,avmjkl->jkl", apar_weight, dg_6d)
     apar = apar_num / apar_diag
 
-    # Step 2: Convert g -> f
     df_6d = g_to_f(dg_6d, apar, params, pre)
     df = df_6d[0] if adiabatic_5d else df_6d
-
-    # Step 3: Solve phi from f (uses coupled weight/diag when nlbpar=True)
     phi = _compute_phi(df, geometry, params, pre)
 
-    # Step 4: Solve bpar from f (shares coupled diagonal with phi)
     bpar = None
     if params.nlbpar and "bpar_weight" in pre:
         bpar_num = jnp.einsum("avmjkl,avmjkl->jkl", pre["bpar_weight"], df_6d)
         bpar = -bpar_num / pre["phi_diag"]
-
     return phi, apar, bpar
 
 
@@ -1333,8 +1253,7 @@ def gkstep_single(
 
     def _rhs(dg):
         phi_local, apar_local, bpar_local = _compute_fields(dg, geometry, params, pre)
-        # GKW converts g→f before linear terms (exp_integration.F90:802-814: fdis_tmp = f).
-        # All linear terms (streaming, drift, trapping) act on f, not g.
+        # linear terms act on f, not g (GKW exp_integration.F90:802-814 fdis_tmp = f)
         df_for_rhs = g_to_f(dg, apar_local, params, pre) if apar_local is not None else dg
         rhs = ops.linear_rhs(
             df_for_rhs, phi_local, geometry, params, pre, apar=apar_local, bpar=bpar_local
@@ -1364,8 +1283,7 @@ def gkstep_single(
     dt3 = dt / 3.0
     next_df_raw = prev_df + dt6 * k1 + dt3 * k2 + dt3 * k3 + dt6 * k4
 
-    # inline NL CFL from RK4 substages (max grad across all 4 stages).
-    # scaling matches GKW non_linear_terms.F90:1538 (see estimate_nl_timestep).
+    # inline NL CFL: max grad across all RK4 substages (GKW non_linear_terms.F90:1538)
     if params.non_linear:
         _ycorr = pre["nl_mrad"] * pre["nl_mrad"] * pre["nl_mphi"] * pre["nl_lxinv"]
         _xcorr = pre["nl_mrad"] * pre["nl_mphi"] * pre["nl_mphi"] * pre["nl_lyinv"]
@@ -1401,20 +1319,20 @@ def gkstep_single(
 
             return jnp.max(jax.vmap(_per_s)(p))
 
-        # max grad(phi) across all substages
         mg_phi = jnp.maximum(
             jnp.maximum(_max_grad_inline(phi1), _max_grad_inline(phi2)),
             jnp.maximum(_max_grad_inline(phi3), _max_grad_inline(phi4)),
         )
-        # em: 2*vthrat_max * max grad(apar) * vpmax across substages
-        # (non_linear_terms.F90:1241,1790 — vthrat is baked into a_apar/b_apar)
+        # em: 2*vthrat_max * max grad(apar) * vpmax (non_linear_terms.F90:1241,1790)
         mg_apar = jnp.array(0.0, dtype=jnp.float64)
         if params.nlapar:
             vpmax = pre["vpmax"]
             vthrat_max = pre.get("vthrat_max", jnp.asarray(1.0, dtype=jnp.float64))
             apar_fac = 2.0 * vthrat_max * vpmax
             _apar_grads = [
-                _max_grad_inline(a) * apar_fac for a in [apar1, apar2, apar3, apar4] if a is not None
+                _max_grad_inline(a) * apar_fac
+                for a in [apar1, apar2, apar3, apar4]
+                if a is not None
             ]
             if _apar_grads:
                 mg_apar = jnp.maximum(mg_apar, jnp.stack(_apar_grads).max())
@@ -1425,7 +1343,6 @@ def gkstep_single(
     else:
         substage_dt_est = jnp.array(1e10, dtype=jnp.float64)
 
-    # post-step: normalization and amplitude tracking
     new_step = state.step + jnp.array(1, dtype=jnp.int32)
     is_window_end = jnp.equal(jnp.mod(new_step, params.naverage), 0)
 
@@ -1482,7 +1399,7 @@ def gksolve(
     if pre is None:
         pre = linear_precompute(geometry, params)
 
-    # Ensure geometry has correct multi-species arrays for downstream flux calculations
+    # ensure multi-species arrays are present for downstream flux calculations
     if not params.adiabatic_electrons:
         geometry = dict(geometry)
         for k in ("mas", "signz", "tmp", "de", "vthrat"):
@@ -1553,11 +1470,8 @@ def gksolve(
             "dt_input": dt_input_scalar,
         }
 
-    # diagnostics use the physical distribution f, not the evolved mixed variable g.
-    # GKW's diagnos_fluxes_vspace.F90:444 applies get_f_from_g before every flux and
-    # field integral; we do the same here. Without this, phi, ky_spec, kx_spec and
-    # fluxes for nlapar=True are computed on g and differ from f by the A_par (and
-    # bpar) response term, which is ~vthrat amplified for kinetic electrons.
+    # diagnostics use the physical distribution f, not the evolved mixed variable g
+    # (GKW diagnos_fluxes_vspace.F90:444 applies get_f_from_g before fluxes/fields)
     diag_df = final_df
     if params.nlapar:
         _, apar_final, _ = _compute_fields(final_df, geometry, params, pre)

@@ -64,16 +64,12 @@ def load_gkw_dump(
         knth = np.reshape(ff, (2, nvpar, nmu, ns, nkx, nky), order="F")
         df = jnp.array(knth[0] + 1j * knth[1], dtype=jnp.complex128)
     else:
-        # GKW stores species as the outermost (slowest) Fortran index.
-        # binary layout: (2_re_im, nvpar, nmu, ns, nkx, nky, nspecies) Fortran order.
+        # GKW Fortran layout: species is the outermost (slowest) index;
+        # (2_re_im, nvpar, nmu, ns, nkx, nky, nspecies) -> move species to leading axis.
         knth = np.reshape(ff, (2, nvpar, nmu, ns, nkx, nky, n_species), order="F")
-        # combine real/imag and move species to leading axis
-        df_np = knth[0] + 1j * knth[1]  # (nvpar, nmu, ns, nkx, nky, nspecies)
-        df = jnp.array(
-            np.moveaxis(df_np, -1, 0), dtype=jnp.complex128
-        )  # (nspecies, nvpar, nmu, ns, nkx, nky)
+        df_np = knth[0] + 1j * knth[1]
+        df = jnp.array(np.moveaxis(df_np, -1, 0), dtype=jnp.complex128)
 
-    # 2. Load side info
     info = {"path": file_path, "time": 0.0}
     dat_path = file_path + ".dat"
     if os.path.exists(dat_path):
@@ -148,26 +144,21 @@ def save_dumps(
     block_start_step: int = 0,
     block_start_time: float = 0.0,
 ):
-    """
-    Handle simulation output. Saves heavy 5D distribution snapshots if requested
+    """Handle simulation output. Saves heavy 5D distribution snapshots if requested
     and appends diagnostic history to persistent files.
 
     When ``params`` and ``pre`` are supplied and ``params.nlapar`` is set, also
-    writes a new ``fluxes_em.npz`` with the magnetic-flutter EM fluxes
-    computed from the final (f, A_par, B_par). Existing ``fluxes.npz`` /
-    ``kyspec.npz`` / ``kxspec.npz`` / ``growth.npz`` formats are unchanged.
-
-    When ``dt_info`` is supplied (dict with per-step ``dt_used``/``dt_nl``/
-    ``dt_lin`` arrays and scalar ``dt_input``), also appends a per-step
-    ``dt_history.npz`` matching GKW's debug4 dt_history.dat columns:
+    writes ``fluxes_em.npz`` with the magnetic-flutter EM fluxes computed from
+    the final (f, A_par, B_par). When ``dt_info`` is supplied (dict with per-step
+    ``dt_used``/``dt_nl``/``dt_lin`` arrays and scalar ``dt_input``), also
+    appends a per-step ``dt_history.npz`` matching GKW's debug4 columns:
     step, time, dt_used, dt_nl, dt_lin, dt_input.
     """
     os.makedirs(output_dir, exist_ok=True)
 
-    # spectra use field-line-averaged |phi|^2, matching GKW conventions:
-    #   ky_spec: per-mode spectral density = ds * sum_{s,kx} |phi|^2
-    #   kx_spec: total per kx = ds * sum_{s,ky} parseval_ky * |phi|^2
-    #     where parseval_ky = [1, 2, 2, ...] (one-sided Parseval for real fields)
+    # spectra use field-line-averaged |phi|^2 (GKW convention):
+    #   ky_spec = ds * sum_{s,kx} |phi|^2
+    #   kx_spec = ds * sum_{s,ky} parseval_ky * |phi|^2,  parseval_ky = [1, 2, 2, ...]
     ds = float(jnp.asarray(geometry["ints"])[0])
     nky = phi.shape[-1]
     parseval_ky = jnp.array([1.0] + [2.0] * (nky - 1))
@@ -175,15 +166,12 @@ def save_dumps(
     ky_spec = jnp.sum(ds * phi_sq, axis=(0, 1))
     kx_spec = jnp.sum(ds * phi_sq * parseval_ky[None, None, :], axis=(0, 2))
 
-    # fluxes: tuple of 3 scalars (adiabatic) or (nsp, 3) array (kinetic)
     fluxes_arr = np.asarray(fluxes)
     if fluxes_arr.ndim == 0 or (fluxes_arr.ndim == 1 and fluxes_arr.shape[0] != 3):
-        # tuple of scalars -> (3,)
         fluxes_arr = np.array([fluxes[0], fluxes[1], fluxes[2]])
 
-    # em fluxes (magnetic-flutter A_par / B_par components). Shape matches ES
-    # fluxes: (3,) for 5D df, (nsp, 3) for 6D. Third slot (vflux) is 0 — EM
-    # momentum flux is not tracked by calculate_em_fluxes.
+    # em fluxes shape matches ES: (3,) for 5D df, (nsp, 3) for 6D. vflux slot is
+    # zero -- EM momentum flux is not tracked by calculate_em_fluxes.
     em_fluxes_arr = _compute_em_fluxes_arr(df, geometry, params, pre, fluxes_arr.shape)
 
     diags = {
@@ -196,47 +184,39 @@ def save_dumps(
         "step": np.array(state.step),
     }
 
-    # internal helper to append data to an npz file
     def _append_to_npz(filename, new_data):
         path = os.path.join(output_dir, filename)
         current_step = int(state.step)
         if os.path.exists(path):
             try:
                 with np.load(path) as data:
-                    # use 'step' to truncate entries strictly before the current one.
-                    # this prevents overlapping history when resuming simulations.
+                    # truncate at current_step so resume doesn't double-append
                     if "step" in data.files:
                         mask = data["step"] < current_step
                         updated = {
                             k: np.append(data[k][mask], [new_data[k]], axis=0) for k in data.files
                         }
                     else:
-                        # fallback for legacy files without 'step'
                         updated = {k: np.append(data[k], [new_data[k]], axis=0) for k in data.files}
             except (IOError, ValueError):
-                # if file is corrupted or incompatible, start fresh
                 updated = {k: np.array([v]) for k, v in new_data.items()}
         else:
-            # create new file with first entry
             updated = {k: np.array([v]) for k, v in new_data.items()}
         np.savez(path, **updated)
 
-    # note: we group these to avoid too many small files
-    # but the user requested "fluxes.npz, kyspec.npz, kxspec.npz, growth.npz"
-    # we now include step and time in every file for self-description and safe appending.
+    # include step and time in every diagnostic file for self-description
     common = {"step": diags["step"], "time": diags["time"]}
 
     _append_to_npz("fluxes.npz", {"fluxes": diags["fluxes"], **common})
     _append_to_npz("kyspec.npz", {"ky_spec": diags["ky_spec"], **common})
     _append_to_npz("kxspec.npz", {"kx_spec": diags["kx_spec"], **common})
     _append_to_npz("growth.npz", {"growth": diags["growth"], **common})
-    # EM flux is saved in a separate file so existing consumers of fluxes.npz
-    # are unaffected. With nlapar off the array is zeros.
+    # EM flux kept in a separate file so existing consumers of fluxes.npz are
+    # unaffected; with nlapar off the array is zeros.
     _append_to_npz("fluxes_em.npz", {"fluxes_em": diags["fluxes_em"], **common})
 
-    # dt_history: per-step record of the adaptive CFL controller. Columns
-    # mirror GKW's debug4 dt_history.dat: step, time, dt_used, dt_nl, dt_lin,
-    # dt_input. This lets us diagnose dt ramp-up / blow-up on resume.
+    # dt_history: per-step record of the adaptive CFL controller, mirroring
+    # GKW's debug4 dt_history.dat for diagnosing dt ramp-up on resume.
     last_dt = None
     if dt_info is not None:
         dt_used = np.asarray(dt_info["dt_used"]).reshape(-1)
@@ -245,10 +225,11 @@ def save_dumps(
         dt_input = float(np.asarray(dt_info["dt_input"]))
         n = int(dt_used.shape[0])
         if n > 0:
-            # cumulative time within the block: starts at block_start_time +
-            # dt_used[0] and increments by dt_used[i]. step is similarly the
-            # absolute step at the END of each substep.
-            step_arr = np.asarray(block_start_step, dtype=np.int64) + 1 + np.arange(n, dtype=np.int64)
+            # cumulative time within the block; step is the absolute step at
+            # the END of each substep.
+            step_arr = (
+                np.asarray(block_start_step, dtype=np.int64) + 1 + np.arange(n, dtype=np.int64)
+            )
             time_arr = float(block_start_time) + np.cumsum(dt_used)
             dt_input_arr = np.full((n,), dt_input, dtype=np.float64)
             _append_dt_path = os.path.join(output_dir, "dt_history.npz")
@@ -265,7 +246,9 @@ def save_dumps(
                     with np.load(_append_dt_path) as data:
                         if "step" in data.files:
                             mask = data["step"] < int(step_arr[0])
-                            updated = {k: np.concatenate([data[k][mask], new_data[k]]) for k in new_data}
+                            updated = {
+                                k: np.concatenate([data[k][mask], new_data[k]]) for k in new_data
+                            }
                         else:
                             updated = {k: np.concatenate([data[k], new_data[k]]) for k in new_data}
                 except (IOError, ValueError):
@@ -275,7 +258,6 @@ def save_dumps(
             np.savez(_append_dt_path, **updated)
             last_dt = float(dt_used[-1])
 
-    # 2. Save heavy snapshot if flag is set
     if save_dumps:
         ckpt_name = f"step_{int(state.step):06d}.npz"
         path = os.path.join(output_dir, ckpt_name)
@@ -291,8 +273,8 @@ def save_dumps(
             "kx_spec": diags["kx_spec"],
             "ky_spec": diags["ky_spec"],
         }
-        # record the last dt used (if available) so resume can warm-start the
-        # CFL controller from the saturated state instead of params.dt.
+        # record last dt so resume can warm-start the CFL controller from the
+        # saturated state instead of params.dt.
         if last_dt is not None:
             checkpoint["dt_last"] = np.array(last_dt, dtype=np.float64)
         np.savez(path, **checkpoint)
@@ -308,7 +290,6 @@ def print_params(params, grid_shape=None):
     """Pretty-print GKParams and optional grid shape."""
     d = vars(params)
 
-    # group fields
     solver_keys = [
         "dt",
         "naverage",
@@ -351,9 +332,6 @@ def print_params(params, grid_shape=None):
         print(f"  grid shape: {dims}")
 
     print("=" * 88)
-
-
-# --- file-loading utilities (moved from geometry.py) ---
 
 
 def is_number(string):
@@ -615,19 +593,15 @@ def load_runtime_params(input_dat_path: str) -> Dict[str, Any]:
 
 
 def load_scalars(directory: str) -> Dict[str, Any]:
-    """
-    Extract only the scalar configuration and physics parameters from GKW files.
+    """Extract scalar config and physics parameters from GKW files.
 
-    This is a lightweight alternative to load_geometry, returning only the
-    scalars needed for GKParams and YAML configuration.
+    Lightweight alternative to load_geometry: returns only the scalars
+    needed for GKParams and YAML configuration.
     """
     geom = load_geom_dat_file(os.path.join(directory, "geom.dat"))
     input_data = parse_input_dat(os.path.join(directory, "input.dat"))
-
-    # 1. extract runtime/solver params
     runtime = load_runtime_params(os.path.join(directory, "input.dat"))
 
-    # 2. extract geometry scalars
     def _scalar(key, default=0.0):
         return float(np.asarray(geom.get(key, default)).item())
 
@@ -641,7 +615,6 @@ def load_scalars(directory: str) -> Dict[str, Any]:
         "signB": 1.0,
     }
 
-    # 3. extract species info (all kinetic species)
     num_sp = input_data.get("gridsize", {}).get("number_of_species", 1)
     species_keys = [k for k in input_data.keys() if k.startswith("species")][:num_sp]
     if species_keys:
@@ -680,7 +653,6 @@ def load_scalars(directory: str) -> Dict[str, Any]:
             }
         )
 
-    # 4. extract grid/scaling info
     kxrh = np.loadtxt(os.path.join(directory, "kxrh"))
     if kxrh.ndim > 1:
         kxrh = kxrh[0]
@@ -713,20 +685,17 @@ def load_scalars(directory: str) -> Dict[str, Any]:
     elif "tgrid" in geom:
         scalars["tgrid"] = float(np.asarray(geom["tgrid"]).reshape(-1)[0])
 
-    # merge with runtime
     scalars.update(runtime)
     return scalars
 
 
 def load_geometry(directory):
     """Load geometry and physics parameters into JAX arrays."""
-
     geom = load_geom_dat_file(os.path.join(directory, "geom.dat"))
     input_data = parse_input_dat(os.path.join(directory, "input.dat"))
 
     geometry = {}
 
-    # scalar geometry controls
     if "kthnorm" in geom:
         geometry["kthnorm"] = jnp.array(
             float(np.asarray(geom["kthnorm"]).reshape(-1)[0]), dtype=jnp.float64
@@ -742,7 +711,6 @@ def load_geometry(directory):
             float(np.asarray(geom["eps"]).reshape(-1)[0]), dtype=jnp.float64
         )
 
-    # grids
     kxrh = np.atleast_1d(np.loadtxt(os.path.join(directory, "kxrh")))
     if kxrh.ndim > 1:
         kxrh = kxrh[0]
@@ -758,7 +726,6 @@ def load_geometry(directory):
     krho_vals = jnp.asarray(geometry["krho"], dtype=jnp.float64)
     geometry["parseval"] = jnp.where(jnp.abs(krho_vals) < 1e-10, 1.0, 2.0)
 
-    # velocity space
     intvp = np.loadtxt(os.path.join(directory, "intvp.dat"))
     if intvp.ndim > 1:
         intvp = intvp[0]
@@ -800,7 +767,6 @@ def load_geometry(directory):
     else:
         geometry["sgr_dist"] = jnp.array(1.0, dtype=jnp.float64)
 
-    # physics constants defaults
     geometry["Rref"] = jnp.array(jnp.abs(geom["Rref"]), dtype=jnp.float64)
     geometry["signz"] = jnp.array([1.0], dtype=jnp.float64)
     geometry["tmp"] = jnp.array([1.0], dtype=jnp.float64)
@@ -812,7 +778,6 @@ def load_geometry(directory):
     geometry["d2X"] = jnp.array(1.0, dtype=jnp.float64)
     geometry["signB"] = jnp.array(1.0, dtype=jnp.float64)
 
-    # load species info
     num_sp = input_data.get("gridsize", {}).get("number_of_species", 1)
     species_keys = [k for k in input_data.keys() if k.startswith("species")][:num_sp]
     if species_keys:
@@ -834,7 +799,6 @@ def load_geometry(directory):
         geometry["rln"] = jnp.array(rln, dtype=jnp.float64)
         geometry["vthrat"] = jnp.sqrt(geometry["tmp"] / geometry["mas"])
 
-    # geometry arrays
     geometry["bn"] = jnp.array(geom["bn"], dtype=jnp.float64)
     geometry["ffun"] = jnp.array(geom["F"], dtype=jnp.float64)
     if "G" in geom:
@@ -846,7 +810,6 @@ def load_geometry(directory):
         dtype=jnp.float64,
     )
 
-    # drift functions
     if "D_eps" in geom:
         geometry["dfun"] = jnp.array(
             np.stack([geom["D_eps"], geom["D_zeta"], geom["D_s"]], -1),
@@ -863,7 +826,6 @@ def load_geometry(directory):
             dtype=jnp.float64,
         )
 
-    # ExB function
     if "E_eps_zeta" in geom:
         geometry["efun"] = jnp.array(-geom["E_eps_zeta"], dtype=jnp.float64)
 

@@ -48,10 +48,9 @@ def _parallel_weights(sgrid):
 def _calc_geom_tensors(cg, signJ=1.0, signB=1.0):
     """E, D, H, I, J, K drift tensors from the geometry dict.
 
-    Translated from calc_geom_tensors in geom.f90:3487-3634.
-    jfun = R^2 - R0^2 (centrifugal trapping); kfun = 2·R·dR/dpsi - lfun
-    with lfun = 2·R0·dR0/dpsi (centrifugal drift). R0 defaults to the
-    magnetic-axis location if cg provides it, else R[ns//2].
+    Port of calc_geom_tensors (geom.f90:3487-3634). jfun = R²-R0² (centrifugal
+    trapping); kfun = 2*R*dR/dpsi - lfun, lfun = 2*R0*dR0/dpsi. R0 defaults to
+    the magnetic-axis location if cg provides it, else R[ns//2].
     """
     bn = cg["bn"]
     metric = cg["metric"]
@@ -88,7 +87,6 @@ def _calc_geom_tensors(cg, signJ=1.0, signB=1.0):
     lfun = 2.0 * R0 * dR0dpsi
     jfun = R**2 - R0**2
     kfun = 2.0 * R * dRdpsi - lfun
-
     return efun, dfun, hfun, ifun, jfun, kfun
 
 
@@ -128,9 +126,6 @@ def _build_wavevector_grids(
 
     kxrh = jnp.arange(-half, half + 1) * kxspace
     return kxrh, jnp.arange(nky) * dky
-
-
-# ─── discrete topology (numpy, not differentiable) ────────────────────────
 
 
 def _build_mode_label(nkx, nky, ikxspace):
@@ -274,9 +269,6 @@ def _build_parallel_shift_maps(ixplus, ixminus, iyzero, ns, max_shift=4):
     return s_shift, kx_shift, valid
 
 
-# ─── public entry points ──────────────────────────────────────────────────
-
-
 def compute_geometry(
     q: float,
     shat: float,
@@ -318,14 +310,18 @@ def compute_geometry(
         from gyaradax.geometry.miller import _miller_geometry
 
         cg = _miller_geometry(
-            sgrid=sgrid, q=q, shat=shat, eps=eps, nperiod=nperiod,
-            signB=signB, signJ=signJ, **miller_params,
+            sgrid=sgrid,
+            q=q,
+            shat=shat,
+            eps=eps,
+            nperiod=nperiod,
+            signB=signB,
+            signJ=signJ,
+            **miller_params,
         )
     else:
         theta = _poloidal_angle(sgrid, eps, geom_type=geom_type)
-        cg = _circular_geometry(
-            theta, q, shat, eps, signB=signB, signJ=signJ, geom_type=geom_type
-        )
+        cg = _circular_geometry(theta, q, shat, eps, signB=signB, signJ=signJ, geom_type=geom_type)
 
     efun_3x3, dfun, hfun, ifun, jfun, kfun = _calc_geom_tensors(cg, signJ=signJ, signB=signB)
 
@@ -342,11 +338,19 @@ def compute_geometry(
 
     vpgr, mugr, intvp, intmu = _build_velocity_grids(nvpar, nmu, vpar_max)
     kxrh, krho_raw = _build_wavevector_grids(
-        nkx, nky, kxmax, krhomax,
-        q=q, shat=shat, eps=eps, ikxspace=ikxspace, kthnorm=kthnorm,
+        nkx,
+        nky,
+        kxmax,
+        krhomax,
+        q=q,
+        shat=shat,
+        eps=eps,
+        ikxspace=ikxspace,
+        kthnorm=kthnorm,
     )
     krho = krho_raw / kthnorm
 
+    # discrete topology (numpy, not differentiable)
     kxrh_np = np.asarray(jax.lax.stop_gradient(kxrh))
     krho_np = np.asarray(jax.lax.stop_gradient(krho))
     nkx_actual = len(kxrh_np)
@@ -459,15 +463,27 @@ def compute_geometry_from_input(input_dat_path: str) -> Dict[str, Any]:
     miller_params = {}
     if geom_type == "miller":
         alias = {"zmil": "Zmil", "drmil": "dRmil", "dzmil": "dZmil"}
-        for k in ("kappa", "delta", "square", "zmil", "drmil", "dzmil",
-                  "skappa", "sdelta", "ssquare"):
+        for k in (
+            "kappa",
+            "delta",
+            "square",
+            "zmil",
+            "drmil",
+            "dzmil",
+            "skappa",
+            "sdelta",
+            "ssquare",
+        ):
             if k in geom_sec:
                 miller_params[alias.get(k, k)] = float(geom_sec[k])
 
     return compute_geometry(
-        q=q, shat=shat, eps=eps,
+        q=q,
+        shat=shat,
+        eps=eps,
         ns=int(grid_sec.get("n_s_grid", 16)),
-        nkx=nkx, nky=nky,
+        nkx=nkx,
+        nky=nky,
         nvpar=int(grid_sec.get("n_vpar_grid", 32)),
         nmu=int(grid_sec.get("n_mu_grid", 8)),
         vpar_max=vpar_max,
