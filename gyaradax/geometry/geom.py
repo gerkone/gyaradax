@@ -29,7 +29,7 @@ def _load_1d_array(path):
     data = np.loadtxt(path)
     if data.ndim > 1:
         data = data[0]
-    return data
+    return np.atleast_1d(data)
 
 
 def _parallel_grid(ns, nperiod):

@@ -71,3 +71,4 @@ upload_changed_py.sh
 .claude/
 .opencode/
 paper/
+data/
