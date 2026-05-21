@@ -526,30 +526,43 @@ def gkparams_from_config(config: Any, **overrides) -> GKParams:
         if nvpar > 0:
             params_dict["dvp"] = 2.0 * vpar_max / nvpar
 
-    # derive kxmax/kymax from grid params (max kx/ky in the wavevector grid).
-    # used in hyperdissipation normalization. fallback to GKParams default (1.0)
-    # if not derivable.
+    # derive kxmax/kymax from grid params (max kx/ky in INTERNAL units the
+    # hyperdissipation formula uses; the matrix uses krho/kthnorm and
+    # kxrh, so kymax must also be in those units). fallback to GKParams
+    # default (1.0) if not derivable.
     if grid_cfg is not None:
         nkx = int(getattr(grid_cfg, "nkx", 1))
         nky = int(getattr(grid_cfg, "nky", 1))
         krhomax = float(getattr(grid_cfg, "krhomax", 0.0))
+        q = float(getattr(geometry_cfg, "q", 1.0))
+        shat = float(getattr(geometry_cfg, "shat", 0.0))
+        eps = float(getattr(geometry_cfg, "eps", 0.1))
+        ikxspace = int(getattr(grid_cfg, "ikxspace", 5))
+        geom_type = str(getattr(geometry_cfg, "geometry_model", "s-alpha"))
+        import math
+        if geom_type == "s-alpha":
+            kthnorm = q / (2.0 * math.pi * eps)
+        elif geom_type == "circ":
+            # Lapillonne kthnorm: 1/(2π(1+eps)) * sqrt(1 + (1-eps²)*(q/eps)²)
+            kthnorm = (1.0 / (2.0 * math.pi * (1.0 + eps))) * math.sqrt(
+                1.0 + (1.0 - eps**2) * (q / max(eps, 1e-12)) ** 2
+            )
+        else:
+            kthnorm = 1.0
         if "kymax" not in params_dict and krhomax > 0 and nky > 1:
-            params_dict["kymax"] = krhomax
-        if "kxmax" not in params_dict and nkx > 1 and krhomax > 0 and nky > 1:
-            q = float(getattr(geometry_cfg, "q", 1.0))
-            shat = float(getattr(geometry_cfg, "shat", 0.0))
-            eps = float(getattr(geometry_cfg, "eps", 0.1))
-            ikxspace = int(getattr(grid_cfg, "ikxspace", 5))
-            geom_type = str(getattr(geometry_cfg, "geometry_model", "s-alpha"))
-            import math
-            if geom_type == "s-alpha":
-                kthnorm = q / (2.0 * math.pi * eps)
-            else:
-                kthnorm = 1.0
-            if abs(shat) > 1e-12 and abs(eps) > 1e-12:
-                ky_min_internal = krhomax / max(nky - 1, 1) / kthnorm
-                kxspace = abs(q * shat * ky_min_internal / (eps * max(ikxspace, 1)))
-                params_dict["kxmax"] = (nkx - 1) // 2 * kxspace
+            # max ky in internal units (matches geometry["krho"])
+            params_dict["kymax"] = krhomax / kthnorm
+        if (
+            "kxmax" not in params_dict
+            and nkx > 1
+            and krhomax > 0
+            and nky > 1
+            and abs(shat) > 1e-12
+            and abs(eps) > 1e-12
+        ):
+            ky_min_internal = krhomax / max(nky - 1, 1) / kthnorm
+            kxspace = abs(q * shat * ky_min_internal / (eps * max(ikxspace, 1)))
+            params_dict["kxmax"] = (nkx - 1) // 2 * kxspace
 
     if overrides:
         params_dict.update(overrides)
