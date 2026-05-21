@@ -716,6 +716,7 @@ def _linear_precompute_core(geometry: Dict[str, jnp.ndarray], params: GKParams) 
             stencil_ndim=6,
         )
         out.update(sp)
+        out.update(precompute_collisions(geometry, params))
         out["geom_tensors"] = None
         out["nsp"] = nsp
         # kx_b/ky_b computed in _compute_species_coeffs but not returned - add them here
@@ -1453,7 +1454,7 @@ def gkstep_single(
     return next_df, (phi, (z, z, substage_dt_est)), next_state
 
 
-@functools.partial(jax.jit, static_argnames=("n_steps",))
+@functools.partial(jax.jit, static_argnames=("n_steps", "return_dt_info"))
 def gksolve(
     df: jnp.ndarray,
     geometry: Dict[str, jnp.ndarray],
@@ -1461,6 +1462,7 @@ def gksolve(
     state: GKState,
     n_steps: int = 1,
     pre: Optional[GKPre] = None,
+    return_dt_info: bool = False,
 ) -> Tuple[
     jnp.ndarray,
     Tuple[jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]],
@@ -1471,7 +1473,11 @@ def gksolve(
     Executes multiple time steps via jax.lax.scan.
     When params.adaptive_dt is True, uses CFL-adaptive timestep with
     one-step lag (current step uses CFL estimate from previous step's phi).
-    Returns (final_df, (final_phi, final_fluxes), final_state).
+    Returns (final_df, (final_phi, final_fluxes), final_state) by default.
+    When ``return_dt_info`` is True, returns an extra trailing dict with
+    per-step arrays ``dt_used``/``dt_nl``/``dt_lin`` (shape (n_steps,)) and
+    scalar ``dt_input``. In the fixed-dt path ``dt_used`` is filled with
+    ``params.dt`` and the CFL estimates are zero.
     """
     if pre is None:
         pre = linear_precompute(geometry, params)
@@ -1488,9 +1494,11 @@ def gksolve(
         pre, backend=params.backend, use_z2z=params.use_z2z, mixed_precision=params.mixed_precision
     )
 
+    dt_input_scalar = jnp.array(params.dt, dtype=jnp.float64)
+
     if params.adaptive_dt and params.non_linear:
         # adaptive CFL path: carry dt as part of scan state
-        dt_input = jnp.array(params.dt, dtype=jnp.float64)
+        dt_input = dt_input_scalar
         cfl_safety = jnp.array(params.cfl_safety, dtype=jnp.float64)
 
         def _scan_body(carry, _):
@@ -1501,10 +1509,13 @@ def gksolve(
             # inline substage CFL from gkstep_single + linear CFL
             substage_dt = out[1][2]
             dt_lin = estimate_linear_timestep(pre, params=params)
-            dt_cfl = jnp.minimum(jnp.minimum(cfl_safety * substage_dt, dt_input), dt_lin)
-            # allow slow increase, fast decrease
-            next_dt = jnp.where(dt_cfl < curr_dt, dt_cfl, jnp.minimum(dt_cfl, curr_dt * 1.05))
-            return (next_df, next_state, next_dt), None
+            dt_nl = jnp.minimum(cfl_safety * substage_dt, dt_input)
+            dt_cfl = jnp.minimum(dt_nl, dt_lin)
+            # Ramp-up rule: dt grows at most by 5% per step
+            ramp_up = jnp.minimum(curr_dt * 1.05, dt_input)
+            next_dt = jnp.where(dt_cfl < curr_dt, dt_cfl, jnp.minimum(dt_cfl, ramp_up))
+            dt_info_step = jnp.stack([curr_dt, dt_nl, dt_lin])
+            return (next_df, next_state, next_dt), dt_info_step
 
         # init_dt must reflect the CURRENT NL amplitude, not just params.dt,
         # to avoid resetting dt at every block boundary when gksolve is called
@@ -1515,9 +1526,16 @@ def gksolve(
         )
         dt_lin_init = estimate_linear_timestep(pre, params=params)
         init_dt = jnp.minimum(jnp.minimum(dt_input, dt_lin_init), dt_nl_init)
-        (final_df, final_state, _), _ = jax.lax.scan(
+        (final_df, final_state, _), dt_stack = jax.lax.scan(
             _scan_body, (df, state, init_dt), None, length=n_steps
         )
+        # dt_stack shape: (n_steps, 3) -> split into named arrays
+        dt_info = {
+            "dt_used": dt_stack[:, 0],
+            "dt_nl": dt_stack[:, 1],
+            "dt_lin": dt_stack[:, 2],
+            "dt_input": dt_input_scalar,
+        }
     else:
         # fixed dt path
         def _scan_body(carry, _):
@@ -1528,6 +1546,12 @@ def gksolve(
             return (next_df, next_state), None
 
         (final_df, final_state), _ = jax.lax.scan(_scan_body, (df, state), None, length=n_steps)
+        dt_info = {
+            "dt_used": jnp.full((n_steps,), dt_input_scalar, dtype=jnp.float64),
+            "dt_nl": jnp.zeros((n_steps,), dtype=jnp.float64),
+            "dt_lin": jnp.zeros((n_steps,), dtype=jnp.float64),
+            "dt_input": dt_input_scalar,
+        }
 
     # diagnostics use the physical distribution f, not the evolved mixed variable g.
     # GKW's diagnos_fluxes_vspace.F90:444 applies get_f_from_g before every flux and
@@ -1546,4 +1570,6 @@ def gksolve(
         pre=pre,
         adiabatic_electrons=params.adiabatic_electrons,
     )
+    if return_dt_info:
+        return final_df, (phi, fluxes), final_state, dt_info
     return final_df, (phi, fluxes), final_state

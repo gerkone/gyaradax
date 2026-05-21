@@ -144,6 +144,9 @@ def save_dumps(
     save_dumps: bool = True,
     params: Any = None,
     pre: Any = None,
+    dt_info: Any = None,
+    block_start_step: int = 0,
+    block_start_time: float = 0.0,
 ):
     """
     Handle simulation output. Saves heavy 5D distribution snapshots if requested
@@ -153,6 +156,11 @@ def save_dumps(
     writes a new ``fluxes_em.npz`` with the magnetic-flutter EM fluxes
     computed from the final (f, A_par, B_par). Existing ``fluxes.npz`` /
     ``kyspec.npz`` / ``kxspec.npz`` / ``growth.npz`` formats are unchanged.
+
+    When ``dt_info`` is supplied (dict with per-step ``dt_used``/``dt_nl``/
+    ``dt_lin`` arrays and scalar ``dt_input``), also appends a per-step
+    ``dt_history.npz`` matching GKW's debug4 dt_history.dat columns:
+    step, time, dt_used, dt_nl, dt_lin, dt_input.
     """
     os.makedirs(output_dir, exist_ok=True)
 
@@ -226,6 +234,47 @@ def save_dumps(
     # are unaffected. With nlapar off the array is zeros.
     _append_to_npz("fluxes_em.npz", {"fluxes_em": diags["fluxes_em"], **common})
 
+    # dt_history: per-step record of the adaptive CFL controller. Columns
+    # mirror GKW's debug4 dt_history.dat: step, time, dt_used, dt_nl, dt_lin,
+    # dt_input. This lets us diagnose dt ramp-up / blow-up on resume.
+    last_dt = None
+    if dt_info is not None:
+        dt_used = np.asarray(dt_info["dt_used"]).reshape(-1)
+        dt_nl = np.asarray(dt_info["dt_nl"]).reshape(-1)
+        dt_lin = np.asarray(dt_info["dt_lin"]).reshape(-1)
+        dt_input = float(np.asarray(dt_info["dt_input"]))
+        n = int(dt_used.shape[0])
+        if n > 0:
+            # cumulative time within the block: starts at block_start_time +
+            # dt_used[0] and increments by dt_used[i]. step is similarly the
+            # absolute step at the END of each substep.
+            step_arr = np.asarray(block_start_step, dtype=np.int64) + 1 + np.arange(n, dtype=np.int64)
+            time_arr = float(block_start_time) + np.cumsum(dt_used)
+            dt_input_arr = np.full((n,), dt_input, dtype=np.float64)
+            _append_dt_path = os.path.join(output_dir, "dt_history.npz")
+            new_data = {
+                "step": step_arr,
+                "time": time_arr,
+                "dt_used": dt_used.astype(np.float64),
+                "dt_nl": dt_nl.astype(np.float64),
+                "dt_lin": dt_lin.astype(np.float64),
+                "dt_input": dt_input_arr,
+            }
+            if os.path.exists(_append_dt_path):
+                try:
+                    with np.load(_append_dt_path) as data:
+                        if "step" in data.files:
+                            mask = data["step"] < int(step_arr[0])
+                            updated = {k: np.concatenate([data[k][mask], new_data[k]]) for k in new_data}
+                        else:
+                            updated = {k: np.concatenate([data[k], new_data[k]]) for k in new_data}
+                except (IOError, ValueError):
+                    updated = new_data
+            else:
+                updated = new_data
+            np.savez(_append_dt_path, **updated)
+            last_dt = float(dt_used[-1])
+
     # 2. Save heavy snapshot if flag is set
     if save_dumps:
         ckpt_name = f"step_{int(state.step):06d}.npz"
@@ -242,6 +291,10 @@ def save_dumps(
             "kx_spec": diags["kx_spec"],
             "ky_spec": diags["ky_spec"],
         }
+        # record the last dt used (if available) so resume can warm-start the
+        # CFL controller from the saturated state instead of params.dt.
+        if last_dt is not None:
+            checkpoint["dt_last"] = np.array(last_dt, dtype=np.float64)
         np.savez(path, **checkpoint)
 
 

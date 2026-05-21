@@ -161,10 +161,21 @@ def gk_run(
     state: GKState,
     n_steps: int,
     pre: Optional[GKPre] = None,
-) -> Tuple[jnp.ndarray, jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray], GKState]:
-    """Run n_steps. Pure, no IO. Returns (df, phi, fluxes, state)."""
+    return_dt_info: bool = False,
+):
+    """Run n_steps. Pure, no IO.
+
+    Returns ``(df, phi, fluxes, state)`` by default. When
+    ``return_dt_info=True``, returns ``(df, phi, fluxes, state, dt_info)``
+    with per-step adaptive-CFL diagnostics from the underlying scan.
+    """
     if pre is None:
         pre = linear_precompute(geometry, params)
+    if return_dt_info:
+        final_df, (phi, fluxes), final_state, dt_info = gksolve(
+            df, geometry, params, state, n_steps=n_steps, pre=pre, return_dt_info=True
+        )
+        return final_df, phi, fluxes, final_state, dt_info
     final_df, (phi, fluxes), final_state = gksolve(
         df, geometry, params, state, n_steps=n_steps, pre=pre
     )
@@ -243,11 +254,20 @@ def gksimulate(
     current_phi = None
     current_fluxes = None
 
-    # warmup (compilation)
+    # warmup (compilation) — request the same trailing dt_info as the body
+    # loop so we compile the right specialization and avoid a second cache miss
     if n_steps > 0:
         print("warmup (compilation)...")
         w_t0 = time.time()
-        _ = gk_run(current_df, geometry, params, current_state, min(interval, n_steps), pre=pre)
+        _ = gk_run(
+            current_df,
+            geometry,
+            params,
+            current_state,
+            min(interval, n_steps),
+            pre=pre,
+            return_dt_info=True,
+        )
         jax.block_until_ready(_[0])
         print(f"compilation: {time.time() - w_t0:.2f}s")
 
@@ -257,9 +277,17 @@ def gksimulate(
         if block_steps <= 0:
             break
 
+        block_start_step = int(current_state.step)
+        block_start_time = float(current_state.time)
         t0 = time.time()
-        current_df, current_phi, current_fluxes, current_state = gk_run(
-            current_df, geometry, params, current_state, block_steps, pre=pre
+        current_df, current_phi, current_fluxes, current_state, dt_info = gk_run(
+            current_df,
+            geometry,
+            params,
+            current_state,
+            block_steps,
+            pre=pre,
+            return_dt_info=True,
         )
         jax.block_until_ready(current_df)
         wall_time = time.time() - t0
@@ -276,6 +304,9 @@ def gksimulate(
                 save_dumps=save_snapshots or (save_final and is_final),
                 params=params,
                 pre=pre,
+                dt_info=dt_info,
+                block_start_step=block_start_step,
+                block_start_time=block_start_time,
             )
 
         log_step(current_fluxes, current_state, wall_time, n_steps=block_steps)
