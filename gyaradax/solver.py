@@ -619,6 +619,11 @@ def _compute_species_coeffs(
 
 def _linear_precompute_core(geometry: Dict[str, jnp.ndarray], params: GKParams) -> "GKPre":
     """Core implementation of linear_precompute (no auto-sharding logic)."""
+    if params.nlbpar and params.adiabatic_electrons:
+        raise NotImplementedError(
+            "nlbpar=True requires kinetic electrons (adiabatic_electrons=False). "
+            "The 2x2 phi-bpar coupled Poisson solve needs the kinetic electron response."
+        )
     kx, ky = kx_ky_grids(geometry)
     ns, nkx, nky = len(geometry["ints"]), int(kx.shape[0]), int(ky.shape[0])
 
