@@ -2,7 +2,7 @@ import jax
 import jax.numpy as jnp
 from jax.scipy.special import i0e, bessel_jn
 from einops import rearrange
-from typing import Dict, Tuple, Any
+from typing import Dict, Tuple, Any, Optional
 
 from gyaradax import _EPS
 
@@ -327,8 +327,8 @@ def precompute_phi_kinetic(geometry: Dict[str, jnp.ndarray]):
 def _phi_kinetic(
     geometry: Dict[str, jnp.ndarray],
     df: jnp.ndarray,
-    phi_weight: jnp.ndarray = None,
-    phi_diag: jnp.ndarray = None,
+    phi_weight: Optional[jnp.ndarray] = None,
+    phi_diag: Optional[jnp.ndarray] = None,
 ) -> jnp.ndarray:
     """
     Kinetic electron phi from multi-species quasineutrality.
@@ -347,7 +347,7 @@ def calculate_phi(
     geometry: Dict[str, jnp.ndarray],
     df: jnp.ndarray,
     params: Any = None,
-    pre: Dict = None,
+    pre: Optional[Dict] = None,
 ) -> jnp.ndarray:
     """
     Compute electrostatic potential from quasineutrality.
@@ -460,7 +460,7 @@ def calculate_apar(
     geometry: Dict[str, jnp.ndarray],
     df: jnp.ndarray,
     params: Any = None,
-    pre: Dict = None,
+    pre: Optional[Dict] = None,
 ) -> jnp.ndarray:
     """
     Compute A_parallel from Ampere's law.
@@ -612,10 +612,10 @@ def calculate_fluxes_kinetic(
 def calculate_em_fluxes(
     geometry: Dict[str, jnp.ndarray],
     df: jnp.ndarray,
-    apar: jnp.ndarray,
+    apar: Optional[jnp.ndarray],
     params: Any = None,
-    bpar: jnp.ndarray = None,
-    pre: Dict = None,
+    bpar: Optional[jnp.ndarray] = None,
+    pre: Optional[Dict] = None,
 ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Electromagnetic flux contributions from A_parallel and B_parallel.
 
@@ -744,9 +744,9 @@ def get_integrals(
     df: jnp.ndarray,
     geometry: Dict[str, jnp.ndarray],
     params: Any = None,
-    pre: Dict = None,
+    pre: Optional[Dict] = None,
     adiabatic_electrons: bool = True,
-    geom: Dict[str, jnp.ndarray] = None,
+    geom: Optional[Dict[str, jnp.ndarray]] = None,
 ) -> Tuple[jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]]:
     """
     Compute phi and fluxes from distribution function.

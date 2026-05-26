@@ -6,7 +6,7 @@ import sys
 _initialized = False
 
 
-def init_jax(device: int = None):
+def init_jax(device: int | None = None):
     """Configure jax: fp64 precision and optional gpu device isolation."""
     global _initialized
     if _initialized:

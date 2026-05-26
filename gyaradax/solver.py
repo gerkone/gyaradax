@@ -213,7 +213,7 @@ def estimate_nl_timestep(
     bessel: jnp.ndarray,
     dt_input: float,
     safety_factor: float = 0.95,
-    apar: jnp.ndarray = None,
+    apar: Optional[jnp.ndarray] = None,
 ) -> jnp.ndarray:
     """CFL-adaptive timestep from nonlinear ExB velocity.
 
@@ -263,9 +263,9 @@ def estimate_nl_timestep(
 
 def estimate_linear_timestep(
     pre: GKPre,
-    params: "GKParams" = None,
+    params: Optional["GKParams"] = None,
     fac_dtim_est: float = 0.95,
-    safety_factor: float = None,
+    safety_factor: Optional[float] = None,
 ) -> jnp.ndarray:
     """Von Neumann stability timestep estimate (matdat.F90:1440-1510).
 
@@ -340,8 +340,8 @@ def estimate_timestep(
     bessel: jnp.ndarray,
     dt_input: float,
     safety_factor: float = 0.95,
-    params: "GKParams" = None,
-    apar: jnp.ndarray = None,
+    params: Optional["GKParams"] = None,
+    apar: Optional[jnp.ndarray] = None,
 ) -> jnp.ndarray:
     """Combined CFL: min(nonlinear ExB + EM apar, linear von Neumann)."""
     dt_nl = estimate_nl_timestep(phi, pre, bessel, dt_input, safety_factor, apar=apar)

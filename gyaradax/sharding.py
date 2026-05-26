@@ -26,7 +26,7 @@ Partition convention (velocity-space sharding on the adiabatic path):
 Arrays whose shape doesn't match any of the above stay replicated.
 """
 
-from typing import Any, Dict, NamedTuple, Optional
+from typing import Any, Dict, NamedTuple, Optional, cast
 
 import jax
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
@@ -250,8 +250,8 @@ def grid_shape_from(params, geometry) -> GridShape:
 def init_f_sharded(
     geometry,
     params=None,
-    mesh: Mesh = None,
-    grid: GridShape = None,
+    mesh: Optional[Mesh] = None,
+    grid: Optional[GridShape] = None,
     finit: str = "cosine2",
     amp_init_real: float = 1.0e-4,
     amp_init_imag: float = 0.0,
@@ -273,7 +273,7 @@ def init_f_sharded(
         spec = PartitionSpec(_AXIS_SP, _AXIS_VP, _AXIS_MU, None, None, None)
     else:
         spec = PartitionSpec(_AXIS_VP, _AXIS_MU, None, None, None)
-    out_sharding = NamedSharding(mesh, spec)
+    out_sharding = NamedSharding(cast(Mesh, mesh), spec)
 
     # Delegate to unified init_f
     return init_f(
