@@ -5,7 +5,7 @@ using pure JAX. This is the direct port of GKW's non_linear_terms.F90
 and linear_terms.f90 stencil application.
 """
 
-from typing import Dict, Tuple
+from typing import Any, Dict, Tuple
 
 import jax
 import jax.numpy as jnp
@@ -104,8 +104,8 @@ class JAXOps(SolverOps):
         efun_sign: float = 1.0,
         fft_prefactor: complex = 1.0 + 0.0j,
         exclude_zero_mode: bool = True,
-        bessel: jnp.ndarray = None,
-        chi_correction: jnp.ndarray = None,
+        bessel: jnp.ndarray | None = None,
+        chi_correction: jnp.ndarray | None = None,
     ) -> jnp.ndarray:
         """Nonlinear ExB advection (term III) for 5D df. Shared skeleton for R2C and Z2Z.
 
@@ -198,8 +198,8 @@ class JAXOps(SolverOps):
         efun_sign: float = 1.0,
         fft_prefactor: complex = 1.0 + 0.0j,
         exclude_zero_mode: bool = True,
-        bessel: jnp.ndarray = None,
-        chi_correction: jnp.ndarray = None,
+        bessel: jnp.ndarray | None = None,
+        chi_correction: jnp.ndarray | None = None,
     ) -> jnp.ndarray:
         """Nonlinear ExB advection with shape dispatch.
 
@@ -247,10 +247,10 @@ class JAXOps(SolverOps):
         df: jnp.ndarray,
         phi: jnp.ndarray,
         params: GKParams,
-        pre: GKPre,
-        apar: jnp.ndarray = None,
-        bpar: jnp.ndarray = None,
-    ) -> dict:
+        pre: GKPre | dict[str, Any],
+        apar: jnp.ndarray | None = None,
+        bpar: jnp.ndarray | None = None,
+    ) -> dict[str, jnp.ndarray]:
         """Return each linear-RHS term as a dict entry.
 
         Implements Terms I, II, IV, V, VII, VIII, X, XI + dissipation + collisions.
@@ -340,9 +340,9 @@ class JAXOps(SolverOps):
         df: jnp.ndarray,
         phi: jnp.ndarray,
         params: GKParams,
-        pre: GKPre,
-        apar: jnp.ndarray = None,
-        bpar: jnp.ndarray = None,
+        pre: GKPre | dict[str, Any],
+        apar: jnp.ndarray | None = None,
+        bpar: jnp.ndarray | None = None,
     ) -> jnp.ndarray:
         """Total linear RHS = sum of all linear terms.
 
@@ -364,8 +364,8 @@ class JAXOps(SolverOps):
         geometry: Dict[str, jnp.ndarray],
         params: GKParams,
         pre: GKPre,
-        apar: jnp.ndarray = None,
-        bpar: jnp.ndarray = None,
+        apar: jnp.ndarray | None = None,
+        bpar: jnp.ndarray | None = None,
     ) -> jnp.ndarray:
         """Linear RHS with shape dispatch.
 

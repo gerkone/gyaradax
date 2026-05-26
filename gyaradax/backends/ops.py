@@ -72,8 +72,8 @@ class SolverOps(ABC):
         efun_sign: float = 1.0,
         fft_prefactor: complex = 1.0 + 0.0j,
         exclude_zero_mode: bool = True,
-        bessel: jnp.ndarray = None,
-        chi_correction: jnp.ndarray = None,
+        bessel: jnp.ndarray | None = None,
+        chi_correction: jnp.ndarray | None = None,
     ) -> jnp.ndarray:
         """Compute term III (nonlinear ExB advection) via pseudospectral method.
 
@@ -108,8 +108,8 @@ class SolverOps(ABC):
         geometry: Dict[str, jnp.ndarray],
         params,
         pre,
-        apar: jnp.ndarray = None,
-        bpar: jnp.ndarray = None,
+        apar: jnp.ndarray | None = None,
+        bpar: jnp.ndarray | None = None,
     ) -> jnp.ndarray:
         """Compute linear RHS for 5D (single species) or 6D (multi-species) df.
 

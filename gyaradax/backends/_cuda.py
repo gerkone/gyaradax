@@ -130,7 +130,7 @@ class CUDAOps(SolverOps):
         """Apply d1 and d4 vpar stencils in a single fused kernel."""
         nv = field.shape[0]
         inner_size = field.size // nv
-        return ffi.ffi_call(
+        out = ffi.ffi_call(
             "apply_vpar_dual_stencil_ffi",
             [
                 jax.ShapeDtypeStruct(field.shape, field.dtype),
@@ -151,6 +151,7 @@ class CUDAOps(SolverOps):
             nv=np.int32(nv),
             inner_size=np.int32(inner_size),
         )
+        return out[0], out[1]
 
     def _apply_parallel(self, field: jnp.ndarray, coeffs: jnp.ndarray) -> jnp.ndarray:
         """Apply 9-point parallel stencil via CUDA kernel."""
@@ -196,7 +197,7 @@ class CUDAOps(SolverOps):
         c2_1d = self._prepare_parallel_coeffs(coeffs2, nv, nmu, ns, nkx, nky).reshape(-1)
         packed_maps = self._pack_shift_maps()
 
-        return ffi.ffi_call(
+        out = ffi.ffi_call(
             "apply_parallel_dual_ffi",
             [
                 jax.ShapeDtypeStruct(target_shape, field1.dtype),
@@ -214,6 +215,7 @@ class CUDAOps(SolverOps):
             nky=np.int32(nky),
             nmu=np.int32(nmu),
         )
+        return out[0], out[1]
 
     def _linear_rhs_fused(
         self,
@@ -374,8 +376,8 @@ class CUDAOps(SolverOps):
         geometry: Dict[str, jnp.ndarray],
         params,
         pre: Dict[str, jnp.ndarray],
-        apar: jnp.ndarray = None,
-        bpar: jnp.ndarray = None,
+        apar: Optional[jnp.ndarray] = None,
+        bpar: Optional[jnp.ndarray] = None,
     ) -> jnp.ndarray:
         """Fused linear RHS for single or multi-species.
 
@@ -383,6 +385,12 @@ class CUDAOps(SolverOps):
         For 6D df (kinetic): per-species loop to handle non-uniform species params
         (ions + electrons have different signz, tmp, etc.).
         """
+        if apar is not None or bpar is not None:
+            raise NotImplementedError(
+                "CUDA backend does not implement electromagnetic linear_rhs "
+                "coupling for apar/bpar; use backend='jax' for EM/B_parallel runs."
+            )
+
         if df.ndim == 5:
             return self._linear_rhs_fused(
                 df, phi, pre, params.dvp, params.disp_vp, params.drive_scale
