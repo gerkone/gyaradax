@@ -215,9 +215,9 @@ class GKParams:
         return cls(**kwargs)
 
 
-def gkparams_from_runtime(runtime: Dict[str, Any], **overrides) -> GKParams:
+def gkparams_from_runtime(runtime: Dict[str, Any], **overrides: Any) -> GKParams:
     """Build GKParams from a GKW-compatible runtime-controls dictionary."""
-    params_dict = {
+    params_dict: dict[str, Any] = {
         "dt": float(runtime.get("dtim", 0.01)),
         "naverage": int(runtime.get("naverage", 40)),
         "disp_par": float(runtime.get("disp_par", 1.0)),
@@ -282,7 +282,7 @@ def gkparams_from_runtime(runtime: Dict[str, Any], **overrides) -> GKParams:
     return GKParams(**params_dict)
 
 
-def gkparams_from_input_dat(input_dat_path: str, **overrides) -> GKParams:
+def gkparams_from_input_dat(input_dat_path: str, **overrides: Any) -> GKParams:
     """Load all runtime, physics, and geometry scalars from a GKW run directory.
 
     Args:
@@ -298,7 +298,7 @@ def gkparams_from_input_dat(input_dat_path: str, **overrides) -> GKParams:
 
 
 def gkparams_from_input_and_geometry(
-    input_dat_path: str, geometry: Dict[str, Any], **overrides
+    input_dat_path: str, geometry: Dict[str, Any], **overrides: Any
 ) -> GKParams:
     """Build GKParams from input.dat + a pre-computed geometry dict.
 
@@ -311,7 +311,7 @@ def gkparams_from_input_and_geometry(
     runtime = load_runtime_params(input_dat_path)
     inp = parse_input_dat(input_dat_path)
 
-    scalars = {}
+    scalars: dict[str, Any] = {}
     for k in (
         "shat",
         "q",
@@ -417,12 +417,12 @@ def load_config(config_path: str) -> Any:
     return OmegaConf.load(config_path)
 
 
-def gkparams_from_config(config: Any, **overrides) -> GKParams:
+def gkparams_from_config(config: Any, **overrides: Any) -> GKParams:
     solver_cfg = config.solver
     physics_cfg = getattr(config, "physics", {})
     geometry_cfg = getattr(config, "geometry", {})
 
-    params_dict = {
+    params_dict: dict[str, Any] = {
         "dt": float(getattr(solver_cfg, "dt", 0.01)),
         "naverage": int(getattr(solver_cfg, "naverage", 40)),
         "disp_par": float(getattr(solver_cfg, "disp_par", 1.0)),
