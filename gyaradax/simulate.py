@@ -2,7 +2,7 @@
 
 import os
 import time
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Literal, Optional, Tuple, overload
 
 import jax
 import jax.numpy as jnp
@@ -151,6 +151,74 @@ def gk_init(
     return df, geometry, state
 
 
+@overload
+def gk_run(
+    df: jnp.ndarray,
+    geometry: Dict[str, jnp.ndarray],
+    params: GKParams,
+    state: GKState,
+    n_steps: int,
+    pre: Optional[GKPre] = None,
+    return_dt_info: Literal[False] = False,
+) -> Tuple[jnp.ndarray, jnp.ndarray, Any, GKState]: ...
+
+
+@overload
+def gk_run(
+    df: jnp.ndarray,
+    geometry: Dict[str, jnp.ndarray],
+    params: GKParams,
+    state: GKState,
+    n_steps: int,
+    pre: Optional[GKPre],
+    return_dt_info: Literal[True],
+) -> Tuple[jnp.ndarray, jnp.ndarray, Any, GKState, Dict[str, Any]]: ...
+
+
+@overload
+def gk_run(
+    df: jnp.ndarray,
+    geometry: Dict[str, jnp.ndarray],
+    params: GKParams,
+    state: GKState,
+    n_steps: int,
+    pre: Optional[GKPre] = None,
+    *,
+    return_dt_info: Literal[True],
+) -> Tuple[jnp.ndarray, jnp.ndarray, Any, GKState, Dict[str, Any]]: ...
+
+
+@overload
+def gk_run(
+    df: jnp.ndarray,
+    geometry: Dict[str, jnp.ndarray],
+    params: GKParams,
+    state: GKState,
+    n_steps: int,
+    pre: Optional[GKPre],
+    return_dt_info: bool,
+) -> (
+    Tuple[jnp.ndarray, jnp.ndarray, Any, GKState]
+    | Tuple[jnp.ndarray, jnp.ndarray, Any, GKState, Dict[str, Any]]
+): ...
+
+
+@overload
+def gk_run(
+    df: jnp.ndarray,
+    geometry: Dict[str, jnp.ndarray],
+    params: GKParams,
+    state: GKState,
+    n_steps: int,
+    pre: Optional[GKPre] = None,
+    *,
+    return_dt_info: bool,
+) -> (
+    Tuple[jnp.ndarray, jnp.ndarray, Any, GKState]
+    | Tuple[jnp.ndarray, jnp.ndarray, Any, GKState, Dict[str, Any]]
+): ...
+
+
 def gk_run(
     df: jnp.ndarray,
     geometry: Dict[str, jnp.ndarray],
@@ -159,6 +227,9 @@ def gk_run(
     n_steps: int,
     pre: Optional[GKPre] = None,
     return_dt_info: bool = False,
+) -> (
+    Tuple[jnp.ndarray, jnp.ndarray, Any, GKState]
+    | Tuple[jnp.ndarray, jnp.ndarray, Any, GKState, Dict[str, Any]]
 ):
     """Run n_steps. Pure, no IO.
 
