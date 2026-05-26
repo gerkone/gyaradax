@@ -1,16 +1,16 @@
 """Test sharded initialization matches single-GPU initialization."""
 
 import jax
-import jax.numpy as jnp
 import numpy as np
 import pytest
 
 from gyaradax import sharding
 from gyaradax.geometry import compute_geometry
-from gyaradax.params import GKParams, gkparams_from_config
+from gyaradax.params import gkparams_from_config
 from gyaradax.solver import init_f, linear_precompute
 from gyaradax import load_config
 import os
+from typing import Any, cast
 
 
 CONFIG_ADIABATIC = os.path.join(
@@ -84,7 +84,7 @@ def test_sharded_init_matches_single_gpu():
     print(f"Single-GPU df shape: {df_single_host.shape}")
     print(f"Sharded df shape: {df_sharded_host.shape}")
     print(f"Single-GPU df device: {df_single.device}")
-    print(f"Sharded df spec: {df_sharded.sharding.spec}")
+    print(f"Sharded df spec: {cast(Any, df_sharded.sharding).spec}")
     
     # Compare (should be identical for deterministic init modes)
     # For noise modes, they're random but should have same distribution

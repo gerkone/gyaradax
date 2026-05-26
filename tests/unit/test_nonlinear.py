@@ -1,4 +1,11 @@
-from conftest import rel_l2, read_dump_time, read_dump_dtim, ALL_BACKENDS, CUDA_BACKENDS, HAS_CUDA
+from conftest import (  # type: ignore[import-not-found]
+    rel_l2,
+    read_dump_time,
+    read_dump_dtim,
+    ALL_BACKENDS,
+    CUDA_BACKENDS,
+    HAS_CUDA,
+)
 import jax
 import jax.numpy as jnp
 import numpy as np

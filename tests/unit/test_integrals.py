@@ -2,7 +2,7 @@ import jax.numpy as jnp
 import numpy as np
 import os
 import pytest
-from conftest import read_dump_time
+from conftest import read_dump_time  # type: ignore[import-not-found]
 from gyaradax.integrals import (
     get_integrals,
     geom_tensors,
@@ -56,9 +56,9 @@ def test_flux_integral_real_data_parity(adiabatic_dir, adiabatic_geom, adiabatic
     fluxes = np.loadtxt(os.path.join(adiabatic_dir, "fluxes.dat"))
     ref_eflux = fluxes[ts_idx, 1]
 
-    assert np.isclose(
-        eflux_pred, ref_eflux, rtol=1e-2, atol=1e-4
-    ), f"eflux mismatch at T={time_val}: {eflux_pred} vs {ref_eflux}"
+    assert np.isclose(eflux_pred, ref_eflux, rtol=1e-2, atol=1e-4), (
+        f"eflux mismatch at T={time_val}: {eflux_pred} vs {ref_eflux}"
+    )
 
 
 def test_kinetic_geom_tensors_per_species(kinetic_geom):
@@ -178,7 +178,7 @@ def test_kinetic_flux_integral_per_species_parity(kinetic_dir, kinetic_geom, kin
         pred_eflux = float(per_sp_fluxes[isp, 1])
 
         assert np.isclose(pred_eflux, ref_eflux, rtol=1e-2, atol=1e-4), (
-            f"{sp_name} eflux mismatch at T={time_val}: " f"{pred_eflux:.6e} vs {ref_eflux:.6e}"
+            f"{sp_name} eflux mismatch at T={time_val}: {pred_eflux:.6e} vs {ref_eflux:.6e}"
         )
 
 

@@ -11,7 +11,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from dataclasses import replace
-from conftest import ALL_BACKENDS
+from conftest import ALL_BACKENDS  # type: ignore[import-not-found]
 
 from gyaradax.geometry import compute_geometry, compute_geometry_from_input
 from gyaradax.params import gkparams_from_input_and_geometry

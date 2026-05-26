@@ -1,4 +1,9 @@
-from conftest import rel_l2, read_dump_time, read_dump_dtim, ALL_BACKENDS
+from conftest import (  # type: ignore[import-not-found]
+    rel_l2,
+    read_dump_time,
+    read_dump_dtim,
+    ALL_BACKENDS,
+)
 import os
 import jax
 import jax.numpy as jnp
