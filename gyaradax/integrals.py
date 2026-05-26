@@ -5,6 +5,7 @@ from einops import rearrange
 from typing import Dict, Tuple, Any, Optional
 
 from gyaradax import _EPS
+from gyaradax.state import Precompute
 
 
 def j0(x):
@@ -347,7 +348,7 @@ def calculate_phi(
     geometry: Dict[str, jnp.ndarray],
     df: jnp.ndarray,
     params: Any = None,
-    pre: Optional[Dict] = None,
+    pre: Optional[Precompute] = None,
 ) -> jnp.ndarray:
     """
     Compute electrostatic potential from quasineutrality.
@@ -460,7 +461,7 @@ def calculate_apar(
     geometry: Dict[str, jnp.ndarray],
     df: jnp.ndarray,
     params: Any = None,
-    pre: Optional[Dict] = None,
+    pre: Optional[Precompute] = None,
 ) -> jnp.ndarray:
     """
     Compute A_parallel from Ampere's law.
@@ -615,8 +616,8 @@ def calculate_em_fluxes(
     apar: Optional[jnp.ndarray],
     params: Any = None,
     bpar: Optional[jnp.ndarray] = None,
-    pre: Optional[Dict] = None,
-) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    pre: Optional[Precompute] = None,
+) -> Any:
     """Electromagnetic flux contributions from A_parallel and B_parallel.
 
     A_par flutter: coupling factor -2*vthrat*vpgr*conj(J0*apar)
@@ -744,10 +745,10 @@ def get_integrals(
     df: jnp.ndarray,
     geometry: Dict[str, jnp.ndarray],
     params: Any = None,
-    pre: Optional[Dict] = None,
+    pre: Optional[Precompute] = None,
     adiabatic_electrons: bool = True,
     geom: Optional[Dict[str, jnp.ndarray]] = None,
-) -> Tuple[jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]]:
+) -> Tuple[jnp.ndarray, Any]:
     """
     Compute phi and fluxes from distribution function.
 

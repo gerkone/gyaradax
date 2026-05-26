@@ -2,7 +2,7 @@
 
 import os
 import time
-from typing import Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 import jax
 import jax.numpy as jnp
@@ -41,7 +41,7 @@ def _geometry_from_config(cfg):
     """
     gc = getattr(cfg, "geometry", {})
     gr = cfg.grid
-    kwargs = {}
+    kwargs: dict[str, Any] = {}
     _float_keys = {"q", "shat", "eps", "kxmax", "signB", "Rref", "vpar_max", "krhomax"}
     _int_keys = {"ns", "nkx", "nky", "nvpar", "nmu", "nperiod", "ikxspace"}
     for key, section in [
@@ -213,7 +213,7 @@ def gksimulate(
     checkpoint_interval: Optional[int] = None,
     save_snapshots: bool = False,
     save_final: bool = True,
-) -> Tuple[jnp.ndarray, jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray], GKState]:
+) -> Tuple[jnp.ndarray, jnp.ndarray, Any, GKState]:
     """Run n_steps with optional IO checkpointing and logging.
 
     Returns:
@@ -248,8 +248,8 @@ def gksimulate(
     target_step = start_step + n_steps
     current_df = df
     current_state = state
-    current_phi = None
-    current_fluxes = None
+    current_phi: Any = None
+    current_fluxes: Any = None
 
     # warmup compile with the same return_dt_info as the body loop, otherwise
     # the first block hits a second cache miss for a different specialization
@@ -277,7 +277,7 @@ def gksimulate(
         block_start_step = int(current_state.step)
         block_start_time = float(current_state.time)
         t0 = time.time()
-        current_df, current_phi, current_fluxes, current_state, dt_info = gk_run(
+        run_result: Any = gk_run(
             current_df,
             geometry,
             params,
@@ -286,6 +286,7 @@ def gksimulate(
             pre=pre,
             return_dt_info=True,
         )
+        current_df, current_phi, current_fluxes, current_state, dt_info = run_result
         jax.block_until_ready(current_df)
         wall_time = time.time() - t0
 

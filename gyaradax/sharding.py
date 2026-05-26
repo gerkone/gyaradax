@@ -26,10 +26,12 @@ Partition convention (velocity-space sharding on the adiabatic path):
 Arrays whose shape doesn't match any of the above stay replicated.
 """
 
-from typing import Any, Dict, NamedTuple, Optional, cast
+from typing import Any, NamedTuple, Optional, TypeVar, cast
 
 import jax
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
+
+from gyaradax.state import Precompute
 
 
 class GridShape(NamedTuple):
@@ -46,6 +48,8 @@ class GridShape(NamedTuple):
 _AXIS_SP = "sp"
 _AXIS_VP = "vp"
 _AXIS_MU = "mu"
+
+_P = TypeVar("_P", bound=Precompute)
 
 
 def get_device_count() -> int:
@@ -148,7 +152,7 @@ def shard_df(df, mesh: Optional[Mesh], grid: GridShape):
     return _place(df, spec, mesh)
 
 
-def shard_pre(pre: Dict[str, Any], mesh: Optional[Mesh], grid: GridShape) -> Dict[str, Any]:
+def shard_pre(pre: _P, mesh: Optional[Mesh], grid: GridShape) -> _P:
     """Place each ``pre`` leaf per shape (build-then-shard fallback path).
 
     Prefer :func:`precompute_sharded` for large grids — it partitions the
@@ -212,7 +216,8 @@ def precompute_sharded(geometry, params, mesh: Optional[Mesh], grid: GridShape):
     def _wrapped(geom, p):
         from gyaradax.solver import _linear_precompute_core
 
-        pre = _linear_precompute_core({**geom, **int_scalars}, p)
+        geom_with_scalars: dict[str, Any] = {**geom, **int_scalars}
+        pre = _linear_precompute_core(geom_with_scalars, p)
         return pre._items
 
     shapes = jax.eval_shape(_wrapped, geom_rep, params_rep)

@@ -1,8 +1,29 @@
-from typing import Any, Dict
+from collections.abc import ItemsView, KeysView
+from typing import Any, Protocol
 from dataclasses import dataclass
 
 import jax
 import jax.numpy as jnp
+
+
+class Precompute(Protocol):
+    """Dict-like precompute access boundary.
+
+    Precompute values are intentionally heterogeneous: JAX arrays, nested
+    dictionaries, and static auxiliary metadata such as ``nl_m*``, ``ixzero``,
+    ``iyzero``, and ``nsp``. Accessors therefore return ``Any`` rather than a
+    homogeneous array type.
+    """
+
+    def __contains__(self, key: object) -> bool: ...
+
+    def __getitem__(self, key: str) -> Any: ...
+
+    def get(self, key: str, default: Any = None) -> Any: ...
+
+    def items(self) -> ItemsView[str, Any]: ...
+
+    def keys(self) -> KeysView[str]: ...
 
 
 @jax.tree_util.register_pytree_node_class
@@ -10,10 +31,10 @@ class GKPre:
     """Precomputed terms container. separates dynamic arrays (leaves) from
     static metadata (auxiliary) so FFT sizes stay concrete under JIT."""
 
-    def __init__(self, items: Dict[str, Any]):
-        self._items = items
+    def __init__(self, items: dict[str, Any]) -> None:
+        self._items: dict[str, Any] = items
 
-    def tree_flatten(self):
+    def tree_flatten(self) -> tuple[tuple[Any, ...], dict[str, Any]]:
         leaves = []
         leaf_keys = []
         aux = {}
@@ -34,8 +55,8 @@ class GKPre:
         return tuple(leaves), {"leaf_keys": tuple(leaf_keys), "aux": aux}
 
     @classmethod
-    def tree_unflatten(cls, metadata, leaves):
-        items = {}
+    def tree_unflatten(cls, metadata: dict[str, Any], leaves: tuple[Any, ...]) -> "GKPre":
+        items: dict[str, Any] = {}
         for key, val in zip(metadata["leaf_keys"], leaves):
             if "." in key:
                 parent, child = key.split(".", 1)
@@ -47,19 +68,19 @@ class GKPre:
         items.update(metadata["aux"])
         return cls(items)
 
-    def __contains__(self, key):
+    def __contains__(self, key: object) -> bool:
         return key in self._items
 
-    def __getitem__(self, key):
+    def __getitem__(self, key: str) -> Any:
         return self._items[key]
 
-    def get(self, key, default=None):
+    def get(self, key: str, default: Any = None) -> Any:
         return self._items.get(key, default)
 
-    def items(self):
+    def items(self) -> ItemsView[str, Any]:
         return self._items.items()
 
-    def keys(self):
+    def keys(self) -> KeysView[str]:
         return self._items.keys()
 
 
@@ -74,9 +95,9 @@ class GKState:
     window_start_amp: jnp.ndarray
     last_growth_rate: jnp.ndarray
 
-    def tree_flatten(self):
+    def tree_flatten(self) -> tuple[tuple[jnp.ndarray, ...], None]:
         return tuple(vars(self).values()), None
 
     @classmethod
-    def tree_unflatten(cls, aux_data, leaves):
+    def tree_unflatten(cls, aux_data: None, leaves: tuple[jnp.ndarray, ...]) -> "GKState":
         return cls(*leaves)

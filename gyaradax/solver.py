@@ -29,7 +29,7 @@ jax.config.update("jax_enable_x64", True)
 
 import math
 import functools
-from typing import Dict, Tuple, Optional
+from typing import Any, Dict, Tuple, Optional, cast
 
 from gyaradax import _EPS, stencils
 from gyaradax.integrals import (
@@ -44,7 +44,7 @@ from gyaradax.integrals import (
 from gyaradax.backends import create_ops
 from gyaradax.collisions import precompute_collisions
 from gyaradax.params import GKParams
-from gyaradax.state import GKPre, GKState
+from gyaradax.state import GKPre, GKState, Precompute
 from gyaradax.backends.ops import SolverOps
 from gyaradax.utils import pack_half_spectrum, unpack_half_spectrum  # noqa: F401
 from einops import rearrange
@@ -126,7 +126,7 @@ def normalize_per_ky(
     df: jnp.ndarray,
     geometry: Dict[str, jnp.ndarray],
     params: GKParams,
-    pre: Optional[Dict] = None,
+    pre: Optional[Precompute] = None,
 ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     phi = calculate_phi(geometry, df, params=params, pre=pre)
     amp_per_ky = mode_amplitude(phi, geometry, params.norm_eps)
@@ -209,10 +209,10 @@ def nonlinear_term_iii(
 
 def estimate_nl_timestep(
     phi: jnp.ndarray,
-    pre: Dict[str, jnp.ndarray],
+    pre: Precompute,
     bessel: jnp.ndarray,
-    dt_input: float,
-    safety_factor: float = 0.95,
+    dt_input: Any,
+    safety_factor: Any = 0.95,
     apar: Optional[jnp.ndarray] = None,
 ) -> jnp.ndarray:
     """CFL-adaptive timestep from nonlinear ExB velocity.
@@ -222,7 +222,9 @@ def estimate_nl_timestep(
     correction factors absorb FFTW's unnormalized magnitude (N·|∂phi|_real)
     so `irfft2(norm="backward")` outputs match GKW's `max|ar|·mrad·lxinv`.
     """
-    mrad, mphi, mphiw3 = pre["nl_mrad"], pre["nl_mphi"], pre["nl_mphiw3"]
+    mrad = cast(int, pre["nl_mrad"])
+    mphi = cast(int, pre["nl_mphi"])
+    mphiw3 = cast(int, pre["nl_mphiw3"])
     jind = pre["nl_jind"]
     kx2d, ky2d = pre["nl_kx2d"], pre["nl_ky2d"]
     ycorr = mrad * mrad * mphi * pre["nl_lxinv"]
@@ -414,7 +416,7 @@ def _precompute_shared(
         "nl_fft_scale": jnp.asarray(float(mrad * mphi), dtype=jnp.float64),
         "nl_lxinv": jnp.asarray(lxinv, dtype=jnp.float64),
         "nl_lyinv": jnp.asarray(lyinv, dtype=jnp.float64),
-        "nl_jind": build_jind(nkx, mrad, ixzero),
+        "nl_jind": build_jind(nkx, mrad, cast(int, ixzero)),
         "nl_kx2d": jnp.broadcast_to(jnp.reshape(kx, (nkx, 1)), (nkx, nky)),
         "nl_ky2d": jnp.broadcast_to(jnp.reshape(ky, (1, nky)), (nkx, nky)),
         "nl_dum_s": -jnp.asarray(efun, dtype=jnp.float64),
@@ -1380,11 +1382,10 @@ def gksolve(
     n_steps: int = 1,
     pre: Optional[GKPre] = None,
     return_dt_info: bool = False,
-) -> Tuple[
-    jnp.ndarray,
-    Tuple[jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]],
-    GKState,
-]:
+) -> (
+    Tuple[jnp.ndarray, Tuple[jnp.ndarray, Any], GKState]
+    | Tuple[jnp.ndarray, Tuple[jnp.ndarray, Any], GKState, Dict[str, Any]]
+):
     """Gyrokinetics solver forward.
 
     Executes multiple time steps via jax.lax.scan.
@@ -1455,14 +1456,16 @@ def gksolve(
         }
     else:
         # fixed dt path
-        def _scan_body(carry, _):
+        def _scan_body_fixed(carry, _):
             curr_df, curr_state = carry
             next_df, out, next_state = gkstep_single(
                 curr_df, geometry, params, curr_state, pre, ops
             )
             return (next_df, next_state), None
 
-        (final_df, final_state), _ = jax.lax.scan(_scan_body, (df, state), None, length=n_steps)
+        (final_df, final_state), _ = jax.lax.scan(
+            _scan_body_fixed, (df, state), None, length=n_steps
+        )
         dt_info = {
             "dt_used": jnp.full((n_steps,), dt_input_scalar, dtype=jnp.float64),
             "dt_nl": jnp.zeros((n_steps,), dtype=jnp.float64),
