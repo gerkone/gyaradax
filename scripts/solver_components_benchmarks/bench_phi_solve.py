@@ -25,17 +25,17 @@ from common import (
     analyze_cost,
     BASELINES_DIR,
 )
-from gyaradax.solver import _compute_phi, GKPre
+from gyaradax.solver import _compute_phi
 
 
 def run(config="configs/iteration_13.yaml", mixed_precision=False):
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print("C5: _compute_phi  (phi solve)")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
 
     df, phi, geom, params, pre = load_setup(config, mixed_precision)
 
-    pre_gk = GKPre(pre)
+    pre_gk = pre
     baseline = BASELINES_DIR / "phi_solve.npz"
 
     # Define the timed function with production code

@@ -17,6 +17,7 @@ import argparse
 import os
 import sys
 from pathlib import Path
+from typing import Any
 
 # parse --device before JAX import
 _p = argparse.ArgumentParser(add_help=False)
@@ -37,7 +38,7 @@ from common import load_setup, BASELINES_DIR
 BASELINES_DIR.mkdir(exist_ok=True)
 
 
-def save(name: str, **arrays):
+def save(name: str, **arrays: Any) -> None:
     path = BASELINES_DIR / f"{name}.npz"
     np.savez(path, **{k: np.array(v) for k, v in arrays.items()})
     print(f"  saved {path.name}  ({', '.join(arrays)})")
@@ -173,11 +174,11 @@ def main():
 
     # ── C7: gkstep_single (full RK4 step) ───────────────────────────────────
     print("\nC7: gkstep_single")
-    from gyaradax.solver import gkstep_single, default_state, GKPre
+    from gyaradax.solver import gkstep_single, default_state
     from dataclasses import replace
 
     state = default_state(nky=df.shape[-1])
-    pre_gk = GKPre(pre)
+    pre_gk = pre
 
     @jax.jit
     def _rk4_linear(d, s):

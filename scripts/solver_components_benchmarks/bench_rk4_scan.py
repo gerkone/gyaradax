@@ -48,7 +48,7 @@ from common import (  # noqa: E402
     analyze_cost,
     BASELINES_DIR,
 )
-from gyaradax.solver import gkstep_single, default_state, GKPre  # noqa: E402
+from gyaradax.solver import gkstep_single, default_state  # noqa: E402
 from gyaradax.backends import create_ops  # noqa: E402
 
 # ---------------------------------------------------------------------------
@@ -366,7 +366,7 @@ def run(
 
     df, phi, geom, params, pre = load_setup(config, mixed_precision)
     state = default_state(nky=df.shape[-1])
-    pre_gk = GKPre(pre)
+    pre_gk = pre
 
     baseline = BASELINES_DIR / "rk4_step.npz"
     if not baseline.exists():

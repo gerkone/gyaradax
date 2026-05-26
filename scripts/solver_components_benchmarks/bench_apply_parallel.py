@@ -30,8 +30,6 @@ from common import (
     BenchTimer,
     roofline_report,
 )
-from gyaradax.solver import GKPre
-
 # Reporters and Main removed; now integrated into run()
 
 
@@ -39,13 +37,13 @@ from gyaradax.solver import GKPre
 
 
 def run(config="configs/iteration_13.yaml", mixed_precision=False):
-    print(f"\n{'='*75}")
+    print(f"\n{'=' * 75}")
     print("C1: _apply_parallel  (9-point parallel stencil)")
-    print(f"{'='*75}")
+    print(f"{'=' * 75}")
 
     df, phi, geom, params, pre = load_setup(config, mixed_precision)
     field = df
-    pre_gk = GKPre(pre)
+    pre_gk = pre
     baseline = BASELINES_DIR / "apply_parallel.npz"
 
     from gyaradax.backends import create_ops
@@ -94,7 +92,7 @@ def run(config="configs/iteration_13.yaml", mixed_precision=False):
             roofline_report(f"_apply_parallel ({bname})", mean_ms, flops, bytes_rw_ffi)
 
     if "jax" in backend_times and "cuda" in backend_times:
-        print(f"     Speedup: {backend_times['jax']/backend_times['cuda']:.2f}x")
+        print(f"     Speedup: {backend_times['jax'] / backend_times['cuda']:.2f}x")
 
     # 2. Dual Fused Stencil (Merge from bench_apply_parallel_cuda.py)
     print("\n  -- Dual Stencil Fusion (_apply_parallel_dual)")
@@ -138,7 +136,7 @@ def run(config="configs/iteration_13.yaml", mixed_precision=False):
             roofline_report(f"_apply_parallel_dual ({bname})", mean_ms, flops, bytes_rw)
 
     if "jax" in dual_times and "cuda" in dual_times:
-        print(f"     Speedup: {dual_times['jax']/dual_times['cuda']:.2f}x")
+        print(f"     Speedup: {dual_times['jax'] / dual_times['cuda']:.2f}x")
 
     return results
 

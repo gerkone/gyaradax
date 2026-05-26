@@ -18,7 +18,7 @@ import jax.numpy as jnp
 # ── GPU Hardware Specs ────────────────────────────────────────────────────────
 
 
-def get_gpu_specs():
+def get_gpu_specs() -> tuple[float, float, str, str]:
     """Detect current GPU and return (BW_GBS, FP64_TFLOPS, kind, name)."""
     try:
         kind = jax.devices()[0].device_kind
@@ -57,8 +57,8 @@ def get_gpu_specs():
         print(f"  [WARN] Unknown GPU kind '{kind}' — roofline figures will be meaningless.")
         return 0.0, 0.0, kind, kind
 
-    bw_gbs = specs["bw_tbs"] * 1024
-    return bw_gbs, specs["fp64_tflops"], kind, specs["name"]
+    bw_gbs = float(specs["bw_tbs"]) * 1024
+    return bw_gbs, float(specs["fp64_tflops"]), kind, str(specs["name"])
 
 
 # Global defaults (can be overridden if needed)
@@ -78,7 +78,7 @@ def load_setup(config_path: str = "configs/iteration_13.yaml", mixed_precision: 
     phi  : jnp.ndarray  (ns, nkx, nky) complex128
     geom : dict
     params : GKParams
-    pre  : dict  (linear_precompute output)
+    pre  : GKPre  (linear_precompute output)
     """
     from gyaradax import load_config, load_geometry
     from gyaradax.params import gkparams_from_config
@@ -113,7 +113,7 @@ def load_setup(config_path: str = "configs/iteration_13.yaml", mixed_precision: 
     else:
         from gyaradax.simulate import gk_init
 
-        df, _ = gk_init(geom, params, n_species=n_species)
+        df, geom, _ = gk_init(geom, params, n_species=n_species)
 
     pre = linear_precompute(geom, params)
     phi = _compute_phi(df, geom, params, pre)
@@ -171,6 +171,8 @@ def analyze_cost(fn: Callable, *args) -> tuple[float, float]:
     # in JAX JIT case, we take the first element
     if isinstance(cost, list):
         cost = cost[0]
+    if cost is None:
+        return 0.0, 0.0
 
     flops = float(cost.get("flops", 0.0))
     bytes_rw = float(cost.get("bytes accessed", 0.0))
@@ -225,7 +227,7 @@ def roofline_report(
     }
 
 
-def check_accuracy(out: jnp.ndarray, baseline_path: str, key: str) -> float:
+def check_accuracy(out: jnp.ndarray, baseline_path: str | Path, key: str) -> float:
     """Compare output against saved baseline; print and return rel_l2."""
     path = Path(baseline_path)
     if not path.exists():

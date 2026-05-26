@@ -25,17 +25,15 @@ from common import (
     analyze_cost,
     BASELINES_DIR,
 )
-from gyaradax.solver import pack_half_spectrum, unpack_half_spectrum, GKPre
+from gyaradax.solver import pack_half_spectrum, unpack_half_spectrum
 
 
 def run(config="configs/iteration_13.yaml", mixed_precision=False):
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print("C6: pack_half_spectrum / unpack_half_spectrum")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
 
     df, phi, geom, params, pre = load_setup(config, mixed_precision)
-
-    GKPre(pre)
 
     jind = pre["nl_jind"]
     mrad = int(pre["nl_mrad"])

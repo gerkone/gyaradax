@@ -29,9 +29,6 @@ from common import (
     analyze_cost,
     BASELINES_DIR,
 )
-from gyaradax.solver import GKPre
-
-
 def run(config="configs/iteration_13.yaml", mixed_precision=False, test_z2z=False):
     """Benchmark nonlinear_term_iii.
 
@@ -44,7 +41,7 @@ def run(config="configs/iteration_13.yaml", mixed_precision=False, test_z2z=Fals
     print(f"{'='*60}")
 
     df, phi, geom, params, pre = load_setup(config, mixed_precision)
-    pre_gk = GKPre(pre)
+    pre_gk = pre
     field = df
     baseline = BASELINES_DIR / "nonlinear.npz"
 

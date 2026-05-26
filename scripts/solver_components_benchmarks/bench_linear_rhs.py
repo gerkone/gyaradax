@@ -29,16 +29,15 @@ from common import (
     analyze_cost,
     BASELINES_DIR,
 )
-from gyaradax.solver import GKPre
 
 
 def run(config="configs/iteration_13.yaml", mixed_precision=False):
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print("C3: linear_rhs  (full linear operator)")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
 
     df, phi, geom, params, pre = load_setup(config, mixed_precision)
-    pre_gk = GKPre(pre)
+    pre_gk = pre
     baseline = BASELINES_DIR / "linear_rhs.npz"
 
     from gyaradax.backends import create_ops

@@ -25,7 +25,6 @@ from common import (
     analyze_cost,
     BASELINES_DIR,
 )
-from gyaradax.solver import GKPre
 from gyaradax.backends import create_ops
 import gyaradax.stencils as stencils
 
@@ -33,14 +32,13 @@ import gyaradax.stencils as stencils
 
 
 def run(config="configs/iteration_13.yaml", mixed_precision=False):
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print("C2: _apply_vpar  (5-point vpar stencil)")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
 
     df, phi, geom, params, pre = load_setup(config, mixed_precision)
     field = df
-    pre_gk = GKPre(pre)
-
+    pre_gk = pre
 
     results = {}
     backends = []
@@ -90,7 +88,7 @@ def run(config="configs/iteration_13.yaml", mixed_precision=False):
                 roofline_report(f"_apply_vpar ({label[:4]}, {bname})", mean_ms, flops, bytes_rw)
 
         if "jax" in backend_times and "cuda" in backend_times:
-            print(f"     Speedup: {backend_times['jax']/backend_times['cuda']:.2f}x")
+            print(f"     Speedup: {backend_times['jax'] / backend_times['cuda']:.2f}x")
 
     # 2. Dual Fused Stencil
     print("\n  -- VPAR_D1+D4 Dual Fusion")
@@ -123,7 +121,7 @@ def run(config="configs/iteration_13.yaml", mixed_precision=False):
             roofline_report(f"_apply_vpar_dual ({bname})", mean_ms, flops, bytes_rw)
 
     if "jax" in dual_times and "cuda" in dual_times:
-        print(f"     Speedup: {dual_times['jax']/dual_times['cuda']:.2f}x")
+        print(f"     Speedup: {dual_times['jax'] / dual_times['cuda']:.2f}x")
 
     return results
 
