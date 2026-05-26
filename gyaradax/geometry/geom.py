@@ -11,7 +11,7 @@ import os
 import numpy as np
 import jax
 import jax.numpy as jnp
-from typing import Dict, Any
+from typing import Dict, Any, Mapping, cast
 
 from gyaradax.geometry.lapillonne import _circular_geometry, _poloidal_angle
 
@@ -306,28 +306,36 @@ def compute_geometry(
     signJ = 1.0
     sgrid = _parallel_grid(ns, nperiod)
 
+    cg: dict[str, Any]
     if geom_type == "miller":
         from gyaradax.geometry.miller import _miller_geometry
 
-        cg = _miller_geometry(
-            sgrid=sgrid,
-            q=q,
-            shat=shat,
-            eps=eps,
-            nperiod=nperiod,
-            signB=signB,
-            signJ=signJ,
-            **miller_params,
+        cg = cast(
+            dict[str, Any],
+            _miller_geometry(
+                sgrid=sgrid,
+                q=q,
+                shat=shat,
+                eps=eps,
+                nperiod=nperiod,
+                signB=signB,
+                signJ=signJ,
+                **miller_params,
+            ),
         )
     else:
         theta = _poloidal_angle(sgrid, eps, geom_type=geom_type)
-        cg = _circular_geometry(theta, q, shat, eps, signB=signB, signJ=signJ, geom_type=geom_type)
+        cg = cast(
+            dict[str, Any],
+            _circular_geometry(theta, q, shat, eps, signB=signB, signJ=signJ, geom_type=geom_type),
+        )
 
     efun_3x3, dfun, hfun, ifun, jfun, kfun = _calc_geom_tensors(cg, signJ=signJ, signB=signB)
 
     bn, R = cg["bn"], cg["R"]
     little_g = jnp.stack([cg["metric"][:, 1, 1], cg["dzetadeps"], jnp.ones(ns)], axis=-1)
 
+    g_zz_mid: Any
     if geom_type == "s-alpha":
         g_zz_mid = (q / (2 * jnp.pi * eps)) ** 2
     elif geom_type == "circ":
@@ -460,7 +468,7 @@ def compute_geometry_from_input(input_dat_path: str) -> Dict[str, Any]:
 
     # Miller shape parameters (only used when geom_type='miller'); the alias
     # map handles GKW's case-insensitive namelist vs. the JAX entry-point.
-    miller_params = {}
+    miller_params: dict[str, Any] = {}
     if geom_type == "miller":
         alias = {"zmil": "Zmil", "drmil": "dRmil", "dzmil": "dZmil"}
         for k in (
@@ -510,7 +518,7 @@ def geometry_from_geom_dat_and_input(input_dat_path: str) -> Dict[str, Any]:
     if not os.path.exists(geom_dat_path):
         raise FileNotFoundError(f"geom.dat not found at {geom_dat_path}")
 
-    gd = load_geom_dat_file(geom_dat_path)
+    gd: Mapping[str, Any] = load_geom_dat_file(geom_dat_path)
     inp = parse_input_dat(input_dat_path)
     geom_sec = inp.get("geom", {})
     grid_sec = inp.get("gridsize", {})

@@ -2,7 +2,7 @@ import os
 import re
 import numpy as np
 import jax.numpy as jnp
-from typing import Tuple, Dict, Any
+from typing import Tuple, Dict, Any, cast
 from gyaradax.geometry import (
     _build_mode_connectivity,
     _build_pos_par_grid_classes,
@@ -233,7 +233,7 @@ def save_dumps(
             time_arr = float(block_start_time) + np.cumsum(dt_used)
             dt_input_arr = np.full((n,), dt_input, dtype=np.float64)
             _append_dt_path = os.path.join(output_dir, "dt_history.npz")
-            new_data = {
+            new_data: dict[str, Any] = {
                 "step": step_arr,
                 "time": time_arr,
                 "dt_used": dt_used.astype(np.float64),
@@ -255,13 +255,13 @@ def save_dumps(
                     updated = new_data
             else:
                 updated = new_data
-            np.savez(_append_dt_path, **updated)
+            np.savez(_append_dt_path, **cast(Any, updated))
             last_dt = float(dt_used[-1])
 
     if save_dumps:
         ckpt_name = f"step_{int(state.step):06d}.npz"
         path = os.path.join(output_dir, ckpt_name)
-        checkpoint = {
+        checkpoint: dict[str, Any] = {
             "df": np.array(df),
             "phi": np.array(phi),
             "fluxes": fluxes_arr,
@@ -277,7 +277,7 @@ def save_dumps(
         # saturated state instead of params.dt.
         if last_dt is not None:
             checkpoint["dt_last"] = np.array(last_dt, dtype=np.float64)
-        np.savez(path, **checkpoint)
+        np.savez(path, **cast(Any, checkpoint))
 
 
 def load_checkpoint(path: str) -> Dict[str, Any]:
@@ -415,14 +415,14 @@ def _parse_namelist_value(value: str):
     return v
 
 
-def load_geom_dat_file(file_path):
+def load_geom_dat_file(file_path: str) -> Dict[str, Any]:
     """Load geometric parameters from a .dat file."""
-    data = {}
+    data: dict[str, Any] = {}
     with open(file_path, "r") as f:
         lines = f.readlines()
 
-    key = None
-    values = []
+    key: str | None = None
+    values: list[float] = []
 
     for line in lines:
         line = line.strip()
@@ -434,7 +434,8 @@ def load_geom_dat_file(file_path):
             try:
                 if len(values) == 0:
                     values.extend(map(float, parts))
-                    data[key] = values[0]
+                    if key is not None:
+                        data[key] = values[0]
                     key = None
                     values = []
                     continue
@@ -605,7 +606,7 @@ def load_scalars(directory: str) -> Dict[str, Any]:
     def _scalar(key, default=0.0):
         return float(np.asarray(geom.get(key, default)).item())
 
-    scalars = {
+    scalars: dict[str, Any] = {
         "shat": _scalar("shat", 0.0),
         "q": _scalar("q", 1.0),
         "eps": _scalar("eps", 0.0),
@@ -694,7 +695,7 @@ def load_geometry(directory):
     geom = load_geom_dat_file(os.path.join(directory, "geom.dat"))
     input_data = parse_input_dat(os.path.join(directory, "input.dat"))
 
-    geometry = {}
+    geometry: dict[str, Any] = {}
 
     if "kthnorm" in geom:
         geometry["kthnorm"] = jnp.array(

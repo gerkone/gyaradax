@@ -1,6 +1,8 @@
 """tests for analytic circular geometry computation."""
 
 import os
+from typing import Any
+
 import numpy as np
 import pytest
 import jax
@@ -213,7 +215,7 @@ def test_ifun_zeta(gkw_dir_all):
 # Differentiability tests: AD gradients vs finite differences
 # ---------------------------------------------------------------------------
 
-_GEOM_KWARGS = dict(
+_GEOM_KWARGS: dict[str, Any] = dict(
     ns=16,
     nkx=9,
     nky=8,

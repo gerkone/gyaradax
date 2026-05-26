@@ -1,3 +1,5 @@
+# mypy: ignore-errors
+
 from typing import List, Optional, Union, Tuple
 import matplotlib.pyplot as plt
 import matplotlib
