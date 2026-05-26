@@ -1,5 +1,6 @@
-from typing import Dict, Any
+from typing import Any, Dict
 from dataclasses import dataclass
+
 import jax
 import jax.numpy as jnp
 

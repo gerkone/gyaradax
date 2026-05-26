@@ -9,7 +9,7 @@ from typing import Dict, Tuple
 
 import jax.numpy as jnp
 
-from gyaradax.types import GKPre
+from gyaradax.state import GKPre
 
 
 class SolverOps(ABC):

@@ -17,7 +17,7 @@ from jax import ffi
 
 from gyaradax import stencils
 from gyaradax.backends.ops import SolverOps
-from gyaradax.types import GKPre
+from gyaradax.state import GKPre
 
 log = logging.getLogger(__name__)
 
@@ -122,9 +122,7 @@ class CUDAOps(SolverOps):
             c4=float(coeffs[4]),
             nv=np.int32(nv),
             inner_size=np.int32(inner_size),
-        )[
-            0
-        ]
+        )[0]
 
     def _apply_vpar_dual(
         self, field: jnp.ndarray, coeffs_d1, coeffs_d4
@@ -172,9 +170,7 @@ class CUDAOps(SolverOps):
             ns=np.int32(ns),
             nky=np.int32(nky),
             nmu=np.int32(nmu),
-        )[
-            0
-        ]
+        )[0]
 
     def _apply_parallel_dual(
         self,
@@ -186,9 +182,9 @@ class CUDAOps(SolverOps):
         """Apply parallel stencils to two fields in a single fused kernel."""
         nv1, nmu1, ns1, nkx1, nky1 = field1.shape
         nv2, nmu2, ns2, nkx2, nky2 = field2.shape
-        assert (
-            ns1 == ns2 and nkx1 == nkx2 and nky1 == nky2
-        ), f"spatial mismatch: field1={(ns1, nkx1, nky1)}, field2={(ns2, nkx2, nky2)}"
+        assert ns1 == ns2 and nkx1 == nkx2 and nky1 == nky2, (
+            f"spatial mismatch: field1={(ns1, nkx1, nky1)}, field2={(ns2, nkx2, nky2)}"
+        )
         nv, nmu = max(nv1, nv2), max(nmu1, nmu2)
         ns, nkx, nky = ns1, nkx1, nky1
 

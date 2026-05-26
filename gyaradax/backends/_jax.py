@@ -14,7 +14,7 @@ from gyaradax import stencils
 from gyaradax.backends.ops import SolverOps
 from gyaradax.collisions import collision_rhs, conservation_correction
 from gyaradax.params import GKParams
-from gyaradax.types import GKPre
+from gyaradax.state import GKPre
 from gyaradax.utils import pack_half_spectrum, unpack_half_spectrum
 
 

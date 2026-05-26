@@ -44,7 +44,7 @@ from gyaradax.integrals import (
 from gyaradax.backends import create_ops
 from gyaradax.collisions import precompute_collisions
 from gyaradax.params import GKParams
-from gyaradax.types import GKPre, GKState
+from gyaradax.state import GKPre, GKState
 from gyaradax.backends.ops import SolverOps
 from gyaradax.utils import pack_half_spectrum, unpack_half_spectrum  # noqa: F401
 from einops import rearrange

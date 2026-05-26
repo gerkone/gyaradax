@@ -11,7 +11,7 @@ from gyaradax.params import GKParams, gkparams_from_input_dat
 from gyaradax.utils import load_gkw_k_dump
 from gyaradax.integrals import calculate_phi_kinetic, calculate_fluxes_kinetic
 from gyaradax.backends import create_ops
-from gyaradax.types import GKPre
+from gyaradax.state import GKPre
 from gyaradax.solver import build_jind
 
 
@@ -290,12 +290,12 @@ def test_kinetic_adaptive_dt_consistency(
     assert jnp.all(jnp.isfinite(cuda_df)), "CUDA backend produced non-finite values"
 
     # Validate: states should be consistent
-    assert jnp.isclose(
-        jax_state.time, cuda_state.time, rtol=1e-10
-    ), f"Time mismatch: JAX={jax_state.time}, CUDA={cuda_state.time}"
-    assert (
-        jax_state.step == cuda_state.step == 10
-    ), f"Step mismatch: JAX={jax_state.step}, CUDA={cuda_state.step}"
+    assert jnp.isclose(jax_state.time, cuda_state.time, rtol=1e-10), (
+        f"Time mismatch: JAX={jax_state.time}, CUDA={cuda_state.time}"
+    )
+    assert jax_state.step == cuda_state.step == 10, (
+        f"Step mismatch: JAX={jax_state.step}, CUDA={cuda_state.step}"
+    )
 
     # Validate: numerical consistency between backends
     # Tolerance is relaxed for adaptive_dt (different CFL estimates may accumulate)

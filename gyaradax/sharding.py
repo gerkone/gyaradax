@@ -225,7 +225,7 @@ def precompute_sharded(geometry, params, mesh: Optional[Mesh], grid: GridShape):
     out_shardings = jax.tree_util.tree_map(_leaf_sharding, shapes)
     result_dict = jax.jit(_wrapped, out_shardings=out_shardings)(geom_rep, params_rep)
 
-    from gyaradax.types import GKPre
+    from gyaradax.state import GKPre
 
     return GKPre(result_dict)
 
