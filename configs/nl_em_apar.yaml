@@ -1,0 +1,44 @@
+run:
+  name: nl_em_apar_gyaradax
+  data_dir: tests/data/gkw_cases/nl_em_apar
+solver:
+  dt: 0.005
+  naverage: 100
+  n_steps: 200
+  dump_interval: 20
+  disp_par: 1.0
+  disp_vp: 0.1
+  disp_x: 0.1
+  disp_y: 0.1
+  idisp: 2
+  non_linear: true
+  adaptive_dt: true
+  finit: cosine2
+  amp_init: 0.005
+  nlapar: true
+  nlbpar: false
+  backend: jax
+physics:
+  rlt: [6.9, 6.9]
+  rln: [2.2, 2.2]
+  mas: [1.0, 2.72e-4]
+  tmp: [1.0, 1.0]
+  de: [1.0, 1.0]
+  signz: [1.0, -1.0]
+  dgrid: 1.0
+  tgrid: 1.0
+  beta: 0.001
+geometry:
+  geometry_model: circ
+  shat: 0.78
+  q: 1.4
+  eps: 0.19
+  Rref: 1.0
+  signB: 1.0
+grid:
+  nvpar: 32
+  nmu: 8
+  ns: 16
+  nkx: 9
+  nky: 5
+  adiabatic_electrons: false

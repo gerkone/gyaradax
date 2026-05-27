@@ -1,0 +1,82 @@
+! input file based on the Rosenbluth-Hinton-residual-"test" from GKW'S
+! benchmark-files (doc/benchmarks/zonal_flow/RH_test_not_cbc)
+
+&CONTROL 
+ testing = .false.,
+ silent = .false.
+ order_of_the_scheme = 'fourth_order'
+ parallel_boundary_conditions = 'zero'
+ READ_FILE  = .false.
+ NON_LINEAR = .false.
+ zonal_adiabatic=.true.
+ METHOD = 'EXP',
+ METH   = 2, 
+ DTIM=0.01
+ NTIME=5
+ NAVERAGE=2
+ normalized=.false.
+ nlapar=.false.
+ disp_par=0.0
+ disp_vp=0.0
+ lverbose = .false.
+ io_format = 'ascii'
+ io_testdata = .true.
+ order_of_the_zf_scheme='sixth_order'
+ /
+ &GRIDSIZE
+ n_procs_vpar = 2
+ n_procs_mu = 2
+ n_procs_s = 2
+ n_procs_x  = 1
+ n_procs_sp = 1
+ NX = 3,   
+ N_s_grid=16
+ N_mu_grid=8
+ nperiod=1
+ N_vpar_grid=16
+ NMOD = 2	
+ number_of_species=1
+ /
+ &MODE
+ CHIN    = 0., 
+ kthrho=0.43
+ mode_box = .true. 
+ krhomax=0.450145
+ ikxspace=10
+ /
+ &GEOM
+ shat=0.1
+ Q    = 1.3, 
+ EPS  = 5.000000e-02,
+ /
+ &SPCGENERAL
+ finit='zonal'
+ beta = 3e-4,
+ adiabatic_electrons=.true.
+ /
+ &SPECIES 
+ MASS  = 1, 
+ Z     = 1.0, 
+ TEMP  = 1.0, 
+ dens  = 1.0,
+ rlt=1
+ rln=1
+ uprim = 0.0,
+ / 
+ &SPECIES 
+ MASS  = 2.77e-4, 		!sqrt(mi/me)=60
+ Z     = -1.0, 
+ TEMP  = 1.0,
+ dens  = 1.0,
+ rlt=1
+ rln=1
+ uprim = 0.0,
+ / 
+ &ROTATION
+ VCOR = 0.000000e+00
+ shear_rate=0.0
+ cf_trap=.true.
+ cf_drift=.true.
+ /
+
+

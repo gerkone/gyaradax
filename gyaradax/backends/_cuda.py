@@ -465,6 +465,15 @@ class CUDAOps(SolverOps):
             kernel_name = "cufft_graph_bracket_fp64_ffi"
         _register_ffi()
 
+        # CUDA FFI attributes must be Python-concrete at trace time.  When
+        # gksolve is called without an explicit precompute, the precompute is
+        # built inside jax.jit and scalar metadata such as pre["ixzero"] can be
+        # tracers.  For the supported mode-box grids, zero kx is the central
+        # spectral index and zero ky is the first ky mode; derive these from
+        # static array shapes instead of converting traced scalar metadata.
+        ixzero_static = np.int32(nkx // 2)
+        iyzero_static = np.int32(0)
+
         def _call_5d(df5, bessel5):
             batch = nv * nmu * ns
             df_flat = df5.reshape(-1, nkx, nky) * efun_sign
@@ -486,8 +495,8 @@ class CUDAOps(SolverOps):
                 nkx=np.int32(nkx),
                 nky=np.int32(nky),
                 nspec=np.int32(ns),
-                ixzero=np.int32(pre["ixzero"]),
-                iyzero=np.int32(pre["iyzero"]),
+                ixzero=ixzero_static,
+                iyzero=iyzero_static,
             )
 
         if bessel is None:
