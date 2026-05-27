@@ -1,10 +1,10 @@
 run:
-  name: nl_em_waltz_b005_gyaradax
-  data_dir: tests/data/gkw_cases/nl_em_waltz_b005
+  name: nl_em_waltz_b01_gyaradax
+  data_dir: tests/data/gkw_cases/nl_em_waltz_b01
 solver:
   dt: 0.005
   naverage: 50
-  n_steps: 24000
+  n_steps: 12000
   dump_interval: 20
   disp_par: 1.0
   disp_vp: 0.2
@@ -27,7 +27,7 @@ physics:
   signz: [1.0, -1.0]
   dgrid: 1.0
   tgrid: 1.0
-  beta: 0.005
+  beta: 0.01
 geometry:
   geometry_model: circ
   shat: 1.0

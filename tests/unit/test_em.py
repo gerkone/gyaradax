@@ -19,12 +19,13 @@ from dataclasses import replace
 
 jax.config.update("jax_enable_x64", True)
 
-from gyaradax.params import GKParams, gkparams_from_input_and_geometry
+from gyaradax.params import GKParams, gkparams_from_config, gkparams_from_input_and_geometry, load_config
 from gyaradax.geometry import compute_geometry_from_input
 from gyaradax.solver import linear_precompute, init_f, default_state
 from gyaradax.simulate import gk_run
 from gyaradax import load_geometry
 
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 GKW_CASES_DIR = os.path.join(os.path.dirname(__file__), "..", "data", "gkw_cases")
 
 
@@ -101,6 +102,43 @@ class TestEMParams:
         params = gkparams_from_input_and_geometry(input_path, geometry)
         assert params.nlapar is True
         assert params.beta > 0
+
+    @pytest.mark.parametrize(
+        ("case_name", "config_name", "beta", "n_steps"),
+        [
+            ("nl_em_waltz_b005", "nl_em_waltz_b005.yaml", 0.005, 24000),
+            ("nl_em_waltz_b01", "nl_em_waltz_b01.yaml", 0.01, 12000),
+        ],
+    )
+    def test_nl_em_waltz_yaml_matches_gkw_input(self, case_name, config_name, beta, n_steps):
+        """The nonlinear Waltz EM YAMLs mirror the corresponding GKW input.dat files."""
+        case_dir = _load_em_case(case_name)
+        input_path = os.path.join(case_dir, "input.dat")
+        config = load_config(os.path.join(REPO_ROOT, "configs", config_name))
+
+        geometry = compute_geometry_from_input(input_path)
+        params_from_input = gkparams_from_input_and_geometry(input_path, geometry)
+        params_from_yaml = gkparams_from_config(config)
+
+        assert config.geometry.geometry_model == "circ"
+        assert config.run.data_dir == f"tests/data/gkw_cases/{case_name}"
+        assert int(config.solver.n_steps) == n_steps
+        assert params_from_yaml.nlapar is True
+        assert params_from_input.nlapar is True
+        assert params_from_yaml.nlbpar is False
+        assert params_from_input.nlbpar is False
+        assert params_from_yaml.non_linear is True
+        assert params_from_input.non_linear is True
+        assert params_from_yaml.adiabatic_electrons is False
+        assert params_from_input.adiabatic_electrons is False
+        assert params_from_yaml.beta == pytest.approx(beta)
+        assert params_from_input.beta == pytest.approx(beta)
+        assert params_from_yaml.dt == pytest.approx(params_from_input.dt)
+        assert params_from_yaml.naverage == params_from_input.naverage
+        assert int(config.grid.nvpar) == len(geometry["intvp"])
+        assert int(config.grid.nmu) == len(geometry["intmu"])
+        assert int(config.grid.ns) == len(geometry["ints"])
+        assert int(config.grid.nky) == len(geometry["krho"])
 
 
 # ── 2. Precomputation tests ─────────────────────────────────────────────────
