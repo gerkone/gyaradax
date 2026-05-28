@@ -2,15 +2,14 @@
 import argparse
 import os
 import sys
-import time
 import ctypes
 from pathlib import Path
 
 # --- Argument Parsing ---
-root = Path(__file__).parent.parent
+repo_root = Path(__file__).resolve().parents[2]
 parser = argparse.ArgumentParser()
 parser.add_argument("--device", type=int, default=0)
-parser.add_argument("--config", type=str, default=str(root / "configs" / "iteration_13.yaml"))
+parser.add_argument("--config", type=str, default=str(repo_root / "configs" / "iteration_13.yaml"))
 parser.add_argument("--debug", action="store_true", help="Print debug slices and accuracy metrics")
 parser.add_argument("--slice", type=int, default=0, help="Run only N batches for debugging")
 args = parser.parse_args()
@@ -25,15 +24,12 @@ import numpy as np
 from jax import ffi
 
 # --- Project Imports ---
-root = Path(__file__).parent.parent
-sys.path.insert(0, str(root))
-sys.path.insert(0, str(root / "solver_components_benchmarks"))
+repo_root = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(repo_root))
+sys.path.insert(0, str(repo_root / "scripts" / "solver_components_benchmarks"))
 
 from common import load_setup, BenchTimer, DEFAULT_BW_GBS, DEFAULT_FP64_TFLOPS, DEVICE_MODEL
-from gyaradax.solver import nonlinear_term_iii
-from gyaradax.utils import pack_half_spectrum, unpack_half_spectrum
-from gyaradax.types import GKPre
-from gyaradax.backends import create_ops
+from gyaradax.utils import unpack_half_spectrum
 
 # --- Enable X64 ---
 jax.config.update("jax_enable_x64", True)
@@ -69,14 +65,11 @@ def register_ffi():
     return True
 
 
-
-
-
 # --- Main Benchmark ---
 def main():
-    print(f"\n{'='*80}")
-    print(f"LTO Bracket Production Baseline")
-    print(f"{'='*80}")
+    print(f"\n{'=' * 80}")
+    print("LTO Bracket Production Baseline")
+    print(f"{'=' * 80}")
     print(f"  device   : {DEVICE_MODEL}")
     print(f"  peak BW  : {DEFAULT_BW_GBS:.0f} GB/s")
     print(f"  peak FP64: {DEFAULT_FP64_TFLOPS:.1f} TFLOP/s")
@@ -154,6 +147,7 @@ def main():
 
     # 3. JAX Baselines (R2C and Z2Z)
     from gyaradax.backends._jax import JAXOps
+    from gyaradax.state import GKPre
 
     jax_r2c = JAXOps(pre_gk, use_z2z=False, mixed_precision=False)
     jax_z2z_fp64 = JAXOps(pre_gk, use_z2z=True, mixed_precision=False)
@@ -161,21 +155,15 @@ def main():
 
     @jax.jit
     def run_jax_r2c_fp64(d, p):
-        return jax_r2c.nonlinear_term_iii(
-            d, p, geom, efun_sign=1.0, fft_prefactor=1.0 + 0.0j
-        )
+        return jax_r2c.nonlinear_term_iii(d, p, geom, efun_sign=1.0, fft_prefactor=1.0 + 0.0j)
 
     @jax.jit
     def run_jax_z2z_fp64(d, p):
-        return jax_z2z_fp64.nonlinear_term_iii(
-            d, p, geom, efun_sign=1.0, fft_prefactor=1.0 + 0.0j
-        )
+        return jax_z2z_fp64.nonlinear_term_iii(d, p, geom, efun_sign=1.0, fft_prefactor=1.0 + 0.0j)
 
     @jax.jit
     def run_jax_z2z_fp32(d, p):
-        return jax_z2z_fp32.nonlinear_term_iii(
-            d, p, geom, efun_sign=1.0, fft_prefactor=1.0 + 0.0j
-        )
+        return jax_z2z_fp32.nonlinear_term_iii(d, p, geom, efun_sign=1.0, fft_prefactor=1.0 + 0.0j)
 
     # 4. Shared Physics & Solver Wrapper
     def apply_physics_wrapper(out_raw, is_lto=True):
@@ -293,7 +281,8 @@ def main():
         jind_ffi = jnp.array(jind, dtype=jnp.int32)
 
         out = ffi.ffi_call(
-            "cufft_graph_bracket_fp64_ffi", jax.ShapeDtypeStruct((batch_total, nkx, nky), jnp.complex128)
+            "cufft_graph_bracket_fp64_ffi",
+            jax.ShapeDtypeStruct((batch_total, nkx, nky), jnp.complex128),
         )(
             d,
             p_phi,
@@ -407,7 +396,7 @@ def main():
         if args.debug:
             r_off, k_off = 0, 10
             print(f"  [DEBUG] Slice at rad {r_off}, k_off {k_off}:")
-            print(f"  {variants[0][0]:24s}: {ref_flat[0, r_off, k_off:k_off+5]}")
+            print(f"  {variants[0][0]:24s}: {ref_flat[0, r_off, k_off : k_off + 5]}")
     except Exception as e:
         print(f"  JAX Reference failed: {e}")
         ref_out = None
@@ -417,24 +406,26 @@ def main():
             out = fn(*inputs)
             out_flat = out.reshape(-1, nkx, nky)
             if args.debug and ref_out is not None:
-                print(f"  {name:24s}: {out_flat[0, r_off, k_off:k_off+5]}")
+                print(f"  {name:24s}: {out_flat[0, r_off, k_off : k_off + 5]}")
 
             if ref_out is not None:
-                rel_err = jnp.linalg.norm(
-                    (out_flat.ravel() - ref_flat.ravel())
-                ) / jnp.linalg.norm(ref_flat.ravel())
+                rel_err = jnp.linalg.norm((out_flat.ravel() - ref_flat.ravel())) / jnp.linalg.norm(
+                    ref_flat.ravel()
+                )
                 errors[name] = float(rel_err)
 
-            mean_ms, std_ms = BenchTimer(lambda: fn(*inputs).block_until_ready(), n_trials=100).run()
+            mean_ms, std_ms = BenchTimer(
+                lambda: fn(*inputs).block_until_ready(), n_trials=100
+            ).run()
             results[name] = (mean_ms, std_ms)
         except Exception as e:
             print(f"  {name:24s}: FAILED ({e})")
 
-    print(f"\n{'='*110}")
+    print(f"\n{'=' * 110}")
     print(
         f"{'Variant':30s} | {'Time (ms)':20s} | {'Speedup':10s} | {'Rel L2':10s} | {'Throughput'}"
     )
-    print(f"{'-'*30} | {'-'*20} | {'-'*10} | {'-'*10} | {'-'*15}")
+    print(f"{'-' * 30} | {'-' * 20} | {'-' * 10} | {'-' * 10} | {'-' * 15}")
     base_time, _ = results.get("JAX R2C fp64 baseline", (1.0, 0.0))
     hbm_bytes = 6.11e9
 
@@ -444,7 +435,7 @@ def main():
         rel_err = errors.get(name, 0.0)
         time_str = f"{t:7.3f} ± {std:5.3f}"
         print(f"{name:30s} | {time_str:20s} | {speedup:10.2f}x | {rel_err:10.2e} | {bw:8.1f} GB/s")
-    print(f"\n{'='*110}")
+    print(f"\n{'=' * 110}")
 
 
 if __name__ == "__main__":

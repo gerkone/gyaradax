@@ -40,6 +40,7 @@ from gyaradax.integrals import (
     precompute_phi_kinetic,
     precompute_phi_adiabatic,
     calculate_phi_adiabatic,
+    precompute_bpar,
 )
 from gyaradax.backends import create_ops
 from gyaradax.collisions import precompute_collisions
@@ -757,58 +758,9 @@ def _linear_precompute_core(geometry: Dict[str, jnp.ndarray], params: GKParams) 
             out["apar_chi_factor"] = -2.0 * vthrat_6 * vpgr_6 * sp["bessel"]
 
         if params.nlbpar:
-            from gyaradax.integrals import i1e as _i1e, j1_hat as _j1_hat
-
-            beta = jnp.asarray(params.beta, dtype=jnp.float64)
-            mugr_6 = jnp.asarray(geometry["mugr"], dtype=jnp.float64).reshape(1, 1, -1, 1, 1, 1)
-
-            kxrh_6 = jnp.reshape(kx, (1, 1, 1, 1, -1, 1))
-            ky_6 = jnp.reshape(ky, (1, 1, 1, 1, 1, -1))
-            krloc_sq = (
-                ky_6**2 * little_g[:, 0].reshape(1, 1, 1, -1, 1, 1)
-                + 2 * ky_6 * kxrh_6 * little_g[:, 1].reshape(1, 1, 1, -1, 1, 1)
-                + kxrh_6**2 * little_g[:, 2].reshape(1, 1, 1, -1, 1, 1)
-            )
-            krloc = jnp.sqrt(jnp.maximum(krloc_sq, _EPS))
-            krloc_is_zero = jnp.abs(krloc) < 1e-5
-
-            sz_6 = jnp.where(jnp.abs(signz_6) < _EPS, 1.0, signz_6)
-            gamma_arg = 0.5 * (mas_6 * vthrat_6 * krloc / (sz_6 * bn_6)) ** 2
-            gamma_arg = jnp.clip(gamma_arg, 0.0, 500.0)
-            from jax.scipy.special import i0e as _i0e
-
-            gamma0 = _i0e(gamma_arg)
-            gamma1 = _i1e(gamma_arg)
-            gamma_diff = jnp.where(krloc_is_zero, 1.0, gamma0 - gamma1)
-
-            mugr_bn = jnp.maximum(2.0 * mugr_6 / bn_6, _EPS)
-            bessel_arg = mas_6 * vthrat_6 * krloc * jnp.sqrt(mugr_bn) / sz_6
-            bessel_arg = jnp.where(jnp.isnan(bessel_arg), 0.0, bessel_arg)
-            j1hat = jnp.where(krloc_is_zero, 0.5, _j1_hat(bessel_arg))
-
-            # coupling coefficients (summed over species)
-            gamma0_for_fsp1 = jnp.where(krloc_is_zero, 1.0, gamma0)
-            F_sp1 = jnp.sum(
-                signz_6**2 * de_6 * (gamma0_for_fsp1 - 1.0) / tmp_6, axis=0, keepdims=True
-            )
-            F_sp2 = jnp.sum(
-                signz_6 * beta * de_6 * gamma_diff / (2.0 * bn_6), axis=0, keepdims=True
-            )
-            B_sp1 = jnp.sum(signz_6 * de_6 * gamma_diff / bn_6, axis=0, keepdims=True)
-            B_sp2 = jnp.sum(tmp_6 * de_6 * beta * gamma_diff / bn_6**2, axis=0, keepdims=True)
-
-            cdiag = F_sp1 * (1.0 + B_sp2) - F_sp2 * B_sp1
-            cdiag_3d = cdiag.reshape(cdiag.shape[-3], cdiag.shape[-2], cdiag.shape[-1])
-            cdiag_3d = jnp.where(jnp.abs(cdiag_3d) < _EPS, 1.0, cdiag_3d)
-
-            I_sp1 = signz_6 * de_6 * bn_6 * sp["bessel"] * intvp_6 * intmu_6
-            I_sp2 = beta * bn_6 * tmp_6 * de_6 * intvp_6 * intmu_6 * mugr_6 * j1hat
-
             # phi/bpar form a coupled 2x2 system; override phi_weight/phi_diag
-            out["phi_weight"] = I_sp1 * (1.0 + B_sp2) - I_sp2 * B_sp1
-            out["phi_diag"] = cdiag_3d
-            out["bpar_weight"] = I_sp2 * F_sp1 - I_sp1 * F_sp2
-            out["bpar_chi_factor"] = 2.0 * mugr_6 * tmp_6 / signz_6 * j1hat
+            # with the behavior-preserving kinetic multi-species B_parallel helper.
+            out.update(precompute_bpar(geom_sp, params, sp))
 
         # field CFL: Alfvén wave limit (time_est_field, matdat.F90:1859-1919).
         # ES: sqrt(mir*kmin2*mer); EM: sqrt(mir*(beta+kmin2*mer)) -- beta adds Alfven coupling

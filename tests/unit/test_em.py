@@ -19,10 +19,16 @@ from dataclasses import replace
 
 jax.config.update("jax_enable_x64", True)
 
-from gyaradax.params import GKParams, gkparams_from_config, gkparams_from_input_and_geometry, load_config
+from gyaradax.params import (
+    GKParams,
+    gkparams_from_config,
+    gkparams_from_input_and_geometry,
+    load_config,
+)
 from gyaradax.geometry import compute_geometry_from_input
 from gyaradax.solver import linear_precompute, init_f, default_state
 from gyaradax.simulate import gk_run
+from gyaradax.integrals import precompute_bpar
 from gyaradax import load_geometry
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -195,6 +201,20 @@ class TestEMPrecompute:
         pre = linear_precompute(geometry, params)
         assert "apar_weight" not in pre
         assert "apar_diag" not in pre
+
+    def test_bpar_helper_matches_linear_precompute(self, em_setup):
+        """B_parallel helper returns the exact arrays used by linear_precompute."""
+        geometry, params = em_setup
+        assert params.nlbpar is True
+        pre = linear_precompute(geometry, params)
+        direct = precompute_bpar(geometry, params, pre)
+
+        for key in ("phi_weight", "phi_diag", "bpar_weight", "bpar_chi_factor"):
+            assert key in pre
+            assert key in direct
+            assert direct[key].shape == pre[key].shape
+            assert jnp.all(jnp.isfinite(direct[key]))
+            np.testing.assert_allclose(np.asarray(direct[key]), np.asarray(pre[key]))
 
 
 # ── 3. Field solve tests ────────────────────────────────────────────────────
@@ -546,16 +566,16 @@ class TestEMGKWValidation:
         sim_efl_ion = pred_fluxes[:, 1]
         ref_efl_ion = ref_fluxes[:, 1]
         same_sign = np.sign(sim_efl_ion[-3:]) == np.sign(ref_efl_ion[-3:])
-        assert np.all(
-            same_sign
-        ), f"ion eflux sign mismatch: sim={sim_efl_ion[-3:]}, ref={ref_efl_ion[-3:]}"
+        assert np.all(same_sign), (
+            f"ion eflux sign mismatch: sim={sim_efl_ion[-3:]}, ref={ref_efl_ion[-3:]}"
+        )
         # monotonic growth in both codes (linear phase ramp-up)
-        assert np.all(
-            np.diff(np.abs(sim_efl_ion)) > 0
-        ), f"sim ion eflux not monotonic: {sim_efl_ion}"
-        assert np.all(
-            np.diff(np.abs(ref_efl_ion)) > 0
-        ), f"ref ion eflux not monotonic: {ref_efl_ion}"
+        assert np.all(np.diff(np.abs(sim_efl_ion)) > 0), (
+            f"sim ion eflux not monotonic: {sim_efl_ion}"
+        )
+        assert np.all(np.diff(np.abs(ref_efl_ion)) > 0), (
+            f"ref ion eflux not monotonic: {ref_efl_ion}"
+        )
 
     @pytest.mark.slow
     def test_adiabat_apar_em_fluxes_match_gkw(self):
@@ -636,8 +656,7 @@ class TestEMGKWValidation:
             )
             # signs should also match
             assert np.all(np.sign(pred_fluxes[-3:, col]) == np.sign(ref_5[-3:, col])), (
-                f"{name} sign mismatch at tail: "
-                f"sim={pred_fluxes[-3:, col]}, ref={ref_5[-3:, col]}"
+                f"{name} sign mismatch at tail: sim={pred_fluxes[-3:, col]}, ref={ref_5[-3:, col]}"
             )
 
     @pytest.mark.slow
@@ -671,6 +690,6 @@ class TestEMGKWValidation:
         ref_em = np.loadtxt(ref_em_path)
         # sanity: GKW reference columns line up with gyaradax (nsp*3 = 6 for
         # 2-species kinetic case)
-        assert (
-            np.asarray(fluxes).size == ref_em.shape[1]
-        ), f"col count mismatch: pred {np.asarray(fluxes).size} vs ref {ref_em.shape[1]}"
+        assert np.asarray(fluxes).size == ref_em.shape[1], (
+            f"col count mismatch: pred {np.asarray(fluxes).size} vs ref {ref_em.shape[1]}"
+        )

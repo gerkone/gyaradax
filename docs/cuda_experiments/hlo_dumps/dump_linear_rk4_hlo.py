@@ -6,8 +6,8 @@ import sys
 import argparse
 from pathlib import Path
 
-root = Path(__file__).parent.parent
-sys.path.insert(0, str(root))
+repo_root = Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(repo_root))
 
 
 def setup_test_data(pre, jax, jnp, dtype):
@@ -19,8 +19,8 @@ def setup_test_data(pre, jax, jnp, dtype):
     nv, nmu, ns, nkx, nky = pre["bessel"].shape
 
     key = jax.random.PRNGKey(42)
-    df  = jax.random.normal(key, (nv, nmu, ns, nkx, nky), dtype=dtype)
-    phi = jax.random.normal(key, (ns, nkx, nky),           dtype=dtype)
+    df = jax.random.normal(key, (nv, nmu, ns, nkx, nky), dtype=dtype)
+    phi = jax.random.normal(key, (ns, nkx, nky), dtype=dtype)
 
     return df, phi
 
@@ -55,16 +55,16 @@ def run_linear_rk4_step(ops, df, geom, params, pre, dt):
 def main():
     parser = argparse.ArgumentParser(description="Generate HLO dumps for linear RK4.")
     parser.add_argument(
-        "--full-dump", 
-        action="store_true", 
-        help="Enable full XLA dump to ./xla_hlo_linear (generates many files)"
+        "--full-dump",
+        action="store_true",
+        help="Enable full XLA dump to ./xla_hlo_linear (generates many files)",
     )
     args = parser.parse_args()
 
     if args.full_dump:
         os.environ["XLA_FLAGS"] = "--xla_dump_to=./xla_hlo_linear"
         os.makedirs("./xla_hlo_linear", exist_ok=True)
-    
+
     os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
     if "CUDA_VISIBLE_DEVICES" not in os.environ:
         os.environ["CUDA_VISIBLE_DEVICES"] = "0"
@@ -73,20 +73,19 @@ def main():
 
     import jax
     import jax.numpy as jnp
-    import numpy as np
 
     jax.config.update("jax_enable_x64", True)
 
     from gyaradax.backends._jax import JAXOps
-    from gyaradax.types import GKPre
+    from gyaradax.state import GKPre
     from gyaradax.params import load_config, gkparams_from_config
     from gyaradax.solver import linear_precompute
     from gyaradax.geometry import compute_geometry
 
-    cfg = load_config(str(root / "configs" / "iteration_13.yaml"))
+    cfg = load_config(str(repo_root / "configs" / "iteration_13.yaml"))
     geom_cfg = cfg["geometry"]
     grid_cfg = cfg["grid"]
-    
+
     geom = compute_geometry(
         q=float(geom_cfg["q"]),
         shat=float(geom_cfg["shat"]),
@@ -105,50 +104,43 @@ def main():
         Rref=float(geom_cfg.get("Rref", 100.0)),
         geom_type=str(geom_cfg.get("geometry_model", "circ")),
     )
-    
+
     from dataclasses import replace
-    
+
     params = gkparams_from_config(cfg)
     params = replace(params, non_linear=False)
-    
+
     pre = linear_precompute(geom, params)
     pre_gk = GKPre(pre)
-    
+
     df, phi = setup_test_data(pre, jax, jnp, jnp.complex128)
-    
+
     ops = JAXOps(pre_gk, use_z2z=False)
-    
+
     dt = 0.01
-    
-    lowered_rhs64 = jax.jit(run_linear_rhs).lower(
-        ops, df, phi, geom, params, pre
-    )
+
+    lowered_rhs64 = jax.jit(run_linear_rhs).lower(ops, df, phi, geom, params, pre)
     hlo_text_rhs64 = lowered_rhs64.as_text()
     with open("linear_rhs_only.hlo.txt", "w") as f:
         f.write(hlo_text_rhs64)
     print(f"  RHS:  linear_rhs_only.hlo.txt ({len(hlo_text_rhs64)} chars)")
-    
-    lowered_rk464 = jax.jit(run_linear_rk4_step).lower(
-        ops, df, geom, params, pre, dt
-    )
+
+    lowered_rk464 = jax.jit(run_linear_rk4_step).lower(ops, df, geom, params, pre, dt)
     hlo_text_rk464 = lowered_rk464.as_text()
     with open("linear_rk4_fp64.hlo.txt", "w") as f:
         f.write(hlo_text_rk464)
     print(f"  FP64: linear_rk4_fp64.hlo.txt ({len(hlo_text_rk464)} chars)")
-    
+
     df_f32 = df.astype(jnp.complex64)
-    phi_f32 = phi.astype(jnp.complex64)
-    
-    lowered_rk432 = jax.jit(run_linear_rk4_step).lower(
-        ops, df_f32, geom, params, pre, dt
-    )
+
+    lowered_rk432 = jax.jit(run_linear_rk4_step).lower(ops, df_f32, geom, params, pre, dt)
     hlo_text_rk432 = lowered_rk432.as_text()
     with open("linear_rk4_fp32.hlo.txt", "w") as f:
         f.write(hlo_text_rk432)
     print(f"  FP32: linear_rk4_fp32.hlo.txt ({len(hlo_text_rk432)} chars)")
-    
+
     if args.full_dump:
-        print(f"  XLA:  ./xla_hlo_linear/")
+        print("  XLA:  ./xla_hlo_linear/")
     print("Done.")
 
 
