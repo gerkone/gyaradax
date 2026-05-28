@@ -70,5 +70,13 @@ upload_changed_py.sh
 **/jax_cache/
 .claude/
 .opencode/
+.pi-lens/
+pyrightconfig.json
+p0-implementation.md
+p0-review.md
+progress.md
+collegue_dump/
+docs/cleanup-plan.md
 paper/
+lsp-type-cleanup/
 data/

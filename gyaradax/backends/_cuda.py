@@ -8,7 +8,7 @@ is not compiled.
 import ctypes
 import logging
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 import jax
 import jax.numpy as jnp
@@ -24,6 +24,37 @@ log = logging.getLogger(__name__)
 _CUDA_KERNELS_DIR = Path(__file__).parent / "cuda_kernels"
 LIB_PATH = _CUDA_KERNELS_DIR / "libgyaradax_cuda.so"
 _ffi_registered = False
+
+
+def _concrete_int_or_none(value: Any) -> int | None:
+    """Return a Python int for concrete scalar metadata, or None for tracers."""
+    try:
+        arr = np.asarray(value)
+    except (jax.errors.ConcretizationTypeError, jax.errors.TracerArrayConversionError, TypeError):
+        return None
+    if arr.shape != ():
+        raise ValueError(f"expected scalar metadata, got shape {arr.shape}")
+    return int(arr.item())
+
+
+def _cuda_zero_mode_index(pre: GKPre, key: str, fallback: int, size: int) -> np.int32:
+    """Get concrete zero-mode metadata for CUDA FFI static attributes.
+
+    CUDA FFI attributes must be Python-concrete at trace time. Prefer the
+    precomputed zero-mode index when available; when ``pre`` was constructed
+    inside a JIT trace, scalar metadata can be traced, so fall back to the
+    current mode-box convention while still validating all concrete metadata.
+    """
+    concrete = _concrete_int_or_none(pre[key])
+    if concrete is None:
+        if key == "ixzero" and size % 2 != 1:
+            raise ValueError("CUDA nonlinear mode-box fallback requires odd nkx")
+        idx = fallback
+    else:
+        idx = concrete
+    if not 0 <= idx < size:
+        raise ValueError(f"{key}={idx} out of bounds for size {size}")
+    return np.int32(idx)
 
 
 def _register_ffi():
@@ -465,14 +496,11 @@ class CUDAOps(SolverOps):
             kernel_name = "cufft_graph_bracket_fp64_ffi"
         _register_ffi()
 
-        # CUDA FFI attributes must be Python-concrete at trace time.  When
-        # gksolve is called without an explicit precompute, the precompute is
-        # built inside jax.jit and scalar metadata such as pre["ixzero"] can be
-        # tracers.  For the supported mode-box grids, zero kx is the central
-        # spectral index and zero ky is the first ky mode; derive these from
-        # static array shapes instead of converting traced scalar metadata.
-        ixzero_static = np.int32(nkx // 2)
-        iyzero_static = np.int32(0)
+        # Fallback convention for currently supported CUDA mode-box grids.
+        # _cuda_zero_mode_index uses concrete precomputed metadata when it can,
+        # and only falls back here when the metadata is traced under JIT.
+        ixzero_static = _cuda_zero_mode_index(pre, "ixzero", nkx // 2, nkx)
+        iyzero_static = _cuda_zero_mode_index(pre, "iyzero", 0, nky)
 
         def _call_5d(df5, bessel5):
             batch = nv * nmu * ns
@@ -514,5 +542,5 @@ class CUDAOps(SolverOps):
             nl = fft_prefactor * pre["nl_fft_scale"] * jnp.stack(results, axis=0)
 
         if exclude_zero_mode:
-            return nl.at[..., pre["ixzero"], pre["iyzero"]].set(0.0)
+            return nl.at[..., int(ixzero_static), int(iyzero_static)].set(0.0)
         return nl

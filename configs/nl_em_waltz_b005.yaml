@@ -17,7 +17,7 @@ solver:
   amp_init: 1.0e-3
   nlapar: true
   nlbpar: false
-  backend: cuda
+  backend: jax
 physics:
   rlt: [9.0, 9.0]
   rln: [3.0, 3.0]
