@@ -5,9 +5,9 @@ Public entry points:
 - create_geometry                  build from a GeometrySpec via registry
 - compute_geometry_from_input       build from a GKW input.dat
 - geometry_from_geom_dat_and_input  build from a GKW geom.dat + input.dat
+- load_loaded_geometry              build from a GKW reference/output directory
 
-Internal helpers `_build_mode_connectivity`, `_build_pos_par_grid_classes`,
-`_build_parallel_shift_maps` are re-exported for `utils.load_geometry`.
+Internal connectivity helpers are re-exported for compatibility.
 """
 
 from gyaradax.geometry.geom import (
@@ -19,6 +19,7 @@ from gyaradax.geometry.geom import (
     _build_pos_par_grid_classes,
     _build_parallel_shift_maps,
 )
+from gyaradax.geometry.loaded import LoadedGKWGeometryModel, load_loaded_geometry
 from gyaradax.geometry.registry import GeometryModel, get_geometry_model, list_geometry_models
 from gyaradax.geometry.spec import GeometrySpec, geometry_spec_from_compute_kwargs
 
@@ -32,6 +33,8 @@ __all__ = [
     "list_geometry_models",
     "compute_geometry_from_input",
     "geometry_from_geom_dat_and_input",
+    "LoadedGKWGeometryModel",
+    "load_loaded_geometry",
     "_build_mode_connectivity",
     "_build_pos_par_grid_classes",
     "_build_parallel_shift_maps",
