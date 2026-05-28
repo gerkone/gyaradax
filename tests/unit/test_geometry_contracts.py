@@ -25,8 +25,10 @@ from gyaradax.geometry import (
     geometry_spec_from_compute_kwargs,
     geometry_spec_from_config,
     geometry_spec_from_input_dat,
+    get_geometry_model,
     list_geometry_models,
 )
+from gyaradax.geometry.miller import MillerGeometryModel
 from gyaradax.simulate import _geometry_from_config
 from gyaradax.utils import load_geometry
 
@@ -141,6 +143,11 @@ def test_geometry_spec_from_compute_kwargs_preserves_direct_api_shape() -> None:
 def test_geometry_registry_has_current_analytic_models() -> None:
     """Batch-B registry exposes current models without changing behavior."""
     assert list_geometry_models() == ("circ", "miller", "s-alpha")
+
+
+def test_miller_registry_entry_uses_miller_model_adapter() -> None:
+    """Miller is registered through its dedicated model adapter."""
+    assert isinstance(get_geometry_model("miller"), MillerGeometryModel)
 
 
 def test_create_geometry_from_spec_matches_compute_geometry() -> None:

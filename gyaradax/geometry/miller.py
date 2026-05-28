@@ -14,7 +14,32 @@ forms skappa, sdelta, ssquare, dRmil, dZmil.
 ``_calc_geom_tensors`` consumes it unchanged.
 """
 
+from collections.abc import Callable
+from typing import Any
+
 import jax.numpy as jnp
+
+from gyaradax.geometry.registry import register_geometry_model
+from gyaradax.geometry.spec import GeometrySpec
+
+
+class MillerGeometryModel:
+    """Registry adapter for the existing Miller analytic geometry path."""
+
+    name = "miller"
+
+    def __init__(self, compute_impl: Callable[[GeometrySpec], dict[str, Any]]) -> None:
+        self._compute_impl = compute_impl
+
+    def compute(self, spec: GeometrySpec) -> dict[str, Any]:
+        return self._compute_impl(spec)
+
+
+def register_miller_geometry_model(
+    compute_impl: Callable[[GeometrySpec], dict[str, Any]],
+) -> None:
+    """Register the Miller geometry model with the shared registry."""
+    register_geometry_model(MillerGeometryModel(compute_impl))
 
 
 def _interpquad(x_fine, y_fine, x_out):

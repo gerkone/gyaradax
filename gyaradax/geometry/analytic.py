@@ -2,8 +2,8 @@
 
 This module is the first split point for analytic geometry models.  The
 numerical implementation still lives in ``geom.py`` for now; this adapter gives
-``circ``, ``s-alpha``, and ``miller`` dedicated registry entries without
-changing formulas or public entry points.
+``circ`` and ``s-alpha`` dedicated registry entries without changing formulas
+or public entry points. Miller has its own adapter in ``miller.py``.
 """
 
 from __future__ import annotations
@@ -29,6 +29,6 @@ class AnalyticGeometryModel:
 def register_analytic_geometry_models(
     compute_impl: Callable[[GeometrySpec], dict[str, Any]],
 ) -> None:
-    """Register the current analytic geometry models with the shared registry."""
-    for name in ("circ", "s-alpha", "miller"):
+    """Register shared circular analytic geometry models with the registry."""
+    for name in ("circ", "s-alpha"):
         register_geometry_model(AnalyticGeometryModel(name, compute_impl))
