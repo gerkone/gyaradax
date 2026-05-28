@@ -13,8 +13,9 @@ import jax
 import jax.numpy as jnp
 from typing import Dict, Any, Mapping, cast
 
+from gyaradax.geometry.analytic import register_analytic_geometry_models
 from gyaradax.geometry.lapillonne import _circular_geometry, _poloidal_angle
-from gyaradax.geometry.registry import get_geometry_model, register_geometry_model
+from gyaradax.geometry.registry import get_geometry_model
 from gyaradax.geometry.spec import GeometrySpec, geometry_spec_from_compute_kwargs
 
 
@@ -102,7 +103,7 @@ def _build_velocity_grids(nvpar, nmu, vpar_max):
 
 
 def _build_wavevector_grids(
-    nkx, nky, kxmax, krhomax, q=1.0, shat=0.0, eps=0.1, ikxspace=5, kthnorm=1.0
+    nkx, nky, kxmax, krhomax, q=1.0, shat=0.0, eps=0.1, ikxspace=5, kthnorm: Any = 1.0
 ):
     """Centered kx grid and uniform ky grid.
 
@@ -465,18 +466,7 @@ def _compute_geometry_impl(spec: GeometrySpec) -> Dict[str, Any]:
     }
 
 
-class _AnalyticGeometryModel:
-    """Trivial registry adapter for the current monolithic analytic builder."""
-
-    def __init__(self, name: str) -> None:
-        self.name = name
-
-    def compute(self, spec: GeometrySpec) -> dict[str, Any]:
-        return _compute_geometry_impl(spec)
-
-
-for _geom_model_name in ("circ", "s-alpha", "miller"):
-    register_geometry_model(_AnalyticGeometryModel(_geom_model_name))
+register_analytic_geometry_models(_compute_geometry_impl)
 
 
 def create_geometry(spec: GeometrySpec) -> Dict[str, Any]:
