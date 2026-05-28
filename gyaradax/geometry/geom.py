@@ -14,6 +14,8 @@ import jax.numpy as jnp
 from typing import Dict, Any, Mapping, cast
 
 from gyaradax.geometry.lapillonne import _circular_geometry, _poloidal_angle
+from gyaradax.geometry.registry import get_geometry_model, register_geometry_model
+from gyaradax.geometry.spec import GeometrySpec, geometry_spec_from_compute_kwargs
 
 
 def _f64(x):
@@ -286,7 +288,7 @@ def compute_geometry(
     signB: float = 1.0,
     Rref: float = 100.0,
     geom_type: str = "circ",
-    **miller_params,
+    **miller_params: Any,
 ) -> Dict[str, Any]:
     """Compute the geometry dict from equilibrium parameters.
 
@@ -301,7 +303,47 @@ def compute_geometry(
                 squareness (see gyaradax.geometry.miller for the shape
                 parameters, passed through **miller_params).
     """
+    spec = geometry_spec_from_compute_kwargs(
+        q=q,
+        shat=shat,
+        eps=eps,
+        ns=ns,
+        nkx=nkx,
+        nky=nky,
+        nvpar=nvpar,
+        nmu=nmu,
+        vpar_max=vpar_max,
+        nperiod=nperiod,
+        kxmax=kxmax,
+        krhomax=krhomax,
+        ikxspace=ikxspace,
+        signB=signB,
+        Rref=Rref,
+        geom_type=geom_type,
+        **miller_params,
+    )
+    return create_geometry(spec)
+
+
+def _compute_geometry_impl(spec: GeometrySpec) -> Dict[str, Any]:
+    geom_type = spec.model
     assert geom_type in ("circ", "s-alpha", "miller"), f"unknown geom_type: {geom_type}"
+    q = spec.q
+    shat = spec.shat
+    eps = spec.eps
+    ns = spec.ns
+    nkx = spec.nkx
+    nky = spec.nky
+    nvpar = spec.nvpar
+    nmu = spec.nmu
+    vpar_max = spec.vpar_max
+    nperiod = spec.nperiod
+    kxmax = spec.kxmax
+    krhomax = spec.krhomax
+    ikxspace = spec.ikxspace
+    signB = spec.signB
+    Rref = spec.Rref
+    miller_params = dict(spec.model_params)
 
     signJ = 1.0
     sgrid = _parallel_grid(ns, nperiod)
@@ -421,6 +463,29 @@ def compute_geometry(
         "kxmax": _f64(jnp.max(jnp.abs(kxrh))),
         "kymax": _f64(jnp.max(jnp.abs(krho))),
     }
+
+
+class _AnalyticGeometryModel:
+    """Trivial registry adapter for the current monolithic analytic builder."""
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+    def compute(self, spec: GeometrySpec) -> dict[str, Any]:
+        return _compute_geometry_impl(spec)
+
+
+for _geom_model_name in ("circ", "s-alpha", "miller"):
+    register_geometry_model(_AnalyticGeometryModel(_geom_model_name))
+
+
+def create_geometry(spec: GeometrySpec) -> Dict[str, Any]:
+    """Create analytic geometry arrays from a normalized spec via the registry."""
+    try:
+        model = get_geometry_model(spec.model)
+    except KeyError as exc:
+        raise AssertionError(f"unknown geom_type: {spec.model}") from exc
+    return model.compute(spec)
 
 
 def compute_geometry_from_input(input_dat_path: str) -> Dict[str, Any]:
