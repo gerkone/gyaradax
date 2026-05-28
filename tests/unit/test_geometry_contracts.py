@@ -28,6 +28,7 @@ from gyaradax.geometry import (
     get_geometry_model,
     list_geometry_models,
 )
+from gyaradax.geometry.analytic import CircularGeometryModel, SAlphaGeometryModel
 from gyaradax.geometry.miller import MillerGeometryModel
 from gyaradax.simulate import _geometry_from_config
 from gyaradax.utils import load_geometry
@@ -145,8 +146,10 @@ def test_geometry_registry_has_current_analytic_models() -> None:
     assert list_geometry_models() == ("circ", "miller", "s-alpha")
 
 
-def test_miller_registry_entry_uses_miller_model_adapter() -> None:
-    """Miller is registered through its dedicated model adapter."""
+def test_registry_entries_use_dedicated_model_adapters() -> None:
+    """Current analytic geometries are registered through distinct adapters."""
+    assert isinstance(get_geometry_model("circ"), CircularGeometryModel)
+    assert isinstance(get_geometry_model("s-alpha"), SAlphaGeometryModel)
     assert isinstance(get_geometry_model("miller"), MillerGeometryModel)
 
 
