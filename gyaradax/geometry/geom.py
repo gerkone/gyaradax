@@ -478,11 +478,11 @@ def create_geometry(spec: GeometrySpec) -> Dict[str, Any]:
     return model.compute(spec)
 
 
-def compute_geometry_from_input(input_dat_path: str) -> Dict[str, Any]:
-    """Compute geometry from a GKW input.dat file.
+def geometry_spec_from_input_dat(input_dat_path: str) -> GeometrySpec:
+    """Build a ``GeometrySpec`` from a GKW input.dat file.
 
-    Reads kxrh and vpgr.dat from the same directory if available; falls
-    back to approximate formulas otherwise.
+    Preserves the historical ``compute_geometry_from_input`` defaults,
+    including absent ``geom_type`` -> ``s-alpha``.
     """
     from gyaradax.utils import parse_input_dat
 
@@ -540,7 +540,7 @@ def compute_geometry_from_input(input_dat_path: str) -> Dict[str, Any]:
             if k in geom_sec:
                 miller_params[alias.get(k, k)] = float(geom_sec[k])
 
-    return compute_geometry(
+    return geometry_spec_from_compute_kwargs(
         q=q,
         shat=shat,
         eps=eps,
@@ -557,6 +557,15 @@ def compute_geometry_from_input(input_dat_path: str) -> Dict[str, Any]:
         geom_type=geom_type,
         **miller_params,
     )
+
+
+def compute_geometry_from_input(input_dat_path: str) -> Dict[str, Any]:
+    """Compute geometry from a GKW input.dat file.
+
+    Reads kxrh and vpgr.dat from the same directory if available; falls
+    back to approximate formulas otherwise.
+    """
+    return create_geometry(geometry_spec_from_input_dat(input_dat_path))
 
 
 def geometry_from_geom_dat_and_input(input_dat_path: str) -> Dict[str, Any]:

@@ -23,6 +23,8 @@ from gyaradax.geometry import (
     compute_geometry_from_input,
     create_geometry,
     geometry_spec_from_compute_kwargs,
+    geometry_spec_from_config,
+    geometry_spec_from_input_dat,
     list_geometry_models,
 )
 from gyaradax.simulate import _geometry_from_config
@@ -165,10 +167,14 @@ def test_compute_geometry_from_input_absent_geom_type_defaults_to_s_alpha(tmp_pa
     input_dat = tmp_path / "input.dat"
     input_dat.write_text(_minimal_input_dat(), encoding="utf-8")
 
+    spec = geometry_spec_from_input_dat(str(input_dat))
+    assert spec.model == "s-alpha"
     from_input = compute_geometry_from_input(str(input_dat))
+    from_spec = create_geometry(spec)
     explicit_salpha = compute_geometry(**_BASE_KWARGS, geom_type="s-alpha")
     explicit_circ = compute_geometry(**_BASE_KWARGS, geom_type="circ")
 
+    _assert_arrays_equal(from_input, from_spec, ("bn", "efun", "little_g", "krho", "kxrh"))
     _assert_arrays_equal(from_input, explicit_salpha, ("bn", "efun", "little_g", "krho", "kxrh"))
     assert not np.allclose(np.asarray(from_input["krho"]), np.asarray(explicit_circ["krho"]))
 
@@ -191,10 +197,14 @@ def test_config_geometry_absent_geometry_model_defaults_to_circ() -> None:
         }
     )
 
+    spec = geometry_spec_from_config(cfg)
+    assert spec.model == "circ"
     from_config = _geometry_from_config(cfg)
+    from_spec = create_geometry(spec)
     explicit_circ = compute_geometry(**_BASE_KWARGS, geom_type="circ")
     explicit_salpha = compute_geometry(**_BASE_KWARGS, geom_type="s-alpha")
 
+    _assert_arrays_equal(from_config, from_spec, ("bn", "efun", "little_g", "krho", "kxrh"))
     _assert_arrays_equal(from_config, explicit_circ, ("bn", "efun", "little_g", "krho", "kxrh"))
     assert not np.allclose(np.asarray(from_config["krho"]), np.asarray(explicit_salpha["krho"]))
 

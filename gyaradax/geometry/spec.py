@@ -12,6 +12,13 @@ from dataclasses import dataclass, field
 from typing import Any, Mapping
 
 
+def _section_get(section: Any, key: str, default: Any = None) -> Any:
+    """Read a value from either an OmegaConf-style object or a mapping."""
+    if isinstance(section, Mapping):
+        return section.get(key, default)
+    return getattr(section, key, default)
+
+
 @dataclass(frozen=True)
 class GeometrySpec:
     """Normalized specification for analytic geometry construction.
@@ -107,3 +114,41 @@ def geometry_spec_from_compute_kwargs(
         Rref=Rref,
         model_params=model_params,
     )
+
+
+def geometry_spec_from_config(cfg: Any) -> GeometrySpec:
+    """Build a ``GeometrySpec`` from the current YAML/OmegaConf config shape.
+
+    This mirrors the historical ``simulate._geometry_from_config`` wrapper:
+    missing ``geometry.geometry_model`` defaults through the direct geometry
+    API to ``circ``; only values present in the config are forwarded.
+    """
+    gc = _section_get(cfg, "geometry", {})
+    gr = _section_get(cfg, "grid")
+    kwargs: dict[str, Any] = {}
+    int_keys = {"ns", "nkx", "nky", "nvpar", "nmu", "nperiod", "ikxspace"}
+    for key, section in [
+        ("q", gc),
+        ("shat", gc),
+        ("eps", gc),
+        ("kxmax", gc),
+        ("signB", gc),
+        ("Rref", gc),
+        ("ns", gr),
+        ("nkx", gr),
+        ("nky", gr),
+        ("nvpar", gr),
+        ("nmu", gr),
+        ("vpar_max", gr),
+        ("nperiod", gr),
+        ("krhomax", gr),
+        ("ikxspace", gr),
+    ]:
+        val = _section_get(section, key, None)
+        if val is not None:
+            kwargs[key] = int(val) if key in int_keys else float(val)
+
+    gm = _section_get(gc, "geometry_model", None)
+    if gm is not None:
+        kwargs["geom_type"] = str(gm)
+    return geometry_spec_from_compute_kwargs(**kwargs)

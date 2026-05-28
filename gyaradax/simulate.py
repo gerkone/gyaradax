@@ -10,7 +10,7 @@ import jax.numpy as jnp
 jax.config.update("jax_enable_x64", True)
 
 from gyaradax.utils import load_geometry
-from gyaradax.geometry import compute_geometry
+from gyaradax.geometry import create_geometry, geometry_spec_from_config
 from gyaradax.integrals import (
     get_integrals,
     calculate_phi,
@@ -36,39 +36,10 @@ def _compute_phi_for_init(df, geometry, params):
 def _geometry_from_config(cfg):
     """Build geometry from config when no data_dir is provided.
 
-    defaults are defined in compute_geometry(); we only forward
-    values that are actually present in the config.
+    Missing ``geometry.geometry_model`` preserves the historical direct-wrapper
+    default of circular geometry.
     """
-    gc = getattr(cfg, "geometry", {})
-    gr = cfg.grid
-    kwargs: dict[str, Any] = {}
-    _float_keys = {"q", "shat", "eps", "kxmax", "signB", "Rref", "vpar_max", "krhomax"}
-    _int_keys = {"ns", "nkx", "nky", "nvpar", "nmu", "nperiod", "ikxspace"}
-    for key, section in [
-        ("q", gc),
-        ("shat", gc),
-        ("eps", gc),
-        ("kxmax", gc),
-        ("signB", gc),
-        ("Rref", gc),
-        ("ns", gr),
-        ("nkx", gr),
-        ("nky", gr),
-        ("nvpar", gr),
-        ("nmu", gr),
-        ("vpar_max", gr),
-        ("nperiod", gr),
-        ("krhomax", gr),
-        ("ikxspace", gr),
-    ]:
-        val = getattr(section, key, None)
-        if val is not None:
-            kwargs[key] = int(val) if key in _int_keys else float(val)
-    # geometry_model: "circ" (Lapillonne) or "s-alpha"
-    gm = getattr(gc, "geometry_model", None)
-    if gm is not None:
-        kwargs["geom_type"] = str(gm)
-    return compute_geometry(**kwargs)
+    return create_geometry(geometry_spec_from_config(cfg))
 
 
 def log_step(fluxes, state: GKState, wall_time: float, n_steps: int = 0):
