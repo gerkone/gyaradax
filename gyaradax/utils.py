@@ -4,6 +4,8 @@ import numpy as np
 import jax.numpy as jnp
 from typing import Tuple, Dict, Any, cast
 
+from gyaradax.gkw_input import as_bool, as_float, as_int, species_blocks
+
 
 def read_gkw_dump_time(dat_path: str) -> float:
     """Read simulation time from a GKW .dat file."""
@@ -498,24 +500,13 @@ def load_runtime_params(input_dat_path: str) -> Dict[str, Any]:
     control = inp.get("control", {})
 
     def _flt(name, default):
-        val = control.get(name, default)
-        return float(val) if val is not None else float(default)
+        return as_float(control.get(name, default), default)
 
     def _int(name, default):
-        val = control.get(name, default)
-        return int(val) if val is not None else int(default)
+        return as_int(control.get(name, default), default)
 
     def _bool(name, default):
-        val = control.get(name, default)
-        if isinstance(val, bool):
-            return val
-        if isinstance(val, str):
-            lv = val.strip().lower()
-            if lv in (".true.", "true", "t"):
-                return True
-            if lv in (".false.", "false", "f"):
-                return False
-        return bool(default)
+        return as_bool(control.get(name, default), default)
 
     method_val = control.get("method", "EXP")
     method = str(method_val).strip().strip("'").strip('"').upper()
@@ -534,16 +525,7 @@ def load_runtime_params(input_dat_path: str) -> Dict[str, Any]:
     coll = inp.get("collisions", {})
 
     def _coll_bool(name, default):
-        val = coll.get(name, default)
-        if isinstance(val, bool):
-            return val
-        if isinstance(val, str):
-            lv = val.strip().lower()
-            if lv in (".true.", "true", "t"):
-                return True
-            if lv in (".false.", "false", "f"):
-                return False
-        return bool(default)
+        return as_bool(coll.get(name, default), default)
 
     collisions_on = _bool("collisions", False)
 
@@ -611,15 +593,15 @@ def load_scalars(directory: str) -> Dict[str, Any]:
         "signB": 1.0,
     }
 
-    num_sp = input_data.get("gridsize", {}).get("number_of_species", 1)
-    species_keys = [k for k in input_data.keys() if k.startswith("species")][:num_sp]
-    if species_keys:
-        sp_mas = np.array([float(input_data[k].get("mass", 1.0)) for k in species_keys])
-        sp_tmp = np.array([float(input_data[k].get("temp", 1.0)) for k in species_keys])
-        sp_de = np.array([float(input_data[k].get("dens", 1.0)) for k in species_keys])
-        sp_signz = np.array([float(input_data[k].get("z", 1.0)) for k in species_keys])
-        sp_rlt = np.array([float(input_data[k].get("rlt", 0.0)) for k in species_keys])
-        sp_rln = np.array([float(input_data[k].get("rln", 0.0)) for k in species_keys])
+    num_sp = as_int(input_data.get("gridsize", {}).get("number_of_species", 1), 1)
+    species = species_blocks(input_data, limit=num_sp)
+    if species:
+        sp_mas = np.array([float(sp.get("mass", 1.0)) for sp in species])
+        sp_tmp = np.array([float(sp.get("temp", 1.0)) for sp in species])
+        sp_de = np.array([float(sp.get("dens", 1.0)) for sp in species])
+        sp_signz = np.array([float(sp.get("z", 1.0)) for sp in species])
+        sp_rlt = np.array([float(sp.get("rlt", 0.0)) for sp in species])
+        sp_rln = np.array([float(sp.get("rln", 0.0)) for sp in species])
         sp_vthrat = np.sqrt(sp_tmp / sp_mas)
 
         def _maybe_scalar(arr):

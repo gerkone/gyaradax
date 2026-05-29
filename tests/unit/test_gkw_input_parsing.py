@@ -11,6 +11,7 @@ from pathlib import Path
 import numpy as np
 
 from gyaradax.geometry import compute_geometry
+from gyaradax.gkw_input import as_bool, as_float, as_int, species_blocks, species_section_keys
 from gyaradax.params import gkparams_from_input_and_geometry
 from gyaradax.utils import parse_input_dat
 
@@ -74,6 +75,39 @@ def test_parse_input_dat_keeps_comments_and_commas_inside_quotes(tmp_path: Path)
 
 def test_parse_input_dat_missing_file_returns_empty_dict(tmp_path: Path) -> None:
     assert parse_input_dat(str(tmp_path / "missing.input.dat")) == {}
+
+
+def test_gkw_input_helpers_preserve_species_section_ordering(tmp_path: Path) -> None:
+    input_dat = tmp_path / "input.dat"
+    input_dat.write_text(
+        """
+ &SPECIES
+ MASS = 1.0
+ /
+ &SPECIES
+ MASS = 2.0
+ /
+ &SPECIES
+ MASS = 3.0
+ /
+""",
+        encoding="utf-8",
+    )
+    parsed = parse_input_dat(str(input_dat))
+
+    assert species_section_keys(parsed) == ("species", "species0", "species00")
+    assert species_section_keys(parsed, limit=2) == ("species", "species0")
+    assert [block["mass"] for block in species_blocks(parsed, limit=2)] == [1.0, 2.0]
+
+
+def test_gkw_input_scalar_coercion_helpers_match_runtime_defaults() -> None:
+    assert as_float(None, 1.25) == 1.25
+    assert as_float("1.0e-2", 0.0) == 1.0e-2
+    assert as_int(None, 7) == 7
+    assert as_int("5", 0) == 5
+    assert as_bool(".true.", False) is True
+    assert as_bool("false", True) is False
+    assert as_bool("not-a-bool", True) is True
 
 
 def _minimal_species_input(adiabatic_electrons: bool) -> str:

@@ -18,6 +18,7 @@ from gyaradax.geometry.topology import (
     _build_parallel_shift_maps,
     _build_pos_par_grid_classes,
 )
+from gyaradax.gkw_input import as_int, species_blocks
 from gyaradax.utils import load_geom_dat_file, parse_input_dat
 
 
@@ -117,12 +118,11 @@ class LoadedGKWGeometryModel:
         geometry["d2X"] = jnp.array(1.0, dtype=jnp.float64)
         geometry["signB"] = jnp.array(1.0, dtype=jnp.float64)
 
-        num_sp = input_data.get("gridsize", {}).get("number_of_species", 1)
-        species_keys = [k for k in input_data.keys() if k.startswith("species")][:num_sp]
-        if species_keys:
+        num_sp = as_int(input_data.get("gridsize", {}).get("number_of_species", 1), 1)
+        species = species_blocks(input_data, limit=num_sp)
+        if species:
             mas, tmp, de, signz, rlt, rln = [], [], [], [], [], []
-            for k in species_keys:
-                sp = input_data[k]
+            for sp in species:
                 mas.append(sp.get("mass", 1.0))
                 tmp.append(sp.get("temp", 1.0))
                 de.append(sp.get("dens", 1.0))
