@@ -1,14 +1,19 @@
-"""Geometry module: circular (Lapillonne), s-alpha, Miller.
+"""Public geometry construction API.
 
-Public entry points:
-- compute_geometry                 build from scalar parameters
-- create_geometry                  build from a GeometrySpec via registry
-- compute_geometry_from_config      build from a YAML/OmegaConf config
-- compute_geometry_from_input       build from a GKW input.dat
-- geometry_from_geom_dat_and_input  build from a GKW geom.dat + input.dat
-- load_loaded_geometry              build from a GKW reference/output directory
+Analytic construction entry points:
+- ``compute_geometry`` builds directly from scalar parameters.
+- ``compute_geometry_from_config`` builds from a YAML/OmegaConf config.
+- ``compute_geometry_from_input`` builds from a GKW ``input.dat``.
+- ``create_geometry`` builds from a normalized ``GeometrySpec`` via registry.
 
-Internal connectivity helpers are re-exported for compatibility.
+Loaded/reference construction entry points:
+- ``load_loaded_geometry`` reads a GKW reference/output directory.
+- ``geometry_from_geom_dat_and_input`` builds from ``reference/geom.dat`` plus
+  grids/config in a sibling GKW ``input.dat``.
+
+The geometry spec, registry protocol types, and model lookup helpers are also
+exported here. Private connectivity helpers remain re-exported only for
+backward compatibility with older internal imports.
 """
 
 from gyaradax.geometry.geom import (

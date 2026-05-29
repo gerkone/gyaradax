@@ -1,8 +1,8 @@
-"""Model-independent geometry grid and topology helpers.
+"""Model-independent geometry grid and mode-label helpers.
 
 These helpers build the parallel, velocity, wavevector, and mode-label grids
-shared by analytic and loaded geometry construction.  They intentionally do not
-contain continuous geometry formulas or tensor assembly.
+shared by analytic geometry construction. They intentionally do not contain
+continuous geometry formulas, tensor assembly, or parallel-boundary topology.
 """
 
 from __future__ import annotations

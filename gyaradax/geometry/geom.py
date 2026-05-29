@@ -1,9 +1,8 @@
-"""Model-independent geometry helpers and public entry points.
+"""Geometry construction dispatchers and compatibility entry points.
 
-Holds the parallel / velocity / wavevector grids, the open-boundary
-topology maps, the E/D/H/I/J/K tensor builder, and the dispatchers that
-pick the geometry model (circ, s-alpha, miller) and assemble the dict
-consumed by the solver.
+This module keeps the historical public wrappers while delegating model
+formulas, grids, topology, tensor construction, and final dict assembly to the
+smaller ``gyaradax.geometry`` submodules.
 """
 
 import os

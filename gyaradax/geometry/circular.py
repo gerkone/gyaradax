@@ -1,11 +1,9 @@
 """Circular and s-alpha geometry model adapter registration.
 
 This module contains dedicated registry adapters for the current circular
-analytic geometry names.  The numerical implementation still lives in
-``geom.py`` for now; these adapters only provide distinct model classes so the
-registry shape can evolve toward one implementation module per geometry without
-changing formulas or public entry points. Miller has its own adapter in
-``miller.py``.
+analytic geometry names. The adapters provide distinct model classes while
+reusing the shared analytic geometry assembly path, so formulas and public
+entry points remain unchanged. Miller has its own adapter in ``miller.py``.
 """
 
 from __future__ import annotations
@@ -43,9 +41,9 @@ class _DelegatingCircularGeometryModel:
     ) -> dict[str, Any]:
         """Build the model-specific continuous geometry dict.
 
-        Shared grid, tensor, velocity, wavevector, and topology assembly stays
-        in ``geom.py``; this method owns only the existing circular/s-alpha
-        formula selection.
+        Shared grid, tensor, velocity, wavevector, topology, and final dict
+        assembly stay outside the model; this method owns only the existing
+        circular/s-alpha formula selection.
         """
         theta = _poloidal_angle(sgrid, eps, geom_type=self.name)
         return _circular_geometry(

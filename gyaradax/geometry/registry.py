@@ -1,9 +1,9 @@
-"""Geometry model registry groundwork.
+"""Geometry model registry and protocol types.
 
 The registry mirrors the backend factory shape at a small scale: a geometry
-model is an object with a name and a ``compute(spec)`` method.  Existing public
-APIs continue to live in ``geom.py``; this module provides the extension point
-for future model modules.
+model is an object with a name and a ``compute(spec)`` method. Analytic models
+may also implement ``ContinuousGeometryModel`` to share grid/topology/tensor
+assembly while owning only model-specific continuous geometry formulas.
 """
 
 from __future__ import annotations

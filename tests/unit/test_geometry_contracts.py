@@ -17,6 +17,7 @@ import jax.numpy as jnp
 import numpy as np
 from omegaconf import OmegaConf
 
+import gyaradax.geometry as geometry_api
 from gyaradax.geometry import (
     ContinuousGeometryModel,
     GeometrySpec,
@@ -146,6 +147,27 @@ def test_geometry_spec_from_compute_kwargs_preserves_direct_api_shape() -> None:
 def test_geometry_registry_has_current_analytic_models() -> None:
     """Batch-B registry exposes current models without changing behavior."""
     assert list_geometry_models() == ("circ", "miller", "s-alpha")
+
+
+def test_geometry_package_exports_current_public_api() -> None:
+    """The geometry package re-exports the stable construction API surface."""
+    expected_public = {
+        "compute_geometry",
+        "compute_geometry_from_input",
+        "compute_geometry_from_config",
+        "create_geometry",
+        "load_loaded_geometry",
+        "geometry_from_geom_dat_and_input",
+        "GeometrySpec",
+        "GeometryModel",
+        "ContinuousGeometryModel",
+        "get_geometry_model",
+        "list_geometry_models",
+    }
+    exported = set(geometry_api.__all__)
+    assert expected_public <= exported
+    for name in expected_public:
+        assert hasattr(geometry_api, name), name
 
 
 def test_registry_entries_use_dedicated_model_adapters() -> None:
