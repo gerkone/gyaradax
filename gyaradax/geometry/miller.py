@@ -15,7 +15,7 @@ forms skappa, sdelta, ssquare, dRmil, dZmil.
 """
 
 from collections.abc import Callable
-from typing import Any
+from typing import Any, Mapping
 
 import jax.numpy as jnp
 
@@ -33,6 +33,30 @@ class MillerGeometryModel:
 
     def compute(self, spec: GeometrySpec) -> dict[str, Any]:
         return self._compute_impl(spec)
+
+    def continuous_geometry(
+        self,
+        *,
+        sgrid: Any,
+        q: float,
+        shat: float,
+        eps: float,
+        nperiod: int,
+        signB: float,
+        signJ: float,
+        model_params: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Build the model-specific continuous Miller geometry dict."""
+        return _miller_geometry(
+            sgrid=sgrid,
+            q=q,
+            shat=shat,
+            eps=eps,
+            nperiod=nperiod,
+            signB=signB,
+            signJ=signJ,
+            **dict(model_params),
+        )
 
 
 def register_miller_geometry_model(

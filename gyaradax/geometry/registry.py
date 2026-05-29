@@ -8,7 +8,7 @@ for future model modules.
 
 from __future__ import annotations
 
-from typing import Any, Protocol
+from typing import Any, Mapping, Protocol
 
 from gyaradax.geometry.spec import GeometrySpec
 
@@ -19,6 +19,28 @@ class GeometryModel(Protocol):
     name: str
 
     def compute(self, spec: GeometrySpec) -> dict[str, Any]: ...
+
+
+class ContinuousGeometryModel(GeometryModel, Protocol):
+    """Geometry model that supplies continuous geometry before shared assembly.
+
+    Implementations own only model-specific continuous geometry formulas.
+    Shared grids, tensor assembly, topology, and final solver-dict assembly stay
+    outside the model implementation.
+    """
+
+    def continuous_geometry(
+        self,
+        *,
+        sgrid: Any,
+        q: float,
+        shat: float,
+        eps: float,
+        nperiod: int,
+        signB: float,
+        signJ: float,
+        model_params: Mapping[str, Any],
+    ) -> dict[str, Any]: ...
 
 
 _MODELS: dict[str, GeometryModel] = {}

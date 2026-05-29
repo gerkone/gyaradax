@@ -18,6 +18,7 @@ import numpy as np
 from omegaconf import OmegaConf
 
 from gyaradax.geometry import (
+    ContinuousGeometryModel,
     GeometrySpec,
     compute_geometry,
     compute_geometry_from_input,
@@ -150,11 +151,14 @@ def test_registry_entries_use_dedicated_model_adapters() -> None:
     """Current analytic geometries are registered through distinct adapters."""
     circ_model = get_geometry_model("circ")
     salpha_model = get_geometry_model("s-alpha")
+    miller_model = get_geometry_model("miller")
     assert isinstance(circ_model, CircularGeometryModel)
     assert isinstance(salpha_model, SAlphaGeometryModel)
-    assert isinstance(get_geometry_model("miller"), MillerGeometryModel)
+    assert isinstance(miller_model, MillerGeometryModel)
+    assert ContinuousGeometryModel.__name__ == "ContinuousGeometryModel"
     assert hasattr(circ_model, "continuous_geometry")
     assert hasattr(salpha_model, "continuous_geometry")
+    assert hasattr(miller_model, "continuous_geometry")
 
 
 def test_create_geometry_from_spec_matches_compute_geometry() -> None:

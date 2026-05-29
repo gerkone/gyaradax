@@ -11,7 +11,7 @@ changing formulas or public entry points. Miller has its own adapter in
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import Any
+from typing import Any, Mapping
 
 from gyaradax.geometry.lapillonne import _circular_geometry, _poloidal_angle
 from gyaradax.geometry.registry import register_geometry_model
@@ -36,8 +36,10 @@ class _DelegatingCircularGeometryModel:
         q: float,
         shat: float,
         eps: float,
+        nperiod: int,
         signB: float,
         signJ: float,
+        model_params: Mapping[str, Any],
     ) -> dict[str, Any]:
         """Build the model-specific continuous geometry dict.
 

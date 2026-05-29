@@ -11,7 +11,7 @@ import os
 import numpy as np
 import jax
 import jax.numpy as jnp
-from typing import Dict, Any, Mapping, Protocol, cast
+from typing import Dict, Any, Mapping, cast
 
 from gyaradax.geometry.assembly import assemble_geometry_dict
 from gyaradax.geometry.circular import register_circular_geometry_models
@@ -23,7 +23,7 @@ from gyaradax.geometry.grids import (
     _parallel_weights,
 )
 from gyaradax.geometry.miller import register_miller_geometry_model
-from gyaradax.geometry.registry import get_geometry_model
+from gyaradax.geometry.registry import ContinuousGeometryModel, get_geometry_model
 from gyaradax.geometry.spec import GeometrySpec, geometry_spec_from_compute_kwargs
 from gyaradax.geometry.tensors import _calc_geom_tensors
 from gyaradax.geometry.topology import (
@@ -47,19 +47,6 @@ def _load_1d_array(path):
     if data.ndim > 1:
         data = data[0]
     return np.atleast_1d(data)
-
-
-class _ContinuousGeometryModel(Protocol):
-    def continuous_geometry(
-        self,
-        *,
-        sgrid: Any,
-        q: float,
-        shat: float,
-        eps: float,
-        signB: float,
-        signJ: float,
-    ) -> dict[str, Any]: ...
 
 
 def compute_geometry(
@@ -118,7 +105,10 @@ def compute_geometry(
 
 def _compute_geometry_impl(spec: GeometrySpec) -> Dict[str, Any]:
     geom_type = spec.model
-    assert geom_type in ("circ", "s-alpha", "miller"), f"unknown geom_type: {geom_type}"
+    try:
+        model = cast(ContinuousGeometryModel, get_geometry_model(geom_type))
+    except KeyError as exc:
+        raise AssertionError(f"unknown geom_type: {geom_type}") from exc
     q = spec.q
     shat = spec.shat
     eps = spec.eps
@@ -138,33 +128,16 @@ def _compute_geometry_impl(spec: GeometrySpec) -> Dict[str, Any]:
     signJ = 1.0
     sgrid = _parallel_grid(ns, nperiod)
 
-    cg: dict[str, Any]
-    if geom_type == "miller":
-        from gyaradax.geometry.miller import _miller_geometry
-
-        cg = cast(
-            dict[str, Any],
-            _miller_geometry(
-                sgrid=sgrid,
-                q=q,
-                shat=shat,
-                eps=eps,
-                nperiod=nperiod,
-                signB=signB,
-                signJ=signJ,
-                **miller_params,
-            ),
-        )
-    else:
-        model = cast(_ContinuousGeometryModel, get_geometry_model(geom_type))
-        cg = model.continuous_geometry(
-            sgrid=sgrid,
-            q=q,
-            shat=shat,
-            eps=eps,
-            signB=signB,
-            signJ=signJ,
-        )
+    cg = model.continuous_geometry(
+        sgrid=sgrid,
+        q=q,
+        shat=shat,
+        eps=eps,
+        nperiod=nperiod,
+        signB=signB,
+        signJ=signJ,
+        model_params=miller_params,
+    )
 
     efun_3x3, dfun, hfun, ifun, jfun, kfun = _calc_geom_tensors(cg, signJ=signJ, signB=signB)
 
