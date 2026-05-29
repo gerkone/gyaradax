@@ -22,6 +22,37 @@ from gyaradax.gkw_input import as_int, species_blocks
 from gyaradax.utils import load_geom_dat_file, parse_input_dat
 
 
+def _add_loaded_species_metadata(geometry: dict[str, Any], input_data: dict[str, Any]) -> None:
+    """Populate loaded/reference species arrays, preserving file-backed defaults."""
+    geometry["signz"] = jnp.array([1.0], dtype=jnp.float64)
+    geometry["tmp"] = jnp.array([1.0], dtype=jnp.float64)
+    geometry["mas"] = jnp.array([1.0], dtype=jnp.float64)
+    geometry["de"] = jnp.array([1.0], dtype=jnp.float64)
+    geometry["vthrat"] = jnp.array([1.0], dtype=jnp.float64)
+    geometry["rlt"] = jnp.array([1.0], dtype=jnp.float64)
+    geometry["rln"] = jnp.array([1.0], dtype=jnp.float64)
+
+    num_sp = as_int(input_data.get("gridsize", {}).get("number_of_species", 1), 1)
+    species = species_blocks(input_data, limit=num_sp)
+    if species:
+        mas, tmp, de, signz, rlt, rln = [], [], [], [], [], []
+        for sp in species:
+            mas.append(sp.get("mass", 1.0))
+            tmp.append(sp.get("temp", 1.0))
+            de.append(sp.get("dens", 1.0))
+            signz.append(sp.get("z", 1.0))
+            rlt.append(sp.get("rlt", 0.0))
+            rln.append(sp.get("rln", 0.0))
+
+        geometry["mas"] = jnp.array(mas, dtype=jnp.float64)
+        geometry["tmp"] = jnp.array(tmp, dtype=jnp.float64)
+        geometry["de"] = jnp.array(de, dtype=jnp.float64)
+        geometry["signz"] = jnp.array(signz, dtype=jnp.float64)
+        geometry["rlt"] = jnp.array(rlt, dtype=jnp.float64)
+        geometry["rln"] = jnp.array(rln, dtype=jnp.float64)
+        geometry["vthrat"] = jnp.sqrt(geometry["tmp"] / geometry["mas"])
+
+
 class LoadedGKWGeometryModel:
     """Construct geometry dictionaries from GKW reference/output files."""
 
@@ -108,35 +139,9 @@ class LoadedGKWGeometryModel:
             geometry["sgr_dist"] = jnp.array(1.0, dtype=jnp.float64)
 
         geometry["Rref"] = jnp.array(jnp.abs(geom["Rref"]), dtype=jnp.float64)
-        geometry["signz"] = jnp.array([1.0], dtype=jnp.float64)
-        geometry["tmp"] = jnp.array([1.0], dtype=jnp.float64)
-        geometry["mas"] = jnp.array([1.0], dtype=jnp.float64)
-        geometry["de"] = jnp.array([1.0], dtype=jnp.float64)
-        geometry["vthrat"] = jnp.array([1.0], dtype=jnp.float64)
-        geometry["rlt"] = jnp.array([1.0], dtype=jnp.float64)
-        geometry["rln"] = jnp.array([1.0], dtype=jnp.float64)
+        _add_loaded_species_metadata(geometry, input_data)
         geometry["d2X"] = jnp.array(1.0, dtype=jnp.float64)
         geometry["signB"] = jnp.array(1.0, dtype=jnp.float64)
-
-        num_sp = as_int(input_data.get("gridsize", {}).get("number_of_species", 1), 1)
-        species = species_blocks(input_data, limit=num_sp)
-        if species:
-            mas, tmp, de, signz, rlt, rln = [], [], [], [], [], []
-            for sp in species:
-                mas.append(sp.get("mass", 1.0))
-                tmp.append(sp.get("temp", 1.0))
-                de.append(sp.get("dens", 1.0))
-                signz.append(sp.get("z", 1.0))
-                rlt.append(sp.get("rlt", 0.0))
-                rln.append(sp.get("rln", 0.0))
-
-            geometry["mas"] = jnp.array(mas, dtype=jnp.float64)
-            geometry["tmp"] = jnp.array(tmp, dtype=jnp.float64)
-            geometry["de"] = jnp.array(de, dtype=jnp.float64)
-            geometry["signz"] = jnp.array(signz, dtype=jnp.float64)
-            geometry["rlt"] = jnp.array(rlt, dtype=jnp.float64)
-            geometry["rln"] = jnp.array(rln, dtype=jnp.float64)
-            geometry["vthrat"] = jnp.sqrt(geometry["tmp"] / geometry["mas"])
 
         geometry["bn"] = jnp.array(geom["bn"], dtype=jnp.float64)
         geometry["ffun"] = jnp.array(geom["F"], dtype=jnp.float64)
