@@ -148,9 +148,13 @@ def test_geometry_registry_has_current_analytic_models() -> None:
 
 def test_registry_entries_use_dedicated_model_adapters() -> None:
     """Current analytic geometries are registered through distinct adapters."""
-    assert isinstance(get_geometry_model("circ"), CircularGeometryModel)
-    assert isinstance(get_geometry_model("s-alpha"), SAlphaGeometryModel)
+    circ_model = get_geometry_model("circ")
+    salpha_model = get_geometry_model("s-alpha")
+    assert isinstance(circ_model, CircularGeometryModel)
+    assert isinstance(salpha_model, SAlphaGeometryModel)
     assert isinstance(get_geometry_model("miller"), MillerGeometryModel)
+    assert hasattr(circ_model, "continuous_geometry")
+    assert hasattr(salpha_model, "continuous_geometry")
 
 
 def test_create_geometry_from_spec_matches_compute_geometry() -> None:

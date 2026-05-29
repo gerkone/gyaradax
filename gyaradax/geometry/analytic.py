@@ -13,12 +13,13 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
+from gyaradax.geometry.lapillonne import _circular_geometry, _poloidal_angle
 from gyaradax.geometry.registry import register_geometry_model
 from gyaradax.geometry.spec import GeometrySpec
 
 
 class _DelegatingAnalyticGeometryModel:
-    """Base adapter that delegates to the current monolithic analytic builder."""
+    """Base adapter that delegates shared assembly to the current builder."""
 
     name: str
 
@@ -27,6 +28,33 @@ class _DelegatingAnalyticGeometryModel:
 
     def compute(self, spec: GeometrySpec) -> dict[str, Any]:
         return self._compute_impl(spec)
+
+    def continuous_geometry(
+        self,
+        *,
+        sgrid: Any,
+        q: float,
+        shat: float,
+        eps: float,
+        signB: float,
+        signJ: float,
+    ) -> dict[str, Any]:
+        """Build the model-specific continuous geometry dict.
+
+        Shared grid, tensor, velocity, wavevector, and topology assembly stays
+        in ``geom.py``; this method owns only the existing circular/s-alpha
+        formula selection.
+        """
+        theta = _poloidal_angle(sgrid, eps, geom_type=self.name)
+        return _circular_geometry(
+            theta,
+            q,
+            shat,
+            eps,
+            signB=signB,
+            signJ=signJ,
+            geom_type=self.name,
+        )
 
 
 class CircularGeometryModel(_DelegatingAnalyticGeometryModel):

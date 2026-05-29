@@ -11,10 +11,9 @@ import os
 import numpy as np
 import jax
 import jax.numpy as jnp
-from typing import Dict, Any, Mapping, cast
+from typing import Dict, Any, Mapping, Protocol, cast
 
 from gyaradax.geometry.analytic import register_analytic_geometry_models
-from gyaradax.geometry.lapillonne import _circular_geometry, _poloidal_angle
 from gyaradax.geometry.miller import register_miller_geometry_model
 from gyaradax.geometry.registry import get_geometry_model
 from gyaradax.geometry.spec import GeometrySpec, geometry_spec_from_compute_kwargs
@@ -273,6 +272,19 @@ def _build_parallel_shift_maps(ixplus, ixminus, iyzero, ns, max_shift=4):
     return s_shift, kx_shift, valid
 
 
+class _ContinuousGeometryModel(Protocol):
+    def continuous_geometry(
+        self,
+        *,
+        sgrid: Any,
+        q: float,
+        shat: float,
+        eps: float,
+        signB: float,
+        signJ: float,
+    ) -> dict[str, Any]: ...
+
+
 def compute_geometry(
     q: float,
     shat: float,
@@ -368,10 +380,14 @@ def _compute_geometry_impl(spec: GeometrySpec) -> Dict[str, Any]:
             ),
         )
     else:
-        theta = _poloidal_angle(sgrid, eps, geom_type=geom_type)
-        cg = cast(
-            dict[str, Any],
-            _circular_geometry(theta, q, shat, eps, signB=signB, signJ=signJ, geom_type=geom_type),
+        model = cast(_ContinuousGeometryModel, get_geometry_model(geom_type))
+        cg = model.continuous_geometry(
+            sgrid=sgrid,
+            q=q,
+            shat=shat,
+            eps=eps,
+            signB=signB,
+            signJ=signJ,
         )
 
     efun_3x3, dfun, hfun, ifun, jfun, kfun = _calc_geom_tensors(cg, signJ=signJ, signB=signB)
