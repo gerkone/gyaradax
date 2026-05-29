@@ -13,6 +13,7 @@ import jax
 import jax.numpy as jnp
 from typing import Dict, Any, Mapping, Protocol, cast
 
+from gyaradax.geometry.assembly import assemble_geometry_dict
 from gyaradax.geometry.circular import register_circular_geometry_models
 from gyaradax.geometry.grids import (
     _build_mode_label,
@@ -132,7 +133,6 @@ def _compute_geometry_impl(spec: GeometrySpec) -> Dict[str, Any]:
     krhomax = spec.krhomax
     ikxspace = spec.ikxspace
     signB = spec.signB
-    Rref = spec.Rref
     miller_params = dict(spec.model_params)
 
     signJ = 1.0
@@ -168,9 +168,6 @@ def _compute_geometry_impl(spec: GeometrySpec) -> Dict[str, Any]:
 
     efun_3x3, dfun, hfun, ifun, jfun, kfun = _calc_geom_tensors(cg, signJ=signJ, signB=signB)
 
-    bn, R = cg["bn"], cg["R"]
-    little_g = jnp.stack([cg["metric"][:, 1, 1], cg["dzetadeps"], jnp.ones(ns)], axis=-1)
-
     g_zz_mid: Any
     if geom_type == "s-alpha":
         g_zz_mid = (q / (2 * jnp.pi * eps)) ** 2
@@ -203,60 +200,28 @@ def _compute_geometry_impl(spec: GeometrySpec) -> Dict[str, Any]:
     pos = _build_pos_par_grid_classes(ixp, ixm, ns)
     ss, ks, vs = _build_parallel_shift_maps(ixp, ixm, iyz_bc, ns, max_shift=4)
 
-    return {
-        "kthnorm": _f64(kthnorm),
-        "shat": _f64(shat),
-        "q": _f64(q),
-        "eps": _f64(eps),
-        "kxrh": _f64(kxrh),
-        "krho": _f64(krho),
-        "parseval": _f64(jnp.where(jnp.abs(krho) < 1e-12, 1.0, 2.0)),
-        "intvp": _f64(intvp),
-        "vpgr": _f64(vpgr),
-        "vpgr_rms": _f64(jnp.sqrt(jnp.mean(vpgr**2))),
-        "dvp": _f64(jnp.mean(jnp.diff(vpgr)) if len(vpgr) > 1 else 1.0),
-        "intmu": _f64(intmu),
-        "mugr": _f64(mugr),
-        "mugr_rms": _f64(jnp.sqrt(jnp.mean(mugr**2))),
-        "ints": _f64(_parallel_weights(sgrid)),
-        "sgrid": _f64(sgrid),
-        "sgr_dist": _f64(jnp.abs(sgrid[1] - sgrid[0]) if ns > 1 else 1.0),
-        "bn": _f64(bn),
-        "ffun": _f64(cg["ffun"]),
-        "gfun": _f64(cg["gfun"]),
-        "bt_frac": _f64(cg["bt_frac"]),
-        "rfun": _f64(R),
-        "little_g": _f64(little_g),
-        "dfun": _f64(dfun),
-        "hfun": _f64(hfun),
-        "ifun": _f64(ifun),
-        "efun": _f64(-efun_3x3[:, 0, 1]),
-        "efun_3x3": _f64(efun_3x3),
-        "jfun": _f64(jfun),
-        "kfun": _f64(kfun),
-        "R0": _f64(cg.get("R0", cg["R"][ns // 2])),
-        "Rref": _f64(abs(Rref)),
-        "signz": _f64([1.0]),
-        "tmp": _f64([1.0]),
-        "mas": _f64([1.0]),
-        "de": _f64([1.0]),
-        "vthrat": _f64([1.0]),
-        "rlt": _f64([1.0]),
-        "rln": _f64([1.0]),
-        "d2X": _f64(1.0),
-        "signB": _f64(signB),
-        "mode_label": _i32(ml_kxky),
-        "ixplus": _i32(ixp),
-        "ixminus": _i32(ixm),
-        "ixzero": _i32(ixz),
-        "iyzero": _i32(iyz),
-        "pos_par_grid_class": jnp.array(pos, dtype=jnp.int8),
-        "s_shift": _i32(ss),
-        "kx_shift": _i32(ks),
-        "valid_shift": jnp.array(vs, dtype=jnp.bool_),
-        "kxmax": _f64(jnp.max(jnp.abs(kxrh))),
-        "kymax": _f64(jnp.max(jnp.abs(krho))),
-    }
+    return assemble_geometry_dict(
+        spec=spec,
+        cg=cg,
+        tensors=(efun_3x3, dfun, hfun, ifun, jfun, kfun),
+        sgrid=sgrid,
+        kthnorm=kthnorm,
+        kxrh=kxrh,
+        krho=krho,
+        vpgr=vpgr,
+        mugr=mugr,
+        intvp=intvp,
+        intmu=intmu,
+        mode_label=ml_kxky,
+        ixplus=ixp,
+        ixminus=ixm,
+        ixzero=ixz,
+        iyzero=iyz,
+        pos_par_grid_class=pos,
+        s_shift=ss,
+        kx_shift=ks,
+        valid_shift=vs,
+    )
 
 
 register_circular_geometry_models(_compute_geometry_impl)
