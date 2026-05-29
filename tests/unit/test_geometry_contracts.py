@@ -21,6 +21,7 @@ from gyaradax.geometry import (
     ContinuousGeometryModel,
     GeometrySpec,
     compute_geometry,
+    compute_geometry_from_config,
     compute_geometry_from_input,
     create_geometry,
     geometry_spec_from_compute_kwargs,
@@ -217,12 +218,16 @@ def test_config_geometry_absent_geometry_model_defaults_to_circ() -> None:
 
     spec = geometry_spec_from_config(cfg)
     assert spec.model == "circ"
-    from_config = _geometry_from_config(cfg)
+    from_config = compute_geometry_from_config(cfg)
+    from_private_wrapper = _geometry_from_config(cfg)
     from_spec = create_geometry(spec)
     explicit_circ = compute_geometry(**_BASE_KWARGS, geom_type="circ")
     explicit_salpha = compute_geometry(**_BASE_KWARGS, geom_type="s-alpha")
 
     _assert_arrays_equal(from_config, from_spec, ("bn", "efun", "little_g", "krho", "kxrh"))
+    _assert_arrays_equal(
+        from_private_wrapper, from_config, ("bn", "efun", "little_g", "krho", "kxrh")
+    )
     _assert_arrays_equal(from_config, explicit_circ, ("bn", "efun", "little_g", "krho", "kxrh"))
     assert not np.allclose(np.asarray(from_config["krho"]), np.asarray(explicit_salpha["krho"]))
 

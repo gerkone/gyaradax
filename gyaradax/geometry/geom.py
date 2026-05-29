@@ -24,7 +24,11 @@ from gyaradax.geometry.grids import (
 )
 from gyaradax.geometry.miller import register_miller_geometry_model
 from gyaradax.geometry.registry import ContinuousGeometryModel, get_geometry_model
-from gyaradax.geometry.spec import GeometrySpec, geometry_spec_from_compute_kwargs
+from gyaradax.geometry.spec import (
+    GeometrySpec,
+    geometry_spec_from_compute_kwargs,
+    geometry_spec_from_config,
+)
 from gyaradax.geometry.tensors import _calc_geom_tensors
 from gyaradax.geometry.topology import (
     _build_mode_connectivity,
@@ -289,6 +293,15 @@ def geometry_spec_from_input_dat(input_dat_path: str) -> GeometrySpec:
         geom_type=geom_type,
         **miller_params,
     )
+
+
+def compute_geometry_from_config(cfg: Any) -> Dict[str, Any]:
+    """Compute analytic geometry from a YAML/OmegaConf-style config.
+
+    Missing ``geometry.geometry_model`` preserves the historical config-wrapper
+    default of circular geometry.
+    """
+    return create_geometry(geometry_spec_from_config(cfg))
 
 
 def compute_geometry_from_input(input_dat_path: str) -> Dict[str, Any]:

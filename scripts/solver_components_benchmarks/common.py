@@ -82,7 +82,7 @@ def load_setup(config_path: str = "configs/iteration_13.yaml", mixed_precision: 
     """
     from gyaradax import load_config, load_geometry
     from gyaradax.params import gkparams_from_config
-    from gyaradax.simulate import _geometry_from_config
+    from gyaradax.geometry import compute_geometry_from_config
     from gyaradax.solver import linear_precompute, _compute_phi
     from gyaradax.utils import load_gkw_k_dump, read_gkw_dump_time, K_files
 
@@ -93,7 +93,7 @@ def load_setup(config_path: str = "configs/iteration_13.yaml", mixed_precision: 
     if data_dir and os.path.exists(os.path.join(data_dir, "geom.dat")):
         geom = load_geometry(data_dir)
     else:
-        geom = _geometry_from_config(cfg)
+        geom = compute_geometry_from_config(cfg)
 
     n_species = 1
     if not params.adiabatic_electrons:

@@ -56,12 +56,12 @@ import jax.numpy as jnp
 
 from gyaradax import load_config
 from gyaradax.utils import load_geometry
+from gyaradax.geometry import compute_geometry_from_config
 from gyaradax.params import GKParams, gkparams_from_config
 from gyaradax.simulate import (
     gk_init,
     gksimulate,
     gk_run_batched,
-    _geometry_from_config,
     _compute_phi_for_init,
     _ensure_species_arrays,
 )
@@ -147,7 +147,7 @@ def _setup_run(config_path: str, args: argparse.Namespace) -> _RunSetup:
     if _has_geom_dat(data_dir):
         geometry = cast(dict[str, jnp.ndarray], load_geometry(data_dir))
     else:
-        geometry = cast(dict[str, jnp.ndarray], _geometry_from_config(cfg))
+        geometry = cast(dict[str, jnp.ndarray], compute_geometry_from_config(cfg))
 
     n_species = 1
     if not params.adiabatic_electrons:

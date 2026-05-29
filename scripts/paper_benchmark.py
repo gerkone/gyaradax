@@ -252,9 +252,9 @@ def benchmark_gyaradax(
     if hasattr(cfg.run, "data_dir") and os.path.exists(cfg.run.data_dir):
         geometry = load_geometry(cfg.run.data_dir)
     else:
-        from gyaradax.simulate import _geometry_from_config
+        from gyaradax.geometry import compute_geometry_from_config
 
-        geometry = _geometry_from_config(cfg)
+        geometry = compute_geometry_from_config(cfg)
 
     df, geometry, state = gk_init(geometry, params)
     grid_shape = df.shape

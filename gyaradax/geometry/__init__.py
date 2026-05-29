@@ -3,6 +3,7 @@
 Public entry points:
 - compute_geometry                 build from scalar parameters
 - create_geometry                  build from a GeometrySpec via registry
+- compute_geometry_from_config      build from a YAML/OmegaConf config
 - compute_geometry_from_input       build from a GKW input.dat
 - geometry_from_geom_dat_and_input  build from a GKW geom.dat + input.dat
 - load_loaded_geometry              build from a GKW reference/output directory
@@ -13,6 +14,7 @@ Internal connectivity helpers are re-exported for compatibility.
 from gyaradax.geometry.geom import (
     compute_geometry,
     create_geometry,
+    compute_geometry_from_config,
     compute_geometry_from_input,
     geometry_spec_from_input_dat,
     geometry_from_geom_dat_and_input,
@@ -38,6 +40,7 @@ from gyaradax.geometry.topology import (
 __all__ = [
     "compute_geometry",
     "create_geometry",
+    "compute_geometry_from_config",
     "GeometrySpec",
     "GeometryModel",
     "ContinuousGeometryModel",

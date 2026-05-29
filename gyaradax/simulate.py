@@ -10,7 +10,7 @@ import jax.numpy as jnp
 jax.config.update("jax_enable_x64", True)
 
 from gyaradax.utils import load_geometry
-from gyaradax.geometry import create_geometry, geometry_spec_from_config
+from gyaradax.geometry import compute_geometry_from_config
 from gyaradax.integrals import (
     get_integrals,
     calculate_phi,
@@ -34,12 +34,8 @@ def _compute_phi_for_init(df, geometry, params):
 
 
 def _geometry_from_config(cfg):
-    """Build geometry from config when no data_dir is provided.
-
-    Missing ``geometry.geometry_model`` preserves the historical direct-wrapper
-    default of circular geometry.
-    """
-    return create_geometry(geometry_spec_from_config(cfg))
+    """Compatibility wrapper for the public geometry config helper."""
+    return compute_geometry_from_config(cfg)
 
 
 def log_step(fluxes, state: GKState, wall_time: float, n_steps: int = 0):
@@ -429,7 +425,7 @@ def gk_from_config(
     if data_dir:
         geometry = load_geometry(data_dir)
     else:
-        geometry = _geometry_from_config(cfg)
+        geometry = compute_geometry_from_config(cfg)
 
     n_species = 1
     if not params.adiabatic_electrons:
