@@ -13,7 +13,7 @@ from typing import Any
 import jax.numpy as jnp
 import numpy as np
 
-from gyaradax.geometry.geom import (
+from gyaradax.geometry.topology import (
     _build_mode_connectivity,
     _build_parallel_shift_maps,
     _build_pos_par_grid_classes,

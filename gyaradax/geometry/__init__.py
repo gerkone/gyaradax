@@ -16,9 +16,6 @@ from gyaradax.geometry.geom import (
     compute_geometry_from_input,
     geometry_spec_from_input_dat,
     geometry_from_geom_dat_and_input,
-    _build_mode_connectivity,
-    _build_pos_par_grid_classes,
-    _build_parallel_shift_maps,
 )
 from gyaradax.geometry.loaded import LoadedGKWGeometryModel, load_loaded_geometry
 from gyaradax.geometry.registry import GeometryModel, get_geometry_model, list_geometry_models
@@ -26,6 +23,11 @@ from gyaradax.geometry.spec import (
     GeometrySpec,
     geometry_spec_from_compute_kwargs,
     geometry_spec_from_config,
+)
+from gyaradax.geometry.topology import (
+    _build_mode_connectivity,
+    _build_parallel_shift_maps,
+    _build_pos_par_grid_classes,
 )
 
 __all__ = [
