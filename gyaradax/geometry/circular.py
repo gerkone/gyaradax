@@ -1,4 +1,4 @@
-"""Analytic geometry model adapter registration.
+"""Circular and s-alpha geometry model adapter registration.
 
 This module contains dedicated registry adapters for the current circular
 analytic geometry names.  The numerical implementation still lives in
@@ -18,7 +18,7 @@ from gyaradax.geometry.registry import register_geometry_model
 from gyaradax.geometry.spec import GeometrySpec
 
 
-class _DelegatingAnalyticGeometryModel:
+class _DelegatingCircularGeometryModel:
     """Base adapter that delegates shared assembly to the current builder."""
 
     name: str
@@ -57,21 +57,21 @@ class _DelegatingAnalyticGeometryModel:
         )
 
 
-class CircularGeometryModel(_DelegatingAnalyticGeometryModel):
+class CircularGeometryModel(_DelegatingCircularGeometryModel):
     """Registry adapter for Lapillonne circular geometry (``geom_type='circ'``)."""
 
     name = "circ"
 
 
-class SAlphaGeometryModel(_DelegatingAnalyticGeometryModel):
+class SAlphaGeometryModel(_DelegatingCircularGeometryModel):
     """Registry adapter for s-alpha geometry (``geom_type='s-alpha'``)."""
 
     name = "s-alpha"
 
 
-def register_analytic_geometry_models(
+def register_circular_geometry_models(
     compute_impl: Callable[[GeometrySpec], dict[str, Any]],
 ) -> None:
-    """Register circular analytic geometry models with the registry."""
+    """Register circular and s-alpha geometry models with the registry."""
     register_geometry_model(CircularGeometryModel(compute_impl))
     register_geometry_model(SAlphaGeometryModel(compute_impl))

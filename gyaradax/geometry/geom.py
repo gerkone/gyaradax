@@ -13,7 +13,7 @@ import jax
 import jax.numpy as jnp
 from typing import Dict, Any, Mapping, Protocol, cast
 
-from gyaradax.geometry.analytic import register_analytic_geometry_models
+from gyaradax.geometry.circular import register_circular_geometry_models
 from gyaradax.geometry.miller import register_miller_geometry_model
 from gyaradax.geometry.registry import get_geometry_model
 from gyaradax.geometry.spec import GeometrySpec, geometry_spec_from_compute_kwargs
@@ -483,7 +483,7 @@ def _compute_geometry_impl(spec: GeometrySpec) -> Dict[str, Any]:
     }
 
 
-register_analytic_geometry_models(_compute_geometry_impl)
+register_circular_geometry_models(_compute_geometry_impl)
 register_miller_geometry_model(_compute_geometry_impl)
 
 

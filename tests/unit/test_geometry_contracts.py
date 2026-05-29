@@ -28,7 +28,7 @@ from gyaradax.geometry import (
     get_geometry_model,
     list_geometry_models,
 )
-from gyaradax.geometry.analytic import CircularGeometryModel, SAlphaGeometryModel
+from gyaradax.geometry.circular import CircularGeometryModel, SAlphaGeometryModel
 from gyaradax.geometry.miller import MillerGeometryModel
 from gyaradax.simulate import _geometry_from_config
 from gyaradax.utils import load_geometry
