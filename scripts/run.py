@@ -59,8 +59,9 @@ from gyaradax.simulate import (
     _compute_phi_for_init,
     _ensure_species_arrays,
 )
+from gyaradax.precompute import linear_precompute
 from gyaradax.state import GKPre, GKState
-from gyaradax.solver import linear_precompute, mode_amplitude
+from gyaradax.solver import mode_amplitude
 from gyaradax.utils import (
     load_gkw_k_dump,
     read_gkw_dump_time,

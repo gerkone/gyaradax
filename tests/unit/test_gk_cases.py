@@ -15,7 +15,8 @@ from conftest import ALL_BACKENDS  # type: ignore[import-not-found]
 from gyaradax.geometry import compute_geometry, compute_geometry_from_input
 from gyaradax.params import gkparams_from_input_and_geometry
 from gyaradax.params import GKParams
-from gyaradax.solver import init_f, default_state, linear_precompute
+from gyaradax.precompute import linear_precompute
+from gyaradax.solver import init_f, default_state
 from gyaradax.simulate import gk_run
 from gyaradax.integrals import calculate_phi
 

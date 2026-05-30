@@ -42,10 +42,8 @@ from gyaradax.jax_config import enable_x64
 enable_x64()
 
 from gyaradax import load_geometry, GKParams, gk_init, gksolve
-from gyaradax.solver import (
-    linear_precompute,
-    _compute_phi,
-)
+from gyaradax.fields import _compute_phi
+from gyaradax.precompute import linear_precompute
 from gyaradax.backends import create_ops
 from gyaradax.params import gkparams_from_config, load_config
 

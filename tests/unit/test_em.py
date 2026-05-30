@@ -24,7 +24,8 @@ from gyaradax.params import (
     load_config,
 )
 from gyaradax.geometry import compute_geometry_from_input
-from gyaradax.solver import linear_precompute, init_f, default_state
+from gyaradax.precompute import linear_precompute
+from gyaradax.solver import init_f, default_state
 from gyaradax.simulate import gk_run
 from gyaradax.integrals import precompute_bpar
 from gyaradax import load_geometry
@@ -274,7 +275,7 @@ class TestG2FTransform:
 
     def test_g2f_identity_when_no_em(self):
         """When nlapar=False, g=f (identity transform)."""
-        from gyaradax.solver import g_to_f
+        from gyaradax.fields import g_to_f
 
         params = GKParams(nlapar=False)
         dg = jnp.ones((32, 8, 16, 1, 1), dtype=jnp.complex128)
@@ -285,7 +286,7 @@ class TestG2FTransform:
 
     def test_g2f_nonzero_correction(self):
         """When nlapar=True and apar!=0, g!=f."""
-        from gyaradax.solver import g_to_f
+        from gyaradax.fields import g_to_f
 
         case_dir = _load_em_case("em_bpar_waltz")
         geometry = _load_em_geometry(case_dir)
@@ -307,7 +308,7 @@ class TestG2FTransform:
 
     def test_g2f_roundtrip(self):
         """f -> g -> f should be identity."""
-        from gyaradax.solver import g_to_f, f_to_g
+        from gyaradax.fields import f_to_g, g_to_f
 
         case_dir = _load_em_case("em_bpar_waltz")
         geometry = _load_em_geometry(case_dir)

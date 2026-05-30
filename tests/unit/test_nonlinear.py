@@ -13,13 +13,13 @@ import os
 import pytest
 from dataclasses import replace
 
-from gyaradax.solver import gksolve, GKState, default_state, linear_precompute
+from gyaradax.precompute import build_jind, linear_precompute
+from gyaradax.solver import gksolve, GKState, default_state
 from gyaradax.params import GKParams, gkparams_from_input_dat
 from gyaradax.utils import load_gkw_k_dump
 from gyaradax.integrals import calculate_phi_kinetic, calculate_fluxes_kinetic
 from gyaradax.backends import create_ops
 from gyaradax.state import GKPre
-from gyaradax.solver import build_jind
 
 
 def _make_pre_bessel(bessel, nkx=4, nky=3, ns=4):

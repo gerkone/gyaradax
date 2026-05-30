@@ -132,7 +132,7 @@ def main():
 
     # ── C5: _compute_phi ─────────────────────────────────────────────────
     print("\nC5: _compute_phi")
-    from gyaradax.solver import _compute_phi
+    from gyaradax.fields import _compute_phi
 
     @jax.jit
     def _phi():

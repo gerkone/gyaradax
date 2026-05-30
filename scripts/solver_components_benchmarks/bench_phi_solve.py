@@ -26,7 +26,7 @@ from common import (
     analyze_cost,
     BASELINES_DIR,
 )
-from gyaradax.solver import _compute_phi
+from gyaradax.fields import _compute_phi
 
 
 def run(config="configs/iteration_13.yaml", mixed_precision=False):

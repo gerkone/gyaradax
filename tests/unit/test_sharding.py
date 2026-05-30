@@ -12,12 +12,11 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from dataclasses import replace
 
 from gyaradax import sharding
 from gyaradax.geometry import compute_geometry
 from gyaradax.params import GKParams, gkparams_from_config
-from gyaradax.solver import linear_precompute
+from gyaradax.precompute import linear_precompute
 from gyaradax.simulate import gk_init, gk_run
 from gyaradax import load_config
 
@@ -35,10 +34,19 @@ def _build(params_overrides=None):
     params = gkparams_from_config(cfg, **overrides)
     grid = cfg.grid
     geometry = compute_geometry(
-        q=params.q, shat=params.shat, eps=params.eps,
-        ns=grid.ns, nkx=grid.nkx, nky=grid.nky, nvpar=grid.nvpar, nmu=grid.nmu,
-        vpar_max=grid.vpar_max, nperiod=grid.nperiod, krhomax=grid.krhomax,
-        ikxspace=grid.ikxspace, adiabatic_electrons=True,
+        q=params.q,
+        shat=params.shat,
+        eps=params.eps,
+        ns=grid.ns,
+        nkx=grid.nkx,
+        nky=grid.nky,
+        nvpar=grid.nvpar,
+        nmu=grid.nmu,
+        vpar_max=grid.vpar_max,
+        nperiod=grid.nperiod,
+        krhomax=grid.krhomax,
+        ikxspace=grid.ikxspace,
+        adiabatic_electrons=True,
         geom_type=getattr(cfg.geometry, "geometry_model", "circ"),
         signB=params.signB,
     )
@@ -81,6 +89,7 @@ def test_grid_shape_inference():
 def test_spec_classification():
     """_spec_for_shape returns the right PartitionSpec per shape kind."""
     from jax.sharding import PartitionSpec
+
     grid = sharding.GridShape(nsp=1, nvpar=16, nmu=8, ns=16, nkx=9, nky=5)
 
     # df (5D velocity-sharded)
@@ -90,9 +99,7 @@ def test_spec_classification():
     # field (3D replicated)
     assert sharding._spec_for_shape((16, 9, 5), grid) == PartitionSpec()
     # collision stencil (5D adiabatic)
-    assert sharding._spec_for_shape((9, 16, 8, 16), grid) == PartitionSpec(
-        None, "vp", "mu", None
-    )
+    assert sharding._spec_for_shape((9, 16, 8, 16), grid) == PartitionSpec(None, "vp", "mu", None)
     # unmatched shape (e.g. kx_b broadcast) → replicated
     assert sharding._spec_for_shape((1, 1, 1, 9, 1), grid) == PartitionSpec()
 
@@ -106,9 +113,7 @@ def test_equivalence_2gpu_vp():
     """
     # baseline
     df0, geom0, p0, st0, pre0 = _build()
-    df_ref, phi_ref, flx_ref, _ = gk_run(
-        df0, geom0, p0, st0, n_steps=100, pre=pre0
-    )
+    df_ref, phi_ref, flx_ref, _ = gk_run(df0, geom0, p0, st0, n_steps=100, pre=pre0)
 
     # sharded (vp=2)
     df1, geom1, p1, st1, pre1 = _build({"n_gpus_vp": 2})
@@ -159,9 +164,7 @@ def test_equivalence_4gpu_vpmu():
     assert rel_l2(np.asarray(phi_ref), np.asarray(phi_sh)) < 1e-8
 
 
-CONFIG_KINETIC = os.path.join(
-    os.path.dirname(__file__), "..", "..", "configs", "nl_em_apar.yaml"
-)
+CONFIG_KINETIC = os.path.join(os.path.dirname(__file__), "..", "..", "configs", "nl_em_apar.yaml")
 
 
 def _build_kinetic(params_overrides=None):
@@ -172,10 +175,19 @@ def _build_kinetic(params_overrides=None):
     params = gkparams_from_config(cfg, **overrides)
     grid = cfg.grid
     geometry = compute_geometry(
-        q=params.q, shat=params.shat, eps=params.eps,
-        ns=grid.ns, nkx=grid.nkx, nky=grid.nky, nvpar=grid.nvpar, nmu=grid.nmu,
-        vpar_max=grid.vpar_max, nperiod=grid.nperiod, krhomax=grid.krhomax,
-        ikxspace=grid.ikxspace, adiabatic_electrons=False,
+        q=params.q,
+        shat=params.shat,
+        eps=params.eps,
+        ns=grid.ns,
+        nkx=grid.nkx,
+        nky=grid.nky,
+        nvpar=grid.nvpar,
+        nmu=grid.nmu,
+        vpar_max=grid.vpar_max,
+        nperiod=grid.nperiod,
+        krhomax=grid.krhomax,
+        ikxspace=grid.ikxspace,
+        adiabatic_electrons=False,
         geom_type=getattr(cfg.geometry, "geometry_model", "circ"),
         signB=params.signB,
     )
@@ -203,6 +215,7 @@ def test_equivalence_2gpu_sp_kinetic():
     def rel_l2(a, b):
         return float(np.linalg.norm(a - b) / max(np.linalg.norm(a), 1e-30))
 
-    assert rel_l2(np.asarray(df_ref), np.asarray(df_sh)) < 1e-8, \
+    assert rel_l2(np.asarray(df_ref), np.asarray(df_sh)) < 1e-8, (
         f"df rel L2 = {rel_l2(np.asarray(df_ref), np.asarray(df_sh)):.3e}"
+    )
     assert rel_l2(np.asarray(phi_ref), np.asarray(phi_sh)) < 1e-8

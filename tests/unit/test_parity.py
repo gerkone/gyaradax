@@ -13,15 +13,13 @@ from dataclasses import replace
 
 from gyaradax.diag import term_iii_fft_pack_roundtrip, term_iii_rhs
 from gyaradax.utils import load_runtime_params
+from gyaradax.cfl import estimate_linear_timestep, estimate_nl_timestep, estimate_timestep
+from gyaradax.precompute import linear_precompute
 from gyaradax.solver import (
     init_f,
     gksolve,
     GKState,
     default_state,
-    linear_precompute,
-    estimate_nl_timestep,
-    estimate_linear_timestep,
-    estimate_timestep,
 )
 from gyaradax.params import gkparams_from_input_dat
 from gyaradax.utils import load_gkw_k_dump

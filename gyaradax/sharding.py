@@ -141,18 +141,19 @@ def _place(array, spec: PartitionSpec, mesh: Mesh):
     return jax.device_put(array, NamedSharding(mesh, spec))
 
 
-def shard_df(df, mesh: Optional[Mesh], grid: GridShape):
+def shard_df(df, mesh: Optional[Mesh], grid: Optional[GridShape]):
     """Place the distribution function onto the device mesh.
 
     Dispatches on ``df.ndim``: 5D (adiabatic) or 6D (kinetic).
     """
     if mesh is None:
         return df
+    assert grid is not None
     spec = _spec_for_shape(df.shape, grid)
     return _place(df, spec, mesh)
 
 
-def shard_pre(pre: _P, mesh: Optional[Mesh], grid: GridShape) -> _P:
+def shard_pre(pre: _P, mesh: Optional[Mesh], grid: Optional[GridShape]) -> _P:
     """Place each ``pre`` leaf per shape (build-then-shard fallback path).
 
     Prefer :func:`precompute_sharded` for large grids — it partitions the
@@ -160,6 +161,7 @@ def shard_pre(pre: _P, mesh: Optional[Mesh], grid: GridShape) -> _P:
     """
     if mesh is None:
         return pre
+    assert grid is not None
 
     def _maybe_shard(leaf):
         if not hasattr(leaf, "shape") or len(leaf.shape) == 0:

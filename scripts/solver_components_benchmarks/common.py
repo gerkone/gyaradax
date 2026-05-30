@@ -83,7 +83,8 @@ def load_setup(config_path: str = "configs/iteration_13.yaml", mixed_precision: 
     from gyaradax import load_config, load_geometry
     from gyaradax.params import gkparams_from_config
     from gyaradax.geometry import compute_geometry_from_config
-    from gyaradax.solver import linear_precompute, _compute_phi
+    from gyaradax.fields import _compute_phi
+    from gyaradax.precompute import linear_precompute
     from gyaradax.utils import load_gkw_k_dump, read_gkw_dump_time, K_files
 
     cfg = load_config(config_path)

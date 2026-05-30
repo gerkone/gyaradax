@@ -18,13 +18,13 @@ from gyaradax.integrals import (
     calculate_phi,
 )
 from gyaradax.params import gkparams_from_config, load_config, GKParams
+from gyaradax.precompute import linear_precompute
 from gyaradax.solver import (
     gksolve,
     init_f,
     GKState,
     GKPre,
     default_state,
-    linear_precompute,
     mode_amplitude,
 )
 from gyaradax.utils import save_dumps as save_dumps_fn
