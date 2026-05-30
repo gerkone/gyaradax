@@ -183,7 +183,7 @@ def precompute_sharded(geometry, params, mesh: Optional[Mesh], grid: GridShape):
     On single-device (mesh=None) this falls through to the normal
     ``linear_precompute`` path.
     """
-    from gyaradax.solver import linear_precompute
+    from gyaradax.precompute import linear_precompute
     import jax.numpy as jnp
 
     if mesh is None:
@@ -214,7 +214,7 @@ def precompute_sharded(geometry, params, mesh: Optional[Mesh], grid: GridShape):
     # into aux, which trips up tree_map(_leaf_sharding, ...).
     # Use _linear_precompute_core to avoid auto-sharding recursion.
     def _wrapped(geom, p):
-        from gyaradax.solver import _linear_precompute_core
+        from gyaradax.precompute import _linear_precompute_core
 
         geom_with_scalars: dict[str, Any] = {**geom, **int_scalars}
         pre = _linear_precompute_core(geom_with_scalars, p)

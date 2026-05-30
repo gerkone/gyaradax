@@ -105,8 +105,8 @@ def _compute_em_fluxes_arr(df, geometry, params, pre, fluxes_shape):
     zero = np.zeros(fluxes_shape, dtype=np.float64)
     if params is None or pre is None or not getattr(params, "nlapar", False):
         return zero
-    # solver imports here to avoid a top-level cycle
-    from gyaradax.solver import _compute_fields, g_to_f
+    # field imports here to avoid a top-level cycle
+    from gyaradax.fields import _compute_fields, g_to_f
     from gyaradax.integrals import calculate_em_fluxes
 
     _, apar, bpar = _compute_fields(df, geometry, params, pre)
