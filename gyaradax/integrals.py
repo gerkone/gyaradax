@@ -571,6 +571,7 @@ def calculate_em_fluxes(
         signB = jnp.asarray(geometry["signB"], dtype=jnp.float64)
         d2X = jnp.asarray(geometry.get("d2X", 1.0), dtype=jnp.float64)
 
+        bessel = jnp.asarray(geometry["bessel"], dtype=jnp.float64)
         vthrat_val = float(getattr(params, "vthrat", 1.0)) if params else 1.0
         vpgr_b = vpgr.reshape(-1, 1, 1, 1, 1)
         mugr_b = mugr.reshape(1, -1, 1, 1, 1)
@@ -590,8 +591,10 @@ def calculate_em_fluxes(
         em_pflux, em_eflux, em_vflux = z, z, z
         if apar is not None:
             apar_b = apar[jnp.newaxis, jnp.newaxis, :, :, :]
-            # matches GKW diagnos_fluxes_vspace.F90:464 (-2·vthrat·vpar in χ)
-            dum_a = -2.0 * vthrat_val * vpgr_b * dum * jnp.conj(apar_b)
+            # J0 gyro-average on A_par (GKW get_averaged_apar); matches the 6D
+            # branch. matches GKW diagnos_fluxes_vspace.F90:464 (-2·vthrat·vpar in χ)
+            apar_ga = bessel * apar_b
+            dum_a = -2.0 * vthrat_val * vpgr_b * dum * jnp.conj(apar_ga)
             em_pflux = em_pflux + jnp.sum(d3v * jnp.imag(dum_a))
             em_eflux = em_eflux + jnp.sum(
                 d3v * (vpgr_b**2 * jnp.imag(dum_a) + 2 * mugr_b * bn_b * jnp.imag(dum_a))

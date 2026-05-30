@@ -57,16 +57,19 @@ class GKParams:
     # runtime controls
     dt: float = 0.01
     naverage: int = 40
-    disp_par: float = 1.0
+    # dissipation defaults match GKW namelist (control.f90): disp_par=0.2,
+    # disp_vp=0.2, disp_x=disp_y=0.0. Every shipped config / input.dat sets
+    # these explicitly; the defaults only bite a bare GKParams().
+    disp_par: float = 0.2
     disp_vp: float = 0.2
-    disp_x: float = 0.1
-    disp_y: float = 0.1
+    disp_x: float = 0.0
+    disp_y: float = 0.0
     idisp: int = 2
     drive_scale: float = 1.0
     norm_eps: float = 1.0e-14
     non_linear: bool = False
     finit: str = "cosine2"
-    amp_init: float = 1.0e-4
+    amp_init: float = 1.0e-3  # GKW components.f90:469
     adiabatic_electrons: bool = True
     adaptive_dt: bool = False
     cfl_safety: float = 0.95
@@ -220,13 +223,21 @@ def gkparams_from_runtime(runtime: Dict[str, Any], **overrides) -> GKParams:
     params_dict = {
         "dt": float(runtime.get("dtim", 0.01)),
         "naverage": int(runtime.get("naverage", 40)),
-        "disp_par": float(runtime.get("disp_par", 1.0)),
+        "disp_par": float(runtime.get("disp_par", 0.2)),
         "disp_vp": float(runtime.get("disp_vp", 0.2)),
-        "disp_x": float(runtime.get("disp_x", 0.1)),
-        "disp_y": float(runtime.get("disp_y", 0.1)),
+        "disp_x": float(runtime.get("disp_x", 0.0)),
+        "disp_y": float(runtime.get("disp_y", 0.0)),
+        # idisp, drive_scale, adaptive_dt, mixed_precision, cfl_safety were
+        # previously dropped on this path and silently fell back to the
+        # dataclass defaults; read them so input.dat / runtime dicts apply.
+        "idisp": int(runtime.get("idisp", 2)),
+        "drive_scale": float(runtime.get("drive_scale", 1.0)),
+        "adaptive_dt": bool(runtime.get("adaptive_dt", False)),
+        "mixed_precision": bool(runtime.get("mixed_precision", True)),
+        "cfl_safety": float(runtime.get("cfl_safety", runtime.get("fac_dtim_est", 0.95))),
         "non_linear": bool(runtime.get("non_linear", False)),
         "finit": str(runtime.get("finit", "cosine2")),
-        "amp_init": float(runtime.get("amp_init", 1.0e-4)),
+        "amp_init": float(runtime.get("amp_init", 1.0e-3)),
         "adiabatic_electrons": bool(runtime.get("adiabatic_electrons", True)),
         "backend": str(runtime.get("backend", "jax")),
         "nlapar": bool(runtime.get("nlapar", False)),

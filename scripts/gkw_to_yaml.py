@@ -39,14 +39,17 @@ def gkw_to_yaml(gkw_dir, output_yaml):
             "naverage": scalars.get("naverage", 40),
             "n_steps": scalars.get("ntime", 400),
             "dump_interval": scalars.get("ndump_ts", 3),
-            "disp_par": scalars.get("disp_par", 1.0),
+            "disp_par": scalars.get("disp_par", 0.2),
             "disp_vp": scalars.get("disp_vp", 0.2),
-            "disp_x": scalars.get("disp_x", 0.1),
-            "disp_y": scalars.get("disp_y", 0.1),
-            "idisp": scalars.get("meth", 2),
+            "disp_x": scalars.get("disp_x", 0.0),
+            "disp_y": scalars.get("disp_y", 0.0),
+            "idisp": scalars.get("idisp", 2),
             "non_linear": scalars.get("non_linear", False),
             "adaptive_dt": not scalars.get("adiabatic_electrons", True),
             "finit": scalars.get("finit", "cosine2"),
+            # electromagnetic switches (GKW &control / &spcgeneral)
+            "nlapar": scalars.get("nlapar", False),
+            "nlbpar": scalars.get("nlbpar", False),
         },
         "physics": {
             "rlt": scalars.get("rlt", 0.0),
@@ -58,6 +61,8 @@ def gkw_to_yaml(gkw_dir, output_yaml):
             "vthrat": scalars.get("vthrat", 1.0),
             "dgrid": scalars.get("dgrid", 1.0),
             "tgrid": scalars.get("tgrid", 1.0),
+            # reference plasma beta (GKW beta / beta_ref); 0 = electrostatic
+            "beta": scalars.get("beta", scalars.get("beta_ref", 0.0)),
         },
         "geometry": {
             "shat": scalars.get("shat", 0.0),
