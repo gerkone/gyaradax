@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import builtins
 import importlib
+import subprocess
 import sys
 from types import SimpleNamespace
 from typing import Any
@@ -16,6 +17,53 @@ from gyaradax.state import GKPre
 
 def _fail_cuda_import() -> None:
     raise AssertionError("CUDA backend should not be imported for this path")
+
+
+def _run_fresh_python_with_cuda_import_blocked(code: str) -> None:
+    blocker = """
+import builtins
+import sys
+_original_import = builtins.__import__
+def _blocked_import(name, globals=None, locals=None, fromlist=(), level=0):
+    if name == 'gyaradax.backends._cuda' or name.startswith('gyaradax.backends._cuda'):
+        raise ImportError('simulated missing optional CUDA module')
+    return _original_import(name, globals, locals, fromlist, level)
+builtins.__import__ = _blocked_import
+"""
+    trailer = """
+assert 'gyaradax.backends._cuda' not in sys.modules
+"""
+    subprocess.run([sys.executable, "-c", blocker + code + trailer], check=True)
+
+
+def test_import_gyaradax_does_not_require_cuda_module_in_fresh_process() -> None:
+    _run_fresh_python_with_cuda_import_blocked(
+        """
+import gyaradax
+assert hasattr(gyaradax, 'load_config')
+"""
+    )
+
+
+def test_top_level_load_config_import_does_not_require_cuda_module_in_fresh_process() -> None:
+    _run_fresh_python_with_cuda_import_blocked(
+        """
+from gyaradax import load_config
+assert callable(load_config)
+"""
+    )
+
+
+def test_jax_backend_selection_does_not_require_cuda_module_in_fresh_process() -> None:
+    _run_fresh_python_with_cuda_import_blocked(
+        """
+from gyaradax.backends import create_ops
+from gyaradax.backends._jax import JAXOps
+from gyaradax.state import GKPre
+ops = create_ops(GKPre({}), backend='jax')
+assert isinstance(ops, JAXOps)
+"""
+    )
 
 
 def test_backends_package_import_does_not_require_cuda_module(

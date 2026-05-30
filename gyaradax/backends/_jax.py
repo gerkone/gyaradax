@@ -10,7 +10,7 @@ from typing import Any, Dict, Tuple
 import jax
 import jax.numpy as jnp
 
-from gyaradax import stencils
+import gyaradax.stencils as stencils
 from gyaradax.backends.ops import SolverOps
 from gyaradax.collisions import collision_rhs, conservation_correction
 from gyaradax.params import GKParams

@@ -33,7 +33,8 @@ import math
 import functools
 from typing import Any, Dict, Tuple, Optional, cast
 
-from gyaradax import _EPS, stencils
+import gyaradax.stencils as stencils
+from gyaradax.constants import EPS
 from gyaradax.integrals import (
     get_integrals,
     j0,
@@ -259,7 +260,7 @@ def estimate_nl_timestep(
         max_value = jnp.maximum(max_value, 2.0 * vthrat_max * max_grad_apar * vpmax)
 
     dt_est = jnp.where(
-        max_value > _EPS,
+        max_value > EPS,
         jnp.asarray(safety_factor, dtype=jnp.float64) * 2.0 / max_value,
         jnp.asarray(dt_input, dtype=jnp.float64),
     )
@@ -286,8 +287,8 @@ def estimate_linear_timestep(
     max_utrap = jnp.max(jnp.abs(pre["utrap"]))
 
     if safety_factor is not None:
-        dt_par = jnp.where(max_upar > _EPS, safety_factor * sgr_dist / max_upar, 1e10)
-        dt_trap = jnp.where(max_utrap > _EPS, safety_factor * dvp / max_utrap, 1e10)
+        dt_par = jnp.where(max_upar > EPS, safety_factor * sgr_dist / max_upar, 1e10)
+        dt_trap = jnp.where(max_utrap > EPS, safety_factor * dvp / max_utrap, 1e10)
         return jnp.minimum(dt_par, dt_trap)
 
     # max stencil coefficients: boundary D1/D4 = 24/12 = 2.0,
@@ -299,8 +300,8 @@ def estimate_linear_timestep(
 
     # ideriv=1: streaming + trapping
     tmax1 = jnp.maximum(
-        jnp.where(max_upar > _EPS, max_upar * _D1S / sgr_dist, 0.0),
-        jnp.where(max_utrap > _EPS, max_utrap * _D1V / dvp, 0.0),
+        jnp.where(max_upar > EPS, max_upar * _D1S / sgr_dist, 0.0),
+        jnp.where(max_utrap > EPS, max_utrap * _D1V / dvp, 0.0),
     )
 
     # ideriv=4: parallel and velocity dissipation
@@ -313,8 +314,8 @@ def estimate_linear_timestep(
     max_abs_par = jnp.max(jnp.abs(pre["abs_dum2_par"]))
     max_abs_vp = jnp.max(jnp.abs(pre["abs_dum2_vp"]))
     tmax4 = jnp.maximum(
-        disp_par_val * jnp.where(max_abs_par > _EPS, max_abs_par * _D4S / sgr_dist, 0.0),
-        disp_vp_val * jnp.where(max_abs_vp > _EPS, max_abs_vp * _D4V / dvp, 0.0),
+        disp_par_val * jnp.where(max_abs_par > EPS, max_abs_par * _D4S / sgr_dist, 0.0),
+        disp_vp_val * jnp.where(max_abs_vp > EPS, max_abs_vp * _D4V / dvp, 0.0),
     )
 
     # ideriv=2: collision 2nd-derivative; kept undivided in the RK4 max (matdat.F90:1498)
@@ -336,7 +337,7 @@ def estimate_linear_timestep(
     )
 
     fac = jnp.asarray(fac_dtim_est, dtype=jnp.float64)
-    return jnp.where(tmax > _EPS, fac / tmax, jnp.asarray(1e10, dtype=jnp.float64))
+    return jnp.where(tmax > EPS, fac / tmax, jnp.asarray(1e10, dtype=jnp.float64))
 
 
 def estimate_timestep(
@@ -394,9 +395,9 @@ def _precompute_shared(
 
     hyper = -(
         jnp.abs(params.disp_y)
-        * (ky_b / jnp.maximum(params.kymax, _EPS)) ** jnp.where(params.disp_y < 0.0, 2.0, 4.0)
+        * (ky_b / jnp.maximum(params.kymax, EPS)) ** jnp.where(params.disp_y < 0.0, 2.0, 4.0)
         + jnp.abs(params.disp_x)
-        * (kx_b / jnp.maximum(params.kxmax, _EPS)) ** jnp.where(params.disp_x < 0.0, 2.0, 4.0)
+        * (kx_b / jnp.maximum(params.kxmax, EPS)) ** jnp.where(params.disp_x < 0.0, 2.0, 4.0)
     )
 
     return {
@@ -524,7 +525,7 @@ def _compute_species_coeffs(
         def d_shape(arr):
             return jnp.reshape(arr, (1, 1, -1, 1, 1))
 
-        sz = jnp.where(jnp.abs(signz) < _EPS, 1.0, signz)
+        sz = jnp.where(jnp.abs(signz) < EPS, 1.0, signz)
     else:
         # kinetic: per-species params, 6D arrays
         nsp = mas.shape[0]
@@ -557,17 +558,17 @@ def _compute_species_coeffs(
         def d_shape(arr):
             return jnp.reshape(arr, (1, 1, 1, -1, 1, 1))
 
-        sz = jnp.where(jnp.abs(signz) < _EPS, 1.0, signz)
+        sz = jnp.where(jnp.abs(signz) < EPS, 1.0, signz)
 
     krloc_sq = (
         ky_b**2 * g_shape(little_g[:, 0])
         + 2.0 * ky_b * kx_b * g_shape(little_g[:, 1])
         + kx_b**2 * g_shape(little_g[:, 2])
     )
-    krloc = jnp.sqrt(jnp.maximum(krloc_sq, _EPS))
+    krloc = jnp.sqrt(jnp.maximum(krloc_sq, EPS))
 
     b_arg = (
-        mas * vthrat * krloc * jnp.sqrt(jnp.maximum(2.0 * mu / jnp.maximum(bn_b, _EPS), _EPS)) / sz
+        mas * vthrat * krloc * jnp.sqrt(jnp.maximum(2.0 * mu / jnp.maximum(bn_b, EPS), EPS)) / sz
     )
     bessel = j0(b_arg)
 
@@ -748,7 +749,7 @@ def _linear_precompute_core(geometry: Dict[str, jnp.ndarray], params: GKParams) 
                 kperp_sq.shape[-3], kperp_sq.shape[-2], kperp_sq.shape[-1]
             )
             apar_d = kperp_sq_3d + diag_em
-            apar_d = jnp.where(jnp.abs(apar_d) < _EPS, 1.0, apar_d)
+            apar_d = jnp.where(jnp.abs(apar_d) < EPS, 1.0, apar_d)
             out["apar_diag"] = apar_d
 
             # g2f_factor matches GKW g2f_correct: -2*signz*vthrat*vpgr*J0*fmaxwl/tmp
@@ -769,7 +770,7 @@ def _linear_precompute_core(geometry: Dict[str, jnp.ndarray], params: GKParams) 
         signz_arr = jnp.asarray(params.signz, dtype=jnp.float64)
         de_arr = jnp.asarray(params.de, dtype=jnp.float64)
         mir = jnp.sum(jnp.where(signz_arr > 0, mas_arr * de_arr, 0.0))
-        mer = jnp.sum(jnp.where(signz_arr < 0, mas_arr / jnp.maximum(de_arr, _EPS), 0.0))
+        mer = jnp.sum(jnp.where(signz_arr < 0, mas_arr / jnp.maximum(de_arr, EPS), 0.0))
         ky_min = jnp.where(nky > 1, ky[1], ky[0])
         kmin2 = ky_min**2 * little_g[:, 0]
         # matdat.F90:1911-1914: fall back to 2π*lxinv = kx_min when smaller than ky_min²·g_yy
@@ -777,15 +778,15 @@ def _linear_precompute_core(geometry: Dict[str, jnp.ndarray], params: GKParams) 
         if nkx > 1:
             idx = jnp.clip(ixz_arr + 1, 0, nkx - 1)
             kx_min_abs = jnp.abs(kx[idx])
-            in_range = (ixz_arr + 1 < nkx) & (kx_min_abs > _EPS)
+            in_range = (ixz_arr + 1 < nkx) & (kx_min_abs > EPS)
             kmin2 = jnp.where(in_range, jnp.minimum(kx_min_abs, kmin2), kmin2)
         q_val = jnp.asarray(geometry.get("q", getattr(params, "q", 1.0)), dtype=jnp.float64)
         beta_cfl = jnp.asarray(params.beta, dtype=jnp.float64)
         field_cfl_arg = mir * (beta_cfl + kmin2 * mer)
         field_period = (
-            2.0 * jnp.pi * q_val * params.sgr_dist * bn * jnp.sqrt(jnp.maximum(field_cfl_arg, _EPS))
+            2.0 * jnp.pi * q_val * params.sgr_dist * bn * jnp.sqrt(jnp.maximum(field_cfl_arg, EPS))
         )
-        time_field = jnp.min(jnp.where(field_period > _EPS, field_period, 1e30))
+        time_field = jnp.min(jnp.where(field_period > EPS, field_period, 1e30))
         out["tmax_field"] = jnp.where(time_field < 1e20, 1.0 / time_field, 0.0)
 
         # g2f -> A_par Alfven coupling is captured by tmax_field; em_streaming_cfl
@@ -890,7 +891,7 @@ def linear_precompute(geometry: Dict[str, jnp.ndarray], params: GKParams) -> "GK
     n_gpus_vp = int(getattr(params, "n_gpus_vp", 1))
     n_gpus_mu = int(getattr(params, "n_gpus_mu", 1))
     if n_gpus_sp * n_gpus_vp * n_gpus_mu > 1:
-        from gyaradax import sharding
+        import gyaradax.sharding as sharding
 
         mesh = sharding.build_mesh(params)
         if mesh is not None:
@@ -942,7 +943,7 @@ def init_f(
         n_gpus_vp = int(getattr(params, "n_gpus_vp", 1))
         n_gpus_mu = int(getattr(params, "n_gpus_mu", 1))
         if n_gpus_sp * n_gpus_vp * n_gpus_mu > 1:
-            from gyaradax import sharding
+            import gyaradax.sharding as sharding
             from jax.sharding import NamedSharding, PartitionSpec
 
             mesh = sharding.build_mesh(params)
@@ -1294,7 +1295,7 @@ def gkstep_single(
                 mg_apar = jnp.maximum(mg_apar, jnp.stack(_apar_grads).max())
         mg_total = jnp.maximum(mg_phi, mg_apar)
         substage_dt_est = jnp.where(
-            mg_total > _EPS, 2.0 / mg_total, jnp.array(1e10, dtype=jnp.float64)
+            mg_total > EPS, 2.0 / mg_total, jnp.array(1e10, dtype=jnp.float64)
         )
     else:
         substage_dt_est = jnp.array(1e10, dtype=jnp.float64)

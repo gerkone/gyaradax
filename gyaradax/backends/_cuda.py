@@ -15,7 +15,7 @@ import jax.numpy as jnp
 import numpy as np
 from jax import ffi
 
-from gyaradax import stencils
+import gyaradax.stencils as stencils
 from gyaradax.backends.ops import SolverOps
 from gyaradax.state import GKPre
 

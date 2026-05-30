@@ -30,7 +30,7 @@ import jax
 import jax.numpy as jnp
 from jax.scipy.special import erf
 
-from gyaradax import _EPS
+from gyaradax.constants import EPS
 from gyaradax.params import GKParams
 
 
@@ -41,22 +41,22 @@ def _erfp(x):
 
 def _D_thth(v, gamma_pref, vtb_scale=1.0):
     """Pitch-angle diffusion coefficient (freq_override single-species prefactor)."""
-    v_safe = jnp.maximum(v, _EPS)
-    vtb = jnp.maximum(v_safe * vtb_scale, _EPS)
+    v_safe = jnp.maximum(v, EPS)
+    vtb = jnp.maximum(v_safe * vtb_scale, EPS)
     return gamma_pref * ((2.0 - 1.0 / vtb**2) * erf(vtb) + _erfp(vtb) / vtb) / (4.0 * v_safe)
 
 
 def _D_vv(v, gamma_pref, vtb_scale=1.0):
     """Energy diffusion coefficient."""
-    v_safe = jnp.maximum(v, _EPS)
-    vtb = jnp.maximum(v_safe * vtb_scale, _EPS)
+    v_safe = jnp.maximum(v, EPS)
+    vtb = jnp.maximum(v_safe * vtb_scale, EPS)
     return gamma_pref * (erf(vtb) / vtb**2 - _erfp(vtb) / vtb) / (2.0 * v_safe)
 
 
 def _F_v(v, gamma_pref, vtb_scale=1.0, mrat=1.0):
     """Friction coefficient. mrat = m_a / m_b (target over background)."""
-    v_safe = jnp.maximum(v, _EPS)
-    vtb = jnp.maximum(v_safe * vtb_scale, _EPS)
+    v_safe = jnp.maximum(v, EPS)
+    vtb = jnp.maximum(v_safe * vtb_scale, EPS)
     return gamma_pref * mrat * (erf(vtb) - _erfp(vtb) * vtb) / v_safe**2
 
 
@@ -69,35 +69,35 @@ def _coulomb_log_pair(signz_a, signz_b, tmp_a, tmp_b, mas_a, mas_b, de_a, de_b, 
     tae = tmp_a * tref  # dim-ful temperature
     tbe = tmp_b * tref
     # e-e
-    Lee = 14.9 - 0.5 * jnp.log(jnp.maximum(0.1 * ne19, _EPS)) + jnp.log(jnp.maximum(tae, _EPS))
+    Lee = 14.9 - 0.5 * jnp.log(jnp.maximum(0.1 * ne19, EPS)) + jnp.log(jnp.maximum(tae, EPS))
     # e-i (scattered is electron, background is ion with charge Z_b)
     Lei_low = (
         17.2
-        - 0.5 * jnp.log(jnp.maximum(0.1 * signz_b**2 * ne19, _EPS))
-        + 1.5 * jnp.log(jnp.maximum(tae, _EPS))
+        - 0.5 * jnp.log(jnp.maximum(0.1 * signz_b**2 * ne19, EPS))
+        + 1.5 * jnp.log(jnp.maximum(tae, EPS))
     )
-    Lei_high = 14.8 - 0.5 * jnp.log(jnp.maximum(0.1 * ne19, _EPS)) + jnp.log(jnp.maximum(tae, _EPS))
+    Lei_high = 14.8 - 0.5 * jnp.log(jnp.maximum(0.1 * ne19, EPS)) + jnp.log(jnp.maximum(tae, EPS))
     Lei = jnp.where(tae < 0.01 * signz_b**2, Lei_low, Lei_high)
     # i-e (scattered is ion with charge Z_a, background is electron); NRL p.34
     Lie_low = (
         17.2
-        - 0.5 * jnp.log(jnp.maximum(0.1 * signz_a**2 * ne19, _EPS))
-        + 1.5 * jnp.log(jnp.maximum(tbe, _EPS))
+        - 0.5 * jnp.log(jnp.maximum(0.1 * signz_a**2 * ne19, EPS))
+        + 1.5 * jnp.log(jnp.maximum(tbe, EPS))
     )
-    Lie_high = 14.8 - 0.5 * jnp.log(jnp.maximum(0.1 * ne19, _EPS)) + jnp.log(jnp.maximum(tbe, _EPS))
+    Lie_high = 14.8 - 0.5 * jnp.log(jnp.maximum(0.1 * ne19, EPS)) + jnp.log(jnp.maximum(tbe, EPS))
     Lie = jnp.where(tbe < 0.01 * signz_a**2, Lie_low, Lie_high)
     # i-i (full NRL formula, collisionop.f90:514-517)
     Lii = (
         17.3
-        - jnp.log(jnp.maximum(jnp.abs(signz_a * signz_b) * (mas_a + mas_b), _EPS))
-        + jnp.log(jnp.maximum((mas_a * tmp_b + mas_b * tmp_a) * tref, _EPS))
-        - 0.5 * jnp.log(jnp.maximum(0.1 * nref / tref, _EPS))
+        - jnp.log(jnp.maximum(jnp.abs(signz_a * signz_b) * (mas_a + mas_b), EPS))
+        + jnp.log(jnp.maximum((mas_a * tmp_b + mas_b * tmp_a) * tref, EPS))
+        - 0.5 * jnp.log(jnp.maximum(0.1 * nref / tref, EPS))
         - 0.5
         * jnp.log(
             jnp.maximum(
-                de_a * signz_a**2 / jnp.maximum(tmp_a, _EPS)
-                + de_b * signz_b**2 / jnp.maximum(tmp_b, _EPS),
-                _EPS,
+                de_a * signz_a**2 / jnp.maximum(tmp_a, EPS)
+                + de_b * signz_b**2 / jnp.maximum(tmp_b, EPS),
+                EPS,
             )
         )
     )
@@ -131,9 +131,9 @@ def _gamma_pair(params, signz_a, mas_a, tmp_a, de_a, signz_b, mas_b, tmp_b, de_b
         params.coll_tref,
     )
     z2 = signz_a**2 * signz_b**2
-    tmp_a_safe = jnp.maximum(tmp_a, _EPS)
+    tmp_a_safe = jnp.maximum(tmp_a, EPS)
     if params.coll_freq_override:
-        return z2 * params.coll_freq * de_b * (L_ab / jnp.maximum(L_ref, _EPS)) / tmp_a_safe**2
+        return z2 * params.coll_freq * de_b * (L_ab / jnp.maximum(L_ref, EPS)) / tmp_a_safe**2
     c = 6.5141e-5 * params.coll_rref * params.coll_nref / params.coll_tref**2
     return c * de_b * z2 * L_ab / tmp_a_safe**2
 
@@ -141,7 +141,7 @@ def _gamma_pair(params, signz_a, mas_a, tmp_a, de_a, signz_b, mas_b, tmp_b, de_b
 def _gamma_pref_self(params, de, tmp, signz):
     """Scalar self-collision prefactor for single-species tests/back-compat."""
     if params.coll_freq_override:
-        return params.coll_freq * de / jnp.maximum(tmp, _EPS) ** 2
+        return params.coll_freq * de / jnp.maximum(tmp, EPS) ** 2
     L = _coulomb_log_pair(
         signz,
         signz,
@@ -156,7 +156,7 @@ def _gamma_pref_self(params, de, tmp, signz):
         params.coll_tref,
     )
     c = 6.5141e-5 * params.coll_rref * params.coll_nref / params.coll_tref**2
-    return c * de * signz**4 * L / jnp.maximum(tmp, _EPS) ** 2
+    return c * de * signz**4 * L / jnp.maximum(tmp, EPS) ** 2
 
 
 def _coulomb_log_ii(signz, tmp, de, nref, tref):
@@ -206,7 +206,7 @@ def _build_stencil(
     vp = vpgr.reshape(nv, 1, 1)
     vperp = jnp.sqrt(jnp.maximum(2.0 * mugr, 0.0)).reshape(1, nmu, 1)
     bn_b = bn.reshape(1, 1, ns)
-    sqrtB = jnp.sqrt(jnp.maximum(bn_b, _EPS))
+    sqrtB = jnp.sqrt(jnp.maximum(bn_b, EPS))
     dvrp = sqrtB * dvperp
     vperp_phys = vperp * sqrtB
 
@@ -221,8 +221,8 @@ def _build_stencil(
 
     # block A: vpar + 1/2
     vpar_A = vp + 0.5 * dvp
-    v_A = jnp.sqrt(jnp.maximum(vpar_A**2 + vperp_phys**2, _EPS))
-    denom_A = jnp.maximum(vpar_A**2 + vperp_phys**2, _EPS)
+    v_A = jnp.sqrt(jnp.maximum(vpar_A**2 + vperp_phys**2, EPS))
+    denom_A = jnp.maximum(vpar_A**2 + vperp_phys**2, EPS)
     fac_A = jnp.where(pitch_angle, vperp_phys**2 * Dth(v_A) / (denom_A * dvp**2), 0.0)
     fad_A = jnp.where(en_scatter, vpar_A**2 * Dvv(v_A) / (denom_A * dvp**2), 0.0)
     faf_A = jnp.where(friction, vpar_A * Fv(v_A) / (jnp.sqrt(denom_A) * dvp), 0.0)
@@ -233,8 +233,8 @@ def _build_stencil(
 
     # block B: vpar - 1/2
     vpar_B = vp - 0.5 * dvp
-    v_B = jnp.sqrt(jnp.maximum(vpar_B**2 + vperp_phys**2, _EPS))
-    denom_B = jnp.maximum(vpar_B**2 + vperp_phys**2, _EPS)
+    v_B = jnp.sqrt(jnp.maximum(vpar_B**2 + vperp_phys**2, EPS))
+    denom_B = jnp.maximum(vpar_B**2 + vperp_phys**2, EPS)
     fac_B = jnp.where(pitch_angle, vperp_phys**2 * Dth(v_B) / (denom_B * dvp**2), 0.0)
     fad_B = jnp.where(en_scatter, vpar_B**2 * Dvv(v_B) / (denom_B * dvp**2), 0.0)
     faf_B = jnp.where(friction, vpar_B * Fv(v_B) / (jnp.sqrt(denom_B) * dvp), 0.0)
@@ -245,9 +245,9 @@ def _build_stencil(
 
     # block C: v_perp + 1/2
     vperp_C = vperp_phys + 0.5 * dvrp
-    v_C = jnp.sqrt(jnp.maximum(vp**2 + vperp_C**2, _EPS))
-    denom_C = jnp.maximum(vp**2 + vperp_C**2, _EPS)
-    vzero = jnp.maximum(vperp_phys, _EPS)
+    v_C = jnp.sqrt(jnp.maximum(vp**2 + vperp_C**2, EPS))
+    denom_C = jnp.maximum(vp**2 + vperp_C**2, EPS)
+    vzero = jnp.maximum(vperp_phys, EPS)
     fac_C = jnp.where(pitch_angle, vperp_C * vp**2 * Dth(v_C) / (denom_C * vzero * dvrp**2), 0.0)
     fad_C = jnp.where(en_scatter, vperp_C**3 * Dvv(v_C) / (denom_C * vzero * dvrp**2), 0.0)
     faf_C = jnp.where(friction, vperp_C**2 * Fv(v_C) / (jnp.sqrt(denom_C) * vzero * dvrp), 0.0)
@@ -258,8 +258,8 @@ def _build_stencil(
 
     # block D: v_perp - 1/2 (natural zero flux at mu=0)
     vperp_D = vperp_phys - 0.5 * dvrp
-    v_D = jnp.sqrt(jnp.maximum(vp**2 + vperp_D**2, _EPS))
-    denom_D = jnp.maximum(vp**2 + vperp_D**2, _EPS)
+    v_D = jnp.sqrt(jnp.maximum(vp**2 + vperp_D**2, EPS))
+    denom_D = jnp.maximum(vp**2 + vperp_D**2, EPS)
     fac_D = jnp.where(pitch_angle, vperp_D * vp**2 * Dth(v_D) / (denom_D * vzero * dvrp**2), 0.0)
     fad_D = jnp.where(en_scatter, vperp_D**3 * Dvv(v_D) / (denom_D * vzero * dvrp**2), 0.0)
     faf_D = jnp.where(friction, vperp_D**2 * Fv(v_D) / (jnp.sqrt(denom_D) * vzero * dvrp), 0.0)
@@ -353,7 +353,7 @@ def _collect_species_arrays(params):
 
     # electron density (ne19 = sum_e de_b * nref), for Coulomb log
     ne19 = jnp.sum(jnp.where(bg_signz < 0, bg_de, 0.0)) * params.coll_nref
-    ne19 = jnp.maximum(ne19, _EPS)
+    ne19 = jnp.maximum(ne19, EPS)
     return (
         tgt_mas,
         tgt_signz,
@@ -429,15 +429,15 @@ def precompute_collisions(geometry: Dict, params: GKParams) -> Dict[str, jnp.nda
         params.coll_nref,
         params.coll_tref,
     )
-    L_ref = jnp.maximum(L_ref, _EPS)
+    L_ref = jnp.maximum(L_ref, EPS)
 
     def stencil_for_target(mas_a, signz_a, tmp_a, de_a, vthrat_a):
         def per_bg(mas_b, signz_b, tmp_b, de_b, vthrat_b):
             gp = _gamma_pair(
                 params, signz_a, mas_a, tmp_a, de_a, signz_b, mas_b, tmp_b, de_b, ne19, L_ref
             )
-            vtb_scale = vthrat_a / jnp.maximum(vthrat_b, _EPS)
-            mrat = mas_a / jnp.maximum(mas_b, _EPS)
+            vtb_scale = vthrat_a / jnp.maximum(vthrat_b, EPS)
+            mrat = mas_a / jnp.maximum(mas_b, EPS)
             return _build_stencil(
                 vpgr, mugr, bn, dvp, dvperp, gp, vthrat_a, vtb_scale, mrat, *flags
             )
@@ -487,11 +487,11 @@ def _precompute_conservation(geometry, params, vpgr, mugr, bn):
         fmax = de_val * fm_env
         part = jnp.sum(fmax * d3v, axis=(0, 1))
         ene = jnp.sum(vsq * fmax * d3v, axis=(0, 1))
-        A = ene / jnp.maximum(part, _EPS)
+        A = ene / jnp.maximum(part, EPS)
         P = jnp.sum(vp**2 * fmax * d3v, axis=(0, 1))
         E = jnp.sum(vsq * (vsq - A.reshape(1, 1, ns)) * fmax * d3v, axis=(0, 1))
-        mom_factor = vp * fmax / jnp.maximum(P, _EPS).reshape(1, 1, ns)
-        ene_factor = (vsq - A.reshape(1, 1, ns)) * fmax / jnp.maximum(E, _EPS).reshape(1, 1, ns)
+        mom_factor = vp * fmax / jnp.maximum(P, EPS).reshape(1, 1, ns)
+        ene_factor = (vsq - A.reshape(1, 1, ns)) * fmax / jnp.maximum(E, EPS).reshape(1, 1, ns)
         vpar_w = vp * d3v
         vsq_w = vsq * d3v
         mom_on = jnp.where(params.coll_mom_conservation, 1.0, 0.0)

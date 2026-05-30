@@ -4,7 +4,7 @@ from jax.scipy.special import i0e, bessel_jn
 from einops import rearrange
 from typing import Dict, Tuple, Any, Optional, Mapping
 
-from gyaradax import _EPS
+from gyaradax.constants import EPS
 from gyaradax.state import Precompute
 
 
@@ -80,11 +80,11 @@ def geom_tensors(geometry: Dict[str, jnp.ndarray], params: Any = None) -> Dict[s
         + 2 * geom_["krho"] * kxrh * little_g[1]
         + kxrh**2 * little_g[2]
     )
-    krloc = jnp.sqrt(jnp.maximum(krloc_sq, _EPS))
+    krloc = jnp.sqrt(jnp.maximum(krloc_sq, EPS))
 
-    mugr_bn = jnp.maximum(2.0 * geom_["mugr"] / geom_["bn"], _EPS)
+    mugr_bn = jnp.maximum(2.0 * geom_["mugr"] / geom_["bn"], EPS)
 
-    sz = jnp.where(jnp.abs(geom_["signz"]) < _EPS, 1.0, geom_["signz"])
+    sz = jnp.where(jnp.abs(geom_["signz"]) < EPS, 1.0, geom_["signz"])
     bessel_arg = jnp.sqrt(mugr_bn) / sz
     bessel_arg = geom_["mas"] * vthrat * krloc * bessel_arg
     bessel_arg = jnp.where(jnp.isnan(bessel_arg), 0.0, bessel_arg)
@@ -119,12 +119,12 @@ def _phi_adiabatic(geom: Dict[str, jnp.ndarray], df: jnp.ndarray) -> jnp.ndarray
     bessel, gamma = geom["bessel"], geom["gamma"]
 
     poisson_int = signz * de * intmu * intvp * bessel * bn
-    poisson_int = jnp.where(jnp.abs(intvp) < _EPS, 0.0, poisson_int)
+    poisson_int = jnp.where(jnp.abs(intvp) < EPS, 0.0, poisson_int)
 
     cfen = 0.0
     diagz = signz * (gamma - 1.0) * jnp.exp(-cfen) / tmp
     denom = diagz - jnp.exp(-cfen) / tmp
-    denom = jnp.where(jnp.abs(denom) < _EPS, 1.0, denom)
+    denom = jnp.where(jnp.abs(denom) < EPS, 1.0, denom)
     matz = -ints / (signz * de * denom)
     has_zonal = geom["has_zonal"]
     ixzero, iyzero = geom["ixzero"], geom["iyzero"]
@@ -149,7 +149,7 @@ def _phi_adiabatic(geom: Dict[str, jnp.ndarray], df: jnp.ndarray) -> jnp.ndarray
     x_is_zero = jnp.arange(phi.shape[-2]) == ixzero
     x_mask = jnp.broadcast_to(x_is_zero[None, None, None, None, :, None], phi.shape)
     maty_val = jnp.where(x_mask, 1.0 + 0j, maty)
-    maty_val = jnp.where(jnp.abs(maty_val) < _EPS, 1.0, maty_val)
+    maty_val = jnp.where(jnp.abs(maty_val) < EPS, 1.0, maty_val)
     maty_val = 1.0 / maty_val
     phi = phi + maty_val * bufphi * y_mask
 
@@ -158,7 +158,7 @@ def _phi_adiabatic(geom: Dict[str, jnp.ndarray], df: jnp.ndarray) -> jnp.ndarray
     norm_mask = norm_mask.at[..., ixzero, iyzero].set(1.0 - has_zonal)
 
     pdiag = poisson_diag * norm_mask - signz * jnp.exp(-cfen) * de / tmp
-    pdiag = jnp.where(jnp.abs(pdiag) < _EPS, -1.0, pdiag)
+    pdiag = jnp.where(jnp.abs(pdiag) < EPS, -1.0, pdiag)
 
     phi = phi * (-1.0 / pdiag)
     return jnp.squeeze(phi, axis=(0, 1, 2))
@@ -256,7 +256,7 @@ def _species_bessel_gamma(geometry):
     mas_6d = mas.reshape(nsp, 1, 1, 1, 1, 1)
     signz_6d = signz.reshape(nsp, 1, 1, 1, 1, 1)
     vthrat_6d = vthrat.reshape(nsp, 1, 1, 1, 1, 1)
-    sz = jnp.where(jnp.abs(signz_6d) < _EPS, 1.0, signz_6d)
+    sz = jnp.where(jnp.abs(signz_6d) < EPS, 1.0, signz_6d)
 
     krho = jnp.asarray(geometry["krho"], dtype=jnp.float64).reshape(1, 1, 1, 1, 1, -1)
     kxrh = jnp.asarray(geometry["kxrh"], dtype=jnp.float64).reshape(1, 1, 1, 1, -1, 1)
@@ -268,9 +268,9 @@ def _species_bessel_gamma(geometry):
     g1 = little_g[:, 1].reshape(1, 1, 1, -1, 1, 1)
     g2 = little_g[:, 2].reshape(1, 1, 1, -1, 1, 1)
     krloc_sq = krho**2 * g0 + 2 * krho * kxrh * g1 + kxrh**2 * g2
-    krloc = jnp.sqrt(jnp.maximum(krloc_sq, _EPS))
+    krloc = jnp.sqrt(jnp.maximum(krloc_sq, EPS))
 
-    mugr_bn = jnp.maximum(2.0 * mugr / jnp.maximum(bn, _EPS), _EPS)
+    mugr_bn = jnp.maximum(2.0 * mugr / jnp.maximum(bn, EPS), EPS)
     bessel_arg = mas_6d * vthrat_6d * krloc * jnp.sqrt(mugr_bn) / sz
     bessel_arg = jnp.where(jnp.isnan(bessel_arg), 0.0, bessel_arg)
     bessel = j0(bessel_arg)
@@ -307,7 +307,7 @@ def precompute_phi_kinetic(geometry: Dict[str, jnp.ndarray]):
     bn = jnp.asarray(geometry["bn"], dtype=jnp.float64).reshape(1, 1, 1, -1, 1, 1)
 
     weight = signz_6d * de_6d * intmu * intvp * bessel * bn
-    weight = jnp.where(jnp.abs(intvp) < _EPS, 0.0, weight)
+    weight = jnp.where(jnp.abs(intvp) < EPS, 0.0, weight)
 
     # Poisson diagonal: sum_sp Z^2*n*(Gamma_0 - 1)/T
     diag_per_sp = signz_6d**2 * de_6d * (gamma - 1.0) / tmp_6d
@@ -321,7 +321,7 @@ def precompute_phi_kinetic(geometry: Dict[str, jnp.ndarray]):
     has_zonal = jnp.abs(krho[iyzero]) < 1e-10
     diag_with_zonal = diag.at[:, ixzero, iyzero].set(1.0)
     diag = jnp.where(has_zonal, diag_with_zonal, diag)
-    diag = jnp.where(jnp.abs(diag) < _EPS, -1.0, diag)
+    diag = jnp.where(jnp.abs(diag) < EPS, -1.0, diag)
     return weight, diag
 
 
@@ -443,7 +443,7 @@ def precompute_apar(geometry: Dict[str, jnp.ndarray], params: Any = None):
     # Ampere numerator (GKW ampere_int, linear_terms.f90:3246).
     # vthrat converts vpgr (v_ths units) to physical velocity in v_thi units.
     apar_weight = beta * signz_6d * de_6d * vthrat_6d * vpgr * bessel * bn * intvp * intmu
-    apar_weight = jnp.where(jnp.abs(intvp) < _EPS, 0.0, apar_weight)
+    apar_weight = jnp.where(jnp.abs(intvp) < EPS, 0.0, apar_weight)
 
     # Ampere denominator. Analytical fallback; solver.py overrides with numerical
     # gamma_num using properly normalized fmaxwl for GKW parity.
@@ -453,7 +453,7 @@ def precompute_apar(geometry: Dict[str, jnp.ndarray], params: Any = None):
     kperp_sq_3d = kperp_sq.reshape(kperp_sq.shape[-3], kperp_sq.shape[-2], kperp_sq.shape[-1])
 
     apar_diag = kperp_sq_3d + diag_em
-    apar_diag = jnp.where(jnp.abs(apar_diag) < _EPS, 1.0, apar_diag)
+    apar_diag = jnp.where(jnp.abs(apar_diag) < EPS, 1.0, apar_diag)
     return apar_weight, apar_diag, kperp_sq
 
 
@@ -524,17 +524,17 @@ def precompute_bpar(
         + 2 * ky_6 * kxrh_6 * little_g[:, 1].reshape(1, 1, 1, -1, 1, 1)
         + kxrh_6**2 * little_g[:, 2].reshape(1, 1, 1, -1, 1, 1)
     )
-    krloc = jnp.sqrt(jnp.maximum(krloc_sq, _EPS))
+    krloc = jnp.sqrt(jnp.maximum(krloc_sq, EPS))
     krloc_is_zero = jnp.abs(krloc) < 1e-5
 
-    sz_6 = jnp.where(jnp.abs(signz_6) < _EPS, 1.0, signz_6)
+    sz_6 = jnp.where(jnp.abs(signz_6) < EPS, 1.0, signz_6)
     gamma_arg = 0.5 * (mas_6 * vthrat_6 * krloc / (sz_6 * bn_6)) ** 2
     gamma_arg = jnp.clip(gamma_arg, 0.0, 500.0)
     gamma0 = i0e(gamma_arg)
     gamma1 = i1e(gamma_arg)
     gamma_diff = jnp.where(krloc_is_zero, 1.0, gamma0 - gamma1)
 
-    mugr_bn = jnp.maximum(2.0 * mugr_6 / bn_6, _EPS)
+    mugr_bn = jnp.maximum(2.0 * mugr_6 / bn_6, EPS)
     bessel_arg = mas_6 * vthrat_6 * krloc * jnp.sqrt(mugr_bn) / sz_6
     bessel_arg = jnp.where(jnp.isnan(bessel_arg), 0.0, bessel_arg)
     j1hat = jnp.where(krloc_is_zero, 0.5, j1_hat(bessel_arg))
@@ -548,7 +548,7 @@ def precompute_bpar(
 
     cdiag = F_sp1 * (1.0 + B_sp2) - F_sp2 * B_sp1
     cdiag_3d = cdiag.reshape(cdiag.shape[-3], cdiag.shape[-2], cdiag.shape[-1])
-    cdiag_3d = jnp.where(jnp.abs(cdiag_3d) < _EPS, 1.0, cdiag_3d)
+    cdiag_3d = jnp.where(jnp.abs(cdiag_3d) < EPS, 1.0, cdiag_3d)
 
     I_sp1 = signz_6 * de_6 * bn_6 * species_precompute["bessel"] * intvp_6 * intmu_6
     I_sp2 = beta * bn_6 * tmp_6 * de_6 * intvp_6 * intmu_6 * mugr_6 * j1hat
