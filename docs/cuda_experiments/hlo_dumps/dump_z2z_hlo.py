@@ -58,11 +58,11 @@ def main():
 
     import jax
     import jax.numpy as jnp
+    from gyaradax.jax_config import enable_x64
 
-    jax.config.update("jax_enable_x64", True)
+    enable_x64()
 
     from gyaradax.backends._jax import JAXOps
-    from gyaradax.state import GKPre
     from gyaradax.params import load_config, gkparams_from_config
     from gyaradax.solver import linear_precompute
     from gyaradax.geometry import compute_geometry
@@ -92,12 +92,11 @@ def main():
 
     params = gkparams_from_config(cfg)
     pre = linear_precompute(geom, params)
-    pre_gk = GKPre(pre)
 
     df, phi = setup_test_data(pre, jax, jnp, jnp.complex128)
 
-    ops_z2z_fp64 = JAXOps(pre_gk, use_z2z=True, mixed_precision=False)
-    ops_z2z_fp32 = JAXOps(pre_gk, use_z2z=True, mixed_precision=True)
+    ops_z2z_fp64 = JAXOps(pre, use_z2z=True, mixed_precision=False)
+    ops_z2z_fp32 = JAXOps(pre, use_z2z=True, mixed_precision=True)
 
     # FP64 HLO
     lowered64 = jax.jit(run_z2z_nonlinear).lower(ops_z2z_fp64, df, phi, geom)

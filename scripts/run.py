@@ -23,6 +23,8 @@ from typing import Any, TypedDict, cast
 
 import numpy as np
 
+from _runtime_config_loader import configure_runtime_env
+
 # parse --device / --device-list before any jax import so cuda sees the right gpus
 _parser = argparse.ArgumentParser(add_help=False)
 _parser.add_argument("--device", type=int, default=-1)
@@ -31,27 +33,19 @@ _parser.add_argument("--n-gpus-sp", type=int, default=1)
 _parser.add_argument("--n-gpus-vp", type=int, default=1)
 _parser.add_argument("--n-gpus-mu", type=int, default=1)
 _early_args, _ = _parser.parse_known_args()
-if _early_args.device_list:
-    os.environ["CUDA_VISIBLE_DEVICES"] = _early_args.device_list
-elif _early_args.device != -1:
-    os.environ["CUDA_VISIBLE_DEVICES"] = str(_early_args.device)
-os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
-
-# latency-hiding + pipelined collective flags: overlap NCCL ops with compute.
-# Note: in JAX ≥ 0.9 the old `enable_async_*` flags are removed (async is the
-# default). Keep only the pipelining / scheduler hints that still parse.
-if _early_args.n_gpus_sp * _early_args.n_gpus_vp * _early_args.n_gpus_mu > 1:
-    _async_flags = " ".join(
-        [
-            "--xla_gpu_enable_latency_hiding_scheduler=true",
-            "--xla_gpu_enable_pipelined_all_reduce=true",
-            "--xla_gpu_enable_pipelined_all_gather=true",
-            "--xla_gpu_enable_while_loop_double_buffering=true",
-        ]
-    )
-    os.environ["XLA_FLAGS"] = (os.environ.get("XLA_FLAGS", "") + " " + _async_flags).strip()
+configure_runtime_env(
+    device=_early_args.device,
+    device_list=_early_args.device_list,
+    n_gpus_sp=_early_args.n_gpus_sp,
+    n_gpus_vp=_early_args.n_gpus_vp,
+    n_gpus_mu=_early_args.n_gpus_mu,
+)
 
 import jax
+from gyaradax.jax_config import enable_x64
+
+enable_x64()
+
 import jax.numpy as jnp
 
 from gyaradax import load_config

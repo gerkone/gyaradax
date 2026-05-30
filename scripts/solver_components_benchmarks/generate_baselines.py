@@ -14,22 +14,23 @@ these baselines using both JAX and CUDA backends.
 """
 
 import argparse
-import os
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
+
+from _runtime_config_loader import configure_runtime_env
 
 # parse --device before JAX import
 _p = argparse.ArgumentParser(add_help=False)
 _p.add_argument("--device", type=int, default=1)
 _p.add_argument("--config", type=str, default="configs/iteration_13.yaml")
 _early, _ = _p.parse_known_args()
-os.environ["CUDA_VISIBLE_DEVICES"] = str(_early.device)
-os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
+configure_runtime_env(device=_early.device)
 
 import jax
+from gyaradax.jax_config import enable_x64
 
-jax.config.update("jax_enable_x64", True)
+enable_x64()
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -40,7 +41,7 @@ BASELINES_DIR.mkdir(exist_ok=True)
 
 def save(name: str, **arrays: Any) -> None:
     path = BASELINES_DIR / f"{name}.npz"
-    np.savez(path, **{k: np.array(v) for k, v in arrays.items()})
+    np.savez(str(path), **cast(Any, {k: np.array(v) for k, v in arrays.items()}))
     print(f"  saved {path.name}  ({', '.join(arrays)})")
 
 

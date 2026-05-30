@@ -8,8 +8,6 @@ import pytest
 import jax
 import jax.numpy as jnp
 
-jax.config.update("jax_enable_x64", True)
-
 from gyaradax.utils import load_geometry
 from gyaradax.geometry import compute_geometry, compute_geometry_from_input
 

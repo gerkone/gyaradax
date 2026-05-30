@@ -9,11 +9,12 @@ Backend handles all shape dispatch (5D adiabatic / 6D kinetic electrons).
 """
 
 import argparse
-import os
 import sys
 from pathlib import Path
 from dataclasses import replace
 from typing import Any
+
+from _runtime_config_loader import configure_runtime_env
 
 # ---------------------------------------------------------------------------
 # Early device selection (before any JAX import)
@@ -21,12 +22,12 @@ from typing import Any
 _p = argparse.ArgumentParser(add_help=False)
 _p.add_argument("--device", type=int, default=1)
 _early, _ = _p.parse_known_args()
-os.environ["CUDA_VISIBLE_DEVICES"] = str(_early.device)
-os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
+configure_runtime_env(device=_early.device)
 
 import jax  # noqa: E402
+from gyaradax.jax_config import enable_x64  # noqa: E402
 
-jax.config.update("jax_enable_x64", True)
+enable_x64()
 
 sys.path.insert(0, str(Path(__file__).parent))
 from common import (  # noqa: E402

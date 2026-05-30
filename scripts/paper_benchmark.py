@@ -18,15 +18,28 @@ import json
 import argparse
 from typing import Any
 
-import numpy as np
+from _runtime_config_loader import configure_runtime_env
 
-os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
+
+def _configure_device_from_argv() -> None:
+    """Apply --device before importing JAX so CUDA device visibility is honored."""
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--device", type=int, default=None)
+    args, _ = parser.parse_known_args()
+    configure_runtime_env(device=args.device)
+
+
+_configure_device_from_argv()
+
+import numpy as np
 
 import jax
 
-jax.config.update("jax_enable_x64", True)
-
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+from gyaradax.jax_config import enable_x64
+
+enable_x64()
 
 from gyaradax import load_geometry, GKParams, gk_init, gksolve
 from gyaradax.solver import (
@@ -219,7 +232,7 @@ def benchmark_gyaradax(
 ) -> dict[str, Any]:
     """Run full gyaradax benchmark. Returns a results dict."""
     if device is not None:
-        os.environ["CUDA_VISIBLE_DEVICES"] = str(device)
+        configure_runtime_env(device=device, preallocate=None)
 
     cfg = load_config(config_path)
     overrides: dict[str, Any] = {}

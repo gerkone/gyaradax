@@ -17,8 +17,6 @@ import numpy as np
 import pytest
 from dataclasses import replace
 
-jax.config.update("jax_enable_x64", True)
-
 from gyaradax.params import (
     GKParams,
     gkparams_from_config,

@@ -1,6 +1,6 @@
-import jax
+from gyaradax.jax_config import enable_x64
 
-jax.config.update("jax_enable_x64", True)
+enable_x64()
 
 _EPS = 1e-30
 

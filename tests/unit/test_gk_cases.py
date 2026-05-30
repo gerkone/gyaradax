@@ -6,7 +6,6 @@ Includes:
 
 import os
 
-import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -19,8 +18,6 @@ from gyaradax.params import GKParams
 from gyaradax.solver import init_f, default_state, linear_precompute
 from gyaradax.simulate import gk_run
 from gyaradax.integrals import calculate_phi
-
-jax.config.update("jax_enable_x64", True)
 
 
 GKW_CASES_DIR = os.path.join(os.path.dirname(__file__), "..", "data", "gkw_cases")

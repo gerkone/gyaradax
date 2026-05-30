@@ -73,11 +73,11 @@ def main():
 
     import jax
     import jax.numpy as jnp
+    from gyaradax.jax_config import enable_x64
 
-    jax.config.update("jax_enable_x64", True)
+    enable_x64()
 
     from gyaradax.backends._jax import JAXOps
-    from gyaradax.state import GKPre
     from gyaradax.params import load_config, gkparams_from_config
     from gyaradax.solver import linear_precompute
     from gyaradax.geometry import compute_geometry
@@ -111,11 +111,10 @@ def main():
     params = replace(params, non_linear=False)
 
     pre = linear_precompute(geom, params)
-    pre_gk = GKPre(pre)
 
     df, phi = setup_test_data(pre, jax, jnp, jnp.complex128)
 
-    ops = JAXOps(pre_gk, use_z2z=False)
+    ops = JAXOps(pre, use_z2z=False)
 
     dt = 0.01
 

@@ -28,12 +28,19 @@ repo_root = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(repo_root))
 sys.path.insert(0, str(repo_root / "scripts" / "solver_components_benchmarks"))
 
-from common import load_setup, BenchTimer, DEFAULT_BW_GBS, DEFAULT_FP64_TFLOPS, DEVICE_MODEL
+from gyaradax.jax_config import enable_x64
+
+enable_x64()
+
+from common import (  # type: ignore[import-not-found]
+    load_setup,
+    BenchTimer,
+    DEFAULT_BW_GBS,
+    DEFAULT_FP64_TFLOPS,
+    DEVICE_MODEL,
+)
+from gyaradax.state import GKPre
 from gyaradax.utils import unpack_half_spectrum
-
-# --- Enable X64 ---
-jax.config.update("jax_enable_x64", True)
-
 
 # --- FFI Registration ---
 def register_ffi():
@@ -85,6 +92,7 @@ def main():
     pre_gk = GKPre(pre)
     mrad, mphi = pre["nl_mrad"], pre["nl_mphi"]
     jind = np.array(pre["nl_jind"])  # packed -> dense map
+    jind_jax = jnp.array(jind)
     nkx, nky = df.shape[-2], df.shape[-1]
 
     # CRITICAL: Build inverse_jind (dense -> packed map) for the FFI callback
@@ -147,7 +155,6 @@ def main():
 
     # 3. JAX Baselines (R2C and Z2Z)
     from gyaradax.backends._jax import JAXOps
-    from gyaradax.state import GKPre
 
     jax_r2c = JAXOps(pre_gk, use_z2z=False, mixed_precision=False)
     jax_z2z_fp64 = JAXOps(pre_gk, use_z2z=True, mixed_precision=False)
@@ -181,7 +188,7 @@ def main():
         # Match baseline real-space scaling: dum_s * fft_scale * efun_sign * np.real(fft_prefactor)
         # Note: dum_s was already applied in CUDA, so we only need the rest
         nl_half = (fft_scale * efun_sign * jnp.real(fft_prefactor)) * out_normalized
-        nl = unpack_half_spectrum(nl_half, jind, nky)
+        nl = unpack_half_spectrum(nl_half, jind_jax, nky)
         ixzero, iyzero = pre["ixzero"], pre["iyzero"]
         nl_masked = nl.at[:, ixzero, iyzero].set(0.0)
         return nl_masked.reshape(-1, nkx, nky)

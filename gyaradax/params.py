@@ -1,8 +1,10 @@
 import jax
 import jax.numpy as jnp
 
+from gyaradax.jax_config import enable_x64
+
 # enforce 64-bit precision
-jax.config.update("jax_enable_x64", True)
+enable_x64()
 
 import os
 from omegaconf import OmegaConf

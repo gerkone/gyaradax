@@ -12,7 +12,6 @@ import shutil
 from pathlib import Path
 from typing import Any
 
-import jax
 import jax.numpy as jnp
 import numpy as np
 from omegaconf import OmegaConf
@@ -35,8 +34,6 @@ from gyaradax.geometry.circular import CircularGeometryModel, SAlphaGeometryMode
 from gyaradax.geometry.miller import MillerGeometryModel
 from gyaradax.simulate import _geometry_from_config
 from gyaradax.utils import load_geometry
-
-jax.config.update("jax_enable_x64", True)
 
 
 _BASE_KWARGS: dict[str, Any] = dict(

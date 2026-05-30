@@ -7,7 +7,9 @@ from typing import Any, Dict, Literal, Optional, Tuple, overload
 import jax
 import jax.numpy as jnp
 
-jax.config.update("jax_enable_x64", True)
+from gyaradax.jax_config import enable_x64
+
+enable_x64()
 
 from gyaradax.utils import load_geometry
 from gyaradax.geometry import compute_geometry_from_config

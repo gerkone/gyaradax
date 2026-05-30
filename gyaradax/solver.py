@@ -25,7 +25,9 @@ Time Integration: Explicit RK4 with optional per-ky normalization (linear mode).
 import jax
 import jax.numpy as jnp
 
-jax.config.update("jax_enable_x64", True)
+from gyaradax.jax_config import enable_x64
+
+enable_x64()
 
 import math
 import functools
