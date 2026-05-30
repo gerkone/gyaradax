@@ -58,18 +58,22 @@ def geom_tensors(geometry: Dict[str, jnp.ndarray], params: Any = None) -> Dict[s
         if params is not None and hasattr(params, k):
             val = getattr(params, k)
         else:
-            val = geometry[k]
-            if val.ndim > 0:
+            # d2X is no longer a GKParams field; default 1.0 if geometry lacks it
+            val = geometry.get(k, 1.0)
+            if hasattr(val, "ndim") and val.ndim > 0:
                 val = val[0]
         geom_[k] = jnp.reshape(jnp.asarray(val, dtype=jnp.float64), (1, 1, 1, 1, 1, 1))
 
-    if params is not None and hasattr(params, "vthrat"):
-        vthrat = params.vthrat
+    # vthrat is derived from species temperature and mass: sqrt(T_s/m_s).
+    if params is not None and hasattr(params, "tmp") and hasattr(params, "mas"):
+        _vt_tmp = jnp.asarray(params.tmp, dtype=jnp.float64)
+        _vt_mas = jnp.asarray(params.mas, dtype=jnp.float64)
     else:
-        vthrat = geometry["vthrat"]
-        if vthrat.ndim > 0:
-            vthrat = vthrat[0]
-    vthrat = jnp.reshape(jnp.asarray(vthrat, dtype=jnp.float64), (1, 1, 1, 1, 1, 1))
+        _vt_tmp = jnp.asarray(geometry["tmp"], dtype=jnp.float64)
+        _vt_mas = jnp.asarray(geometry["mas"], dtype=jnp.float64)
+    _vt_tmp = _vt_tmp[0] if _vt_tmp.ndim > 0 else _vt_tmp
+    _vt_mas = _vt_mas[0] if _vt_mas.ndim > 0 else _vt_mas
+    vthrat = jnp.reshape(jnp.sqrt(_vt_tmp / jnp.maximum(_vt_mas, 1e-30)), (1, 1, 1, 1, 1, 1))
 
     kxrh = rearrange(geometry["kxrh"], "x -> 1 1 1 1 x 1")
     little_g = rearrange(geometry["little_g"], "s three -> three 1 1 1 s 1 1")
@@ -408,7 +412,8 @@ def precompute_apar(geometry: Dict[str, jnp.ndarray], params: Any = None):
     signz = _sp_arr("signz")
     tmp = _sp_arr("tmp")
     de = _sp_arr("de")
-    vthrat = _sp_arr("vthrat")
+    # vthrat is derived from species temperature and mass: sqrt(T_s/m_s)
+    vthrat = jnp.sqrt(tmp / jnp.maximum(mas, 1e-30))
     nsp = mas.shape[0]
 
     geom_sp = dict(geometry)
@@ -572,7 +577,13 @@ def calculate_em_fluxes(
         d2X = jnp.asarray(geometry.get("d2X", 1.0), dtype=jnp.float64)
 
         bessel = jnp.asarray(geometry["bessel"], dtype=jnp.float64)
-        vthrat_val = float(getattr(params, "vthrat", 1.0)) if params else 1.0
+        # vthrat derived: sqrt(T/m); single-species (adiabatic) 5D EM-flux path
+        if params is not None:
+            _t = float(jnp.asarray(params.tmp).reshape(-1)[0])
+            _m = float(jnp.asarray(params.mas).reshape(-1)[0])
+            vthrat_val = (_t / max(_m, 1e-30)) ** 0.5
+        else:
+            vthrat_val = 1.0
         vpgr_b = vpgr.reshape(-1, 1, 1, 1, 1)
         mugr_b = mugr.reshape(1, -1, 1, 1, 1)
         bn_b = bn.reshape(1, 1, -1, 1, 1)
@@ -591,8 +602,7 @@ def calculate_em_fluxes(
         em_pflux, em_eflux, em_vflux = z, z, z
         if apar is not None:
             apar_b = apar[jnp.newaxis, jnp.newaxis, :, :, :]
-            # J0 gyro-average on A_par (GKW get_averaged_apar); matches the 6D
-            # branch. matches GKW diagnos_fluxes_vspace.F90:464 (-2·vthrat·vpar in χ)
+            # J0 gyro-average on A_par (GKW get_averaged_apar; matches 6D branch)
             apar_ga = bessel * apar_b
             dum_a = -2.0 * vthrat_val * vpgr_b * dum * jnp.conj(apar_ga)
             em_pflux = em_pflux + jnp.sum(d3v * jnp.imag(dum_a))
@@ -609,7 +619,13 @@ def calculate_em_fluxes(
         results = []
         for isp in range(nsp):
             sp_geom = dict(geometry)
-            vthrat_sp = float(jnp.asarray(geometry["vthrat"])[isp])
+            # vthrat derived: sqrt(T_s/m_s)
+            vthrat_sp = float(
+                jnp.sqrt(
+                    jnp.asarray(geometry["tmp"])[isp]
+                    / jnp.maximum(jnp.asarray(geometry["mas"])[isp], 1e-30)
+                )
+            )
             for k in ("mas", "tmp", "de", "signz", "vthrat", "rlt", "rln"):
                 if k in geometry and jnp.asarray(geometry[k]).ndim > 0:
                     sp_geom[k] = jnp.asarray(geometry[k])[isp : isp + 1]

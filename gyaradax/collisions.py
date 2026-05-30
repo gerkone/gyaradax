@@ -334,7 +334,8 @@ def _collect_species_arrays(params):
     tgt_signz = _arr(params.signz)
     tgt_tmp = _arr(params.tmp)
     tgt_de = _arr(params.de)
-    tgt_vthrat = _arr(params.vthrat)
+    # vthrat is derived from species temperature and mass: sqrt(T_s/m_s)
+    tgt_vthrat = jnp.sqrt(tgt_tmp / jnp.maximum(tgt_mas, 1e-30))
 
     if params.coll_bg_signz is None:
         bg_mas, bg_signz, bg_tmp, bg_de, bg_vthrat = (
@@ -384,7 +385,7 @@ def precompute_collisions(geometry: Dict, params: GKParams) -> Dict[str, jnp.nda
     vpgr = jnp.asarray(geometry["vpgr"], dtype=jnp.float64)
     mugr = jnp.asarray(geometry["mugr"], dtype=jnp.float64)
     bn = jnp.asarray(geometry["bn"], dtype=jnp.float64)
-    dvp = float(params.dvp)
+    dvp = float(geometry["dvp"])
     vperp_grid = jnp.sqrt(jnp.maximum(2.0 * mugr, 0.0))
     dvperp = float(vperp_grid[0] * 2.0)
 

@@ -1,8 +1,6 @@
 """Unit tests for the Fokker-Planck collision operator."""
 
 import jax.numpy as jnp
-import numpy as np
-import pytest
 from dataclasses import replace
 
 from gyaradax.collisions import precompute_collisions, collision_rhs
@@ -16,9 +14,6 @@ def _base_params(geom, **overrides):
         naverage=50,
         disp_par=1.0,
         disp_vp=0.0,
-        dvp=float(geom["dvp"]),
-        sgr_dist=float(geom["sgr_dist"]),
-        kxmax=float(geom["kxmax"]),
         kymax=float(geom["kymax"]),
         rlt=6.9,
         rln=2.2,
@@ -26,11 +21,9 @@ def _base_params(geom, **overrides):
         tmp=1.0,
         de=1.0,
         signz=1.0,
-        vthrat=1.0,
         shat=1.07,
         q=1.57,
         eps=0.177,
-        kthnorm=1.0,
         adiabatic_electrons=True,
         collisions=True,
         coll_freq=0.1,
@@ -168,8 +161,11 @@ def test_coulomb_log_path_runs_and_scales():
 
     geom = _geom()
     p = _base_params(
-        geom, coll_freq_override=False,
-        coll_rref=1.0, coll_nref=1.0, coll_tref=1.0,
+        geom,
+        coll_freq_override=False,
+        coll_rref=1.0,
+        coll_nref=1.0,
+        coll_tref=1.0,
     )
     assert "coll_stencil" in precompute_collisions(geom, p)
     L = float(_coulomb_log_ii(1.0, 1.0, 1.0, 1.0, 1.0))
@@ -190,7 +186,6 @@ def test_kinetic_produces_per_species_stencil():
         signz=jnp.array([1.0, -1.0]),
         tmp=jnp.array([1.0, 1.0]),
         de=jnp.array([1.0, 1.0]),
-        vthrat=jnp.array([1.0, 60.6]),
         rlt=jnp.array([6.9, 6.9]),
         rln=jnp.array([2.2, 2.2]),
         # self-collision only for this test: target = bg, pair sum reduces to self

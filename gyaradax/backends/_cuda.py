@@ -84,6 +84,11 @@ class CUDAOps(SolverOps):
             log.warning("CUDA backend: use_z2z=True ignored (CUDA is Z2Z-only)")
 
         super().__init__(pre, use_z2z, mixed_precision)
+        # dvp is a static float in pre (FFI needs concrete); 1.0 fallback for minimal test pres
+        try:
+            self._dvp = float(pre["dvp"])
+        except (KeyError, TypeError):
+            self._dvp = 1.0
 
     def _prepare_parallel_coeffs(self, c, nv, nmu, ns, nkx, nky):
         """Reshape stencil coefficients to (9, nv*nmu, ns, nkx, nky) for FFI."""
@@ -365,7 +370,7 @@ class CUDAOps(SolverOps):
             }
 
             result_sp = self._linear_rhs_fused(
-                df_sp, phi, sp_pre, params.dvp, params.disp_vp, params.drive_scale
+                df_sp, phi, sp_pre, self._dvp, params.disp_vp, params.drive_scale
             )
             results.append(result_sp)
 
@@ -389,7 +394,7 @@ class CUDAOps(SolverOps):
         """
         if df.ndim == 5:
             return self._linear_rhs_fused(
-                df, phi, pre, params.dvp, params.disp_vp, params.drive_scale
+                df, phi, pre, self._dvp, params.disp_vp, params.drive_scale
             )
 
         # 6D kinetic: always use per-species loop (ions and electrons have different params)

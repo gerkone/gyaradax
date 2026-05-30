@@ -10,6 +10,9 @@ from dataclasses import dataclass
 from typing import Dict, Any
 from gyaradax.utils import load_scalars
 
+# Species parameters that can be per-species arrays in multi-species (kinetic) configs.
+_SPECIES_PARAMS = frozenset({"rlt", "rln", "mas", "tmp", "de", "signz"})
+
 
 @jax.tree_util.register_pytree_node_class
 @dataclass(frozen=True)
@@ -38,28 +41,18 @@ class GKParams:
         tmp: Temperature of the kinetic species.
         de: Density of the kinetic species.
         signz: Charge sign of the species.
-        vthrat: Thermal velocity ratio.
         shat: Magnetic shear parameter.
         q: Safety factor.
         eps: Local aspect ratio.
-        kthnorm: Wavevector normalization factor.
         Rref: Reference major radius.
-        d2X: Geometry-dependent scaling factor.
         signB: Direction of the magnetic field.
-        dvp: Parallel velocity grid spacing.
-        sgr_dist: Field-line grid spacing.
-        kxmax: Maximum radial wavevector.
         kymax: Maximum binormal wavevector.
-        dgrid: Global density scaling.
-        tgrid: Global temperature scaling.
     """
 
     # runtime controls
     dt: float = 0.01
     naverage: int = 40
-    # dissipation defaults match GKW namelist (control.f90): disp_par=0.2,
-    # disp_vp=0.2, disp_x=disp_y=0.0. Every shipped config / input.dat sets
-    # these explicitly; the defaults only bite a bare GKParams().
+    # dissipation defaults match GKW namelist (control.f90); configs set these explicitly
     disp_par: float = 0.2
     disp_vp: float = 0.2
     disp_x: float = 0.0
@@ -112,24 +105,16 @@ class GKParams:
     tmp: float = 1.0
     de: float = 1.0
     signz: float = 1.0
-    vthrat: float = 1.0
 
     # geometry scalars
     shat: float = 0.0
     q: float = 1.0
     eps: float = 0.0
-    kthnorm: float = 1.0
     Rref: float = 1.0
-    d2X: float = 1.0
     signB: float = 1.0
 
     # grid metadata and scaling
-    dvp: float = 1.0
-    sgr_dist: float = 1.0
-    kxmax: float = 1.0
     kymax: float = 1.0
-    dgrid: float = 1.0
-    tgrid: float = 1.0
 
     # multi-GPU grid parallelism; sharding logic lives in gyaradax/sharding.py.
     # These fields only carry mesh shape and are static (part of trace signature).
@@ -180,17 +165,11 @@ class GKParams:
         "norm_eps",
         "cfl_safety",
         "amp_init",
-        "dvp",
-        "sgr_dist",
-        "kxmax",
         "kymax",
         "mas",
         "tmp",
         "de",
         "signz",
-        "vthrat",
-        "dgrid",
-        "tgrid",
     )
 
     def tree_flatten(self):
@@ -227,9 +206,7 @@ def gkparams_from_runtime(runtime: Dict[str, Any], **overrides) -> GKParams:
         "disp_vp": float(runtime.get("disp_vp", 0.2)),
         "disp_x": float(runtime.get("disp_x", 0.0)),
         "disp_y": float(runtime.get("disp_y", 0.0)),
-        # idisp, drive_scale, adaptive_dt, mixed_precision, cfl_safety were
-        # previously dropped on this path and silently fell back to the
-        # dataclass defaults; read them so input.dat / runtime dicts apply.
+        # idisp/drive_scale/adaptive_dt/mixed_precision/cfl_safety: previously dropped here
         "idisp": int(runtime.get("idisp", 2)),
         "drive_scale": float(runtime.get("drive_scale", 1.0)),
         "adaptive_dt": bool(runtime.get("adaptive_dt", False)),
@@ -263,7 +240,6 @@ def gkparams_from_runtime(runtime: Dict[str, Any], **overrides) -> GKParams:
         if k in runtime:
             params_dict[k] = runtime[k]
     # species params may be arrays (multi-species) or scalars
-    _SPECIES_PARAMS = {"rlt", "rln", "mas", "tmp", "de", "signz", "vthrat"}
     for k in _SPECIES_PARAMS:
         if k in runtime:
             v = runtime[k]
@@ -274,16 +250,9 @@ def gkparams_from_runtime(runtime: Dict[str, Any], **overrides) -> GKParams:
         "shat",
         "q",
         "eps",
-        "kthnorm",
         "Rref",
-        "d2X",
         "signB",
-        "dvp",
-        "sgr_dist",
-        "kxmax",
         "kymax",
-        "dgrid",
-        "tgrid",
     ]:
         if k in runtime:
             params_dict[k] = float(runtime[k])
@@ -327,13 +296,8 @@ def gkparams_from_input_and_geometry(
         "shat",
         "q",
         "eps",
-        "kthnorm",
         "Rref",
-        "d2X",
         "signB",
-        "dvp",
-        "sgr_dist",
-        "kxmax",
         "kymax",
     ):
         if k in geometry:
@@ -374,7 +338,6 @@ def gkparams_from_input_and_geometry(
         sp_signz = np.array([float(inp[k].get("z", 1.0)) for k in species_keys])
         sp_rlt = np.array([float(inp[k].get("rlt", 0.0)) for k in species_keys])
         sp_rln = np.array([float(inp[k].get("rln", 0.0)) for k in species_keys])
-        sp_vthrat = np.sqrt(sp_tmp / sp_mas)
 
         # adiabatic path evolves only kinetic (non-electron) species, dropping Z<0
         # from the target list; Boltzmann electron lives in the QN denominator.
@@ -390,7 +353,6 @@ def gkparams_from_input_and_geometry(
                 sp_signz = sp_signz[keep]
                 sp_rlt = sp_rlt[keep]
                 sp_rln = sp_rln[keep]
-                sp_vthrat = sp_vthrat[keep]
 
         def _maybe_scalar(arr):
             return float(arr[0]) if len(arr) == 1 else arr
@@ -403,7 +365,6 @@ def gkparams_from_input_and_geometry(
                 "signz": _maybe_scalar(sp_signz),
                 "rlt": _maybe_scalar(sp_rlt),
                 "rln": _maybe_scalar(sp_rln),
-                "vthrat": _maybe_scalar(sp_vthrat),
             }
         )
         # collision backgrounds = ALL species (kinetic + adiabatic)
@@ -481,64 +442,32 @@ def gkparams_from_config(config: Any, **overrides) -> GKParams:
         if not params_dict["coll_freq_override"]:
             raise NotImplementedError("collisions: only freq_override=True is supported in MVP")
 
-    # physics scalars (may be arrays for multi-species kinetic configs)
-    _SPECIES_PARAMS = {"rlt", "rln", "mas", "tmp", "de", "signz", "vthrat"}
-    _vthrat_explicit = hasattr(physics_cfg, "vthrat")
-    for k in ["rlt", "rln", "mas", "tmp", "de", "signz", "vthrat", "dgrid", "tgrid"]:
+    # physics scalars; vthrat/dgrid/tgrid removed (vthrat derived in solver, dgrid/tgrid from geometry)
+    for k in _SPECIES_PARAMS:
         if hasattr(physics_cfg, k):
             v = getattr(physics_cfg, k)
-            if k in _SPECIES_PARAMS and hasattr(v, "__iter__") and not isinstance(v, str):
+            if hasattr(v, "__iter__") and not isinstance(v, str):
                 params_dict[k] = jnp.array([float(x) for x in v])
-            elif hasattr(v, "__iter__") and not isinstance(v, str):
-                # scalar param stored as list in yaml (e.g. dgrid: [1.0, 1.0]) — take first
-                params_dict[k] = float(list(v)[0])
             else:
                 params_dict[k] = float(v)
 
-    # GKW defines vthrat = sqrt(T_s/m_s); old configs used sqrt(tgrid/mas) which
-    # was wrong for electrons (missing T_e factor). Default to sqrt(tmp/mas).
-    if not _vthrat_explicit and "tmp" in params_dict and "mas" in params_dict:
-        import numpy as _np
-
-        _tmp = _np.asarray(params_dict["tmp"], dtype=float)
-        _mas = _np.asarray(params_dict["mas"], dtype=float)
-        params_dict["vthrat"] = _np.sqrt(_tmp / _mas)
-
     # geometry scalars
-    for k in ["shat", "q", "eps", "kthnorm", "Rref", "d2X", "signB"]:
+    for k in ["shat", "q", "eps", "Rref", "signB"]:
         if hasattr(geometry_cfg, k):
             params_dict[k] = float(getattr(geometry_cfg, k))
 
-    # scaling/grid scalars
-    for k in ["dvp", "sgr_dist", "kxmax", "kymax"]:
+    # kymax is kept for hyper-dissipation normalisation
+    for k in ["kymax"]:
         if hasattr(geometry_cfg, k):
             params_dict[k] = float(getattr(geometry_cfg, k))
 
-    # derive sgr_dist/dvp from grid params when missing (matches compute_geometry).
-    # Without these, the parallel stencil divides by sgr_dist=1.0 instead of 1/ns,
-    # making terms I and VII ~ns times too weak. Same applies to dvp/kxmax/kymax.
+    # derive kymax when missing; sgr_dist/dvp/kxmax now sourced from geometry / computed in solver
     grid_cfg = getattr(config, "grid", None)
-    if "sgr_dist" not in params_dict and grid_cfg is not None:
-        ns = int(getattr(grid_cfg, "ns", 16))
-        nperiod = int(getattr(grid_cfg, "nperiod", 1))
-        if ns > 1:
-            params_dict["sgr_dist"] = (2.0 * nperiod - 1.0) / ns
-    if "dvp" not in params_dict and grid_cfg is not None:
-        nvpar = int(getattr(grid_cfg, "nvpar", 32))
-        vpar_max = float(getattr(grid_cfg, "vpar_max", 3.0))
-        if nvpar > 0:
-            params_dict["dvp"] = 2.0 * vpar_max / nvpar
-
-    # derive kxmax/kymax from grid params (internal units: krho/kthnorm and kxrh).
-    # Fallback is GKParams default 1.0.
-    if grid_cfg is not None:
-        nkx = int(getattr(grid_cfg, "nkx", 1))
+    if "kymax" not in params_dict and grid_cfg is not None:
         nky = int(getattr(grid_cfg, "nky", 1))
         krhomax = float(getattr(grid_cfg, "krhomax", 0.0))
         q = float(getattr(geometry_cfg, "q", 1.0))
-        shat = float(getattr(geometry_cfg, "shat", 0.0))
         eps = float(getattr(geometry_cfg, "eps", 0.1))
-        ikxspace = int(getattr(grid_cfg, "ikxspace", 5))
         geom_type = str(getattr(geometry_cfg, "geometry_model", "s-alpha"))
         import math
 
@@ -551,19 +480,8 @@ def gkparams_from_config(config: Any, **overrides) -> GKParams:
             )
         else:
             kthnorm = 1.0
-        if "kymax" not in params_dict and krhomax > 0 and nky > 1:
+        if krhomax > 0 and nky > 1:
             params_dict["kymax"] = krhomax / kthnorm
-        if (
-            "kxmax" not in params_dict
-            and nkx > 1
-            and krhomax > 0
-            and nky > 1
-            and abs(shat) > 1e-12
-            and abs(eps) > 1e-12
-        ):
-            ky_min_internal = krhomax / max(nky - 1, 1) / kthnorm
-            kxspace = abs(q * shat * ky_min_internal / (eps * max(ikxspace, 1)))
-            params_dict["kxmax"] = (nkx - 1) // 2 * kxspace
 
     if overrides:
         params_dict.update(overrides)

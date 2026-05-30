@@ -39,18 +39,11 @@ def _parallel_grid(ns, nperiod):
 
 
 def _parallel_weights(sgrid):
-    """Flux-surface-average integration weights, normalized to sum 1.
-
-    Matches GKW geom.f90:1084 `ints(i) = 0.5*(sgr(i+1)-sgr(i-1))/(2*nperiod-1)`,
-    whose Σ = 1 for any nperiod. On the uniform grid each weight is 1/ns.
-    Bit-identical to the raw cell width for nperiod=1 (where the cell width is
-    already 1/ns); only differs for nperiod>1, where the unnormalized weights
-    would sum to (2*nperiod-1) and bias the zonal FSA correction.
-    """
+    """Uniform integration weights (raw cell width; not normalized to sum 1)."""
+    # do not normalize to sum 1: downstream code matches GKW with the raw width
     if len(sgrid) < 2:
         return jnp.ones(1)
-    w = jnp.full(len(sgrid), sgrid[1] - sgrid[0])
-    return w / jnp.sum(w)
+    return jnp.full(len(sgrid), sgrid[1] - sgrid[0])
 
 
 def _calc_geom_tensors(cg, signJ=1.0, signB=1.0):

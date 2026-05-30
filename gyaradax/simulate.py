@@ -15,7 +15,7 @@ from gyaradax.integrals import (
     get_integrals,
     calculate_phi,
 )
-from gyaradax.params import gkparams_from_config, load_config, GKParams
+from gyaradax.params import gkparams_from_config, load_config, GKParams, _SPECIES_PARAMS
 from gyaradax.solver import (
     gksolve,
     init_f,
@@ -24,6 +24,7 @@ from gyaradax.solver import (
     default_state,
     linear_precompute,
     mode_amplitude,
+    _derive_vthrat,
 )
 from gyaradax.utils import save_dumps as save_dumps_fn
 
@@ -93,7 +94,8 @@ def _ensure_species_arrays(
     runs need per-species arrays in the geometry dict for downstream flux
     diagnostics (``calculate_fluxes_kinetic``); copy them over from params.
     """
-    _SPECIES_KEYS = ("mas", "signz", "de", "tmp", "vthrat", "rlt", "rln")
+    # Species params are copied from params to geometry dict.
+    # 'vthrat' is intentionally excluded: it is derived from tmp/mas below.
     mas = jnp.asarray(params.mas, dtype=jnp.float64)
     nsp = int(mas.shape[0]) if mas.ndim > 0 else 1
     if nsp <= 1:
@@ -103,11 +105,13 @@ def _ensure_species_arrays(
     if geom_nsp >= nsp:
         return geometry
 
-    geometry = dict(geometry)
-    for k in _SPECIES_KEYS:
+    geometry = dict(geometry)  # shallow copy
+    for k in _SPECIES_PARAMS:
         val = getattr(params, k, None)
         if val is not None:
             geometry[k] = jnp.asarray(val, dtype=jnp.float64)
+    # vthrat is derived from species temperatures and masses
+    geometry["vthrat"] = _derive_vthrat(params.tmp, params.mas)
     return geometry
 
 
