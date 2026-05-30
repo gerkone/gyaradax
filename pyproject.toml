@@ -1,28 +1,22 @@
 [project]
 name = "gyaradax"
-authors = [
-    {name = "Gianluca Galletti"},
-    {name = "Eric Volkmann"},
-]
+authors = [{ name = "Gianluca Galletti" }, { name = "Eric Volkmann" }]
 version = "0.0.1"
 description = "Gyrokinetic Vlasov-Poisson solver in JAX"
 requires-python = ">=3.12"
 dependencies = [
-    "jax[cuda13-local]",
-    "numpy",
-    "omegaconf",
-    "einops",
-    "matplotlib",
-    "pillow",
-    "scipy",
+  "jax",
+  "numpy",
+  "omegaconf",
+  "einops",
+  "matplotlib",
+  "pillow",
+  "scipy",
 ]
 
 [project.optional-dependencies]
-dev = [
-    "pytest",
-    "ruff",
-    "black",
-]
+cuda13 = ["jax[cuda13-local]"]
+dev = ["pytest", "ruff", "black"]
 
 [tool.setuptools.packages.find]
 include = ["gyaradax*"]

@@ -176,6 +176,11 @@ Add `--backend=cuda` to force CUDA backend.
 
 ## Building the CUDA backend
 
+The base package depends on CPU-compatible `jax`. Install the CUDA extra before building or using the CUDA backend:
+```bash
+pip install -e ".[cuda13]"
+```
+
 From `gyaradax/backends/cuda_kernels/`:
 ```bash
 mkdir -p _build && cd _build

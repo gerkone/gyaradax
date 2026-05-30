@@ -5,8 +5,12 @@ This directory the CUDA kernels for stencils and Poisson brackets, used via JAX 
 ## Prerequisites
 - **CUDA Toolkit**: NVCC and cuFFT. Tested for cudatoolkit >=13.1
 
-- **Python**: A environment with `jaxlib` installed (for FFI headers). Make sure you have a jax version installed that is compatible with your cudatoolkit version. See https://docs.jax.dev/en/latest/installation.html#pip-installation-nvidia-gpu-cuda-installed-locally-harder
-The default install of jax does not use your system's cudatoolkit, but rather installs its own. This can lead to version mismatches. 
+- **Python**: An environment with `jaxlib` installed (for FFI headers). The base `gyaradax` install depends on CPU-compatible `jax`; install the CUDA extra when building or using these kernels:
+  ```bash
+  pip install -e ".[cuda13]"
+  ```
+  Make sure the installed JAX/JAXLIB CUDA version is compatible with your local CUDA toolkit. See https://docs.jax.dev/en/latest/installation.html#pip-installation-nvidia-gpu-cuda-installed-locally-harder
+  The default install of JAX does not use your system's cudatoolkit, but rather installs its own. This can lead to version mismatches.
 
 ## Building the Library
 

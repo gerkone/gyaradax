@@ -12,11 +12,17 @@ import logging
 
 import jax
 
-from gyaradax.backends._cuda import CUDAOps, is_available
 from gyaradax.backends._jax import JAXOps
 from gyaradax.backends.ops import SolverOps
 
 log = logging.getLogger(__name__)
+
+
+def _load_cuda_backend():
+    """Import CUDA backend objects only when CUDA selection needs them."""
+    from gyaradax.backends._cuda import CUDAOps, is_available
+
+    return CUDAOps, is_available
 
 
 def create_ops(
@@ -45,13 +51,21 @@ def create_ops(
             raise RuntimeError("backend='cuda' but no GPU found")
 
         if has_gpu:
-            if is_available():
-                mp_str = " (mixed)" if mixed_precision else " (fp64)"
-                log.info("Backend: CUDA%s [Z2Z-only]", mp_str)
-                return CUDAOps(pre, use_z2z=use_z2z, mixed_precision=mixed_precision)
-            elif backend == "cuda":
-                raise RuntimeError("backend='cuda' but extensions not compiled")
+            try:
+                CUDAOps, is_available = _load_cuda_backend()
+            except ImportError as exc:
+                if backend == "cuda":
+                    raise RuntimeError(
+                        "backend='cuda' but CUDA backend could not be imported"
+                    ) from exc
+                log.info("Backend: JAX (GPU present, CUDA backend import failed)")
             else:
+                if is_available():
+                    mp_str = " (mixed)" if mixed_precision else " (fp64)"
+                    log.info("Backend: CUDA%s [Z2Z-only]", mp_str)
+                    return CUDAOps(pre, use_z2z=use_z2z, mixed_precision=mixed_precision)
+                if backend == "cuda":
+                    raise RuntimeError("backend='cuda' but extensions not compiled")
                 log.info("Backend: JAX (GPU present, extensions not compiled)")
 
         if backend == "auto":

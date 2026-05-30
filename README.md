@@ -17,17 +17,21 @@ Check out [our whitepaper](https://arxiv.org/abs/2604.06085), or see [agent note
 
 ## Installation
 
-Create a conda environment with CUDA toolkit and all dependencies:
+Create a conda environment and install the CPU/base package:
 ```bash
 conda env create -f environment.yml
 conda activate gyaradax_env
 pip install -e ".[dev]"
 ```
 
-This installs `gyaradax` in editable mode with JAX (CUDA 13, local toolkit), numpy, and dev tools (pytest, ruff, black). The conda environment provides the CUDA toolkit (>= 13.1), cuDNN, cmake, and a C++ compiler.
+This installs `gyaradax` in editable mode with the base JAX dependency, numpy, and dev tools (pytest, ruff, black). The conda environment provides common build tools and, when CUDA work is needed, the CUDA toolkit (>= 13.1), cuDNN, cmake, and a C++ compiler.
 
 ### CUDA Backend
-The optional CUDA backend provides fused kernels for the linear RHS stencils and the nonlinear Poisson bracket (cuFFT graph-captured pipeline). It requires a GPU with compute capability >= 80.
+The optional CUDA backend provides fused kernels for the linear RHS stencils and the nonlinear Poisson bracket (cuFFT graph-captured pipeline). It requires a GPU with compute capability >= 80. Install the CUDA JAX extra before building or using CUDA kernels:
+
+```bash
+pip install -e ".[cuda13,dev]"
+```
 
 From `gyaradax/backends/cuda_kernels/`:
 ```bash
