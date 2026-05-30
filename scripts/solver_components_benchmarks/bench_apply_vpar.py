@@ -41,7 +41,6 @@ def run(config="configs/iteration_13.yaml", mixed_precision=False):
     field = df
     pre_gk = GKPre(pre)
 
-
     results = {}
     backends = []
     for b in ["jax", "cuda"]:
