@@ -40,12 +40,14 @@ os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
 # Note: in JAX ≥ 0.9 the old `enable_async_*` flags are removed (async is the
 # default). Keep only the pipelining / scheduler hints that still parse.
 if _early_args.n_gpus_sp * _early_args.n_gpus_vp * _early_args.n_gpus_mu > 1:
-    _async_flags = " ".join([
-        "--xla_gpu_enable_latency_hiding_scheduler=true",
-        "--xla_gpu_enable_pipelined_all_reduce=true",
-        "--xla_gpu_enable_pipelined_all_gather=true",
-        "--xla_gpu_enable_while_loop_double_buffering=true",
-    ])
+    _async_flags = " ".join(
+        [
+            "--xla_gpu_enable_latency_hiding_scheduler=true",
+            "--xla_gpu_enable_pipelined_all_reduce=true",
+            "--xla_gpu_enable_pipelined_all_gather=true",
+            "--xla_gpu_enable_while_loop_double_buffering=true",
+        ]
+    )
     os.environ["XLA_FLAGS"] = (os.environ.get("XLA_FLAGS", "") + " " + _async_flags).strip()
 
 import jax
@@ -172,6 +174,7 @@ def _setup_run(config_path, args):
         df, geometry, state = gk_init(geometry, params, n_species=n_species)
 
     from gyaradax import sharding as _sharding
+
     mesh = _sharding.build_mesh(params)
     if mesh is not None:
         grid = _sharding.grid_shape_from(params, geometry)
