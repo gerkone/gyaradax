@@ -27,6 +27,10 @@ dev = [
 [tool.setuptools.packages.find]
 include = ["gyaradax*"]
 
+# ship the bundled gyaradax-QL Cn calibration weights as package data
+[tool.setuptools.package-data]
+"gyaradax.quasilinear.models" = ["*.pkl"]
+
 [tool.ruff]
 line-length = 100
 

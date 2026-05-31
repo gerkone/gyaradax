@@ -35,6 +35,7 @@ from .data import (
 )
 from .calibration import (
     fit_cn,
+    fit_cn_heads,
     fit_cn_log,
     fit_cn_parametric,
     fit_cn_polynomial,
@@ -44,15 +45,23 @@ from .calibration import (
     r2_score,
     DEFAULT_PARAM_FEATURES,
 )
-from .calibration_advanced import (
-    fit_cn_ridge_polynomial,
-    fit_cn_gbm,
-    fit_cn_gp_log,
-    RidgePolynomialCn,
-    GBMCn,
-    GPLogCn,
-)
+# advanced calibration heads need scikit-learn, an optional dependency. keep the
+# package importable (ql_flux, parametric/polynomial heads) when it is absent.
+try:
+    from .calibration_advanced import (
+        fit_cn_ridge_polynomial,
+        fit_cn_gbm,
+        fit_cn_gp_log,
+        RidgePolynomialCn,
+        GBMCn,
+        GPLogCn,
+    )
+except ImportError:
+    fit_cn_ridge_polynomial = fit_cn_gbm = fit_cn_gp_log = None
+    RidgePolynomialCn = GBMCn = GPLogCn = None
 from .linear_pipeline import linear_from_fds, linear_run, harvest, root_mse, root_mse_log
+from .models import load_default_weights as load_default_cn_weights
+from .models import load_weights_from_name as load_cn_weights_from_name
 
 __all__ = [
     "ql_flux",
@@ -69,6 +78,7 @@ __all__ = [
     "growth_rate_max",
     "FEATURE_NAMES",
     "fit_cn",
+    "fit_cn_heads",
     "fit_cn_log",
     "fit_cn_parametric",
     "fit_cn_polynomial",
@@ -88,4 +98,6 @@ __all__ = [
     "harvest",
     "root_mse",
     "root_mse_log",
+    "load_default_cn_weights",
+    "load_cn_weights_from_name",
 ]

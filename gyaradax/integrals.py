@@ -816,8 +816,9 @@ def calculate_em_fluxes(
             bt_frac_6 = gt["bt_frac"]
             signB_6 = gt["signB"]
 
-            # axes (0,1,2) are velocity-space + s; (-2,-1) are (kx,ky)
-            sum_axes_6 = (0, 1, 2, 3, 4) if reduce else (0, 1, 2)
+            # gt tensors are 6D (1, vpar, mu, s, kx, ky); df[isp] broadcasts to 6D too.
+            # reduce=True: sum every axis -> scalar. reduce=False: keep (kx, ky) -> sum (0,1,2,3).
+            sum_axes_6 = (0, 1, 2, 3, 4, 5) if reduce else (0, 1, 2, 3)
             zero_sp = z if reduce else jnp.zeros((df.shape[-2], df.shape[-1]), dtype=jnp.float64)
             sp_pf, sp_ef, sp_vf = zero_sp, zero_sp, zero_sp
             if apar is not None:

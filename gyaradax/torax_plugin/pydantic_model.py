@@ -41,6 +41,11 @@ class GyaradaxQLConfig(_GyaradaxBase):
     cn_calibration_path: Annotated[
         Optional[str], torax_pydantic.JAX_STATIC
     ] = "auto"
+    early_stop: Annotated[bool, torax_pydantic.JAX_STATIC] = True
+    early_stop_block: Annotated[int, torax_pydantic.JAX_STATIC] = 25
+    early_stop_atol: Annotated[float, torax_pydantic.JAX_STATIC] = 1e-4
+    early_stop_rtol: Annotated[float, torax_pydantic.JAX_STATIC] = 1e-3
+    early_stop_min_steps: Annotated[int, torax_pydantic.JAX_STATIC] = 50
 
     def build_transport_model(self):
         from gyaradax.torax_plugin.gyaradax_ql_transport_model import (

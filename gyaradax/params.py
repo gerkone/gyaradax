@@ -445,12 +445,15 @@ def gkparams_from_config(config: Any, **overrides) -> GKParams:
         "non_linear": bool(getattr(solver_cfg, "non_linear", False)),
         "finit": str(getattr(solver_cfg, "finit", "cosine2")),
         "amp_init": float(getattr(solver_cfg, "amp_init", 1.0e-4)),
+        "drive_scale": float(getattr(solver_cfg, "drive_scale", 1.0)),
         "adiabatic_electrons": bool(getattr(config.grid, "adiabatic_electrons", True)),
         "adaptive_dt": bool(getattr(solver_cfg, "adaptive_dt", False)),
         "cfl_safety": float(getattr(solver_cfg, "cfl_safety", 0.95)),
         "backend": str(getattr(solver_cfg, "backend", "jax")),
         "nlapar": bool(getattr(solver_cfg, "nlapar", False)),
         "nlbpar": bool(getattr(solver_cfg, "nlbpar", False)),
+        "mixed_precision": bool(getattr(solver_cfg, "mixed_precision", True)),
+        "disable_per_ky_norm": bool(getattr(solver_cfg, "disable_per_ky_norm", False)),
         "beta": float(getattr(physics_cfg, "beta", 0.0)),
     }
 
@@ -513,6 +516,46 @@ def gkparams_from_config(config: Any, **overrides) -> GKParams:
     for k in ["dvp", "sgr_dist", "kxmax", "kymax"]:
         if hasattr(geometry_cfg, k):
             params_dict[k] = float(getattr(geometry_cfg, k))
+
+    # derive sgr_dist and dvp from grid params when not specified in geometry
+    # (matches compute_geometry's internal calculation)
+    grid_cfg = getattr(config, "grid", None)
+    if "sgr_dist" not in params_dict and grid_cfg is not None:
+        ns = int(getattr(grid_cfg, "ns", 16))
+        nperiod = int(getattr(grid_cfg, "nperiod", 1))
+        if ns > 1:
+            params_dict["sgr_dist"] = (2.0 * nperiod - 1.0) / ns
+    if "dvp" not in params_dict and grid_cfg is not None:
+        nvpar = int(getattr(grid_cfg, "nvpar", 32))
+        vpar_max = float(getattr(grid_cfg, "vpar_max", 3.0))
+        if nvpar > 0:
+            params_dict["dvp"] = 2.0 * vpar_max / nvpar
+
+    # derive kxmax/kymax from grid params (max kx/ky in the wavevector grid).
+    # used in hyperdissipation normalization. fallback to GKParams default (1.0) if not derivable.
+    if grid_cfg is not None:
+        nkx = int(getattr(grid_cfg, "nkx", 1))
+        nky = int(getattr(grid_cfg, "nky", 1))
+        krhomax = float(getattr(grid_cfg, "krhomax", 0.0))
+        if "kymax" not in params_dict and krhomax > 0 and nky > 1:
+            params_dict["kymax"] = krhomax
+        # kxmax = (nkx-1)/2 * kxspace; need q, shat, eps, ikxspace, kthnorm
+        if "kxmax" not in params_dict and nkx > 1 and krhomax > 0 and nky > 1:
+            q = float(getattr(geometry_cfg, "q", 1.0))
+            shat = float(getattr(geometry_cfg, "shat", 0.0))
+            eps = float(getattr(geometry_cfg, "eps", 0.1))
+            ikxspace = int(getattr(grid_cfg, "ikxspace", 5))
+            geom_type = str(getattr(geometry_cfg, "geometry_model", "s-alpha"))
+            import math
+            # kthnorm for s-alpha: q / (2π·eps); for circ approximate similarly
+            if geom_type == "s-alpha":
+                kthnorm = q / (2.0 * math.pi * eps)
+            else:
+                kthnorm = 1.0
+            if abs(shat) > 1e-12 and abs(eps) > 1e-12:
+                ky_min_internal = krhomax / max(nky - 1, 1) / kthnorm
+                kxspace = abs(q * shat * ky_min_internal / (eps * max(ikxspace, 1)))
+                params_dict["kxmax"] = (nkx - 1) // 2 * kxspace
 
     if overrides:
         params_dict.update(overrides)

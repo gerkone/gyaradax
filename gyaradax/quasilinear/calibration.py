@@ -252,3 +252,72 @@ def fit_cn_polynomial_log(X, Y, F, feature_names=DEFAULT_PARAM_FEATURES,
     coef, *_ = np.linalg.lstsq(Phi, rhs, rcond=None)
     return PolynomialCn(coef=coef, feature_names=tuple(feature_names),
                         degree=degree, log_space=True)
+
+
+def fit_cn_heads(X, Y, F, *, degree=1, test_frac=0.2, seed=0, min_flux=None):
+    """Fit the full set of Cn heads on a (X_QL, Y_NL, F) dataset.
+
+    Convenience wrapper that produces the same payload dict the torax
+    gyaradax-ql plugin loads via `cn_calibration_path`: a scalar (basic ql),
+    a parametric and a polynomial head (cn version), a log-space polynomial,
+    plus train/test R2. Pickle the result and point `cn_calibration_path` at
+    it to use a custom calibration.
+
+    Args:
+      X: QL flux per sample at cn=1, shape (n,).
+      Y: nonlinear / target flux per sample, shape (n,).
+      F: features per sample, shape (n, n_features) in `FEATURE_NAMES` order.
+      degree: polynomial degree for the polynomial heads (1 = affine).
+      test_frac: held-out fraction for the reported R2.
+      seed: split RNG seed.
+      min_flux: if set, drop samples with Y < min_flux (unsaturated / noise).
+
+    Returns:
+      dict with keys scalar, parametric, polynomial, polynomial_log, r2_test,
+      r2_train, n_train, n_test.
+    """
+    X = np.asarray(X, dtype=float)
+    Y = np.asarray(Y, dtype=float)
+    F = np.asarray(F, dtype=float)
+    keep = np.isfinite(X) & np.isfinite(Y) & (X > 0) & (Y > 0)
+    if min_flux is not None:
+        keep &= Y >= float(min_flux)
+    X, Y, F = X[keep], Y[keep], F[keep]
+    if len(X) < 4:
+        raise ValueError(f"need >= 4 usable samples, got {len(X)}")
+
+    rng = np.random.default_rng(seed)
+    idx = rng.permutation(len(X))
+    n_test = max(1, int(test_frac * len(X)))
+    te, tr = idx[:n_test], idx[n_test:]
+    Xtr, Ytr, Ftr = X[tr], Y[tr], F[tr]
+    Xte, Yte, Fte = X[te], Y[te], F[te]
+
+    cn_scalar = float(fit_cn(jnp.asarray(Xtr), jnp.asarray(Ytr)))
+    par = fit_cn_parametric(Xtr, Ytr, Ftr)
+    poly = fit_cn_polynomial(Xtr, Ytr, Ftr, degree=degree)
+    poly_log = fit_cn_polynomial_log(Xtr, Ytr, Ftr, degree=degree)
+
+    def _r2(yt, yp):
+        return float(r2_score(jnp.asarray(yt), jnp.asarray(yp)))
+
+    return dict(
+        scalar=cn_scalar,
+        parametric=par,
+        polynomial=poly,
+        polynomial_log=poly_log,
+        r2_test=dict(
+            scalar=_r2(Yte, cn_scalar * Xte),
+            parametric=_r2(Yte, par.predict(Xte, Fte)),
+            polynomial=_r2(Yte, poly.predict(Xte, Fte)),
+            polynomial_log=_r2(Yte, poly_log.predict(Xte, Fte)),
+        ),
+        r2_train=dict(
+            scalar=_r2(Ytr, cn_scalar * Xtr),
+            parametric=_r2(Ytr, par.predict(Xtr, Ftr)),
+            polynomial=_r2(Ytr, poly.predict(Xtr, Ftr)),
+            polynomial_log=_r2(Ytr, poly_log.predict(Xtr, Ftr)),
+        ),
+        n_train=int(len(tr)),
+        n_test=int(len(te)),
+    )

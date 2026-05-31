@@ -156,7 +156,9 @@ def _build_mode_label(nkx, nky, ikxspace):
     """Mode-label array for open parallel boundary connectivity.
 
     ky=0: each kx is its own mode (periodic). ky>0: modes grouped into
-    chains spaced ikxspace apart in kx-index.
+    chains spaced `iy * ikxspace` apart in kx-index (matches GKW's
+    physical twist-shift `kx + (2*nperiod-1)*|q*shat*ky/eps|`, where
+    the shift scales linearly with ky).
     """
     ml = np.zeros((nkx, nky), dtype=np.int32)
     label = 1
@@ -164,10 +166,11 @@ def _build_mode_label(nkx, nky, ikxspace):
         ml[ix, 0] = label
         label += 1
     for iy in range(1, nky):
-        for offset in range(ikxspace):
+        step = iy * ikxspace  # scales with ky_idx -- matches GKW twist-shift
+        for offset in range(step):
             lbl = label
             label += 1
-            for ix in range(offset, nkx, ikxspace):
+            for ix in range(offset, nkx, step):
                 ml[ix, iy] = lbl
     return ml
 

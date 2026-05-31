@@ -28,7 +28,11 @@ from gyaradax.torax_plugin.gyaradax_based_transport_model import (
 
 
 _QI_CLIP_ABS = 1e3  # nan-guard / clip on per-radius q_i (poisons TORAX Newton otherwise)
-_REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
+# key the cn-head 'auto' search off the gyaradax install, not this file's location,
+# so it resolves correctly when dropped into torax/_src/transport_model
+import gyaradax as _gyaradax_pkg
+
+_GYARADAX_DATA = pathlib.Path(_gyaradax_pkg.__file__).resolve().parent.parent / "data"
 
 
 @jax.tree_util.register_dataclass
@@ -44,7 +48,7 @@ def _get_cn_head(path: str):
         return None
     if path == "auto":
         candidates = sorted(
-            glob.glob(str(_REPO_ROOT / "data" / "cn_iter_hybrid_*.pkl"))
+            glob.glob(str(_GYARADAX_DATA / "cn_iter_hybrid_*.pkl"))
         )
         if not candidates:
             warnings.warn(
@@ -77,6 +81,14 @@ class GyaradaxQLTransportModel(GyaradaxBasedTransportModel):
     ncv_eigensolve: int = 0
     cn_calibration_path: str = "auto"
     cn_scalar: float = 1.0
+    # early-stop knobs: skip remaining gksolve steps once per-ky growth rates
+    # stop moving. solver itself is untouched -- we chunk the call and check
+    # convergence between chunks via lax.while_loop.
+    early_stop: bool = True
+    early_stop_block: int = 25
+    early_stop_atol: float = 1e-4
+    early_stop_rtol: float = 1e-3
+    early_stop_min_steps: int = 50
 
     @classmethod
     def from_config(cls, cfg) -> "GyaradaxQLTransportModel":
@@ -92,6 +104,11 @@ class GyaradaxQLTransportModel(GyaradaxBasedTransportModel):
             nvpar=cfg.nvpar, nmu=cfg.nmu, ns=cfg.ns,
             nkx=cfg.nkx, nky=cfg.nky, ikxspace=cfg.ikxspace,
             cn_calibration_path=cfg.cn_calibration_path or "",
+            early_stop=cfg.early_stop,
+            early_stop_block=cfg.early_stop_block,
+            early_stop_atol=cfg.early_stop_atol,
+            early_stop_rtol=cfg.early_stop_rtol,
+            early_stop_min_steps=cfg.early_stop_min_steps,
         )
 
     @property
@@ -103,14 +120,57 @@ class GyaradaxQLTransportModel(GyaradaxBasedTransportModel):
     ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
         return self._gyaradax_ql_at_radius(params, geom)
 
+    def _linear_with_early_stop(self, df, geom, params, sim_state, pre):
+        """Chunked linear gksolve with per-ky growth-rate convergence check.
+
+        Runs gksolve in blocks of `early_stop_block` and exits early once the
+        per-ky growth-rate vector stops moving within (atol, rtol). Pure
+        wrapper -- never touches the solver internals. Hard-caps the total
+        iteration count at `n_steps_linear`. Compatible with jit + vmap
+        (lax.while_loop runs until *all* batch elements converge).
+        """
+        block = int(self.early_stop_block)
+        max_blocks = max(int(self.n_steps_linear) // block, 1)
+        min_blocks = max(int(self.early_stop_min_steps) // block, 1)
+        atol = float(self.early_stop_atol)
+        rtol = float(self.early_stop_rtol)
+
+        # bootstrap one block so `phi_last` has a concrete dtype/shape to carry
+        df1, (phi1, _flx), sim1 = gksolve(df, geom, params, sim_state,
+                                          n_steps=block, pre=pre)
+        g0 = sim1.last_growth_rate
+
+        def cond(state):
+            i, _df, _phi, _sim, _prev, conv = state
+            return jnp.logical_and(i < max_blocks, jnp.logical_not(conv))
+
+        def body(state):
+            i, df_c, _phi_c, sim_c, prev_g, _ = state
+            df_n, (phi_n, _f), sim_n = gksolve(df_c, geom, params, sim_c,
+                                                n_steps=block, pre=pre)
+            new_g = sim_n.last_growth_rate
+            delta = jnp.max(jnp.abs(new_g - prev_g))
+            scale = atol + rtol * jnp.max(jnp.abs(new_g))
+            conv = jnp.logical_and(i + 1 >= min_blocks, delta <= scale)
+            return (i + 1, df_n, phi_n, sim_n, new_g, conv)
+
+        init = (jnp.asarray(1), df1, phi1, sim1, g0, jnp.array(False))
+        _i, df_f, phi_f, sim_f, _g, _c = jax.lax.while_loop(cond, body, init)
+        return df_f, phi_f, sim_f
+
     def _gyaradax_ql_at_radius(self, params, geom):
         """Linear gksolve + QL saturation rule + Cn head at one radius."""
         df = self._initial_df()
         sim_state = default_state(nky=self.nky)
         pre = linear_precompute(geom, params)
-        df_final, (phi, _fluxes), sim_state_final = gksolve(
-            df, geom, params, sim_state, n_steps=self.n_steps_linear, pre=pre,
-        )
+        if self.early_stop:
+            df_final, phi, sim_state_final = self._linear_with_early_stop(
+                df, geom, params, sim_state, pre,
+            )
+        else:
+            df_final, (phi, _fluxes), sim_state_final = gksolve(
+                df, geom, params, sim_state, n_steps=self.n_steps_linear, pre=pre,
+            )
 
         gt = geom_tensors(geom)
         _pflux, eflux_kxy, _vflux = calculate_fluxes(gt, df_final, phi, reduce=False)
