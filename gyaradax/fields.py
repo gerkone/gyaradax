@@ -81,10 +81,13 @@ def _compute_fields(dg, geometry, params, pre):
 
     When nlapar=True, Ampere's law is solved directly from mixed ``g``/``dg``;
     the g2f contribution belongs in the Ampere diagonal, not in the source.
-    The code then forms physical ``f`` for the phi/RHS path.  For supported
-    A_parallel-only Maxwellian, symmetric-v_parallel cases, phi from this ``f``
-    is equivalent to phi from ``g`` by odd-v_parallel cancellation.  B_parallel
-    is separate and uses its coupled field weights when enabled.
+    The code then forms physical ``f`` for the phi/RHS path.  GKW's field
+    routine solves the coupled phi/B_parallel system from mixed ``g``.  For the
+    currently supported kinetic Maxwellian cases on symmetric v_parallel grids,
+    this ``f`` path is equivalent to the GKW ordering for phi/B_parallel: the
+    g2f correction is odd in v_parallel while the phi and B_parallel weights
+    are even, so its contribution cancels to roundoff.  This parity argument is
+    not guaranteed for asymmetric grids or future non-Maxwellian/species models.
     """
     if params.nlbpar and not params.nlapar:
         raise NotImplementedError(

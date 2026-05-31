@@ -384,6 +384,69 @@ class TestAmpereSolve:
 class TestBParallelLowRiskDeltas:
     """Targeted tests for Bpar B1/B2 low-risk behavior."""
 
+    @staticmethod
+    def _bpar_waltz_setup():
+        case_dir = _load_em_case("em_bpar_waltz")
+        geometry = _load_em_geometry(case_dir)
+        params = gkparams_from_input_and_geometry(os.path.join(case_dir, "input.dat"), geometry)
+        pre = linear_precompute(geometry, params)
+        shape = (
+            len(np.atleast_1d(np.asarray(params.mas))),
+            len(geometry["vpgr"]),
+            len(geometry["mugr"]),
+            len(geometry["sgrid"]),
+            len(geometry["kxrh"]),
+            len(geometry["krho"]),
+        )
+        return geometry, params, pre, shape
+
+    @staticmethod
+    def _random_complex(shape, seed=0, scale=1e-4):
+        key_re, key_im = jax.random.split(jax.random.PRNGKey(seed))
+        return (jax.random.normal(key_re, shape) + 1j * jax.random.normal(key_im, shape)).astype(
+            jnp.complex128
+        ) * scale
+
+    def test_bpar_g2f_parity_cancels_from_phi_and_bpar_weights(self):
+        """Symmetric-vpar Bpar weights cancel the odd g2f correction; Apar does not."""
+        geometry, params, pre, _shape = self._bpar_waltz_setup()
+        assert params.nlapar is True
+        assert params.nlbpar is True
+
+        phi_coupling = jnp.einsum("avmjkl,avmjkl->jkl", pre["phi_weight"], pre["g2f_factor"])
+        bpar_coupling = jnp.einsum("avmjkl,avmjkl->jkl", pre["bpar_weight"], pre["g2f_factor"])
+        apar_coupling = jnp.einsum("avmjkl,avmjkl->jkl", pre["apar_weight"], pre["g2f_factor"])
+
+        np.testing.assert_allclose(np.asarray(phi_coupling), 0.0, rtol=0.0, atol=1e-12)
+        np.testing.assert_allclose(np.asarray(bpar_coupling), 0.0, rtol=0.0, atol=1e-12)
+        assert float(jnp.max(jnp.abs(apar_coupling))) > 1e-6
+        # Keep the local variable live so future edits do not accidentally make
+        # the setup independent of the Waltz Bpar geometry/parameters.
+        assert len(geometry["vpgr"]) == pre["g2f_factor"].shape[1]
+
+    def test_bpar_coupled_fields_same_from_g_and_physical_f_for_supported_case(self):
+        """Current Waltz Bpar phi/Bpar solve is invariant to g->f by parity."""
+        from gyaradax.fields import g_to_f
+        from gyaradax.integrals import calculate_apar, calculate_phi
+
+        geometry, params, pre, shape = self._bpar_waltz_setup()
+        dg = self._random_complex(shape, seed=404)
+        apar = calculate_apar(geometry, dg, params=params, pre=pre)
+        df = g_to_f(dg, apar, params, pre)
+
+        phi_from_g = calculate_phi(geometry, dg, params=params, pre=pre)
+        phi_from_f = calculate_phi(geometry, df, params=params, pre=pre)
+        bpar_from_g = -jnp.einsum("avmjkl,avmjkl->jkl", pre["bpar_weight"], dg) / pre["phi_diag"]
+        bpar_from_f = -jnp.einsum("avmjkl,avmjkl->jkl", pre["bpar_weight"], df) / pre["phi_diag"]
+
+        assert float(jnp.max(jnp.abs(apar))) > 1e-10
+        np.testing.assert_allclose(
+            np.asarray(phi_from_f), np.asarray(phi_from_g), rtol=1e-12, atol=1e-14
+        )
+        np.testing.assert_allclose(
+            np.asarray(bpar_from_f), np.asarray(bpar_from_g), rtol=1e-12, atol=1e-14
+        )
+
     def test_bpar_curvature_rhs_matches_manual_contribution(self):
         """Term XI contributes the manual curvature-drift × bpar expression."""
         from gyaradax.backends._jax import JAXOps
