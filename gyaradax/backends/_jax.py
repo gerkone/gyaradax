@@ -302,9 +302,22 @@ class JAXOps(SolverOps):
 
         # term X: parallel derivative of gyro-averaged bpar (B_par compression)
         term_X_bpar_par = jnp.zeros_like(df)
+        # term XI: curvature drift × F_M × bpar coupling (B_par analog of VIII).
+        # GKW vd_grad_phi_fm elem2 at linear_terms.f90:2664-2667; equivalent
+        # to VIII with gyro_phi replaced by bpar_chi_factor*bpar.
+        term_XI_curv_bpar = jnp.zeros_like(df)
         if bpar is not None and "bpar_chi_factor" in pre:
+            bpar_b = bpar[None, None, :, :, :]
             gyro_bpar_scaled = pre["bpar_chi_factor"] * bpar_b
             term_X_bpar_par = self._apply_parallel(gyro_bpar_scaled, pre["s_total_t7"])
+            term_XI_curv_bpar = (
+                -1j
+                * params.drive_scale
+                * pre["signz0"]
+                * kdotvd
+                * (pre["fmaxwl"] / jnp.maximum(pre["tmp0"], 1e-15))
+                * gyro_bpar_scaled
+            )
 
         term_hyper_diss = pre["hyper"] * df
 
@@ -331,6 +344,7 @@ class JAXOps(SolverOps):
             "VII_landau_phi": term_VII_landau,
             "VIII_curv_phi": term_VIII_curv_phi,
             "X_bpar_par": term_X_bpar_par,
+            "XI_curv_bpar": term_XI_curv_bpar,
             "hyper_diss": term_hyper_diss,
             "collisions": term_collisions,
         }

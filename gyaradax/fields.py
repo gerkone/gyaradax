@@ -52,8 +52,11 @@ def f_to_g(df, apar, params, pre):
 def _compute_phi(df, geometry, params, pre):
     """Compute phi via the appropriate solver.
 
-    When nlapar=True, df should be the physical distribution (after g2f),
-    NOT the mixed variable g.
+    The argument is the distribution supplied to the quasineutrality solve.  In
+    the current A_parallel-only Maxwellian cases, using mixed ``g`` or physical
+    ``f = g_to_f(g, A_parallel)`` gives the same phi to roundoff: the g2f
+    correction is odd in v_parallel while the phi weights are even.  B_parallel
+    uses a separate coupled solve and is not covered by that A-only cancellation.
     """
     if params.adiabatic_electrons and "phi_weight" in pre and "phi_corr_weight" in pre:
         return calculate_phi_adiabatic(
@@ -74,12 +77,19 @@ def _compute_phi(df, geometry, params, pre):
 
 
 def _compute_fields(dg, geometry, params, pre):
-    """Compute all field variables (phi, apar, bpar) from the evolved variable dg.
+    """Compute all field variables (phi, apar, bpar) from evolved mixed ``dg``.
 
-    When nlapar=True: solves Ampere from g, transforms g->f, then solves phi
-    (coupled weight if nlbpar) and bpar from f. Returns (phi, apar, bpar) with
-    apar/bpar=None when disabled.
+    When nlapar=True, Ampere's law is solved directly from mixed ``g``/``dg``;
+    the g2f contribution belongs in the Ampere diagonal, not in the source.
+    The code then forms physical ``f`` for the phi/RHS path.  For supported
+    A_parallel-only Maxwellian, symmetric-v_parallel cases, phi from this ``f``
+    is equivalent to phi from ``g`` by odd-v_parallel cancellation.  B_parallel
+    is separate and uses its coupled field weights when enabled.
     """
+    if params.nlbpar and not params.nlapar:
+        raise NotImplementedError(
+            "B_parallel without A_parallel (nlbpar=True, nlapar=False) is not supported yet"
+        )
     if not params.nlapar:
         phi = _compute_phi(dg, geometry, params, pre)
         return phi, None, None

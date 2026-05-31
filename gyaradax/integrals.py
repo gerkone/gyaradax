@@ -466,18 +466,22 @@ def calculate_apar(
     """
     Compute A_parallel from Ampere's law.
 
-    df: (nsp, nvpar, nmu, ns, nkx, nky) — the physical distribution δf (not g).
+    df: legacy parameter name for the evolved mixed variable ``g``/``dg`` with
+        shape (nsp, nvpar, nmu, ns, nkx, nky), not the physical distribution
+        δf after the g2f transform.
     Returns: A_parallel with shape (ns, nkx, nky).
 
-    Note: df must be the physical distribution (after g2f transform), not the
-    mixed variable g. The caller is responsible for the g->f conversion.
+    GKW's mixed-variable Ampere solve uses the evolved ``g`` as the source and
+    keeps the g2f correction in the diagonal.  Passing physical ``f`` here
+    double-counts that correction and gives the wrong A_parallel.
     """
+    dg = df
     if pre is not None and "apar_weight" in pre:
         apar_weight = pre["apar_weight"]
         apar_diag = pre["apar_diag"]
     else:
         apar_weight, apar_diag, _ = precompute_apar(geometry, params)
-    apar_num = jnp.einsum("avmjkl,avmjkl->jkl", apar_weight, df)
+    apar_num = jnp.einsum("avmjkl,avmjkl->jkl", apar_weight, dg)
     return apar_num / apar_diag
 
 
@@ -652,6 +656,11 @@ def calculate_em_fluxes(
         signB = jnp.asarray(geometry["signB"], dtype=jnp.float64)
         d2X = jnp.asarray(geometry.get("d2X", 1.0), dtype=jnp.float64)
 
+        if pre is not None and "bessel" in pre:
+            bessel = jnp.asarray(pre["bessel"], dtype=jnp.float64)
+        else:
+            bessel = jnp.asarray(geom_tensors(geometry, params=params)["bessel"], dtype=jnp.float64)
+
         vthrat_val = float(getattr(params, "vthrat", 1.0)) if params else 1.0
         vpgr_b = vpgr.reshape(-1, 1, 1, 1, 1)
         mugr_b = mugr.reshape(1, -1, 1, 1, 1)
@@ -671,8 +680,11 @@ def calculate_em_fluxes(
         em_pflux, em_eflux, em_vflux = z, z, z
         if apar is not None:
             apar_b = apar[jnp.newaxis, jnp.newaxis, :, :, :]
+            # J0 gyro-average A_parallel (GKW get_averaged_apar), matching the
+            # kinetic 6D branch and the generalized-potential chi convention.
+            apar_ga = bessel * apar_b
             # matches GKW diagnos_fluxes_vspace.F90:464 (-2·vthrat·vpar in χ)
-            dum_a = -2.0 * vthrat_val * vpgr_b * dum * jnp.conj(apar_b)
+            dum_a = -2.0 * vthrat_val * vpgr_b * dum * jnp.conj(apar_ga)
             em_pflux = em_pflux + jnp.sum(d3v * jnp.imag(dum_a))
             em_eflux = em_eflux + jnp.sum(
                 d3v * (vpgr_b**2 * jnp.imag(dum_a) + 2 * mugr_b * bn_b * jnp.imag(dum_a))

@@ -215,12 +215,60 @@ class TestEMPrecompute:
             assert jnp.all(jnp.isfinite(direct[key]))
             np.testing.assert_allclose(np.asarray(direct[key]), np.asarray(pre[key]))
 
+    def test_adiabatic_bpar_guard(self):
+        """Adiabatic-electron B_parallel is rejected until its field solve is implemented."""
+        case_dir = _load_em_case("em_adiabat_apar")
+        geometry = _load_em_geometry(case_dir)
+        params = gkparams_from_input_and_geometry(os.path.join(case_dir, "input.dat"), geometry)
+        params = replace(params, nlapar=True, nlbpar=True)
+
+        with pytest.raises(NotImplementedError, match="adiabatic electrons"):
+            linear_precompute(geometry, params)
+
+    def test_bpar_without_apar_guard(self, em_setup):
+        """B_parallel-only currently raises instead of silently skipping bpar."""
+        geometry, params = em_setup
+        params = replace(params, nlapar=False, nlbpar=True)
+
+        with pytest.raises(NotImplementedError, match="without A_parallel"):
+            linear_precompute(geometry, params)
+
 
 # ── 3. Field solve tests ────────────────────────────────────────────────────
 
 
 class TestAmpereSolve:
     """Test the Ampere field solve for A_parallel."""
+
+    @staticmethod
+    def _random_complex(shape, seed=0, scale=1e-4):
+        key_re, key_im = jax.random.split(jax.random.PRNGKey(seed))
+        return (jax.random.normal(key_re, shape) + 1j * jax.random.normal(key_im, shape)).astype(
+            jnp.complex128
+        ) * scale
+
+    @staticmethod
+    def _field_shape(geometry, params):
+        base = (
+            len(geometry["vpgr"]),
+            len(geometry["mugr"]),
+            len(geometry["sgrid"]),
+            len(geometry["kxrh"]),
+            len(geometry["krho"]),
+        )
+        if params.adiabatic_electrons:
+            return base
+        return (len(np.atleast_1d(np.asarray(params.mas))),) + base
+
+    @staticmethod
+    def _a_only_setup(case_name):
+        case_dir = _load_em_case(case_name)
+        geometry = _load_em_geometry(case_dir)
+        params = gkparams_from_input_and_geometry(os.path.join(case_dir, "input.dat"), geometry)
+        assert params.nlapar is True
+        assert params.nlbpar is False
+        pre = linear_precompute(geometry, params)
+        return geometry, params, pre, TestAmpereSolve._field_shape(geometry, params)
 
     @pytest.fixture
     def em_full_setup(self):
@@ -265,6 +313,194 @@ class TestAmpereSolve:
         df = jnp.ones(shape, dtype=jnp.complex128) * 1e-4
         apar = calculate_apar(geometry, df, params=params, pre=pre)
         assert apar.dtype == jnp.complex128
+
+    def test_compute_fields_apar_uses_mixed_g_source(self):
+        """_compute_fields A_parallel matches direct Ampere solve from mixed g."""
+        from gyaradax.fields import _compute_fields
+        from gyaradax.integrals import calculate_apar
+
+        geometry, params, pre, shape = self._a_only_setup("em_cbc_apar")
+        dg = self._random_complex(shape, seed=101)
+
+        phi, apar, bpar = _compute_fields(dg, geometry, params, pre)
+        direct_apar = calculate_apar(geometry, dg, params=params, pre=pre)
+
+        assert apar is not None
+        assert bpar is None
+        assert float(jnp.max(jnp.abs(phi))) > 1e-10
+        assert float(jnp.max(jnp.abs(apar))) > 1e-10
+        np.testing.assert_allclose(np.asarray(apar), np.asarray(direct_apar), rtol=0.0, atol=0.0)
+
+    def test_apar_from_physical_f_differs_from_mixed_g_source(self):
+        """Passing physical f into Ampere double-counts g2f and changes A_parallel."""
+        from gyaradax.fields import g_to_f
+        from gyaradax.integrals import calculate_apar
+
+        geometry, params, pre, shape = self._a_only_setup("em_cbc_apar")
+        dg = self._random_complex(shape, seed=202)
+        correct_apar = calculate_apar(geometry, dg, params=params, pre=pre)
+        df = g_to_f(dg, correct_apar, params, pre)
+        wrong_apar = calculate_apar(geometry, df, params=params, pre=pre)
+
+        diff = float(jnp.max(jnp.abs(wrong_apar - correct_apar)))
+        assert float(jnp.max(jnp.abs(correct_apar))) > 1e-10
+        assert diff > 1e-8
+        assert not jnp.allclose(wrong_apar, correct_apar, rtol=1e-5, atol=1e-10)
+
+    @pytest.mark.parametrize("case_name", ["em_adiabat_apar", "em_cbc_apar"])
+    def test_phi_from_g_equals_phi_from_f_for_a_only_symmetric_vpar(self, case_name):
+        """A-only g2f correction is odd in v_parallel and cancels from phi."""
+        from gyaradax.fields import _compute_fields, _compute_phi, g_to_f
+
+        geometry, params, pre, shape = self._a_only_setup(case_name)
+        dg = self._random_complex(shape, seed=303)
+        _phi_fields, apar, bpar = _compute_fields(dg, geometry, params, pre)
+        assert apar is not None
+        assert bpar is None
+
+        df = g_to_f(dg, apar, params, pre)
+        phi_from_g = _compute_phi(dg, geometry, params, pre)
+        phi_from_f = _compute_phi(df, geometry, params, pre)
+
+        assert float(jnp.max(jnp.abs(phi_from_g))) > 1e-10
+        np.testing.assert_allclose(
+            np.asarray(phi_from_f),
+            np.asarray(phi_from_g),
+            rtol=1e-12,
+            atol=1e-14,
+        )
+
+    def test_compute_fields_bpar_without_apar_guard(self):
+        """The field path also rejects B_parallel-only instead of returning bpar=None."""
+        from gyaradax.fields import _compute_fields
+
+        params = GKParams(nlapar=False, nlbpar=True)
+        dg = jnp.zeros((2, 2, 2, 1, 1), dtype=jnp.complex128)
+
+        with pytest.raises(NotImplementedError, match="without A_parallel"):
+            _compute_fields(dg, {}, params, {})
+
+
+class TestBParallelLowRiskDeltas:
+    """Targeted tests for Bpar B1/B2 low-risk behavior."""
+
+    def test_bpar_curvature_rhs_matches_manual_contribution(self):
+        """Term XI contributes the manual curvature-drift × bpar expression."""
+        from gyaradax.backends._jax import JAXOps
+
+        case_dir = _load_em_case("em_bpar_waltz")
+        geometry = _load_em_geometry(case_dir)
+        params = gkparams_from_input_and_geometry(os.path.join(case_dir, "input.dat"), geometry)
+        pre = linear_precompute(geometry, params)
+        assert params.nlbpar is True
+        assert "bpar_chi_factor" in pre
+
+        shape = (
+            len(geometry["vpgr"]),
+            len(geometry["mugr"]),
+            len(geometry["sgrid"]),
+            len(geometry["kxrh"]),
+            len(geometry["krho"]),
+        )
+        df = jnp.zeros(shape, dtype=jnp.complex128)
+        phi = jnp.zeros(shape[2:], dtype=jnp.complex128)
+        bpar = jnp.ones(shape[2:], dtype=jnp.complex128) * (2.0e-5 + 3.0e-5j)
+        sp_pre = {
+            "bessel": pre["bessel"][0],
+            "fmaxwl": pre["fmaxwl"][0],
+            "dmaxwel_fm_ek": pre["dmaxwel_fm_ek"][0],
+            "drift_x": pre["drift_x"][0],
+            "drift_y": pre["drift_y"][0],
+            "utrap": pre["utrap"][0],
+            "abs_dum2_vp": pre["abs_dum2_vp"][0],
+            "tmp0": pre["tmp0"][0],
+            "signz0": pre["signz0"][0],
+            "s_total_upar": jnp.moveaxis(pre["s_total_upar"], 1, 0)[0],
+            "s_total_t7": jnp.moveaxis(pre["s_total_t7"], 1, 0)[0],
+            "bpar_chi_factor": pre["bpar_chi_factor"][0],
+            "kx_b": pre["kx_b"].ravel().reshape(1, 1, 1, -1, 1),
+            "ky_b": pre["ky_b"].ravel().reshape(1, 1, 1, 1, -1),
+            "hyper": pre["hyper"],
+        }
+
+        terms = JAXOps(pre, mixed_precision=False)._linear_rhs_terms(
+            df, phi, params, sp_pre, bpar=bpar
+        )
+        kdotvd = sp_pre["drift_x"] * sp_pre["kx_b"] + sp_pre["drift_y"] * sp_pre["ky_b"]
+        gyro_bpar_scaled = sp_pre["bpar_chi_factor"] * bpar[None, None, :, :, :]
+        manual = (
+            -1j
+            * params.drive_scale
+            * sp_pre["signz0"]
+            * kdotvd
+            * (sp_pre["fmaxwl"] / jnp.maximum(sp_pre["tmp0"], 1e-15))
+            * gyro_bpar_scaled
+        )
+
+        assert "XI_curv_bpar" in terms
+        assert float(jnp.max(jnp.abs(terms["XI_curv_bpar"]))) > 1e-14
+        np.testing.assert_allclose(
+            np.asarray(terms["XI_curv_bpar"]), np.asarray(manual), rtol=1e-13, atol=1e-18
+        )
+
+    def test_adiabatic_em_flux_uses_j0_gyroaveraged_apar(self):
+        """5D EM flux diagnostic uses J0*A_parallel, not bare A_parallel."""
+        from gyaradax.integrals import calculate_em_fluxes
+
+        case_dir = _load_em_case("em_adiabat_apar")
+        geometry = _load_em_geometry(case_dir)
+        params = gkparams_from_input_and_geometry(os.path.join(case_dir, "input.dat"), geometry)
+        pre = linear_precompute(geometry, params)
+
+        shape = (
+            len(geometry["vpgr"]),
+            len(geometry["mugr"]),
+            len(geometry["sgrid"]),
+            len(geometry["kxrh"]),
+            len(geometry["krho"]),
+        )
+        vp_profile = jnp.asarray(geometry["vpgr"], dtype=jnp.float64).reshape(-1, 1, 1, 1, 1)
+        df = jnp.broadcast_to((1.0e-4 * vp_profile).astype(jnp.complex128), shape)
+        apar = jnp.ones(shape[2:], dtype=jnp.complex128) * 1.0j
+        got = calculate_em_fluxes(geometry, df, apar, params=params, pre=pre)
+
+        ints = jnp.asarray(geometry["ints"], dtype=jnp.float64)
+        fsa = jnp.sum(ints)
+        parseval_b = jnp.asarray(geometry["parseval"], dtype=jnp.float64).reshape(1, 1, 1, 1, -1)
+        intvp_b = jnp.asarray(geometry["intvp"], dtype=jnp.float64).reshape(-1, 1, 1, 1, 1)
+        intmu_b = jnp.asarray(geometry["intmu"], dtype=jnp.float64).reshape(1, -1, 1, 1, 1)
+        vpgr_b = jnp.asarray(geometry["vpgr"], dtype=jnp.float64).reshape(-1, 1, 1, 1, 1)
+        mugr_b = jnp.asarray(geometry["mugr"], dtype=jnp.float64).reshape(1, -1, 1, 1, 1)
+        bn_b = jnp.asarray(geometry["bn"], dtype=jnp.float64).reshape(1, 1, -1, 1, 1)
+        ints_b = ints.reshape(1, 1, -1, 1, 1)
+        efun_b = jnp.asarray(geometry["efun"], dtype=jnp.float64).reshape(1, 1, -1, 1, 1)
+        krho_b = jnp.asarray(geometry["krho"], dtype=jnp.float64).reshape(1, 1, 1, 1, -1)
+        rfun_b = jnp.asarray(geometry["rfun"], dtype=jnp.float64).reshape(1, 1, -1, 1, 1)
+        bt_frac_b = jnp.asarray(geometry["bt_frac"], dtype=jnp.float64).reshape(1, 1, -1, 1, 1)
+        signB = jnp.asarray(geometry["signB"], dtype=jnp.float64)
+        d2X = jnp.asarray(geometry.get("d2X", 1.0), dtype=jnp.float64)
+        d3v = d2X * intmu_b * bn_b * intvp_b
+        dum = parseval_b * ints_b * (efun_b * krho_b) * df
+        apar_ga = pre["bessel"] * apar[jnp.newaxis, jnp.newaxis, :, :, :]
+        dum_a = -2.0 * float(params.vthrat) * vpgr_b * dum * jnp.conj(apar_ga)
+        manual = (
+            jnp.sum(d3v * jnp.imag(dum_a)) / fsa,
+            jnp.sum(d3v * (vpgr_b**2 * jnp.imag(dum_a) + 2 * mugr_b * bn_b * jnp.imag(dum_a)))
+            / fsa,
+            jnp.sum(d3v * (jnp.imag(dum_a) * vpgr_b * rfun_b * bt_frac_b * signB)) / fsa,
+        )
+        bare_dum_a = (
+            -2.0
+            * float(params.vthrat)
+            * vpgr_b
+            * dum
+            * jnp.conj(apar[jnp.newaxis, jnp.newaxis, :, :, :])
+        )
+        bare_pflux = jnp.sum(d3v * jnp.imag(bare_dum_a)) / fsa
+
+        for actual, expected in zip(got, manual):
+            np.testing.assert_allclose(np.asarray(actual), np.asarray(expected), rtol=1e-13)
+        assert abs(float(got[0] - bare_pflux)) > 1e-10
 
 
 # ── 4. g2f transform tests ──────────────────────────────────────────────────

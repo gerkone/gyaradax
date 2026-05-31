@@ -359,6 +359,15 @@ def _linear_precompute_core(geometry: Dict[str, jnp.ndarray], params: GKParams) 
     efun = jnp.asarray(geometry.get("efun", jnp.ones_like(bn)), dtype=jnp.float64)
     little_g = jnp.asarray(geometry["little_g"], dtype=jnp.float64)
 
+    if params.nlbpar and not params.nlapar:
+        raise NotImplementedError(
+            "B_parallel without A_parallel (nlbpar=True, nlapar=False) is not supported yet"
+        )
+    if params.nlbpar and params.adiabatic_electrons:
+        raise NotImplementedError(
+            "B_parallel with adiabatic electrons is not supported by the current field solve"
+        )
+
     out = _precompute_shared(
         geometry, params, kx, ky, ns, nkx, nky, vpgr, mugr, bn, ffun, gfun, dfun, efun
     )
