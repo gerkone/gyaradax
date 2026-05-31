@@ -89,25 +89,27 @@ def _compute_fields(dg, geometry, params, pre):
     are even, so its contribution cancels to roundoff.  This parity argument is
     not guaranteed for asymmetric grids or future non-Maxwellian/species models.
     """
-    if params.nlbpar and not params.nlapar:
-        raise NotImplementedError(
-            "B_parallel without A_parallel (nlbpar=True, nlapar=False) is not supported yet"
-        )
-    if not params.nlapar:
+    if not params.nlapar and not params.nlbpar:
         phi = _compute_phi(dg, geometry, params, pre)
         return phi, None, None
 
     # adiabatic + nlapar (GKW em_adiabat_apar): promote 5D dg to 6D so the
     # (nsp-indexed) apar/bpar einsums work uniformly, restore to 5D for phi.
+    # Kinetic Bpar-only enters here with apar=None and df_6d == dg_6d: there is
+    # no mixed-variable A_parallel correction when nlapar=False.
     adiabatic_5d = dg.ndim == 5
     dg_6d = dg[jnp.newaxis] if adiabatic_5d else dg
 
-    apar_weight = pre["apar_weight"]
-    apar_diag = pre["apar_diag"]
-    apar_num = jnp.einsum("avmjkl,avmjkl->jkl", apar_weight, dg_6d)
-    apar = apar_num / apar_diag
+    apar = None
+    if params.nlapar:
+        apar_weight = pre["apar_weight"]
+        apar_diag = pre["apar_diag"]
+        apar_num = jnp.einsum("avmjkl,avmjkl->jkl", apar_weight, dg_6d)
+        apar = apar_num / apar_diag
+        df_6d = g_to_f(dg_6d, apar, params, pre)
+    else:
+        df_6d = dg_6d
 
-    df_6d = g_to_f(dg_6d, apar, params, pre)
     df = df_6d[0] if adiabatic_5d else df_6d
     phi = _compute_phi(df, geometry, params, pre)
 

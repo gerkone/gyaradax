@@ -699,10 +699,16 @@ def calculate_em_fluxes(
         results = []
         for isp in range(nsp):
             sp_geom = dict(geometry)
-            vthrat_sp = float(jnp.asarray(geometry["vthrat"])[isp])
             for k in ("mas", "tmp", "de", "signz", "vthrat", "rlt", "rln"):
-                if k in geometry and jnp.asarray(geometry[k]).ndim > 0:
-                    sp_geom[k] = jnp.asarray(geometry[k])[isp : isp + 1]
+                if params is not None and hasattr(params, k):
+                    vals = jnp.asarray(getattr(params, k), dtype=jnp.float64).reshape(-1)
+                elif k in geometry:
+                    vals = jnp.asarray(geometry[k], dtype=jnp.float64).reshape(-1)
+                else:
+                    continue
+                idx = isp if vals.shape[0] == nsp else 0
+                sp_geom[k] = vals[idx : idx + 1]
+            vthrat_sp = float(jnp.asarray(sp_geom["vthrat"])[0])
             gt = geom_tensors(sp_geom)
 
             parseval = gt["parseval"]
