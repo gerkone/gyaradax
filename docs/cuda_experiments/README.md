@@ -4,10 +4,13 @@ Historical optimization experiments for the CUDA backend. These files
 are **not** part of the build — the production kernels live in
 `gyaradax/backends/cuda_kernels/`.
 
-Python scripts in this directory are experimental analysis harnesses. They may
-set `CUDA_VISIBLE_DEVICES`, `XLA_PYTHON_CLIENT_PREALLOCATE`, or `XLA_FLAGS`
-directly to preserve the original reproduction workflow and are intentionally
-not migrated to the production `runtime_config` entrypoint pattern.
+Python scripts in this directory are experimental analysis harnesses. They use
+the centralized `gyaradax/runtime_config.py` loader pattern before importing
+JAX, so device defaults and `XLA_PYTHON_CLIENT_PREALLOCATE=false` match the
+main script entrypoints without importing the `gyaradax` package too early.
+HLO dump scripts still set their `XLA_FLAGS --xla_dump_to=...` path directly
+when `--full-dump` is requested, because that output location is specific to
+those experiments.
 
 ## Contents
 

@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 import argparse
-import os
 import sys
 import ctypes
+from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
+from typing import Any, Callable, cast
 
 # --- Argument Parsing ---
 repo_root = Path(__file__).resolve().parents[2]
@@ -14,9 +15,20 @@ parser.add_argument("--debug", action="store_true", help="Print debug slices and
 parser.add_argument("--slice", type=int, default=0, help="Run only N batches for debugging")
 args = parser.parse_args()
 
-os.environ["CUDA_VISIBLE_DEVICES"] = str(args.device)
-# Use a reasonable preallocation limit for a 20GB MIG
-os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
+
+def _load_configure_runtime_env() -> Callable[..., None]:
+    """Load runtime_config without importing gyaradax before JAX setup."""
+    path = repo_root / "gyaradax" / "runtime_config.py"
+    spec = spec_from_file_location("_gyaradax_runtime_config", path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"could not load runtime config from {path}")
+    module = module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return cast(Callable[..., None], getattr(cast(Any, module), "configure_runtime_env"))
+
+
+configure_runtime_env = _load_configure_runtime_env()
+configure_runtime_env(device=args.device)
 
 import jax
 import jax.numpy as jnp
@@ -41,6 +53,7 @@ from common import (  # type: ignore[import-not-found]
 )
 from gyaradax.state import GKPre
 from gyaradax.utils import unpack_half_spectrum
+
 
 # --- FFI Registration ---
 def register_ffi():
@@ -121,6 +134,7 @@ def main():
         * df_ffi.shape[2]
         * (df_ffi.shape[3] if df_ffi.ndim == 6 else 1)
     )
+    batch_to_run = full_batch_size
 
     if args.slice > 0:
         batch_to_run = min(full_batch_size, args.slice)

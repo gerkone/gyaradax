@@ -4,10 +4,26 @@
 import os
 import sys
 import argparse
+from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
+from typing import Any, Callable, cast
 
 repo_root = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(repo_root))
+
+
+def _load_configure_runtime_env() -> Callable[..., None]:
+    """Load runtime_config without importing gyaradax before JAX setup."""
+    path = repo_root / "gyaradax" / "runtime_config.py"
+    spec = spec_from_file_location("_gyaradax_runtime_config", path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"could not load runtime config from {path}")
+    module = module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return cast(Callable[..., None], getattr(cast(Any, module), "configure_runtime_env"))
+
+
+configure_runtime_env = _load_configure_runtime_env()
 
 
 def setup_test_data(pre, jax, jnp, dtype):
@@ -50,9 +66,11 @@ def main():
         os.environ["XLA_FLAGS"] = "--xla_dump_to=./xla_hlo"
         os.makedirs("./xla_hlo", exist_ok=True)
 
-    os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
-    if "CUDA_VISIBLE_DEVICES" not in os.environ:
-        os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+    configure_runtime_env(
+        device=0 if "CUDA_VISIBLE_DEVICES" not in os.environ else -1,
+        preallocate="false",
+        force_preallocate=True,
+    )
 
     print("Generating Z2Z HLO dumps...")
 
