@@ -4,6 +4,11 @@ Historical optimization experiments for the CUDA backend. These files
 are **not** part of the build — the production kernels live in
 `gyaradax/backends/cuda_kernels/`.
 
+Python scripts in this directory are experimental analysis harnesses. They may
+set `CUDA_VISIBLE_DEVICES`, `XLA_PYTHON_CLIENT_PREALLOCATE`, or `XLA_FLAGS`
+directly to preserve the original reproduction workflow and are intentionally
+not migrated to the production `runtime_config` entrypoint pattern.
+
 ## Contents
 
 - **`cufft_graph_bracket*.cu`** — iterations on the cuFFT graph-captured
