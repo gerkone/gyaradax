@@ -33,6 +33,11 @@ baseline_*.npz
 tmp/
 cache/
 gkw_ref/
+!gkw_ref/
+gkw_ref/*
+!gkw_ref/em_validation_inputs/
+gkw_ref/em_validation_inputs/*
+!gkw_ref/em_validation_inputs/*.input.dat
 
 # --- VCS / IDE / Editor noise ---
 .vscode/
