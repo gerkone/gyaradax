@@ -144,6 +144,8 @@ def estimate_linear_timestep(
         jnp.asarray(40.0, dtype=jnp.float64),
     )
 
+    if params is not None:
+        fac_dtim_est = float(getattr(params, "fac_dtim_est", fac_dtim_est))
     fac = jnp.asarray(fac_dtim_est, dtype=jnp.float64)
     return jnp.where(tmax > EPS, fac / tmax, jnp.asarray(1e10, dtype=jnp.float64))
 
@@ -153,11 +155,13 @@ def estimate_timestep(
     pre: GKPre,
     bessel: jnp.ndarray,
     dt_input: float,
-    safety_factor: float = 0.95,
+    safety_factor: float = 1.0,
     params: Optional["GKParams"] = None,
     apar: Optional[jnp.ndarray] = None,
 ) -> jnp.ndarray:
     """Combined CFL: min(nonlinear ExB + EM apar, linear von Neumann)."""
+    if params is not None:
+        safety_factor = float(getattr(params, "fac_dtim_nl", safety_factor))
     dt_nl = estimate_nl_timestep(phi, pre, bessel, dt_input, safety_factor, apar=apar)
     if params is not None:
         dt_lin = estimate_linear_timestep(pre, params=params)

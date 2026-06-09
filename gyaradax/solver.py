@@ -542,7 +542,7 @@ def gksolve(
     if params.adaptive_dt and params.non_linear:
         # adaptive CFL path: carry dt as part of scan state
         dt_input = dt_input_scalar
-        cfl_safety = jnp.array(params.cfl_safety, dtype=jnp.float64)
+        cfl_safety = jnp.array(params.fac_dtim_nl, dtype=jnp.float64)
 
         def _scan_body(carry, _):
             curr_df, curr_state, curr_dt = carry

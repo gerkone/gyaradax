@@ -532,6 +532,10 @@ def load_runtime_params(input_dat_path: str) -> Dict[str, Any]:
     return {
         "dtim": _flt("dtim", 0.01),
         "naverage": _int("naverage", 40),
+        "nl_dtim_est": _bool("nl_dtim_est", True),
+        "fac_dtim_est": _flt("fac_dtim_est", 0.95),
+        "fac_dtim_nl": _flt("fac_dtim_nl", 1.0),
+        "spectral_radius": _bool("spectral_radius", True),
         "disp_par": _flt("disp_par", 1.0),
         "disp_vp": _flt("disp_vp", 0.2),
         "disp_x": _flt("disp_x", 0.0),

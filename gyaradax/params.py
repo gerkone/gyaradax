@@ -73,6 +73,9 @@ class GKParams:
     adiabatic_electrons: bool = True
     adaptive_dt: bool = False
     cfl_safety: float = 0.95
+    fac_dtim_est: float = 0.95
+    fac_dtim_nl: float = 1.0
+    spectral_radius: bool = True
     mixed_precision: bool = True
     backend: str = "jax"
     use_z2z: bool = False
@@ -179,6 +182,9 @@ class GKParams:
         "drive_scale",
         "norm_eps",
         "cfl_safety",
+        "fac_dtim_est",
+        "fac_dtim_nl",
+        "spectral_radius",
         "amp_init",
         "dvp",
         "sgr_dist",
@@ -220,6 +226,10 @@ class GKParams:
 
 def gkparams_from_runtime(runtime: Dict[str, Any], **overrides: Any) -> GKParams:
     """Build GKParams from a GKW-compatible runtime-controls dictionary."""
+    non_linear = bool(runtime.get("non_linear", False))
+    nl_dtim_est = bool(runtime.get("nl_dtim_est", True))
+    fac_dtim_est = float(runtime.get("fac_dtim_est", 0.95))
+    fac_dtim_nl = float(runtime.get("fac_dtim_nl", 1.0))
     params_dict: dict[str, Any] = {
         "dt": float(runtime.get("dtim", 0.01)),
         "naverage": int(runtime.get("naverage", 40)),
@@ -227,10 +237,15 @@ def gkparams_from_runtime(runtime: Dict[str, Any], **overrides: Any) -> GKParams
         "disp_vp": float(runtime.get("disp_vp", 0.2)),
         "disp_x": float(runtime.get("disp_x", 0.1)),
         "disp_y": float(runtime.get("disp_y", 0.1)),
-        "non_linear": bool(runtime.get("non_linear", False)),
+        "non_linear": non_linear,
         "finit": str(runtime.get("finit", "cosine2")),
         "amp_init": float(runtime.get("amp_init", 1.0e-4)),
         "adiabatic_electrons": bool(runtime.get("adiabatic_electrons", True)),
+        "adaptive_dt": non_linear and nl_dtim_est,
+        "cfl_safety": fac_dtim_nl,
+        "fac_dtim_est": fac_dtim_est,
+        "fac_dtim_nl": fac_dtim_nl,
+        "spectral_radius": bool(runtime.get("spectral_radius", True)),
         "backend": str(runtime.get("backend", "jax")),
         "nlapar": bool(runtime.get("nlapar", False)),
         "nlbpar": bool(runtime.get("nlbpar", False)),
@@ -423,6 +438,24 @@ def gkparams_from_config(config: Any, **overrides: Any) -> GKParams:
     physics_cfg = getattr(config, "physics", {})
     geometry_cfg = getattr(config, "geometry", {})
 
+    def _has_cfg_key(container: Any, key: str) -> bool:
+        try:
+            return key in container
+        except TypeError:
+            return hasattr(container, key)
+
+    fac_dtim_nl = float(
+        getattr(
+            solver_cfg,
+            "fac_dtim_nl",
+            getattr(solver_cfg, "cfl_safety", 0.95),
+        )
+    )
+    if _has_cfg_key(solver_cfg, "fac_dtim_nl"):
+        cfl_safety = fac_dtim_nl
+    else:
+        cfl_safety = float(getattr(solver_cfg, "cfl_safety", 0.95))
+
     params_dict: dict[str, Any] = {
         "dt": float(getattr(solver_cfg, "dt", 0.01)),
         "naverage": int(getattr(solver_cfg, "naverage", 40)),
@@ -437,7 +470,10 @@ def gkparams_from_config(config: Any, **overrides: Any) -> GKParams:
         "drive_scale": float(getattr(solver_cfg, "drive_scale", 1.0)),
         "adiabatic_electrons": bool(getattr(config.grid, "adiabatic_electrons", True)),
         "adaptive_dt": bool(getattr(solver_cfg, "adaptive_dt", False)),
-        "cfl_safety": float(getattr(solver_cfg, "cfl_safety", 0.95)),
+        "cfl_safety": cfl_safety,
+        "fac_dtim_est": float(getattr(solver_cfg, "fac_dtim_est", 0.95)),
+        "fac_dtim_nl": fac_dtim_nl,
+        "spectral_radius": bool(getattr(solver_cfg, "spectral_radius", True)),
         "backend": str(getattr(solver_cfg, "backend", "jax")),
         "nlapar": bool(getattr(solver_cfg, "nlapar", False)),
         "nlbpar": bool(getattr(solver_cfg, "nlbpar", False)),
