@@ -126,6 +126,10 @@ def _case_output_dir(output_root: Path, case: str) -> Path:
         return output_root / prefix / f"steps_{steps}"
     if "_window_001" in case:
         return output_root / "observables_window" / case
+    if case.endswith("_rollout_full"):
+        return output_root / "observables_rollout_full" / case
+    if case.endswith("_rollout_short"):
+        return output_root / "observables_rollout_short" / case
     if case.startswith(("linear_", "nonlinear_")):
         return output_root / "observables" / case
     return output_root / case

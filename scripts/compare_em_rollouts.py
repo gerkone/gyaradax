@@ -88,6 +88,8 @@ def resolve_gkw_case_dir(case_key: str, gkw_root: Path) -> Path:
         gkw_root / case_key,
         gkw_root / "observables" / case_key,
         gkw_root / "observables_window" / case_key,
+        gkw_root / "observables_rollout_full" / case_key,
+        gkw_root / "observables_rollout_short" / case_key,
     ]
     for candidate in candidates:
         if candidate.exists():

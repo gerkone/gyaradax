@@ -142,6 +142,8 @@ def _candidate_case_dirs(gkw_root: Path, case: str) -> list[Path]:
         gkw_root / case,
         gkw_root / "observables" / case,
         gkw_root / "observables_window" / case,
+        gkw_root / "observables_rollout_full" / case,
+        gkw_root / "observables_rollout_short" / case,
     ]
     if "_steps_" in case:
         prefix, steps = case.rsplit("_steps_", 1)
