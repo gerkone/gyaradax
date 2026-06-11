@@ -65,6 +65,18 @@ class GKParams:
     disp_x: float = 0.1
     disp_y: float = 0.1
     idisp: int = 2
+    # CGYRO-style conservative parallel dissipation: project out of the
+    # dissipated distribution the components that source the field solves,
+    # so disp_par cannot drive phi/A_par (cures the GKW issue #201 EM
+    # low-ky numerical instability). 0/False = off; 1 = null the Ampere
+    # current moment (J0*vpar) only; 2/True = null Poisson (J0) + Ampere
+    # moments (leaves the full F_M*J0*{1,vpar} subspace undissipated —
+    # can host a long-time spurious mode; prefer 1).
+    disp_par_conserve: int = 0
+    # apply the conservative-dissipation projection only to modes with
+    # krho <= this cutoff (the instability lives at kthrho < ~0.1; modes
+    # above keep the plain dissipation). <= 0 means no ky gating.
+    disp_par_conserve_kycut: float = 0.0
     drive_scale: float = 1.0
     norm_eps: float = 1.0e-14
     non_linear: bool = False
@@ -81,6 +93,15 @@ class GKParams:
     mixed_precision: bool = True
     backend: str = "jax"
     use_z2z: bool = False
+
+    # rotation (GKW &ROTATION): rigid toroidal rotation in the co-moving
+    # frame. vcor = Rref*Omega/vthref adds the Coriolis drift
+    # (2*mas*vthrat*vpar*vcor*hfun, linear_terms.f90 drift()); uprim is the
+    # per-species toroidal velocity gradient entering the Maxwellian
+    # gradient drive (dmaxwel). Centrifugal terms (cf_trap/cf_drift) are
+    # NOT implemented.
+    vcor: float = 0.0
+    uprim: Any = 0.0
 
     # electromagnetic controls
     nlapar: bool = False  # enable A_parallel (shear Alfven)
@@ -184,6 +205,8 @@ class GKParams:
         "disp_x",
         "disp_y",
         "idisp",
+        "disp_par_conserve",
+        "disp_par_conserve_kycut",
         "drive_scale",
         "norm_eps",
         "cfl_safety",
@@ -202,6 +225,8 @@ class GKParams:
         "vthrat",
         "dgrid",
         "tgrid",
+        "vcor",
+        "uprim",
     )
 
     def tree_flatten(self):
@@ -470,6 +495,10 @@ def gkparams_from_config(config: Any, **overrides: Any) -> GKParams:
         "disp_x": float(getattr(solver_cfg, "disp_x", 0.1)),
         "disp_y": float(getattr(solver_cfg, "disp_y", 0.1)),
         "idisp": int(getattr(solver_cfg, "idisp", 2)),
+        "disp_par_conserve": int(getattr(solver_cfg, "disp_par_conserve", 0)),
+        "disp_par_conserve_kycut": float(
+            getattr(solver_cfg, "disp_par_conserve_kycut", 0.0)
+        ),
         "non_linear": bool(getattr(solver_cfg, "non_linear", False)),
         "finit": str(getattr(solver_cfg, "finit", "cosine2")),
         "amp_init": float(getattr(solver_cfg, "amp_init", 1.0e-4)),

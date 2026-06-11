@@ -426,6 +426,11 @@ class CUDAOps(SolverOps):
                 "CUDA backend does not implement electromagnetic linear_rhs "
                 "coupling for apar/bpar; use backend='jax' for EM/B_parallel runs."
             )
+        if "s_disp_par" in pre:
+            raise NotImplementedError(
+                "CUDA backend does not implement disp_par_conserve "
+                "(conservative parallel dissipation); use backend='jax'."
+            )
 
         if df.ndim == 5:
             return self._linear_rhs_fused(

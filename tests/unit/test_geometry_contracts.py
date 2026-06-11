@@ -90,8 +90,6 @@ _INT_CONTRACT: dict[str, tuple[int, ...]] = {
     "mode_label": (5, 3),
     "ixplus": (5, 3),
     "ixminus": (5, 3),
-    "ixzero": (),
-    "iyzero": (),
     "s_shift": (9, 8, 5, 3),
     "kx_shift": (9, 8, 5, 3),
 }
@@ -299,6 +297,15 @@ def test_compute_geometry_representative_keys_shapes_dtypes_for_models() -> None
             assert key in geom, f"{geom_type}: missing {key}"
             assert geom[key].shape == shape, f"{geom_type}: {key} shape"
             assert geom[key].dtype == jnp.int32, f"{geom_type}: {key} dtype"
+
+        # static scalars are python ints/floats: they feed GKPre's hashable
+        # jit-static aux (see gyaradax.geometry.assembly)
+        for key in ("ixzero", "iyzero"):
+            assert key in geom, f"{geom_type}: missing {key}"
+            assert isinstance(geom[key], int), f"{geom_type}: {key} not a python int"
+        for key in ("dvp", "sgr_dist"):
+            assert key in geom, f"{geom_type}: missing {key}"
+            assert isinstance(geom[key], float), f"{geom_type}: {key} not a python float"
 
         assert geom["pos_par_grid_class"].shape == (8, 5, 3)
         assert geom["pos_par_grid_class"].dtype == jnp.int8

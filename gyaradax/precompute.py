@@ -239,7 +239,13 @@ def _fuse_stencils(
         sgr_dist, dtype=jnp.float64
     )
 
-    return s_total_upar, s_total_t7
+    # dissipation-only stencil (for the conservative-dissipation projection);
+    # recomputed standalone so s_total_upar keeps its original fp association
+    s_disp_par = (
+        jnp.asarray(disp_par, dtype=jnp.float64) * rearrange(abs_par, pat_coeff) * s_d4_upar
+    ) / jnp.asarray(sgr_dist, dtype=jnp.float64)
+
+    return s_total_upar, s_total_t7, s_disp_par
 
 
 def _compute_species_coeffs(
@@ -262,6 +268,10 @@ def _compute_species_coeffs(
     little_g,
     params,
     ndim,
+    hfun=None,
+    bt_frac=None,
+    rfun=None,
+    uprim=0.0,
 ):
     """Compute species-dependent RHS coefficients.
 
@@ -287,6 +297,7 @@ def _compute_species_coeffs(
             return jnp.reshape(arr, (1, 1, -1, 1, 1))
 
         sz = jnp.where(jnp.abs(signz) < EPS, 1.0, signz)
+        uprim = jnp.asarray(uprim, dtype=jnp.float64).reshape(-1)[0]
     else:
         # kinetic: per-species params, 6D arrays
         nsp = mas.shape[0]
@@ -303,6 +314,8 @@ def _compute_species_coeffs(
             r6(rln),
             r6(rlt),
         )
+        uprim = r6(jnp.broadcast_to(
+            jnp.asarray(uprim, dtype=jnp.float64).reshape(-1), (nsp,)))
         vp2 = jnp.reshape(vpgr**2, (1, -1, 1, 1, 1, 1))
         vp = jnp.reshape(vpgr, (1, -1, 1, 1, 1, 1))
         mu = jnp.reshape(mugr, (1, 1, -1, 1, 1, 1))
@@ -342,12 +355,25 @@ def _compute_species_coeffs(
         / jnp.pi**1.5
     )
     et = (vp2 + 2.0 * bn_b * mu) - 1.5
-    dmax_ek = (rln + rlt * et) * fmax * (efun_b * ky_b)
+    # rotation: uprim (toroidal velocity gradient) drive in the Maxwellian
+    # gradient bracket (GKW dmaxwel, linear_terms.f90:4769-4771):
+    # 2*sqrt(mas*tgrid)*bt_frac*rfun*uprim*vpar/tmp; with gyaradax's
+    # tgrid(is)=tmp(is) convention this is 2*bt_frac*rfun*uprim*vpar/vthrat.
+    up_drive = 0.0
+    if hfun is not None and bt_frac is not None and rfun is not None:
+        up_drive = (2.0 * d_shape(bt_frac * rfun) * uprim * vp / vthrat)
+    dmax_ek = (rln + rlt * et + up_drive) * fmax * (efun_b * ky_b)
 
     # drifts: GKW drift() scales by tgrid(is) = tmp(is) (linear_terms.f90:4154-4156).
     ed = vp2 + bn_b * mu
     drift_x = tmp * ed * d_shape(dfun[:, 0]) / sz
     drift_y = tmp * ed * d_shape(dfun[:, 1]) / sz
+    # rotation: Coriolis drift (GKW drift(), linear_terms.f90:4200-4203):
+    # 2*mas*vthrat*vpar*vcor*hfun / signz, added to the curvature drift.
+    vcor = jnp.asarray(getattr(params, "vcor", 0.0), dtype=jnp.float64)
+    if hfun is not None:
+        drift_x = drift_x + 2.0 * mas * vthrat * vp * vcor * d_shape(hfun[:, 0]) / sz
+        drift_y = drift_y + 2.0 * mas * vthrat * vp * vcor * d_shape(hfun[:, 1]) / sz
 
     upar = -ffun_b * vthrat * vp
     utrap = vthrat * mu * bn_b * gfun_b
@@ -387,6 +413,15 @@ def _compute_species_coeffs(
 def _linear_precompute_core(geometry: Dict[str, jnp.ndarray], params: GKParams) -> "GKPre":
     """Core implementation of linear_precompute (no auto-sharding logic)."""
     kx, ky = kx_ky_grids(geometry)
+
+    # rotation tensors (None when absent in legacy geometry dicts -> the
+    # vcor/uprim terms are skipped; compute_geometry always provides them)
+    _rot_hfun = (jnp.asarray(geometry["hfun"], dtype=jnp.float64)
+                 if "hfun" in geometry else None)
+    _rot_btfrac = (jnp.asarray(geometry["bt_frac"], dtype=jnp.float64)
+                   if "bt_frac" in geometry else None)
+    _rot_rfun = (jnp.asarray(geometry["rfun"], dtype=jnp.float64)
+                 if "rfun" in geometry else None)
     ns, nkx, nky = len(geometry["ints"]), int(kx.shape[0]), int(ky.shape[0])
 
     vpgr = jnp.asarray(geometry["vpgr"], dtype=jnp.float64)
@@ -432,6 +467,10 @@ def _linear_precompute_core(geometry: Dict[str, jnp.ndarray], params: GKParams) 
             little_g,
             params,
             ndim=6,
+            hfun=_rot_hfun,
+            bt_frac=_rot_btfrac,
+            rfun=_rot_rfun,
+            uprim=getattr(params, "uprim", 0.0),
         )
         if "vpgr_rms" in geometry:
             vp_rms = jnp.asarray(geometry["vpgr_rms"], dtype=jnp.float64)
@@ -451,7 +490,7 @@ def _linear_precompute_core(geometry: Dict[str, jnp.ndarray], params: GKParams) 
                 jnp.abs(vthrat_6 * bn_6 * gfun_6 * mu_rms),
             )
 
-        sp["s_total_upar"], sp["s_total_t7"] = _fuse_stencils(
+        sp["s_total_upar"], sp["s_total_t7"], s_disp_par = _fuse_stencils(
             sp["upar"],
             sp["abs_dum2_par"],
             sp["term7_fac"],
@@ -463,6 +502,54 @@ def _linear_precompute_core(geometry: Dict[str, jnp.ndarray], params: GKParams) 
             out["s_d4_ineg"],
             stencil_ndim=6,
         )
+        if params.disp_par_conserve:
+            # conservative parallel dissipation (CGYRO trick, cgyro_upwind.F90):
+            # the RHS subtracts disp(P[g]) where P projects g onto the
+            # F_M*J0*{1, vpar} components that source Poisson/Ampere. On the
+            # symmetric vpar grid the Gram matrix is diagonal by parity.
+            sp["s_disp_par"] = s_disp_par
+            intmu_p = jnp.asarray(geometry["intmu"], dtype=jnp.float64).reshape(
+                1, 1, -1, 1, 1, 1)
+            intvp_p = jnp.asarray(geometry["intvp"], dtype=jnp.float64).reshape(
+                1, -1, 1, 1, 1, 1)
+            bn_p = jnp.reshape(bn, (1, 1, 1, -1, 1, 1))
+            vpgr_p = jnp.reshape(vpgr, (1, -1, 1, 1, 1, 1))
+            w_base = 2.0 * bn_p * intmu_p * intvp_p * sp["bessel"]
+            g00 = jnp.sum(w_base * sp["bessel"] * sp["fmaxwl"],
+                          axis=(1, 2), keepdims=True)
+            g11 = jnp.sum(w_base * vpgr_p**2 * sp["bessel"] * sp["fmaxwl"],
+                          axis=(1, 2), keepdims=True)
+            mode = int(params.disp_par_conserve)
+            if mode == 3:
+                # CGYRO functional (cgyro_upwind.F90): single |vpar|-weighted
+                # density moment; even in vpar, reduces both field sources
+                # without zeroing an undamped subspace.
+                av = jnp.abs(vpgr_p)
+                gaa = jnp.sum(w_base * av**2 * sp["bessel"] * sp["fmaxwl"],
+                              axis=(1, 2), keepdims=True)
+                sp["dproj_w0"] = w_base * av
+                sp["dproj_e0"] = (sp["bessel"] * av * sp["fmaxwl"]
+                                  / jnp.maximum(gaa, EPS))
+                sp["dproj_w1"] = jnp.zeros_like(w_base)
+                sp["dproj_e1"] = jnp.zeros_like(sp["dproj_e0"])
+            else:
+                e0_gate = 1.0 if mode >= 2 else 0.0
+                sp["dproj_w0"] = w_base
+                sp["dproj_w1"] = w_base * vpgr_p
+                sp["dproj_e0"] = (e0_gate * sp["bessel"] * sp["fmaxwl"]
+                                  / jnp.maximum(g00, EPS))
+                sp["dproj_e1"] = (sp["bessel"] * vpgr_p * sp["fmaxwl"]
+                                  / jnp.maximum(g11, EPS))
+            kycut = float(params.disp_par_conserve_kycut)
+            if kycut > 0.0:
+                krho_g = jnp.asarray(geometry["krho"], dtype=jnp.float64)
+                kth = jnp.asarray(geometry.get("kthnorm", 1.0), dtype=jnp.float64)
+                # finite-ky only: the #201 instability needs ky>0; the
+                # zonal mode keeps plain dissipation (RH residual physics)
+                ky_mask = ((krho_g * kth <= kycut)
+                           & (krho_g > 0.0)).astype(jnp.float64)
+                sp["dproj_e0"] = sp["dproj_e0"] * ky_mask
+                sp["dproj_e1"] = sp["dproj_e1"] * ky_mask
         out.update(sp)
         out.update(precompute_collisions(geometry, params))
         out["geom_tensors"] = None
@@ -581,6 +668,10 @@ def _linear_precompute_core(geometry: Dict[str, jnp.ndarray], params: GKParams) 
             little_g,
             params,
             ndim=5,
+            hfun=_rot_hfun,
+            bt_frac=_rot_btfrac,
+            rfun=_rot_rfun,
+            uprim=getattr(params, "uprim", 0.0),
         )
         if "vpgr_rms" in geometry:
             vp_rms = jnp.asarray(geometry["vpgr_rms"], dtype=jnp.float64)
@@ -599,7 +690,7 @@ def _linear_precompute_core(geometry: Dict[str, jnp.ndarray], params: GKParams) 
                 jnp.abs(params.vthrat * bn_b * gfun_b * mu_rms),
             )
 
-        sp["s_total_upar"], sp["s_total_t7"] = _fuse_stencils(
+        sp["s_total_upar"], sp["s_total_t7"], s_disp_par = _fuse_stencils(
             sp["upar"],
             sp["abs_dum2_par"],
             sp["term7_fac"],
@@ -611,6 +702,49 @@ def _linear_precompute_core(geometry: Dict[str, jnp.ndarray], params: GKParams) 
             out["s_d4_ineg"],
             stencil_ndim=5,
         )
+        if params.disp_par_conserve:
+            # conservative parallel dissipation — see kinetic branch above
+            sp["s_disp_par"] = s_disp_par
+            intmu_p = jnp.asarray(geometry["intmu"], dtype=jnp.float64).reshape(
+                1, -1, 1, 1, 1)
+            intvp_p = jnp.asarray(geometry["intvp"], dtype=jnp.float64).reshape(
+                -1, 1, 1, 1, 1)
+            bn_p = jnp.reshape(bn, (1, 1, -1, 1, 1))
+            vpgr_p = jnp.reshape(vpgr, (-1, 1, 1, 1, 1))
+            w_base = 2.0 * bn_p * intmu_p * intvp_p * sp["bessel"]
+            g00 = jnp.sum(w_base * sp["bessel"] * sp["fmaxwl"],
+                          axis=(0, 1), keepdims=True)
+            g11 = jnp.sum(w_base * vpgr_p**2 * sp["bessel"] * sp["fmaxwl"],
+                          axis=(0, 1), keepdims=True)
+            mode = int(params.disp_par_conserve)
+            if mode == 3:
+                # CGYRO functional — see kinetic branch
+                av = jnp.abs(vpgr_p)
+                gaa = jnp.sum(w_base * av**2 * sp["bessel"] * sp["fmaxwl"],
+                              axis=(0, 1), keepdims=True)
+                sp["dproj_w0"] = w_base * av
+                sp["dproj_e0"] = (sp["bessel"] * av * sp["fmaxwl"]
+                                  / jnp.maximum(gaa, EPS))
+                sp["dproj_w1"] = jnp.zeros_like(w_base)
+                sp["dproj_e1"] = jnp.zeros_like(sp["dproj_e0"])
+            else:
+                e0_gate = 1.0 if mode >= 2 else 0.0
+                sp["dproj_w0"] = w_base
+                sp["dproj_w1"] = w_base * vpgr_p
+                sp["dproj_e0"] = (e0_gate * sp["bessel"] * sp["fmaxwl"]
+                                  / jnp.maximum(g00, EPS))
+                sp["dproj_e1"] = (sp["bessel"] * vpgr_p * sp["fmaxwl"]
+                                  / jnp.maximum(g11, EPS))
+            kycut = float(params.disp_par_conserve_kycut)
+            if kycut > 0.0:
+                krho_g = jnp.asarray(geometry["krho"], dtype=jnp.float64)
+                kth = jnp.asarray(geometry.get("kthnorm", 1.0), dtype=jnp.float64)
+                # finite-ky only: the #201 instability needs ky>0; the
+                # zonal mode keeps plain dissipation (RH residual physics)
+                ky_mask = ((krho_g * kth <= kycut)
+                           & (krho_g > 0.0)).astype(jnp.float64)
+                sp["dproj_e0"] = sp["dproj_e0"] * ky_mask
+                sp["dproj_e1"] = sp["dproj_e1"] * ky_mask
         out.update(sp)
         out.update(precompute_collisions(geometry, params))
         out["geom_tensors"] = geom_tensors(geometry, params=params)

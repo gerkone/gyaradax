@@ -321,6 +321,17 @@ class JAXOps(SolverOps):
 
         term_hyper_diss = pre["hyper"] * df
 
+        # conservative parallel dissipation (CGYRO trick): subtract from the
+        # dissipation its projection onto the F_M*J0*{1, vpar} components, so
+        # disp_par sources neither Poisson nor Ampere (cures the EM low-ky
+        # numerical instability, GKW issue #201).
+        term_disp_proj = jnp.zeros_like(df)
+        if "s_disp_par" in pre:
+            m0 = jnp.sum(pre["dproj_w0"] * df, axis=(0, 1), keepdims=True)
+            m1 = jnp.sum(pre["dproj_w1"] * df, axis=(0, 1), keepdims=True)
+            proj = pre["dproj_e0"] * m0 + pre["dproj_e1"] * m1
+            term_disp_proj = -self._apply_parallel(proj, pre["s_disp_par"])
+
         term_collisions = jnp.zeros_like(df)
         if params.collisions and "coll_stencil" in pre:
             term_collisions = collision_rhs(df, pre["coll_stencil"])
@@ -346,6 +357,7 @@ class JAXOps(SolverOps):
             "X_bpar_par": term_X_bpar_par,
             "XI_curv_bpar": term_XI_curv_bpar,
             "hyper_diss": term_hyper_diss,
+            "disp_par_conserve": term_disp_proj,
             "collisions": term_collisions,
         }
 
@@ -403,6 +415,10 @@ class JAXOps(SolverOps):
                 "s_total_upar": jnp.moveaxis(pre["s_total_upar"], 1, 0),
                 "s_total_t7": jnp.moveaxis(pre["s_total_t7"], 1, 0),
             }
+            if "s_disp_par" in pre:
+                sp_arrays["s_disp_par"] = jnp.moveaxis(pre["s_disp_par"], 1, 0)
+                for k in ("dproj_w0", "dproj_w1", "dproj_e0", "dproj_e1"):
+                    sp_arrays[k] = pre[k]
             # chi factors for em
             if apar is not None and "apar_chi_factor" in pre:
                 sp_arrays["apar_chi_factor"] = pre["apar_chi_factor"]
