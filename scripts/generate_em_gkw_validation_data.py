@@ -31,6 +31,7 @@ from typing import Any
 DEFAULT_GKW_ROOT = Path("/system/user/galletti/git/gkw")
 DEFAULT_GKW_EXE = DEFAULT_GKW_ROOT / "gkw_pike_stable.x"
 DEFAULT_INPUT_DIR = Path("gkw_ref/em_validation_inputs")
+DEFAULT_REGISTRY = Path("gkw_ref/em_validation_cases/index.json")
 DEFAULT_OUTPUT_ROOT = Path("/local00/bioinf/volkmann/gyrokinetics/em_validation")
 DEFAULT_MPIRUN = Path("/usr/lib64/openmpi/bin/mpirun")
 DEFAULT_MPI_ARGS = ["--mca", "btl", "^openib", "--mca", "mtl", "^ofi"]
@@ -163,6 +164,8 @@ def _run_case(
     *,
     input_path: Path,
     output_root: Path,
+    run_dir: Path | None,
+    registry_record: dict[str, Any] | None,
     gkw_exe: Path,
     gkw_root: Path,
     mpirun: Path,
@@ -173,7 +176,7 @@ def _run_case(
     env: dict[str, str],
 ) -> dict[str, Any]:
     case = _case_name(input_path)
-    run_dir = _case_output_dir(output_root, case)
+    run_dir = _case_output_dir(output_root, case) if run_dir is None else run_dir
     if run_dir.exists():
         if not overwrite:
             raise FileExistsError(f"output directory exists: {run_dir} (use --overwrite)")
@@ -203,6 +206,7 @@ def _run_case(
         "nprocs": nprocs,
         "command": command,
         "dry_run": dry_run,
+        "registry_record": registry_record,
     }
 
     if dry_run:
@@ -246,9 +250,60 @@ def _resolve_inputs(input_dir: Path, cases: list[str]) -> list[Path]:
     return paths
 
 
+def _load_registry(path: Path) -> dict[str, Any]:
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _select_registry_records(
+    registry: dict[str, Any],
+    *,
+    cases: list[str],
+    regime: str | None,
+    stage: str | None,
+) -> list[dict[str, Any]]:
+    requested = set(cases)
+    records: list[dict[str, Any]] = []
+    for record in registry.get("cases", []):
+        if requested and record.get("case") not in requested:
+            continue
+        if regime is not None and record.get("regime") != regime:
+            continue
+        if stage is not None and record.get("stage") != stage:
+            continue
+        if not requested and record.get("stage") == "source":
+            continue
+        records.append(record)
+    if requested:
+        matched = {record["case"] for record in records}
+        missing = sorted(requested - matched)
+        if missing:
+            raise FileNotFoundError("missing registry cases: " + ", ".join(missing))
+    return records
+
+
+def _registry_input_path(record: dict[str, Any], input_dir: Path) -> Path:
+    template = Path(str(record.get("template", "")))
+    if template.exists():
+        return template
+    return input_dir / f"{record['case']}.input.dat"
+
+
+def _registry_gkw_dir(record: dict[str, Any]) -> Path:
+    return Path(str(record["paths"]["structured"]["gkw"]))
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input-dir", type=Path, default=DEFAULT_INPUT_DIR)
+    parser.add_argument("--registry", type=Path, default=DEFAULT_REGISTRY)
+    parser.add_argument("--no-registry", action="store_true")
+    parser.add_argument("--legacy-paths", action="store_true")
+    parser.add_argument("--regime", choices=("linear", "nonlinear"), default=None)
+    parser.add_argument(
+        "--stage",
+        choices=("fixed_steps", "window_001", "rollout", "rollout_short", "rollout_full"),
+        default=None,
+    )
     parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)
     parser.add_argument("--gkw-root", type=Path, default=DEFAULT_GKW_ROOT)
     parser.add_argument("--gkw-exe", type=Path, default=DEFAULT_GKW_EXE)
@@ -289,22 +344,54 @@ def main(argv: list[str] | None = None) -> int:
     env["PATH"] = "/usr/lib64/openmpi/bin:/usr/bin:/bin:" + env.get("PATH", "")
 
     manifests = []
-    for input_path in _resolve_inputs(input_dir, args.cases):
-        manifest = _run_case(
-            input_path=input_path,
-            output_root=output_root,
-            gkw_exe=gkw_exe,
-            gkw_root=gkw_root,
-            mpirun=mpirun,
-            mpi_args=mpi_args,
-            use_mpi=args.mpi,
-            overwrite=args.overwrite,
-            dry_run=args.dry_run,
-            env=env,
+    use_registry = not args.no_registry and args.registry.exists()
+    if use_registry and not args.legacy_paths:
+        registry = _load_registry(args.registry)
+        records = _select_registry_records(
+            registry, cases=args.cases, regime=args.regime, stage=args.stage
         )
-        manifests.append(manifest)
-        status = "DRY" if args.dry_run else "OK"
-        print(f"[{status}] {manifest['case']} -> {manifest['run_dir']}")
+        for record in records:
+            input_path = _registry_input_path(record, input_dir)
+            if not input_path.exists():
+                raise FileNotFoundError(f"missing input template: {input_path}")
+            manifest = _run_case(
+                input_path=input_path,
+                output_root=output_root,
+                run_dir=_registry_gkw_dir(record),
+                registry_record=record,
+                gkw_exe=gkw_exe,
+                gkw_root=gkw_root,
+                mpirun=mpirun,
+                mpi_args=mpi_args,
+                use_mpi=args.mpi,
+                overwrite=args.overwrite,
+                dry_run=args.dry_run,
+                env=env,
+            )
+            manifests.append(manifest)
+            status = "DRY" if args.dry_run else "OK"
+            print(f"[{status}] {manifest['case']} -> {manifest['run_dir']}")
+    else:
+        if args.regime is not None or args.stage is not None:
+            raise ValueError("--regime/--stage filters require registry mode")
+        for input_path in _resolve_inputs(input_dir, args.cases):
+            manifest = _run_case(
+                input_path=input_path,
+                output_root=output_root,
+                run_dir=None,
+                registry_record=None,
+                gkw_exe=gkw_exe,
+                gkw_root=gkw_root,
+                mpirun=mpirun,
+                mpi_args=mpi_args,
+                use_mpi=args.mpi,
+                overwrite=args.overwrite,
+                dry_run=args.dry_run,
+                env=env,
+            )
+            manifests.append(manifest)
+            status = "DRY" if args.dry_run else "OK"
+            print(f"[{status}] {manifest['case']} -> {manifest['run_dir']}")
 
     if not args.dry_run:
         output_root.mkdir(parents=True, exist_ok=True)
