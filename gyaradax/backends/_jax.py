@@ -279,8 +279,8 @@ class JAXOps(SolverOps):
 
         # vpar stencil (trapping + vpar dissipation; 5-point central)
         out_d1, out_d4 = self._apply_vpar_dual(df, stencils.VPAR_D1, stencils.VPAR_D4)
-        term_IV_trapping = pre["utrap"] * out_d1 / params.dvp
-        term_IV_vp_diss = params.disp_vp * pre["abs_dum2_vp"] * out_d4 / params.dvp
+        term_IV_trapping = pre["utrap"] * out_d1 / pre["dvp"]
+        term_IV_vp_diss = params.disp_vp * pre["abs_dum2_vp"] * out_d4 / pre["dvp"]
 
         kdotvd = pre["drift_x"] * pre["kx_b"] + pre["drift_y"] * pre["ky_b"]
 
@@ -422,6 +422,8 @@ class JAXOps(SolverOps):
                 "kx_b": pre["kx_b"].ravel().reshape(1, 1, 1, -1, 1),
                 "ky_b": pre["ky_b"].ravel().reshape(1, 1, 1, 1, -1),
                 "hyper": pre["hyper"],
+                # static grid spacing (python float; species-independent)
+                "dvp": pre["dvp"],
             }
 
             def _per_species(df_sp, sp):

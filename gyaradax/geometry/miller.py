@@ -251,6 +251,9 @@ def _miller_geometry(
             * jnp.sqrt(2.0 * jnp.pi**2)
             / (dvoldpsi * jnp.sqrt(vol))
         )
+    elif gradp_type == "alpha_mhd":
+        # alpha = -q^2 * R * dbeta^e_dr (Candy 2009); geom.f90 case('alpha_mhd')
+        grdp = -gradp * dpfdpsi / eps**2
     elif gradp_type == "beta_prime_input":
         grdp = gradp / (2.0 * dpfdpsi)
     elif gradp_type == "pprime":

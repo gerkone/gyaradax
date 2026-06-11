@@ -73,6 +73,32 @@ def extended_seconddim_fft_size(nx: int) -> int:
     return dum
 
 
+def _static_float(v):
+    """Coerce a static scalar to a python float when concrete.
+
+    Python scalars pass through untouched (wrapping them in jnp.asarray under
+    an active jit trace would turn them into tracers); concrete numpy/jax
+    arrays are converted. Traced values (e.g. geometry arguments inside the
+    vmapped gk_run_batched path) cannot be made static -- they fall through
+    unchanged, reproducing the pre-static behavior on those paths."""
+    if isinstance(v, (int, float)):
+        return float(v)
+    try:
+        return float(jnp.asarray(v))
+    except Exception:  # ConcretizationTypeError under trace
+        return v
+
+
+def _static_int(v):
+    """Int analogue of _static_float (GKPre aux wants python ints when possible)."""
+    if isinstance(v, int):
+        return v
+    try:
+        return int(v)
+    except Exception:  # ConcretizationTypeError under trace
+        return jnp.asarray(v, dtype=jnp.int32)
+
+
 def build_jind(nkx: int, mrad: int, ixzero: int) -> jnp.ndarray:
     ix = jnp.arange(nkx, dtype=jnp.int32)
     return jnp.where(ix >= ixzero, ix - ixzero, mrad + ix - ixzero)
@@ -83,8 +109,11 @@ def _precompute_shared(
 ):
     """Species-independent precomputed quantities shared by both paths."""
     pos_par = jnp.asarray(geometry["pos_par_grid_class"], dtype=jnp.int32)
-    ixzero = jnp.asarray(geometry.get("ixzero", jnp.argmin(jnp.abs(kx))), dtype=jnp.int32)
-    iyzero = jnp.asarray(geometry.get("iyzero", jnp.argmin(jnp.abs(ky))), dtype=jnp.int32)
+    # concrete python ints: these land in GKPre's aux (jit-static metadata), so
+    # they must be hashable. Topology entries are always concrete, even when
+    # (q, shat, eps) are traced in the torax-plugin path.
+    ixzero = _static_int(geometry["ixzero"] if "ixzero" in geometry else jnp.argmin(jnp.abs(kx)))
+    iyzero = _static_int(geometry["iyzero"] if "iyzero" in geometry else jnp.argmin(jnp.abs(ky)))
     mphi, mphiw3 = extended_firstdim_fft_size(nky)
     mrad = extended_seconddim_fft_size(nkx)
 
@@ -97,7 +126,7 @@ def _precompute_shared(
 
     # NL CFL length-inverse factors: lxinv = 1/lx with lx = 2π/kx_min
     # (GKW mode.f90:740). Single-mode runs fall back to the grid max.
-    ixz_arr = jnp.asarray(geometry.get("ixzero", 0), dtype=jnp.int32)
+    ixz_arr = jnp.asarray(ixzero, dtype=jnp.int32)
     if nkx > 1:
         idx = jnp.clip(ixz_arr + 1, 0, nkx - 1)
         lxinv = jnp.where(
@@ -113,11 +142,18 @@ def _precompute_shared(
         else jnp.asarray(params.kymax / (2.0 * jnp.pi), dtype=jnp.float64)
     )
 
+    # hyper-dissipation is normalized to the grid maxima so disp_x/y are
+    # grid-independent; the geometry's own kxmax/kymax are the truth (params
+    # carries the config-derived value as fallback for legacy dicts). With
+    # the 1.0 defaults of direct-GKParams users the dissipation is
+    # misnormalized by (kmax)^4 — catastrophic for wide-kx boxes.
+    kymax_n = jnp.asarray(geometry.get("kymax", params.kymax), dtype=jnp.float64)
+    kxmax_n = jnp.asarray(geometry.get("kxmax", params.kxmax), dtype=jnp.float64)
     hyper = -(
         jnp.abs(params.disp_y)
-        * (ky_b / jnp.maximum(params.kymax, EPS)) ** jnp.where(params.disp_y < 0.0, 2.0, 4.0)
+        * (ky_b / jnp.maximum(kymax_n, EPS)) ** jnp.where(params.disp_y < 0.0, 2.0, 4.0)
         + jnp.abs(params.disp_x)
-        * (kx_b / jnp.maximum(params.kxmax, EPS)) ** jnp.where(params.disp_x < 0.0, 2.0, 4.0)
+        * (kx_b / jnp.maximum(kxmax_n, EPS)) ** jnp.where(params.disp_x < 0.0, 2.0, 4.0)
     )
 
     return {
@@ -128,10 +164,15 @@ def _precompute_shared(
         "s_d1_ineg": _parallel_coefficients(pos_par, stencils.D1_IPW_NEG),
         "s_d4_ipos": _parallel_coefficients(pos_par, stencils.D4_IPW_POS),
         "s_d4_ineg": _parallel_coefficients(pos_par, stencils.D4_IPW_NEG),
-        "dvp": params.dvp,
+        # grid spacings: geometry is the source of truth (always matches the
+        # actual grids, incl. direct-GKParams users like the torax plugin);
+        # params carries the config-derived value as fallback. Keep python
+        # floats untouched (jnp.asarray would stage them into tracers under
+        # jit); coerce only concrete arrays so GKPre's aux stays hashable.
+        "dvp": _static_float(geometry.get("dvp", params.dvp)),
         "vpmax": jnp.max(jnp.abs(vpgr)),
         "vthrat_max": jnp.max(jnp.abs(jnp.asarray(params.vthrat, dtype=jnp.float64))),
-        "sgr_dist": params.sgr_dist,
+        "sgr_dist": _static_float(geometry.get("sgr_dist", params.sgr_dist)),
         "ixzero": ixzero,
         "iyzero": iyzero,
         "nl_mphi": mphi,
@@ -140,7 +181,7 @@ def _precompute_shared(
         "nl_fft_scale": jnp.asarray(float(mrad * mphi), dtype=jnp.float64),
         "nl_lxinv": jnp.asarray(lxinv, dtype=jnp.float64),
         "nl_lyinv": jnp.asarray(lyinv, dtype=jnp.float64),
-        "nl_jind": build_jind(nkx, mrad, cast(int, ixzero)),
+        "nl_jind": build_jind(nkx, mrad, ixzero),
         "nl_kx2d": jnp.broadcast_to(jnp.reshape(kx, (nkx, 1)), (nkx, nky)),
         "nl_ky2d": jnp.broadcast_to(jnp.reshape(ky, (1, nky)), (nkx, nky)),
         "nl_dum_s": -jnp.asarray(efun, dtype=jnp.float64),
@@ -415,7 +456,7 @@ def _linear_precompute_core(geometry: Dict[str, jnp.ndarray], params: GKParams) 
             sp["abs_dum2_par"],
             sp["term7_fac"],
             params.disp_par,
-            params.sgr_dist,
+            out["sgr_dist"],
             out["s_d1_ipos"],
             out["s_d1_ineg"],
             out["s_d4_ipos"],
@@ -509,7 +550,7 @@ def _linear_precompute_core(geometry: Dict[str, jnp.ndarray], params: GKParams) 
         beta_cfl = jnp.asarray(params.beta, dtype=jnp.float64)
         field_cfl_arg = mir * (beta_cfl + kmin2 * mer)
         field_period = (
-            2.0 * jnp.pi * q_val * params.sgr_dist * bn * jnp.sqrt(jnp.maximum(field_cfl_arg, EPS))
+            2.0 * jnp.pi * q_val * out["sgr_dist"] * bn * jnp.sqrt(jnp.maximum(field_cfl_arg, EPS))
         )
         time_field = jnp.min(jnp.where(field_period > EPS, field_period, 1e30))
         out["tmax_field"] = jnp.where(time_field < 1e20, 1.0 / time_field, 0.0)
@@ -563,7 +604,7 @@ def _linear_precompute_core(geometry: Dict[str, jnp.ndarray], params: GKParams) 
             sp["abs_dum2_par"],
             sp["term7_fac"],
             params.disp_par,
-            params.sgr_dist,
+            out["sgr_dist"],
             out["s_d1_ipos"],
             out["s_d1_ineg"],
             out["s_d4_ipos"],

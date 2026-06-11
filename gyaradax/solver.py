@@ -179,7 +179,7 @@ def init_f(
                         sharding._AXIS_SP, sharding._AXIS_VP, sharding._AXIS_MU, None, None, None
                     )
                 else:
-                    spec = PartitionSpec(sharding._AXIS_VP, sharding._AXIS_MU, None, None, None)
+                    spec = PartitionSpec(sharding._AXIS_VP, sharding._AXIS_MU, sharding._AXIS_S, None, None)
                 out_sharding = NamedSharding(mesh, spec)
 
     nv, nmu, ns, nkx, nky = (
@@ -473,7 +473,10 @@ def gkstep_single(
     new_step = state.step + jnp.array(1, dtype=jnp.int32)
     is_window_end = jnp.equal(jnp.mod(new_step, params.naverage), 0)
 
-    if params.non_linear:
+    if params.non_linear or params.disable_per_ky_norm:
+        # nonlinear path keeps df at its natural amplitude (controlled by
+        # turbulent saturation). disable_per_ky_norm uses the same skip path
+        # for linear runs that need un-renormalized cross-ky phi amplitudes.
         phi, _, _ = _compute_fields(next_df_raw, geometry, params, pre)
         current_amp = mode_amplitude(phi, geometry, params.norm_eps)
         next_df = next_df_raw

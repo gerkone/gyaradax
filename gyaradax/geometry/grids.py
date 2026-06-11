@@ -53,12 +53,17 @@ def _build_wavevector_grids(
     krho_norm = jnp.arange(nky) * dky / kthnorm
 
     half = (nkx - 1) // 2
-    if half > 0 and abs(shat) > 1e-10 and eps > 1e-10:
-        kxspace = abs(q * shat * krho_norm[1] / (eps * ikxspace))
-    elif half > 0:
-        kxspace = kxmax / half
+    # branch on static shape only; the (q, shat, eps)-dependent choice is traced
+    # via jnp.where so the function stays jit/AD-safe when those are tracers
+    # (the torax-plugin path jits over q, shat, eps).
+    if half == 0:
+        kxspace = jnp.asarray(0.0)
     else:
-        kxspace = 0.0
+        eps_safe = jnp.where(jnp.abs(eps) > 1e-30, eps, 1.0)
+        shat_safe = jnp.where(jnp.abs(shat) > 1e-30, shat, 1.0)
+        kxspace_shear = jnp.abs(q * shat_safe * krho_norm[1] / (eps_safe * ikxspace))
+        use_shear = (jnp.abs(shat) > 1e-10) & (eps > 1e-10)
+        kxspace = jnp.where(use_shear, kxspace_shear, kxmax / half)
 
     kxrh = jnp.arange(-half, half + 1) * kxspace
     return kxrh, jnp.arange(nky) * dky

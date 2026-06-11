@@ -384,7 +384,7 @@ def precompute_collisions(geometry: Dict, params: GKParams) -> Dict[str, jnp.nda
     vpgr = jnp.asarray(geometry["vpgr"], dtype=jnp.float64)
     mugr = jnp.asarray(geometry["mugr"], dtype=jnp.float64)
     bn = jnp.asarray(geometry["bn"], dtype=jnp.float64)
-    dvp = float(params.dvp)
+    dvp = float(geometry.get("dvp", params.dvp))
     vperp_grid = jnp.sqrt(jnp.maximum(2.0 * mugr, 0.0))
     dvperp = float(vperp_grid[0] * 2.0)
 

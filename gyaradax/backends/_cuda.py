@@ -144,6 +144,7 @@ class CUDAOps(SolverOps):
         return ffi.ffi_call(
             "apply_vpar_stencil_ffi",
             [jax.ShapeDtypeStruct(field.shape, field.dtype)],
+            vmap_method="sequential",
         )(
             field,
             c0=float(coeffs[0]),
@@ -167,7 +168,8 @@ class CUDAOps(SolverOps):
                 jax.ShapeDtypeStruct(field.shape, field.dtype),
                 jax.ShapeDtypeStruct(field.shape, field.dtype),
             ],
-        )(
+            vmap_method="sequential",
+)(
             field,
             c0_d1=float(coeffs_d1[0]),
             c1_d1=float(coeffs_d1[1]),
@@ -193,6 +195,7 @@ class CUDAOps(SolverOps):
         return ffi.ffi_call(
             "apply_parallel_ffi",
             [jax.ShapeDtypeStruct(field_b.shape, field_b.dtype)],
+            vmap_method="sequential",
         )(
             field_b,
             c_1d,
@@ -234,6 +237,7 @@ class CUDAOps(SolverOps):
                 jax.ShapeDtypeStruct(target_shape, field1.dtype),
                 jax.ShapeDtypeStruct(target_shape, field2.dtype),
             ],
+            vmap_method="sequential",
         )(
             f1_b,
             f2_b,
@@ -326,7 +330,8 @@ class CUDAOps(SolverOps):
             attrs["v_tile"] = np.int32(_V_TILE)
 
         _register_ffi()
-        return ffi.ffi_call(target_name, [jax.ShapeDtypeStruct(df.shape, df.dtype)])(
+        return ffi.ffi_call(target_name, [jax.ShapeDtypeStruct(df.shape, df.dtype)],
+                            vmap_method="sequential")(
             df.copy(),
             phi.copy(),
             bessel,
@@ -509,6 +514,7 @@ class CUDAOps(SolverOps):
             return ffi.ffi_call(
                 kernel_name,
                 jax.ShapeDtypeStruct((batch, nkx, nky), jnp.complex128),
+                vmap_method="sequential",
             )(
                 df_flat,
                 p_phi,

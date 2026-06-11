@@ -68,6 +68,8 @@ class GKParams:
     drive_scale: float = 1.0
     norm_eps: float = 1.0e-14
     non_linear: bool = False
+    # when True, skip the per-ky mode-amplitude renormalization in gksolve
+    disable_per_ky_norm: bool = False
     finit: str = "cosine2"
     amp_init: float = 1.0e-4
     adiabatic_electrons: bool = True
@@ -139,6 +141,7 @@ class GKParams:
     n_gpus_sp: int = 1
     n_gpus_vp: int = 1
     n_gpus_mu: int = 1
+    n_gpus_s: int = 1
 
     # non-JAX-traceable fields (strings, control-flow booleans) — stored as
     # pytree auxiliary data rather than leaves.
@@ -146,6 +149,7 @@ class GKParams:
         "finit",
         "adiabatic_electrons",
         "non_linear",
+        "disable_per_ky_norm",
         "adaptive_dt",
         "mixed_precision",
         "backend",
@@ -172,6 +176,7 @@ class GKParams:
         "n_gpus_sp",
         "n_gpus_vp",
         "n_gpus_mu",
+        "n_gpus_s",
         "dt",
         "naverage",
         "disp_par",
@@ -265,6 +270,7 @@ def gkparams_from_runtime(runtime: Dict[str, Any], **overrides: Any) -> GKParams
         "n_gpus_sp": int(runtime.get("n_gpus_sp", 1)),
         "n_gpus_vp": int(runtime.get("n_gpus_vp", 1)),
         "n_gpus_mu": int(runtime.get("n_gpus_mu", 1)),
+        "n_gpus_s": int(runtime.get("n_gpus_s", 1)),
     }
     for k in ("coll_bg_mas", "coll_bg_signz", "coll_bg_tmp", "coll_bg_de", "coll_bg_vthrat"):
         if k in runtime:
@@ -478,15 +484,17 @@ def gkparams_from_config(config: Any, **overrides: Any) -> GKParams:
         "nlapar": bool(getattr(solver_cfg, "nlapar", False)),
         "nlbpar": bool(getattr(solver_cfg, "nlbpar", False)),
         "mixed_precision": bool(getattr(solver_cfg, "mixed_precision", True)),
+        "disable_per_ky_norm": bool(getattr(solver_cfg, "disable_per_ky_norm", False)),
         "beta": float(getattr(physics_cfg, "beta", 0.0)),
     }
 
-    # optional sharding: config.sharding.{n_gpus_sp, n_gpus_vp, n_gpus_mu}
+    # optional sharding: config.sharding.{n_gpus_sp, n_gpus_vp, n_gpus_mu, n_gpus_s}
     shard_cfg = getattr(config, "sharding", None)
     if shard_cfg is not None:
         params_dict["n_gpus_sp"] = int(getattr(shard_cfg, "n_gpus_sp", 1))
         params_dict["n_gpus_vp"] = int(getattr(shard_cfg, "n_gpus_vp", 1))
         params_dict["n_gpus_mu"] = int(getattr(shard_cfg, "n_gpus_mu", 1))
+        params_dict["n_gpus_s"] = int(getattr(shard_cfg, "n_gpus_s", 1))
 
     # collision operator: optional 'collisions' section in the YAML config
     coll_cfg = getattr(config, "collisions", None)

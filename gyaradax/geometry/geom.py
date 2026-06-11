@@ -106,7 +106,16 @@ def compute_geometry(
     return create_geometry(spec)
 
 
-def _compute_geometry_impl(spec: GeometrySpec) -> Dict[str, Any]:
+def _compute_geometry_impl(
+    spec: GeometrySpec, topology: Mapping[str, Any] | None = None
+) -> Dict[str, Any]:
+    """Build the geometry dict from a spec.
+
+    ``topology`` optionally injects a prebuilt discrete-topology dict (from
+    ``build_topology``); without it the connectivity is built with numpy from
+    the concrete wavevector grids, which is differentiable but not jittable.
+    With it the whole function is pure JAX (the torax-plugin path jits it).
+    """
     geom_type = spec.model
     try:
         model = cast(ContinuousGeometryModel, get_geometry_model(geom_type))
@@ -167,14 +176,22 @@ def _compute_geometry_impl(spec: GeometrySpec) -> Dict[str, Any]:
     )
     krho = krho_raw / kthnorm
 
-    # discrete topology (numpy, not differentiable)
-    kxrh_np = np.asarray(jax.lax.stop_gradient(kxrh))
-    krho_np = np.asarray(jax.lax.stop_gradient(krho))
-    nkx_actual = len(kxrh_np)
-    ml = _build_mode_label(nkx_actual, nky, ikxspace)
-    ml_kxky, ixp, ixm, ixz, iyz, iyz_bc = _build_mode_connectivity(ml, kxrh_np, krho_np)
-    pos = _build_pos_par_grid_classes(ixp, ixm, ns)
-    ss, ks, vs = _build_parallel_shift_maps(ixp, ixm, iyz_bc, ns, max_shift=4)
+    if topology is None:
+        # discrete topology (numpy, not differentiable)
+        kxrh_np = np.asarray(jax.lax.stop_gradient(kxrh))
+        krho_np = np.asarray(jax.lax.stop_gradient(krho))
+        nkx_actual = len(kxrh_np)
+        ml = _build_mode_label(nkx_actual, nky, ikxspace)
+        ml_kxky, ixp, ixm, ixz, iyz, iyz_bc = _build_mode_connectivity(ml, kxrh_np, krho_np)
+        pos = _build_pos_par_grid_classes(ixp, ixm, ns)
+        ss, ks, vs = _build_parallel_shift_maps(ixp, ixm, iyz_bc, ns, max_shift=4)
+    else:
+        # prebuilt topology (jit/AD-safe path; see build_topology)
+        ml_kxky = topology["mode_label"]
+        ixp, ixm = topology["ixplus"], topology["ixminus"]
+        ixz, iyz = topology["ixzero"], topology["iyzero"]
+        pos = topology["pos_par_grid_class"]
+        ss, ks, vs = topology["s_shift"], topology["kx_shift"], topology["valid_shift"]
 
     return assemble_geometry_dict(
         spec=spec,
@@ -202,6 +219,94 @@ def _compute_geometry_impl(spec: GeometrySpec) -> Dict[str, Any]:
 
 register_circular_geometry_models(_compute_geometry_impl)
 register_miller_geometry_model(_compute_geometry_impl)
+
+
+def build_topology(nkx, nky, ikxspace, ns, max_shift=4):
+    """Build the discrete-topology pytree for a (nkx, nky, ikxspace, ns) grid.
+
+    Topology depends only on grid shape, not on (q, shat, eps, miller). The
+    centered kx grid puts zero at index (nkx-1)//2; the ky grid starts at
+    zero, so ixzero/iyzero are determined by shape alone.
+
+    Returns a dict of jnp.int32/bool/int8 arrays plus concrete python ints.
+    Safe to close over inside ``@jax.jit``.
+    """
+    half = (nkx - 1) // 2
+    # surrogate grids for connectivity: zero positions are all that matters
+    kxrh_surrogate = np.arange(-half, half + 1, dtype=np.float64)
+    krho_surrogate = np.arange(nky, dtype=np.float64)
+    nkx_actual = kxrh_surrogate.shape[0]
+
+    ml = _build_mode_label(nkx_actual, nky, ikxspace)
+    ml_kxky, ixp, ixm, ixz, iyz, iyz_bc = _build_mode_connectivity(
+        ml, kxrh_surrogate, krho_surrogate
+    )
+    pos = _build_pos_par_grid_classes(ixp, ixm, ns)
+    ss, ks, vs = _build_parallel_shift_maps(ixp, ixm, iyz_bc, ns, max_shift=max_shift)
+
+    return {
+        "mode_label": _i32(ml_kxky),
+        "ixplus": _i32(ixp),
+        "ixminus": _i32(ixm),
+        "ixzero": _i32(ixz),
+        "iyzero": _i32(iyz),
+        "iyzero_bc": int(iyz_bc),
+        "pos_par_grid_class": jnp.array(pos, dtype=jnp.int8),
+        "s_shift": _i32(ss),
+        "kx_shift": _i32(ks),
+        "valid_shift": jnp.array(vs, dtype=jnp.bool_),
+        "nkx_actual": int(nkx_actual),
+    }
+
+
+def compute_continuous_geometry(
+    q,
+    shat,
+    eps,
+    ns: int,
+    nkx: int,
+    nky: int,
+    nvpar: int,
+    nmu: int,
+    vpar_max: float = 3.0,
+    nperiod: int = 1,
+    kxmax: float = 0.0,
+    krhomax: float = 1.4,
+    ikxspace: int = 5,
+    signB: float = 1.0,
+    Rref: float = 100.0,
+    geom_type: str = "circ",
+    topology: Mapping[str, Any] | None = None,
+    **miller_params: Any,
+) -> Dict[str, Any]:
+    """Continuous geometry with an optional injected prebuilt topology.
+
+    Differentiable w.r.t. ``q, shat, eps`` and the Miller shape parameters,
+    and safe inside ``@jax.jit`` when ``topology`` (from ``build_topology``)
+    is supplied -- the discrete connectivity is the only numpy stage, and it
+    depends on grid shape alone. This is the torax-plugin entry point: the
+    plugin caches ``build_topology`` per grid and jits over (q, shat, eps).
+    """
+    spec = geometry_spec_from_compute_kwargs(
+        q=q,
+        shat=shat,
+        eps=eps,
+        ns=ns,
+        nkx=nkx,
+        nky=nky,
+        nvpar=nvpar,
+        nmu=nmu,
+        vpar_max=vpar_max,
+        nperiod=nperiod,
+        kxmax=kxmax,
+        krhomax=krhomax,
+        ikxspace=ikxspace,
+        signB=signB,
+        Rref=Rref,
+        geom_type=geom_type,
+        **miller_params,
+    )
+    return _compute_geometry_impl(spec, topology=topology)
 
 
 def create_geometry(spec: GeometrySpec) -> Dict[str, Any]:
