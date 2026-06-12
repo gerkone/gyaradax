@@ -5,8 +5,9 @@ simulations. Supports both adiabatic and kinetic electron configurations.
 
 ## 1. physics overview
 
-gyaradax solves the electrostatic gyrokinetic Vlasov-Poisson system in the
-local (flux-tube) limit. The code evolves the perturbed gyrocenter distribution
+gyaradax solves the gyrokinetic Vlasov-Poisson system in the
+local (flux-tube) limit (this section describes the electrostatic core;
+the electromagnetic extension is in §10). The code evolves the perturbed gyrocenter distribution
 function $\delta f_s$ for each kinetic species $s$ in a 5D phase space
 $(v_\parallel, \mu, s, k_x, k_y)$, where the perpendicular coordinates are
 Fourier-decomposed.
@@ -134,11 +135,23 @@ $$-\frac{Z_s}{T_s} (k_x v_{d,x} + k_y v_{d,y}) F_{M,s} J_0 \phi$$
 ### 2.2 dissipation
 
 - **parallel dissipation**: 4th-order damping on the streaming operator,
-  coefficient `disp_par`, using upwinded 4th-derivative stencils
+  coefficient `disp_par`, using upwinded 4th-derivative stencils.
+  Optional conservative projection (`disp_par_conserve=2`,
+  `disp_par_conserve_kycut=0.15`, default off): for modes with
+  $0 < k_\theta\rho \le$ kycut the dissipated distribution is projected
+  orthogonal to the Poisson/Ampère field-solve moments, curing the GKW
+  issue #201 EM low-ky numerical instability — plain dissipation corrupts
+  a physical KBM at $k_\theta\rho=0.1$, $\beta=1\%$ by +73%; the projection
+  restores it to 1.1% of the dissipation-free value. See
+  `instabilities/REPORT.md` (added 2026-06-11)
 - **velocity dissipation**: 4th-order smoothing in $v_\parallel$,
   coefficient `disp_vp`
 - **perpendicular hyper-dissipation**: spectral damping
-  $(k_x/k_{x,max})^4 + (k_y/k_{y,max})^4$, coefficients `disp_x`, `disp_y`
+  $(k_x/k_{x,max})^4 + (k_y/k_{y,max})^4$, coefficients `disp_x`, `disp_y`.
+  $k_{x,max}$/$k_{y,max}$ are sourced from the geometry dict in
+  `precompute.py`, not from `GKParams` — the params defaults (1.0)
+  silently misnormalized the damping for direct-constructed params
+  (corrected 2026-06-11)
 
 ### 2.3 field equation (quasineutrality)
 
@@ -164,7 +177,7 @@ denominator is set to 1. No flux-surface averaging is needed.
 
 The heat flux for species $s$ is:
 
-$$Q_s = \text{Im} \sum_{s, k_x, k_y, v_\parallel, \mu} P_{k_y} \Delta s \cdot k_y E_\alpha \left(v_\parallel^2 + 2\mu B\right) \delta f_s (J_0 \phi)^* B \Delta\mu \Delta v_\parallel \Delta s \cdot d^2 X$$
+$$Q_s = \text{Im} \sum_{s, k_x, k_y, v_\parallel, \mu} P_{k_y} \Delta s \cdot k_y E_\alpha \left(v_\parallel^2 + 2\mu B\right) \delta f_s (J_0 \phi)^* B \Delta\mu \Delta v_\parallel \cdot d^2 X$$
 
 where $P_{k_y}$ is the Parseval factor (1 for $k_y=0$, 2 otherwise)
 and $d^2 X$ is the velocity-space volume element.
@@ -217,9 +230,10 @@ RK4-specific stability factors:
    (`non_linear_terms.F90:1538`); since gyaradax uses
    `jnp.fft.irfft2(norm="backward")` which applies $1/N$ on the inverse,
    an extra $N \cdot l_\text{inv}$ factor is needed per branch.
-   Safety factor $\sigma = 0.5$ by default (`cfl_safety` parameter — GKW
-   uses 0.95 in analogous place but lacks a per-substage check, so
-   gyaradax's tighter safety is equivalent in practice).
+   Safety factor $\sigma = 0.95$ by default (`cfl_safety` parameter,
+   matching GKW's `fac_dtim_est`). The 2026-04-18 EM benchmarks in
+   §10.13 were run with `cfl_safety=0.5`, which explains the 0.53×
+   mean dt reported there (corrected 2026-06-11).
 
 The combined constraint for RK4 (`meth=2` in GKW):
 $$t_{max} = \max\!\left(\frac{\max(t_{max,1},\, t_{max,\text{field}})}{2.4},\;
@@ -260,17 +274,25 @@ per-step branching on the sign of $v_\parallel$.
 
 ### 4.1 modules
 
+(table refreshed 2026-06-11: precompute/CFL/field-solve split out of
+`solver.py`; `geometry.py` is now the `geometry/` package)
+
 | module | purpose |
 |--------|---------|
-| `solver.py` | RK4 integrator, linear RHS, nonlinear term III, precomputation, CFL |
-| `integrals.py` | phi solvers (adiabatic + kinetic), flux calculations |
+| `solver.py` | RK4 integrator (`gkstep_single`, `gksolve`), per-ky normalization; linear/nonlinear RHS dispatch via `backends/` |
+| `precompute.py` | one-time precomputation: stencils, species coefficients, EM weights, dissipation arrays |
+| `cfl.py` | adaptive CFL timestep estimation (nonlinear + von Neumann + field) |
+| `fields.py` | field solve dispatch (`_compute_fields`), g↔f transforms |
+| `integrals.py` | phi solvers (adiabatic + kinetic), flux calculations (ES + EM) |
 | `params.py` | `GKParams` dataclass, config/input.dat loading |
-| `geometry.py` | analytic circular geometry + mode connectivity (primary path) |
+| `geometry/` | geometry package: circular (Lapillonne), s-alpha, Miller, tensors, grids, mode connectivity |
 | `stencils.py` | finite difference coefficient tables |
+| `collisions.py` | Fokker-Planck collision stencil precompute + apply |
+| `quasilinear/` | quasilinear flux rule (saturation), calibration, linear pipeline |
 | `utils.py` | K-dump loading, checkpoint save/load, diagnostics, GKW file-loading (`load_geometry`, `parse_input_dat`) |
 | `simulate.py` | high-level simulation runner from YAML config |
 | `diag.py` | spectral diagnostics, 1D projections, nonlinear term analysis |
-| `bootstrap.py` | centralized JAX configuration and device initialization |
+| `jax_config.py` | centralized JAX configuration and device initialization |
 | `plot_utils.py` | publication-quality visualization |
 
 ### 4.2 key interfaces
@@ -363,8 +385,9 @@ The GKW manual (`gkw_ref/manual/`) contains:
 - `implementation.tex`: code structure and term-by-term mapping
 - `diagnostics.tex`: output file conventions
 - `buildandrun.tex`: input options and run configuration
-- `collisions.tex`: collision operator (not implemented in gyaradax)
-- `rotation.tex`: centrifugal and Coriolis effects (not implemented)
+- `collisions.tex`: collision operator (implemented — see §11)
+- `rotation.tex`: centrifugal and Coriolis effects (Coriolis drift `vcor`
+  + `uprim` drive implemented; centrifugal not — corrected 2026-06-11)
 - `neoclassics.tex`: neoclassical corrections (not implemented)
 
 ## 6. reference data
@@ -404,7 +427,12 @@ order. Species is the outermost (slowest) index.
 - electromagnetic $A_\parallel$ (shear Alfvén, Ampere's law, mixed variable $g$)
 - electromagnetic $B_\parallel$ (magnetic compression, coupled 2×2 Poisson-Bpar solve)
 - adiabatic and kinetic electron models
-- linearized Fokker-Planck collision operator (pitch-angle, energy diffusion, friction; MVP scope — see §12)
+- linearized Fokker-Planck collision operator (pitch-angle, energy diffusion,
+  friction; inter-species pairs, Coulomb-log path, Xu-style momentum/energy
+  conservation corrections — see §11; corrected 2026-06-11, no longer MVP-only)
+- toroidal rotation: Coriolis drift (`vcor`) + `uprim` drive (added
+  2026-06-11; no centrifugal terms; the uprim drive is ~25% strong vs
+  GKW — known refinement item, see `instabilities/LOG.md`)
 - all 7 linear RHS terms (I, II, III, IV, V, VII, VIII) plus EM terms X and XI
 - nonlinear ExB advection (pseudospectral, spectral Poisson bracket)
 - 4th-order parallel and velocity dissipation
@@ -417,12 +445,13 @@ order. Species is the outermost (slowest) index.
 
 ### 7.2 not implemented
 
+(rows for collision conservation corrections and inter-species collisions
+removed 2026-06-11 — both are now implemented, see §11)
+
 | feature | GKW module | notes |
 |---------|-----------|-------|
-| collision conservation corrections | `collisionop.f90` | `mom_conservation`, `ene_conservation` (base operator is in §11) |
-| inter-species collisions | `collisionop.f90` | only self-collisions in the kinetic-electron MVP |
 | neoclassical | `neoclassics.f90` | equilibrium corrections to $F_M$ |
-| rotation | `rotation.f90` | centrifugal (`cfen`), Coriolis, toroidal shear |
+| centrifugal rotation, ExB shear | `rotation.f90` | centrifugal (`cfen`, `cf_trap`/`cf_drift`) and toroidal ExB shear; Coriolis (`vcor`) + `uprim` are implemented (corrected 2026-06-11) |
 | energetic particles | `components.f90` | `types='EP'`, `types='alpha'` |
 | implicit integration | `imp_integration.F90` | for stiff parallel streaming |
 | RK-Chebyshev | `exp_integration.F90` | for diffusion-dominated regimes |
@@ -522,7 +551,7 @@ nvpar=64, nmu=16, nperiod=5, disp_par=1.0, dt=0.003, naverage=100.
 - **naverage ≥ 10** (naverage=1 gives spurious negative growth from mode phase
   rotation within a single step)
 
-## 9. circular geometry model (`geometry.py`)
+## 9. circular geometry model (`geometry/` package, formerly `geometry.py`)
 
 Formulas translated from `gkw_ref/src/geom.f90` (`geom_circ` lines 1444-1616,
 `calc_geom_tensors` lines 3487-3634). `compute_geometry()` produces the full
@@ -922,6 +951,14 @@ EM parity matches ES at all timescales (100–20000 steps). Fluxes
 computed from the same distribution match GKW to machine precision
 after parseval and flux-surface-average corrections.
 
+**Linear EM γ parity update (2026-06-11,
+`instabilities/em_suite_report.json`):** across a β = 0.001–0.01
+ladder at $k_\theta\rho = 0.4$ (through the KBM transition; both
+apar-only and apar+bpar batches) gyaradax matches GKW to 0.02–0.1%
+(e.g. β=0.01 KBM: γ = 0.9236 vs GKW 0.9238). With rotation
+(vcor + uprim) on: 0.3%. In the low-ky band ($k_\theta\rho = 0.1$,
+β=0.01) with the issue-#201 cure active in both codes: 0.9%.
+
 ### 10.13 EM gotchas from GKW benchmarking
 
 Collected from the CBC NL-EM vs GKW benchmark (see `docs/em_debug_report.md`
@@ -945,8 +982,9 @@ match GKW's convention even for the flux channels that are invariant by
 parity.
 
 **Per-code `geom_type` defaults differ.** GKW defaults to `s-alpha` when
-`input.dat` doesn't set `geom_type`; gyaradax defaults to `circ`
-(Lapillonne). These geometries differ by ~50% in linear γ at finite ε
+`input.dat` doesn't set `geom_type`; gyaradax's Python `compute_geometry`
+defaults to `circ` (Lapillonne) — though `compute_geometry_from_input`
+now mirrors GKW's `s-alpha` default for input.dat-driven runs. These geometries differ by ~50% in linear γ at finite ε
 (§8.3.2). Set the geometry explicitly on both sides when benchmarking —
 never rely on the default.
 
@@ -1022,8 +1060,9 @@ connectivity.
 *: with `dt=0.001` hard cap (pre-fix blew up otherwise).
 
 Both codes now adapt dt similarly through the linear-to-NL crossover
-at β=0.01 (gyra mean dt is 0.53× GKW's, consistent with gyra's
-`cfl_safety=0.5` vs GKW's `fac_dtim_est=0.95`). The previously
+at β=0.01 (gyra mean dt is 0.53× GKW's, consistent with the
+`cfl_safety=0.5` used in that benchmark vs GKW's `fac_dtim_est=0.95`;
+the `cfl_safety` default is 0.95, matching GKW). The previously
 reported "1.5× over at β=0.001, 0.87× under at β=0.01" flux gap was
 a CFL artefact of the FFT-normalisation mismatch, not a physics
 issue. The `configs/nl_em_beta01.yaml` `dt=0.001` cap is removed.
@@ -1046,30 +1085,30 @@ gyaradax already uses (see §1.3).
 
 ### 11.1 scope
 
+(scope bullets corrected 2026-06-11: earlier MVP-only restrictions —
+self-collisions only, freq_override-only, no conservation corrections —
+no longer apply and contradicted the bullets above them)
+
 - Adiabatic electrons + single kinetic ion (original MVP) **and**
   kinetic-electron / multi-kinetic-species configurations. In the
   kinetic case `precompute_collisions` vmaps the 9-point stencil over
-  species axis, giving shape `(nsp, 9, nv, nmu, ns)`. Each species
-  uses its own prefactor; **no species-species coupling** — operator
-  is self-collision only.
-- Both `freq_override=True` (scalar `coll_freq` → `gamma_pref =
-  coll_freq·de/tmp²`) and `freq_override=False` (Coulomb-log path
-  via `rref, tref, nref` → `gamma_pref = 6.5141e-5·rref·nref/tref²·
-  de·Z⁴·L_ii/tmp²`; ion-ion only).
+  species axis, giving shape `(nsp, 9, nv, nmu, ns)`. Each target
+  stencil sums over **all background species** (kinetic + adiabatic),
+  each pair contributing the full Fokker-Planck operator with
+  $\Gamma^{a/b}$, thermal-velocity ratio `vtb = v·vthrat_a/vthrat_b`,
+  and mass-ratio friction — inter-species pairs are included
+  (linearized test-particle form: no field-particle back-reaction).
+- Both `freq_override=True` (scalar `coll_freq` → `Γ^{a/b} =
+  Z_a²·Z_b²·coll_freq·de_b·(L_ab/L_ref)/T_a²`) and
+  `freq_override=False` (Coulomb-log path via `rref, tref, nref` →
+  `Γ^{a/b} = 6.5141e-5·rref·nref/tref²·de_b·Z_a²·Z_b²·L_ab/T_a²`;
+  `_coulomb_log_pair` covers e-e, e-i, i-e, and i-i pairs).
 - Optional **Xu-style momentum and energy conservation corrections**
   (`coll_mom_conservation`, `coll_ene_conservation`), added via
   `conservation_correction` as a scalar rebalance on top of the base
   operator RHS. Drives `Δp, ΔE → 0` to machine precision.
-- `mass_conserve=True` (zero outward flux at velocity boundaries).
-- `freq_override=True` only: the species-pair Coulomb-log machinery is
-  collapsed to a single scalar `coll_freq`, giving $\Gamma^{a/a} =
-  \mathrm{coll\_freq} \cdot n_a / T_a^2$. Reference density/temperature
-  path (`rref/tref/nref`) not yet used.
 - `mass_conserve=True` (zero outward flux at $v_\parallel = \pm v_{par,\max}$
   and $v_\perp = v_{\perp,\max}$).
-- Momentum/energy conservation corrections not implemented — the base
-  operator already conserves particles but not like-particle
-  momentum/energy (manual §7).
 - JAX backend only; no CUDA fused kernel.
 
 ### 11.2 operator and discretization
@@ -1103,9 +1142,14 @@ coll_pitch_angle      D_theta_theta (default True)
 coll_en_scatter       D_vv            (default True)
 coll_friction         F_v             (default True)
 coll_freq             scalar collision frequency for freq_override mode
-coll_freq_override    must be True in MVP
-coll_mass_conserve    must be True in MVP
+coll_freq_override    True: scalar coll_freq; False: Coulomb-log path (default True)
+coll_mass_conserve    zero boundary flux (default True)
+coll_mom_conservation Xu momentum conservation correction (default False)
+coll_ene_conservation Xu energy conservation correction (default False)
 ```
+
+(flag list corrected 2026-06-11: `coll_freq_override`/`coll_mass_conserve`
+are no longer MVP-locked, and the conservation flags exist)
 
 All are static pytree fields (resolved at trace time). When
 `collisions=False` the compile-time branch in `_linear_rhs_core` drops
@@ -1147,13 +1191,13 @@ Run via `python scripts/validate_collisions.py`.
 
 ### 11.5 gotchas
 
-- **Parseval convention for single non-zonal mode.** gyaradax hardcodes
-  `parseval[0]=1` assuming the first ky index is the zonal (ky=0) mode.
-  For runs with `mode_box=False, nmod=1, kthrho≠0` (like the validation
-  case), the single mode is non-zonal but still gets parseval=1, so
-  fluxes are 2× smaller than GKW's. The validation script multiplies
-  gyaradax fluxes by 2 for a fair comparison. Fix is a geometry-level
-  change (`geometry.py:557,760`) — not MVP-blocking.
+- **Parseval convention for single non-zonal mode — FIXED (corrected
+  2026-06-11).** gyaradax used to hardcode `parseval[0]=1`, assuming the
+  first ky index is the zonal (ky=0) mode, so a `mode_box=False, nmod=1,
+  kthrho≠0` run got fluxes 2× smaller than GKW's (the validation script
+  compensated by multiplying by 2). The parseval factor is now
+  wavenumber-based, `where(|krho| < eps, 1, 2)`, in
+  `gyaradax/geometry/{assembly,geom,loaded}.py` — no compensation needed.
 - **Normalization timing.** GKW's `normalize_per_toroidal_mode` is
   default false and `normalized` default true (single global factor);
   gyaradax normalizes per-ky. For parity validation the cleanest path
@@ -1176,7 +1220,7 @@ Run via `python scripts/validate_collisions.py`.
 Known open issues and limitations of the current implementation,
 grouped by severity/impact.
 
-### 11.1 numerical / solver
+### 12.1 numerical / solver
 
 - **Adaptive CFL one-step lag (minor).** Each step's $\Delta t$ is
   estimated from the previous step's $\phi$/$A_\parallel$. Fine in
@@ -1188,9 +1232,14 @@ grouped by severity/impact.
   `s-alpha` blow up at ky=0.1 (over-drive) and ky=1.0 (under-damped).
   NL runs use `circ` for this reason. Root cause likely in the
   finite-ε correction to drift tensors or in missing high-ky
-  dissipation.
+  dissipation. (Update 2026-06-11: at finite β the low-ky blow-up is
+  the GKW issue #201 parallel-dissipation instability — present in
+  *both* codes, β-gated, geometry-independent — and is cured by
+  `disp_par_conserve=2, disp_par_conserve_kycut=0.15`; see
+  `instabilities/REPORT.md`. The electrostatic high-ky observation
+  above remains unexplained.)
 
-### 11.2 electromagnetic
+### 12.2 electromagnetic
 
 - **Term VIII potential fix (2026-05-08).** GKW's `vd_grad_phi_fm`
   (Term VIII, curvature drift × F_M) acts on `phi` only, not on
@@ -1200,38 +1249,31 @@ grouped by severity/impact.
   used `gyro_chi` for both Term V and Term VIII. After the fix
   (Term V → chi, Term VIII → phi):
   - ES γ = 0.611 vs GKW 0.589 (+4%, acceptable — needs ~12k steps to converge)
-  - EM γ = 0.939 vs GKW 1.132 (−17%, explained by shared grid below)
+  - EM γ = 0.939 vs GKW 1.132 (−17% at the time; superseded — see next bullet)
   - EM−ES Δγ = 0.328 vs GKW 0.543 — KBM NOW ACTIVATES at physical mass ✓
   All 25 EM unit tests and all 67 non-sharding tests pass after the fix.
 
-- **KBM at physical mass ratio: partial, limited by shared velocity grid.**
+- **KBM at physical mass ratio — RESOLVED (corrected 2026-06-11).**
+  Superseded by current measurement
+  (`instabilities/em_suite_report.json`): linear EM γ matches GKW to
+  0.02–0.1% across a β = 0.001–0.01 ladder at kθρ=0.4 through the KBM
+  transition (β=0.01: γ = 0.9236 vs GKW 0.9238), and to 0.3% with
+  rotation on. The "shared velocity grid" root-cause narrative recorded
+  below was wrong on its own terms: GKW uses the *same* shared vpgr
+  grid for all species (`velocitygrid.f90:197`) — per-species velocity
+  grids are not how GKW handles kinetic electrons, and no grid change
+  was needed. (The 2026-05-08 GKW reference of γ = 1.132 came from a
+  differently-configured Waltz setup; the current matched-config suite
+  gives GKW γ = 0.9238 on the same box.) Historical (superseded)
+  analysis:
+
   The kinetic-electron Alfvénic (KBM) mode at β=0.01 Waltz benchmark
-  partially activates after the Term VIII fix.
-  GKW gives γ_EM = 1.132 (above the ES γ_ES = 0.589), while
-  gyaradax gives γ_EM ≈ 0.939 (−17% vs GKW, EM−ES Δγ = 0.328 vs 0.543).
-
-  **Root cause of the remaining 17% gap** — shared ion velocity grid.
-  All species evolve on the same vpgr ∈ [−3, 3] v_thi grid. For electrons
-  with v_the = vthrat_e × v_thi ≈ 60.6 v_thi this covers only
-  [−0.05, 0.05] v_the — the electron Alfvénic resonance at
-  v_par ≈ 1 v_the is outside the grid. Two mutually exclusive
-  requirements cannot both be satisfied on the truncated grid:
-
-  1. ∫ F_M^e d³v ≈ n_e (quasineutrality → Γ₀_e ≈ 1 → correct Poisson)
-  2. ∫ v_par² F_M^e d³v ≈ v_the²/2 (Ampere current → KBM drive)
-
-  With the current effective Maxwellian (t_rat = T_e/T_i ≈ 1.2),
-  requirement 1 is met but the electron Ampere current is ~3000×
-  too small compared to the physical value.
-  The captured 60% of the KBM enhancement (Δγ = 0.328 vs 0.543)
-  comes from the ion electromagnetic drive (chi coupling in Term V).
-
-  **Fix**: per-species velocity grids, where each species s gets
-  its own vpgr_s ∈ [−3, 3] v_ths with integration weights
-  intvp_s = vthrat_s × intvp_base, intmu_s = vthrat_s² × intmu_base
-  and Maxwellian F_Ms = exp(−vp²−2Bμ)/(π^{3/2} vthrat_s³).
-  This is how GKW handles multi-species kinetic electrons.
-  Status: not yet implemented (major architectural change).
+  partially activated after the Term VIII fix:
+  GKW gave γ_EM = 1.132 (above the ES γ_ES = 0.589), while
+  gyaradax gave γ_EM ≈ 0.939 (−17% vs GKW, EM−ES Δγ = 0.328 vs 0.543).
+  The gap was attributed to the shared vpgr ∈ [−3, 3] v_thi grid
+  truncating the electron Alfvénic resonance, with per-species
+  velocity grids proposed as the fix — refuted above.
 
   **Convergence note**: both ES and EM growth rates require ~12000 steps
   (t ≈ 12) to converge at these parameters. Measurements at ≤4000 steps
@@ -1253,7 +1295,9 @@ grouped by severity/impact.
 
   **What works**: kinetic ES (+4% vs GKW with 15k steps),
   NL EM at β=0.001 (ITG-dominated, small EM corrections),
-  linear EM with m_i/m_e=100 (full KBM, Δγ ≈ +0.46).
+  linear EM with m_i/m_e=100 (full KBM, Δγ ≈ +0.46) — and, as of
+  2026-06-11, linear EM at physical mass ratio to 0.0–0.1% (see the
+  correction at the top of this bullet).
 
 - **apar-only NL flux (β=0.001, CBC)** — matches GKW within 4% on
   both species' eflux after the FFT-norm fix (2026-04-18). Previously
@@ -1266,7 +1310,9 @@ grouped by severity/impact.
   $B_\parallel$ formulas (coupled solve, chi factor, Term X) verified
   to match GKW to machine precision by isolated tests at fixed
   fields. May also be a CFL-related artefact now that the
-  normalisation is fixed — re-benchmark needed.
+  normalisation is fixed — NL re-benchmark still pending. (Linear
+  apar+bpar γ now matches GKW to 0.0–0.1% across the β ladder,
+  see §10.12 update.)
 - **Linear γ(ky) peak shift vs GKW** (old, unverified). Never
   confirmed via a controlled single-mode γ scan; with the CFL fix
   closing the flux gap, the narrative is likely wrong. Re-run if
@@ -1279,19 +1325,28 @@ grouped by severity/impact.
   that GKW reports as 6 columns (both species) while gyaradax
   reports only the kinetic-ion 3 columns.
 
-### 11.3 diagnostics / I/O
+### 12.3 diagnostics / I/O
 
 - **`save_dumps` fluxes are per-species but not per-kx/ky.** The
   saved `fluxes.npz` array is `(nsp, 3)` (time-collapsed). Spectra
   are saved separately as `kyspec.npz` / `kxspec.npz` from the same
-  final state. There is no per-(kx, ky) flux decomposition output.
+  final state. There is no per-(kx, ky) flux decomposition *output*;
+  in-memory, `calculate_fluxes(..., reduce=False)` returns per-(kx, ky)
+  flux fields (used by the quasilinear pipeline).
 - **EM fluxes are a separate file.** `fluxes_em.npz` sits alongside
-  `fluxes.npz`; it carries `(pflux_em, eflux_em, 0)` shaped like the
-  ES output. `vflux_em` is not tracked (GKW's
-  `calculate_em_fluxes` does not produce it either).
+  `fluxes.npz`; it carries `(pflux_em, eflux_em, vflux_em)` shaped like
+  the ES output — `em_vflux` was added in the 2026-04-18 audit (§10.13
+  item 4), matching GKW's `diagnos_fluxes_vspace.F90:464` (corrected
+  2026-06-11; an earlier note here claimed the vflux slot was zero).
+- **B_par flux is kinetic-only.** `calculate_em_fluxes` implements the
+  compressional B_par flux in the 6D (kinetic) branch only; the 5D
+  (adiabatic) branch raises on `bpar` instead of silently dropping it
+  (guard added 2026-06-11, `quasilinear/REVIEW.md` §5).
 
-### 11.4 scope / missing features (intentional)
+### 12.4 scope / missing features (intentional)
 
 See §7.2 for the full not-implemented list. The most commonly
-requested gaps: collisions, rotation/Coriolis, Miller geometry,
-global/radial-varying profiles, implicit time stepping.
+requested gaps (updated 2026-06-11 — collisions, Coriolis rotation and
+Miller geometry are now implemented): centrifugal rotation terms,
+neoclassical corrections, global/radial-varying profiles, implicit
+time stepping.

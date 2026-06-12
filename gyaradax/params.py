@@ -107,6 +107,15 @@ class GKParams:
     nlapar: bool = False  # enable A_parallel (shear Alfven)
     nlbpar: bool = False  # enable B_parallel (magnetic compression)
     beta: float = 0.0  # reference plasma beta = 2*mu0*n_ref*T_ref/B_ref^2
+    # beta-prime: pressure-gradient (finite-beta) correction of the curvature
+    # drift (GKW veta_prime, linear_terms.f90 drift()). Resolved value of
+    # GKW's betaprime_ref / betaprime_type='sp' (input parsing in utils.py).
+    # GKW convention: betaprime <= 0 for a normal (peaked) pressure profile.
+    betaprime: float = 0.0
+    # 'full_drift': correction uses vpar^2 only (applied on curvature +
+    # grad-B drift combined); 'curv_only': uses vpar^2 + B*mu (GKW
+    # drift_gradp_type, components.f90).
+    drift_gradp_type: str = "full_drift"
 
     # collision operator controls (GKW &collisions namelist)
     collisions: bool = False
@@ -227,6 +236,8 @@ class GKParams:
         "tgrid",
         "vcor",
         "uprim",
+        "betaprime",
+        "drift_gradp_type",
     )
 
     def tree_flatten(self):
@@ -280,6 +291,8 @@ def gkparams_from_runtime(runtime: Dict[str, Any], **overrides: Any) -> GKParams
         "nlapar": bool(runtime.get("nlapar", False)),
         "nlbpar": bool(runtime.get("nlbpar", False)),
         "beta": float(runtime.get("beta", 0.0)),
+        "betaprime": float(runtime.get("betaprime", 0.0)),
+        "drift_gradp_type": str(runtime.get("drift_gradp_type", "full_drift")),
         "collisions": bool(runtime.get("collisions", False)),
         "coll_pitch_angle": bool(runtime.get("coll_pitch_angle", True)),
         "coll_en_scatter": bool(runtime.get("coll_en_scatter", True)),
@@ -515,6 +528,8 @@ def gkparams_from_config(config: Any, **overrides: Any) -> GKParams:
         "mixed_precision": bool(getattr(solver_cfg, "mixed_precision", True)),
         "disable_per_ky_norm": bool(getattr(solver_cfg, "disable_per_ky_norm", False)),
         "beta": float(getattr(physics_cfg, "beta", 0.0)),
+        "betaprime": float(getattr(physics_cfg, "betaprime", 0.0)),
+        "drift_gradp_type": str(getattr(physics_cfg, "drift_gradp_type", "full_drift")),
     }
 
     # optional sharding: config.sharding.{n_gpus_sp, n_gpus_vp, n_gpus_mu, n_gpus_s}

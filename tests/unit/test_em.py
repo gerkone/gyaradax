@@ -342,6 +342,155 @@ class TestEMPrecompute:
         assert "g2f_factor" not in pre
 
 
+# ── 2b. Ampere diagonal: numerical Candy moment (GKW ampere_dia) ─────────────
+
+
+def _candy_geometry(nvpar, nmu, vpar_max, ns=8, krhomax=0.5):
+    """Single-(kx,ky) circ geometry with a controllable velocity grid.
+
+    Returns (geometry, geom_sp) where geom_sp carries unit single-ion
+    species arrays as required by ampere_gamma_num/_species_bessel_gamma.
+    """
+    from gyaradax.geometry import compute_geometry
+
+    geometry = compute_geometry(
+        q=1.57,
+        shat=1.07,
+        eps=0.177,
+        ns=ns,
+        nkx=1,
+        nky=1,
+        nvpar=nvpar,
+        nmu=nmu,
+        vpar_max=vpar_max,
+        nperiod=1,
+        krhomax=krhomax,
+    )
+    geom_sp = dict(geometry)
+    for key, val in dict(
+        mas=[1.0], signz=[1.0], tmp=[1.0], de=[1.0], vthrat=[1.0]
+    ).items():
+        geom_sp[key] = jnp.asarray(val, dtype=jnp.float64)
+    return geometry, geom_sp
+
+
+class TestAmpereCandyMoment:
+    """Ampere diagonal must use the numerical velocity-grid (Candy) moment.
+
+    GKW ampere_dia (linear_terms.f90:3756-3789) computes
+        gamma_num = sum_{mu,vpar} 2*B*intmu*intvp * J0^2 * vpgr^2 * fmaxwl
+    on the discrete grid so the diagonal exactly cancels the discrete g2f
+    source (-2*Z*vthrat*vpgr*J0*F_M/T).  The analytic Gamma_0 = I0(b)e^{-b}
+    only equals this in the continuum limit; GKW warns it causes "large
+    errors at high beta and low kthrho" at default vpmax.
+    """
+
+    @staticmethod
+    def _gammas(geom_sp):
+        from gyaradax.integrals import _species_bessel_gamma, ampere_gamma_num
+
+        gamma_num = np.asarray(ampere_gamma_num(geom_sp)).squeeze()
+        _, gamma0 = _species_bessel_gamma(geom_sp)
+        gamma0 = np.asarray(gamma0).squeeze()
+        return gamma_num, gamma0
+
+    def test_gamma_num_matches_analytic_on_fine_grid(self):
+        """Continuum limit: gamma_num -> Gamma_0 = I0(b)e^{-b} to <1e-3.
+
+        The mu midpoint quadrature converges O(1/nmu^2) (Euler-Maclaurin
+        boundary term at vperp=0), so the 1e-3 target needs nmu=128; the
+        vpar/vpmax contributions are negligible at nvpar=64, vpmax=5.
+        """
+        _, geom_sp = _candy_geometry(nvpar=64, nmu=128, vpar_max=5.0)
+        gamma_num, gamma0 = self._gammas(geom_sp)
+        rel = np.abs(gamma_num - gamma0) / np.abs(gamma0)
+        assert rel.max() < 1e-3, f"fine-grid rel err {rel.max():.3e} >= 1e-3"
+
+    def test_gamma_num_differs_from_analytic_on_coarse_grid(self):
+        """On a production-coarse grid the discrete moment differs measurably.
+
+        This difference IS the point of the fix: the diagonal must carry the
+        same discretization error as the g2f source so they cancel exactly.
+        Observed: rel err ~1.2e-2..3.3e-2 at nvpar=16, nmu=8, vpmax=3.
+        """
+        _, geom_sp = _candy_geometry(nvpar=16, nmu=8, vpar_max=3.0)
+        gamma_num, gamma0 = self._gammas(geom_sp)
+        rel = np.abs(gamma_num - gamma0) / np.abs(gamma0)
+        assert rel.max() > 5e-3, f"coarse-grid rel err {rel.max():.3e} unexpectedly small"
+        assert rel.max() < 0.2, f"coarse-grid rel err {rel.max():.3e} unexpectedly large"
+
+    def test_adiabatic_5d_matches_kinetic_6d_diag(self):
+        """5D (adiabatic) and 6D (kinetic) paths give the same Ampere diagonal
+        for identical single-ion parameters, and it is the numerical one."""
+        from gyaradax.integrals import _species_bessel_gamma
+
+        geometry, geom_sp = _candy_geometry(nvpar=16, nmu=8, vpar_max=3.0)
+        common = dict(
+            dt=0.002,
+            naverage=10,
+            disp_par=0.1,
+            disp_vp=0.1,
+            dvp=float(geometry["dvp"]),
+            sgr_dist=float(geometry["sgr_dist"]),
+            kxmax=float(geometry["kxmax"]),
+            kymax=float(geometry["kymax"]),
+            shat=1.07,
+            q=1.57,
+            eps=0.177,
+            kthnorm=1.0,
+            nlapar=True,
+            beta=0.234,
+        )
+        params_5d = GKParams(
+            adiabatic_electrons=True,
+            mas=1.0,
+            signz=1.0,
+            tmp=1.0,
+            de=1.0,
+            vthrat=1.0,
+            rlt=6.9,
+            rln=2.2,
+            **common,
+        )
+        params_6d = GKParams(
+            adiabatic_electrons=False,
+            mas=jnp.array([1.0]),
+            signz=jnp.array([1.0]),
+            tmp=jnp.array([1.0]),
+            de=jnp.array([1.0]),
+            vthrat=jnp.array([1.0]),
+            rlt=jnp.array([6.9]),
+            rln=jnp.array([2.2]),
+            **common,
+        )
+        pre_5d = linear_precompute(geometry, params_5d)
+        pre_6d = linear_precompute(geometry, params_6d)
+
+        diag_5d = np.asarray(pre_5d["apar_diag"])
+        diag_6d = np.asarray(pre_6d["apar_diag"])
+        np.testing.assert_allclose(diag_5d, diag_6d, rtol=1e-12, atol=0.0)
+
+        # regression vs the pre-fix behavior: the 5D diagonal must NOT be the
+        # analytic kperp^2 + beta*Gamma_0 on this coarse grid
+        kperp_sq = np.asarray(pre_5d["kperp_sq"]).reshape(diag_5d.shape)
+        _, gamma0 = _species_bessel_gamma(geom_sp)
+        gamma0 = np.asarray(gamma0).reshape(diag_5d.shape[0], 1, 1)
+        diag_analytic = kperp_sq + 0.234 * gamma0
+        rel = np.abs(diag_5d - diag_analytic) / np.abs(diag_analytic)
+        assert rel.max() > 1e-3, (
+            f"5D diag still equals the analytic Gamma_0 form (rel {rel.max():.3e})"
+        )
+
+        # the point of the Candy moment: the diagonal exactly cancels the
+        # discrete g2f source, i.e. apar_diag == kperp^2 - apar_weight.g2f
+        # identically on the grid (apar_weight.g2f == -beta*Z^2*de*gamma_num/mas)
+        for pre in (pre_5d, pre_6d):
+            corr = np.asarray(pre["apar_g2f_correction"]).reshape(diag_5d.shape)
+            np.testing.assert_allclose(
+                np.asarray(pre["apar_diag"]), kperp_sq - corr, rtol=1e-12, atol=1e-14
+            )
+
+
 # ── 3. Field solve tests ────────────────────────────────────────────────────
 
 

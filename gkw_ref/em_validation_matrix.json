@@ -1,0 +1,105 @@
+{
+  "schema_version": 1,
+  "description": "Source-case parameter matrix for EM validation. Concrete GKW input.dat files under gkw_ref/em_validation_inputs are generated from these templates by scripts/generate_em_validation_matrix.py.",
+  "families": [
+    {
+      "template": "fixed_step_apar_only.input.dat",
+      "cases": [
+        {"case": "apar_only_steps_001", "replacements": {"NTIME": 1}},
+        {"case": "apar_only_steps_005", "replacements": {"NTIME": 5}},
+        {"case": "apar_only_steps_010", "replacements": {"NTIME": 10}},
+        {"case": "apar_only_steps_020", "replacements": {"NTIME": 20}}
+      ]
+    },
+    {
+      "template": "fixed_step_apar_bpar.input.dat",
+      "cases": [
+        {"case": "apar_bpar_steps_001", "replacements": {"NTIME": 1}},
+        {"case": "apar_bpar_steps_005", "replacements": {"NTIME": 5}},
+        {"case": "apar_bpar_steps_010", "replacements": {"NTIME": 10}},
+        {"case": "apar_bpar_steps_020", "replacements": {"NTIME": 20}}
+      ]
+    },
+    {
+      "template": "fixed_step_bpar_only.input.dat",
+      "cases": [
+        {"case": "bpar_only_steps_001", "replacements": {"NTIME": 1}},
+        {"case": "bpar_only_steps_005", "replacements": {"NTIME": 5}},
+        {"case": "bpar_only_steps_010", "replacements": {"NTIME": 10}},
+        {"case": "bpar_only_steps_020", "replacements": {"NTIME": 20}}
+      ]
+    },
+    {
+      "template": "beta_bench.input.dat",
+      "cases": [
+        {"case": "beta_bench_beta_000", "replacements": {"beta": "0.000", "nlapar": false, "NTIME": 600}},
+        {"case": "beta_bench_beta_001", "replacements": {"beta": "0.001", "nlapar": true, "NTIME": 600}},
+        {"case": "beta_bench_beta_005", "replacements": {"beta": "0.005", "nlapar": true, "NTIME": 600}},
+        {"case": "beta_bench_beta_010", "replacements": {"beta": "0.01", "nlapar": true, "NTIME": 200}}
+      ]
+    },
+    {
+      "template": "bpar_bench_apar.input.dat",
+      "cases": [
+        {"case": "bpar_bench_apar_beta_000", "replacements": {"beta": "0.000000e+00", "NTIME": 200}},
+        {"case": "bpar_bench_apar_beta_002", "replacements": {"beta": "2.000000e-03", "NTIME": 200}},
+        {"case": "bpar_bench_apar_beta_003", "replacements": {"beta": "2.000000e-03", "NTIME": 200}},
+        {"case": "bpar_bench_apar_beta_011", "replacements": {"beta": "1.100000e-02", "NTIME": 200}},
+        {"case": "bpar_bench_apar_beta_020", "replacements": {"beta": "2.000000e-02", "NTIME": 200}}
+      ]
+    },
+    {
+      "template": "bpar_bench_bpar.input.dat",
+      "cases": [
+        {"case": "bpar_bench_bpar_beta_000", "replacements": {"beta": "0.000000e+00", "NTIME": 200}},
+        {"case": "bpar_bench_bpar_beta_011", "replacements": {"beta": "1.100000e-02", "NTIME": 200}},
+        {"case": "bpar_bench_bpar_beta_012", "replacements": {"beta": "1.100000e-02", "NTIME": 200}},
+        {"case": "bpar_bench_bpar_beta_020", "replacements": {"beta": "2.000000e-02", "NTIME": 200}}
+      ]
+    },
+    {"template": "waltz_bpar_linear.input.dat", "cases": [{"case": "waltz_bpar_linear", "replacements": {}}]},
+    {"template": "diag_lin_all_em.input.dat", "cases": [{"case": "diag_lin_all_em", "replacements": {}}]},
+    {
+      "template": "linear_apar.input.dat",
+      "cases": [
+        {"case": "linear_apar_b005", "replacements": {"beta": "0.005"}},
+        {"case": "linear_apar_b01", "replacements": {"beta": "0.01"}}
+      ]
+    },
+    {
+      "template": "linear_apar_bpar.input.dat",
+      "cases": [
+        {"case": "linear_apar_bpar_b005", "replacements": {"beta": "0.005"}},
+        {"case": "linear_apar_bpar_b01", "replacements": {"beta": "0.01"}}
+      ]
+    },
+    {
+      "template": "linear_bpar_only.input.dat",
+      "cases": [
+        {"case": "linear_bpar_only_b005", "replacements": {"beta": "0.005"}},
+        {"case": "linear_bpar_only_b01", "replacements": {"beta": "0.01"}}
+      ]
+    },
+    {
+      "template": "nonlinear_apar.input.dat",
+      "cases": [
+        {"case": "nonlinear_apar_b005", "replacements": {"beta": "0.005"}},
+        {"case": "nonlinear_apar_b01", "replacements": {"beta": "0.01"}}
+      ]
+    },
+    {
+      "template": "nonlinear_apar_bpar.input.dat",
+      "cases": [
+        {"case": "nonlinear_apar_bpar_b005", "replacements": {"beta": "0.005"}},
+        {"case": "nonlinear_apar_bpar_b01", "replacements": {"beta": "0.01"}}
+      ]
+    },
+    {
+      "template": "nonlinear_bpar_only.input.dat",
+      "cases": [
+        {"case": "nonlinear_bpar_only_b005", "replacements": {"beta": "0.005"}},
+        {"case": "nonlinear_bpar_only_b01", "replacements": {"beta": "0.01"}}
+      ]
+    }
+  ]
+}

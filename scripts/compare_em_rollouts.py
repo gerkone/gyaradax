@@ -30,6 +30,7 @@ import numpy as np
 
 
 DEFAULT_GKW_ROOT = Path("/local00/bioinf/volkmann/gyrokinetics/em_validation")
+DEFAULT_REGISTRY = Path("gkw_ref/em_validation_cases/index.json")
 DEFAULT_ROLLOUT_ROOT = DEFAULT_GKW_ROOT / "gyaradax_rollouts"
 DATASETS = (
     ("time", "time.npy", "time.dat"),
@@ -70,6 +71,46 @@ def _load_rollout_array(path: Path) -> np.ndarray | None:
 
 def _case_key_from_rollout_dir(path: Path) -> str:
     return path.resolve().name
+
+
+def _load_registry(path: Path) -> dict[str, Any]:
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _select_registry_records(
+    registry: dict[str, Any],
+    *,
+    cases: list[str] | None,
+    regime: str | None,
+    stage: str | None,
+) -> list[dict[str, Any]]:
+    requested = set(cases or [])
+    records: list[dict[str, Any]] = []
+    for record in registry.get("cases", []):
+        if requested and record.get("case") not in requested:
+            continue
+        if regime is not None and record.get("regime") != regime:
+            continue
+        if stage is not None and record.get("stage") != stage:
+            continue
+        if not requested and record.get("stage") == "source":
+            continue
+        records.append(record)
+    if requested:
+        matched = {record["case"] for record in records}
+        missing = sorted(requested - matched)
+        if missing:
+            raise FileNotFoundError("missing registry cases: " + ", ".join(missing))
+    return records
+
+
+def _registry_dirs(record: dict[str, Any]) -> tuple[Path, Path, Path]:
+    paths = record["paths"]["structured"]
+    return (
+        Path(str(paths["gkw"])),
+        Path(str(paths["gyaradax"])),
+        Path(str(paths["rollout_comparison"])),
+    )
 
 
 def resolve_gkw_case_dir(case_key: str, gkw_root: Path) -> Path:
@@ -133,6 +174,10 @@ def _time_vector(arr: np.ndarray) -> np.ndarray:
         return arr2.astype(float)
     if arr2.size == 0:
         return np.asarray([], dtype=float)
+    if arr2.shape[0] == 1 and arr2.shape[1] > 1:
+        # single-line GKW time.dat: the whole series lives in one row, so
+        # taking column 0 would collapse it to a single time point.
+        return arr2.reshape(-1).astype(float)
     return arr2[:, 0].astype(float)
 
 
@@ -397,13 +442,18 @@ def compare_rollout(
     rollout_dir: Path,
     *,
     gkw_root: Path,
+    gkw_dir_override: Path | None = None,
     abs_threshold: float,
     explosive_ratio: float,
     rel_floor: float,
     align: str,
 ) -> dict[str, Any]:
     case_key = _case_key_from_rollout_dir(rollout_dir)
-    gkw_dir = resolve_gkw_case_dir(case_key, gkw_root)
+    gkw_dir = (
+        gkw_dir_override
+        if gkw_dir_override is not None
+        else resolve_gkw_case_dir(case_key, gkw_root)
+    )
     if not rollout_dir.exists():
         raise FileNotFoundError(f"rollout directory not found: {rollout_dir}")
     if not gkw_dir.exists():
@@ -521,6 +571,17 @@ def main() -> None:
     )
     parser.add_argument("--gkw-root", type=Path, default=DEFAULT_GKW_ROOT)
     parser.add_argument("--rollout-root", type=Path, default=DEFAULT_ROLLOUT_ROOT)
+    parser.add_argument("--registry", type=Path, default=DEFAULT_REGISTRY)
+    parser.add_argument("--no-registry", action="store_true")
+    parser.add_argument("--legacy-paths", action="store_true")
+    parser.add_argument("--regime", choices=("linear", "nonlinear"), default=None)
+    parser.add_argument(
+        "--stage",
+        choices=("fixed_steps", "window_001", "rollout", "rollout_short", "rollout_full"),
+        default=None,
+    )
+    parser.add_argument("--write-case-json", action="store_true")
+    parser.add_argument("--dry-run", action="store_true", help="Resolve paths without reading data")
     parser.add_argument("--json", action="store_true", help="Emit JSON")
     parser.add_argument(
         "--align",
@@ -547,20 +608,71 @@ def main() -> None:
     parser.add_argument("--rel-floor", type=float, default=1e-30)
     args = parser.parse_args()
 
-    rollout_dirs = _available_rollout_dirs(
-        rollout_root=args.rollout_root, cases=args.cases, rollout_dirs=args.rollout_dirs
+    use_registry = (
+        not args.no_registry
+        and not args.legacy_paths
+        and args.registry.exists()
+        and (args.regime is not None or args.stage is not None or args.cases is not None)
     )
-    results = [
-        compare_rollout(
-            rollout_dir,
-            gkw_root=args.gkw_root,
-            abs_threshold=args.abs_threshold,
-            explosive_ratio=args.explosive_ratio,
-            rel_floor=args.rel_floor,
-            align=args.align,
+    results: list[dict[str, Any]] = []
+    case_json_paths: list[Path] = []
+    if use_registry:
+        registry = _load_registry(args.registry)
+        records = _select_registry_records(
+            registry, cases=args.cases, regime=args.regime, stage=args.stage
         )
-        for rollout_dir in rollout_dirs
-    ]
+        for record in records:
+            gkw_dir, rollout_dir, case_json = _registry_dirs(record)
+            if args.dry_run:
+                result = {
+                    "case_key": rollout_dir.name,
+                    "registry_case": record.get("case"),
+                    "rollout_dir": str(rollout_dir),
+                    "gkw_dir": str(gkw_dir),
+                    "comparison_json": str(case_json),
+                    "dry_run": True,
+                }
+            else:
+                result = compare_rollout(
+                    rollout_dir,
+                    gkw_root=args.gkw_root,
+                    gkw_dir_override=gkw_dir,
+                    abs_threshold=args.abs_threshold,
+                    explosive_ratio=args.explosive_ratio,
+                    rel_floor=args.rel_floor,
+                    align=args.align,
+                )
+                result["registry_case"] = record.get("case")
+            results.append(result)
+            case_json_paths.append(case_json)
+    else:
+        if args.regime is not None or args.stage is not None:
+            raise ValueError("--regime/--stage filters require registry mode")
+        rollout_dirs = _available_rollout_dirs(
+            rollout_root=args.rollout_root, cases=args.cases, rollout_dirs=args.rollout_dirs
+        )
+        if args.dry_run:
+            results = [
+                {"case_key": rollout_dir.name, "rollout_dir": str(rollout_dir), "dry_run": True}
+                for rollout_dir in rollout_dirs
+            ]
+        else:
+            results = [
+                compare_rollout(
+                    rollout_dir,
+                    gkw_root=args.gkw_root,
+                    abs_threshold=args.abs_threshold,
+                    explosive_ratio=args.explosive_ratio,
+                    rel_floor=args.rel_floor,
+                    align=args.align,
+                )
+                for rollout_dir in rollout_dirs
+            ]
+
+    if args.write_case_json and not args.dry_run:
+        for result, path in zip(results, case_json_paths):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
     payload = {
         "gkw_root": str(args.gkw_root.resolve()),
@@ -579,7 +691,14 @@ def main() -> None:
             f"abs_threshold={args.abs_threshold:.3e}; explosive_ratio={args.explosive_ratio:.3e}"
         )
         for result in results:
-            _print_case(result)
+            if result.get("dry_run"):
+                print(
+                    f"[DRY] {result['case_key']}: "
+                    f"GKW={result.get('gkw_dir', 'n/a')} "
+                    f"GY={result.get('rollout_dir', 'n/a')}"
+                )
+            else:
+                _print_case(result)
 
 
 if __name__ == "__main__":

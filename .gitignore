@@ -35,9 +35,17 @@ cache/
 gkw_ref/
 !gkw_ref/
 gkw_ref/*
-!gkw_ref/em_validation_inputs/
-gkw_ref/em_validation_inputs/*
-!gkw_ref/em_validation_inputs/*.input.dat
+# gkw_ref/em_validation_inputs/
+# gkw_ref/em_validation_cases/
+# !gkw_ref/em_validation_templates/
+# gkw_ref/em_validation_templates/*
+# !gkw_ref/em_validation_templates/*.input.dat
+# !gkw_ref/em_validation_matrix.json
+instabilities/
+torax/
+em_canon/
+gradients/
+experiments/
 
 # --- VCS / IDE / Editor noise ---
 .vscode/

@@ -64,6 +64,7 @@ from gyaradax.utils import parse_input_dat
 
 
 DEFAULT_GKW_ROOT = Path("/local00/bioinf/volkmann/gyrokinetics/em_validation")
+DEFAULT_REGISTRY = Path("gkw_ref/em_validation_cases/index.json")
 DEFAULT_OUTPUT_ROOT = DEFAULT_GKW_ROOT / "gyaradax_rollouts"
 
 
@@ -151,6 +152,42 @@ def _candidate_case_dirs(gkw_root: Path, case: str) -> list[Path]:
     return candidates
 
 
+def _load_registry(path: Path) -> dict[str, Any]:
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _select_registry_records(
+    registry: dict[str, Any],
+    *,
+    cases: list[str],
+    regime: str | None,
+    stage: str | None,
+) -> list[dict[str, Any]]:
+    requested = set(cases)
+    records: list[dict[str, Any]] = []
+    for record in registry.get("cases", []):
+        if requested and record.get("case") not in requested:
+            continue
+        if regime is not None and record.get("regime") != regime:
+            continue
+        if stage is not None and record.get("stage") != stage:
+            continue
+        if not requested and record.get("stage") == "source":
+            continue
+        records.append(record)
+    if requested:
+        matched = {record["case"] for record in records}
+        missing = sorted(requested - matched)
+        if missing:
+            raise FileNotFoundError("missing registry cases: " + ", ".join(missing))
+    return records
+
+
+def _registry_dirs(record: dict[str, Any]) -> tuple[Path, Path]:
+    paths = record["paths"]["structured"]
+    return Path(str(paths["gkw"])), Path(str(paths["gyaradax"]))
+
+
 def _resolve_case_dirs(gkw_root: Path, cases: list[str], case_dirs: list[Path]) -> list[Path]:
     resolved: list[Path] = []
     for raw_dir in case_dirs:
@@ -214,6 +251,8 @@ def generate_rollout(
     output_dir: Path,
     n_windows: int | None,
     overwrite: bool,
+    disp_par_conserve: int = 0,
+    disp_par_conserve_kycut: float = 0.0,
 ) -> dict[str, Any]:
     if output_dir.exists():
         if not overwrite:
@@ -233,6 +272,12 @@ def generate_rollout(
 
     disabled_by_gkw = _normalization_disabled_by_gkw(case_dir)
     params = replace(params0, naverage=10**9) if disabled_by_gkw else params0
+    if disp_par_conserve:
+        params = replace(
+            params,
+            disp_par_conserve=int(disp_par_conserve),
+            disp_par_conserve_kycut=float(disp_par_conserve_kycut),
+        )
     pre = linear_precompute(geometry, params)
     nsp = 1 if params.adiabatic_electrons else int(jnp.asarray(params.mas).shape[0])
 
@@ -320,41 +365,83 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--gkw-root", type=Path, default=DEFAULT_GKW_ROOT)
     parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)
+    parser.add_argument("--registry", type=Path, default=DEFAULT_REGISTRY)
+    parser.add_argument("--no-registry", action="store_true")
+    parser.add_argument("--legacy-paths", action="store_true")
+    parser.add_argument("--regime", choices=("linear", "nonlinear"), default=None)
+    parser.add_argument(
+        "--stage",
+        choices=("fixed_steps", "window_001", "rollout", "rollout_short", "rollout_full"),
+        default=None,
+    )
     parser.add_argument("--cases", nargs="*", default=[])
     parser.add_argument("--case-dirs", nargs="*", type=Path, default=[])
     parser.add_argument("--n-windows", type=int, default=None)
     parser.add_argument("--overwrite", action="store_true")
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--disp-par-conserve", type=int, default=0,
+                        help="conservative parallel dissipation mode "
+                             "(0 off, 2 recommended)")
+    parser.add_argument("--disp-par-conserve-kycut", type=float, default=0.0,
+                        help="project only modes with 0 < kthrho <= kycut")
     parser.add_argument("--device", type=int, default=-1)
     parser.add_argument("--device-list", type=str, default=None)
     parser.add_argument("--preallocate", choices=("true", "false"), default="false")
     args = parser.parse_args()
 
-    if not args.cases and not args.case_dirs:
-        parser.error("provide at least one --cases entry or --case-dirs entry")
+    use_registry = not args.no_registry and args.registry.exists() and not args.legacy_paths
+    case_pairs: list[tuple[Path, Path]] = []
+    if use_registry:
+        registry = _load_registry(args.registry)
+        records = _select_registry_records(
+            registry, cases=args.cases, regime=args.regime, stage=args.stage
+        )
+        for record in records:
+            case_pairs.append(_registry_dirs(record))
+    else:
+        if not args.cases and not args.case_dirs:
+            parser.error("provide at least one --cases entry or --case-dirs entry")
+        if args.regime is not None or args.stage is not None:
+            raise ValueError("--regime/--stage filters require registry mode")
+        case_dirs = _resolve_case_dirs(args.gkw_root, args.cases, args.case_dirs)
+        for case_dir in case_dirs:
+            name = _case_output_name(case_dir, args.gkw_root)
+            case_pairs.append((case_dir, args.output_root / name))
 
-    case_dirs = _resolve_case_dirs(args.gkw_root, args.cases, args.case_dirs)
     summaries: list[dict[str, Any]] = []
-    for case_dir in case_dirs:
-        name = _case_output_name(case_dir, args.gkw_root)
-        out_dir = args.output_root / name
-        manifest = generate_rollout(
-            case_dir=case_dir,
-            output_dir=out_dir,
-            n_windows=args.n_windows,
-            overwrite=args.overwrite,
-        )
+    for case_dir, out_dir in case_pairs:
+        if args.dry_run:
+            manifest = {
+                "case_dir": str(case_dir.resolve()),
+                "output_dir": str(out_dir.resolve()),
+                "dry_run": True,
+            }
+        else:
+            manifest = generate_rollout(
+                case_dir=case_dir,
+                output_dir=out_dir,
+                n_windows=args.n_windows,
+                overwrite=args.overwrite,
+                disp_par_conserve=args.disp_par_conserve,
+                disp_par_conserve_kycut=args.disp_par_conserve_kycut,
+            )
         summaries.append(manifest)
-        print(
-            f"[OK] {case_dir} -> {out_dir} "
-            f"windows={manifest['n_windows']} final_time={manifest['gyaradax_final_time']:.6e}"
+        status = "DRY" if args.dry_run else "OK"
+        suffix = (
+            ""
+            if args.dry_run
+            else f" windows={manifest['n_windows']} final_time={manifest['gyaradax_final_time']:.6e}"
         )
+        print(f"[{status}] {case_dir} -> {out_dir}{suffix}")
 
-    args.output_root.mkdir(parents=True, exist_ok=True)
-    index_path = args.output_root / "manifest.json"
-    with index_path.open("w", encoding="utf-8") as f:
-        json.dump(summaries, f, indent=2, sort_keys=True)
-        f.write("\n")
-    print(f"wrote {index_path}")
+    if not args.dry_run:
+        index_root = args.output_root if not use_registry else args.gkw_root
+        index_root.mkdir(parents=True, exist_ok=True)
+        index_path = index_root / "gyaradax_rollout_manifest.json"
+        with index_path.open("w", encoding="utf-8") as f:
+            json.dump(summaries, f, indent=2, sort_keys=True)
+            f.write("\n")
+        print(f"wrote {index_path}")
 
 
 if __name__ == "__main__":

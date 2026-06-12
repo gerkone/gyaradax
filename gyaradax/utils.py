@@ -167,8 +167,9 @@ def save_dumps(
     if fluxes_arr.ndim == 0 or (fluxes_arr.ndim == 1 and fluxes_arr.shape[0] != 3):
         fluxes_arr = np.array([fluxes[0], fluxes[1], fluxes[2]])
 
-    # em fluxes shape matches ES: (3,) for 5D df, (nsp, 3) for 6D. vflux slot is
-    # zero -- EM momentum flux is not tracked by calculate_em_fluxes.
+    # em fluxes shape matches ES: (3,) for 5D df, (nsp, 3) for 6D, including
+    # the EM vflux (flutter momentum flux). A_par + B_par contributions are
+    # summed into one triple; GKW writes them as separate fluxes_em/fluxes_bpar.
     em_fluxes_arr = _compute_em_fluxes_arr(df, geometry, params, pre, fluxes_arr.shape)
 
     diags = {
@@ -490,6 +491,37 @@ def parse_input_dat(file_path):
     return parsed_data
 
 
+def resolve_betaprime(inp: Dict[str, Any]) -> float:
+    """Resolve GKW's veta_prime from a parsed input.dat dict.
+
+    Mirrors the flux-tube fill in components.f90 (~1995-2016):
+      betaprime_type='ref'  -> betaprime_ref (input, default 0)
+      betaprime_type='sp'   -> veta * sum_species(-de*tmp*(rlt+rln))
+                               with veta = beta; the sum runs over ALL
+                               species blocks (incl. adiabatic ones).
+      betaprime_type='eq'/'file' -> not supported here.
+    """
+    spc = inp.get("spcgeneral", {})
+    bp_type = str(spc.get("betaprime_type", "ref")).strip().strip("'").strip('"').lower()
+    bp_ref = as_float(spc.get("betaprime_ref", 0.0), 0.0)
+    if bp_type == "ref":
+        return bp_ref
+    if bp_type == "sp":
+        beta = as_float(spc.get("beta", spc.get("beta_ref", 0.0)), 0.0)
+        species = species_blocks(inp)
+        dum = 0.0
+        for sp in species:
+            de = as_float(sp.get("dens", 1.0), 1.0)
+            tmp = as_float(sp.get("temp", 1.0), 1.0)
+            rlt = as_float(sp.get("rlt", 0.0), 0.0)
+            rln = as_float(sp.get("rln", 0.0), 0.0)
+            dum -= de * tmp * (rlt + rln)
+        return beta * dum
+    raise NotImplementedError(
+        f"betaprime_type='{bp_type}' is not supported (only 'ref' and 'sp')"
+    )
+
+
 def load_runtime_params(input_dat_path: str) -> Dict[str, Any]:
     """
     Load runtime controls for solver parity from `input.dat`.
@@ -549,6 +581,10 @@ def load_runtime_params(input_dat_path: str) -> Dict[str, Any]:
                 inp.get("spcgeneral", {}).get("beta_ref", 0.0),
             )
         ),
+        "betaprime": resolve_betaprime(inp),
+        "drift_gradp_type": str(
+            inp.get("spcgeneral", {}).get("drift_gradp_type", "full_drift")
+        ).strip().strip("'").strip('"').lower(),
         "method": method,
         "meth": _int("meth", 0),
         "finit": finit,
@@ -564,8 +600,11 @@ def load_runtime_params(input_dat_path: str) -> Dict[str, Any]:
         "coll_en_scatter": _coll_bool("en_scatter", True),
         "coll_friction": _coll_bool("friction_coll", True),
         "coll_freq": float(coll.get("coll_freq", 0.0)),
-        "coll_freq_override": _coll_bool("freq_override", True),
-        "coll_mass_conserve": _coll_bool("mass_conserve", True),
+        # GKW defaults (collisionop.f90:150-151) are .false. for both; a stock
+        # GKW input omitting these keys must not be reinterpreted (worst case:
+        # freq_override=True with coll_freq=0.0 silently zeroes the operator).
+        "coll_freq_override": _coll_bool("freq_override", False),
+        "coll_mass_conserve": _coll_bool("mass_conserve", False),
         "coll_mom_conservation": _coll_bool("mom_conservation", False),
         "coll_ene_conservation": _coll_bool("ene_conservation", False),
         "coll_rref": float(coll.get("rref", 1.0)),

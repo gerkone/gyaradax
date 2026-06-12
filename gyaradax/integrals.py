@@ -381,6 +381,44 @@ def calculate_phi(
 calculate_phi_kinetic = _phi_kinetic
 
 
+def ampere_gamma_num(
+    geometry: Dict[str, jnp.ndarray], dgrid: Any = 1.0, bessel: Optional[jnp.ndarray] = None
+) -> jnp.ndarray:
+    """Numerical velocity-grid moment for the Ampere diagonal (Candy moment).
+
+    GKW ampere_dia (linear_terms.f90:3756-3789):
+        gamma_num = sum_{mu,vpar} 2*B*intmu*intvp * J0^2 * vpgr^2 * fmaxwl
+    evaluated on the actual (vpar, mu) grid so the diagonal exactly cancels
+    the discrete g2f correction (-2*Z*vthrat*vpgr*J0*F_M/T) in the
+    mixed-variable Ampere solve.  The analytic Gamma_0 = I0(b)e^{-b} equals
+    this only in the continuum limit; GKW notes the analytic form leads to
+    "large errors at high beta and low kthrho" at default vpmax.
+
+    geometry must carry per-species arrays (mas, signz, tmp, de, vthrat),
+    e.g. the geom_sp dict built inside :func:`precompute_apar`.
+
+    Returns gamma_num with shape (nsp, ns, nkx, nky).
+    """
+    if bessel is None:
+        bessel, _ = _species_bessel_gamma(geometry)
+    de = jnp.atleast_1d(jnp.asarray(geometry["de"], dtype=jnp.float64))
+    nsp = de.shape[0]
+    de_6d = de.reshape(nsp, 1, 1, 1, 1, 1)
+    intvp = jnp.asarray(geometry["intvp"], dtype=jnp.float64).reshape(1, -1, 1, 1, 1, 1)
+    intmu = jnp.asarray(geometry["intmu"], dtype=jnp.float64).reshape(1, 1, -1, 1, 1, 1)
+    vpgr = jnp.asarray(geometry["vpgr"], dtype=jnp.float64).reshape(1, -1, 1, 1, 1, 1)
+    mugr = jnp.asarray(geometry["mugr"], dtype=jnp.float64).reshape(1, 1, -1, 1, 1, 1)
+    bn = jnp.asarray(geometry["bn"], dtype=jnp.float64).reshape(1, 1, 1, -1, 1, 1)
+    dgrid = jnp.asarray(dgrid, dtype=jnp.float64)
+    # Maxwellian on the actual grid (GKW init.f90:1977-1983, tmp/tgrid = 1).
+    fmaxwl = (de_6d / dgrid) * jnp.exp(-(vpgr**2 + 2.0 * bn * mugr)) / jnp.pi**1.5
+    gamma_num = jnp.sum(
+        2.0 * bn * intmu * intvp * bessel**2 * vpgr**2 * fmaxwl,
+        axis=(1, 2),
+    )
+    return gamma_num
+
+
 def precompute_apar(geometry: Dict[str, jnp.ndarray], params: Any = None):
     """
     Precompute static arrays for the Ampere A_parallel solve (kinetic species).
@@ -388,8 +426,12 @@ def precompute_apar(geometry: Dict[str, jnp.ndarray], params: Any = None):
     From GKW linear_terms.f90 ampere_int + ampere_dia.
 
     Ampere's law (normalized):
-        [k_perp^2 + beta * sum_sp(Z^2 n / m * Gamma_0)] * A_par
+        [k_perp^2 + beta * sum_sp(Z^2 n / m * gamma_num)] * A_par
         = beta * sum_sp(Z * vthrat * n * 2pi*B * integral(vpar * J0 * g * dvpar dmu))
+
+    The diagonal uses the NUMERICAL grid moment gamma_num (see
+    :func:`ampere_gamma_num`), not the analytic Gamma_0, matching GKW
+    ampere_dia for exact cancellation against the discrete g2f source.
 
     Returns (apar_weight, apar_diag, kperp_sq) where:
         apar_weight: (nsp, nvpar, nmu, ns, nkx, nky) — Ampere numerator weight
@@ -420,7 +462,7 @@ def precompute_apar(geometry: Dict[str, jnp.ndarray], params: Any = None):
     geom_sp["tmp"] = tmp
     geom_sp["de"] = de
     geom_sp["vthrat"] = vthrat
-    bessel, gamma = _species_bessel_gamma(geom_sp)
+    bessel, _gamma_analytic = _species_bessel_gamma(geom_sp)
 
     mas_6d = mas.reshape(nsp, 1, 1, 1, 1, 1)
     signz_6d = signz.reshape(nsp, 1, 1, 1, 1, 1)
@@ -447,11 +489,14 @@ def precompute_apar(geometry: Dict[str, jnp.ndarray], params: Any = None):
     apar_weight = beta * signz_6d * de_6d * vthrat_6d * vpgr * bessel * bn * intvp * intmu
     apar_weight = jnp.where(jnp.abs(intvp) < EPS, 0.0, apar_weight)
 
-    # Ampere denominator. Analytical fallback; solver.py overrides with numerical
-    # gamma_num using properly normalized fmaxwl for GKW parity.
-    diag_per_sp = signz_6d**2 * de_6d / mas_6d * gamma
+    # Ampere denominator (GKW ampere_dia, linear_terms.f90:3760-3785): numerical
+    # gamma_num from the actual velocity grid, NOT the analytic Gamma_0, so the
+    # diagonal exactly cancels the discrete g2f source.  The kinetic 6D path in
+    # precompute.py recomputes the identical moment from its sp arrays.
+    dgrid = getattr(params, "dgrid", 1.0) if params is not None else 1.0
+    gamma_num = ampere_gamma_num(geom_sp, dgrid=dgrid, bessel=bessel)  # (nsp, ns, nkx, nky)
+    diag_per_sp = signz.reshape(nsp, 1, 1, 1) ** 2 * de.reshape(nsp, 1, 1, 1) * gamma_num / mas.reshape(nsp, 1, 1, 1)
     diag_em = beta * jnp.sum(diag_per_sp, axis=0)
-    diag_em = diag_em.reshape(diag_em.shape[-3], diag_em.shape[-2], diag_em.shape[-1])
     kperp_sq_3d = kperp_sq.reshape(kperp_sq.shape[-3], kperp_sq.shape[-2], kperp_sq.shape[-1])
 
     apar_diag = kperp_sq_3d + diag_em
@@ -682,6 +727,13 @@ def calculate_em_fluxes(
     fsa = jnp.sum(ints)
 
     if df.ndim == 5:
+        if bpar is not None:
+            raise NotImplementedError(
+                "calculate_em_fluxes: the 5D (adiabatic) branch implements the "
+                "A_par flutter flux only; the B_par compressional flux is "
+                "implemented in the 6D kinetic branch. Passing bpar here would "
+                "silently drop it (REVIEW.md item 4)."
+            )
         parseval = jnp.asarray(geometry["parseval"], dtype=jnp.float64)
         intvp = jnp.asarray(geometry["intvp"], dtype=jnp.float64)
         intmu = jnp.asarray(geometry["intmu"], dtype=jnp.float64)

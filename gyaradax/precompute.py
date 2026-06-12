@@ -368,6 +368,27 @@ def _compute_species_coeffs(
     ed = vp2 + bn_b * mu
     drift_x = tmp * ed * d_shape(dfun[:, 0]) / sz
     drift_y = tmp * ed * d_shape(dfun[:, 1]) / sz
+    # beta-prime: finite-beta pressure-gradient correction of the curvature
+    # drift (GKW drift(), linear_terms.f90:4186-4197):
+    #   drift_x += tgrid*vpgr^2*veta_prime*efun(1,1)/bn^2
+    #   drift_y += tgrid*vpgr^2*veta_prime*efun(1,2)/bn^2
+    # (with vpgr^2 -> vpgr^2 + bn*mugr for drift_gradp_type='curv_only'),
+    # divided by signz with the rest of the drift. efun(1,1)=E^psi,psi is
+    # identically zero (geom.f90:3259/3526; E is antisymmetric by
+    # construction, see tensors.py), so the drift_x correction vanishes and
+    # only drift_y picks up the term. The 1D geometry 'efun' passed in here
+    # is -efun(1,2) (assembly.py / loaded.py store the negated E^psi,zeta
+    # for the drive-term convention), hence the minus sign below.
+    betaprime = getattr(params, "betaprime", 0.0)
+    gradp_type = getattr(params, "drift_gradp_type", "full_drift")
+    if gradp_type not in ("full_drift", "curv_only"):
+        raise NotImplementedError(f"drift_gradp_type='{gradp_type}' is not supported")
+    # betaprime is a static field (python float); skip entirely when zero so
+    # the default is a strict no-op (bit-identical drift coefficients).
+    if not (isinstance(betaprime, (int, float)) and betaprime == 0.0):
+        betaprime = jnp.asarray(betaprime, dtype=jnp.float64)
+        ed_bp = vp2 if gradp_type == "full_drift" else ed
+        drift_y = drift_y + tmp * ed_bp * betaprime * (-efun_b) / bn_b**2 / sz
     # rotation: Coriolis drift (GKW drift(), linear_terms.f90:4200-4203):
     # 2*mas*vthrat*vpar*vcor*hfun / signz, added to the curvature drift.
     vcor = jnp.asarray(getattr(params, "vcor", 0.0), dtype=jnp.float64)
@@ -573,7 +594,10 @@ def _linear_precompute_core(geometry: Dict[str, jnp.ndarray], params: GKParams) 
         if params.nlapar:
             from gyaradax.integrals import precompute_apar
 
-            apar_w, _apar_d_analytical, kperp_sq = precompute_apar(geometry, params)
+            # precompute_apar's diag is the same numerical gamma_num moment; it is
+            # recomputed below from the sp arrays (bessel/fmaxwl) for exact parity
+            # with the RHS coefficients.
+            apar_w, _apar_d_dup, kperp_sq = precompute_apar(geometry, params)
             out["apar_weight"] = apar_w
             out["kperp_sq"] = kperp_sq
 
@@ -766,6 +790,10 @@ def _linear_precompute_core(geometry: Dict[str, jnp.ndarray], params: GKParams) 
         if params.nlapar:
             from gyaradax.integrals import precompute_apar
 
+            # apar_d carries the numerical gamma_num diagonal (GKW ampere_dia),
+            # matching the kinetic 6D path; the analytic Gamma_0 loses the
+            # discrete cancellation against the g2f correction (large errors
+            # at high beta / low kthrho on coarse vpar grids).
             apar_w, apar_d, kperp_sq = precompute_apar(geometry, params)
             out["apar_weight"] = apar_w
             out["apar_diag"] = apar_d

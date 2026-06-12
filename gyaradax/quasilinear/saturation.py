@@ -49,7 +49,7 @@ def k_perp_eff_squared(phi2, k_perp2, ds):
     return weighted / jnp.maximum(norm, 1e-30)
 
 
-@partial(jax.jit, static_argnames=("mask_zonal",))
+@partial(jax.jit, static_argnames=("mask_zonal", "kx_ratio_sum"))
 def ql_flux(
     growth_rate,
     phi2,
@@ -64,6 +64,7 @@ def ql_flux(
     gate_sharpness=20.0,
     eps=1e-30,
     mask_zonal=True,
+    kx_ratio_sum=False,
 ):
     """Compute Q_QL from a gyaradax linear-run end-state.
 
@@ -90,15 +91,27 @@ def ql_flux(
     g_zz_min = jnp.min(little_g[0])
     safe_kperp2 = jnp.maximum(kperp2_eff, jnp.maximum(krho**2 * g_zz_min, eps))
 
-    # smooth stability gate, γ-linear amplitude
+    # smooth stability gate, γ-linear amplitude. relu keeps stable modes at
+    # exactly zero: sigmoid(20γ)·γ alone is negative for γ<0 and leaked small
+    # negative flux at near-marginal radii (REVIEW.md).
     gate = jax.nn.sigmoid(gate_sharpness * (growth_rate - gate_threshold))
-    sat_amp = gate * growth_rate / safe_kperp2
+    sat_amp = gate * jax.nn.relu(growth_rate) / safe_kperp2
 
-    # normalization-invariant QL weight per (kx, ky)
-    w_kxy = flux_kxy / jnp.maximum(phi2_kxy, eps)
+    # normalization-invariant QL weight. Intensity-weighted over kx
+    # (default): W(ky) = (sum_kx flux)/(sum_kx phi2) — grid-robust (a sum of
+    # per-kx ratios scales ~nkx for ballooning modes; REVIEW.md item 2;
+    # measured skill identical on the legacy set). kx_ratio_sum=True
+    # restores the legacy per-kx-ratio behavior.
+    if kx_ratio_sum:
+        w_kxy = flux_kxy / jnp.maximum(phi2_kxy, eps)
+    else:
+        w_kxy = (jnp.sum(flux_kxy, axis=0, keepdims=True)
+                 / jnp.maximum(jnp.sum(phi2_kxy, axis=0, keepdims=True), eps))
 
+    # mask the zonal mode by its wavenumber, not by position: grids without
+    # a ky=0 column must not lose a physical mode
     ky_mask = (
-        (jnp.arange(krho.shape[0]) > 0).astype(krho.dtype) if mask_zonal else jnp.ones_like(krho)
+        (jnp.abs(krho) > eps).astype(krho.dtype) if mask_zonal else jnp.ones_like(krho)
     )
     return cn * jnp.sum(w_kxy * sat_amp[None, :] * ky_mask[None, :])
 
@@ -117,6 +130,7 @@ def ql_flux_diagnostics(
     gate_sharpness=20.0,
     eps=1e-30,
     mask_zonal=True,
+    kx_ratio_sum=False,
 ):
     """Same as ql_flux but returns intermediate quantities for inspection."""
     k_perp2 = k_perp_squared(krho, kxrh, little_g)
@@ -124,10 +138,14 @@ def ql_flux_diagnostics(
     g_zz_min = jnp.min(little_g[0])
     safe_kperp2 = jnp.maximum(kperp2_eff, jnp.maximum(krho**2 * g_zz_min, eps))
     gate = jax.nn.sigmoid(gate_sharpness * (growth_rate - gate_threshold))
-    sat_amp = gate * growth_rate / safe_kperp2
-    w_kxy = flux_kxy / jnp.maximum(phi2_kxy, eps)
+    sat_amp = gate * jax.nn.relu(growth_rate) / safe_kperp2
+    if kx_ratio_sum:
+        w_kxy = flux_kxy / jnp.maximum(phi2_kxy, eps)
+    else:
+        w_kxy = (jnp.sum(flux_kxy, axis=0, keepdims=True)
+                 / jnp.maximum(jnp.sum(phi2_kxy, axis=0, keepdims=True), eps))
     ky_mask = (
-        (jnp.arange(krho.shape[0]) > 0).astype(krho.dtype) if mask_zonal else jnp.ones_like(krho)
+        (jnp.abs(krho) > eps).astype(krho.dtype) if mask_zonal else jnp.ones_like(krho)
     )
     contrib_kxy = w_kxy * sat_amp[None, :] * ky_mask[None, :]
     return {
