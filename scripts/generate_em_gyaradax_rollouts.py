@@ -162,6 +162,7 @@ def _select_registry_records(
     cases: list[str],
     regime: str | None,
     stage: str | None,
+    setting: str | None,
 ) -> list[dict[str, Any]]:
     requested = set(cases)
     records: list[dict[str, Any]] = []
@@ -171,6 +172,8 @@ def _select_registry_records(
         if regime is not None and record.get("regime") != regime:
             continue
         if stage is not None and record.get("stage") != stage:
+            continue
+        if setting is not None and record.get("setting") != setting:
             continue
         if not requested and record.get("stage") == "source":
             continue
@@ -369,6 +372,7 @@ def main() -> None:
     parser.add_argument("--no-registry", action="store_true")
     parser.add_argument("--legacy-paths", action="store_true")
     parser.add_argument("--regime", choices=("linear", "nonlinear"), default=None)
+    parser.add_argument("--setting", default=None, help="Registry setting name to select")
     parser.add_argument(
         "--stage",
         choices=("fixed_steps", "window_001", "rollout", "rollout_short", "rollout_full"),
@@ -394,15 +398,19 @@ def main() -> None:
     if use_registry:
         registry = _load_registry(args.registry)
         records = _select_registry_records(
-            registry, cases=args.cases, regime=args.regime, stage=args.stage
+            registry,
+            cases=args.cases,
+            regime=args.regime,
+            stage=args.stage,
+            setting=args.setting,
         )
         for record in records:
             case_pairs.append(_registry_dirs(record))
     else:
         if not args.cases and not args.case_dirs:
             parser.error("provide at least one --cases entry or --case-dirs entry")
-        if args.regime is not None or args.stage is not None:
-            raise ValueError("--regime/--stage filters require registry mode")
+        if args.regime is not None or args.stage is not None or args.setting is not None:
+            raise ValueError("--regime/--stage/--setting filters require registry mode")
         case_dirs = _resolve_case_dirs(args.gkw_root, args.cases, args.case_dirs)
         for case_dir in case_dirs:
             name = _case_output_name(case_dir, args.gkw_root)

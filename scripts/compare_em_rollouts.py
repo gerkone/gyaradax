@@ -83,6 +83,7 @@ def _select_registry_records(
     cases: list[str] | None,
     regime: str | None,
     stage: str | None,
+    setting: str | None,
 ) -> list[dict[str, Any]]:
     requested = set(cases or [])
     records: list[dict[str, Any]] = []
@@ -92,6 +93,8 @@ def _select_registry_records(
         if regime is not None and record.get("regime") != regime:
             continue
         if stage is not None and record.get("stage") != stage:
+            continue
+        if setting is not None and record.get("setting") != setting:
             continue
         if not requested and record.get("stage") == "source":
             continue
@@ -575,6 +578,7 @@ def main() -> None:
     parser.add_argument("--no-registry", action="store_true")
     parser.add_argument("--legacy-paths", action="store_true")
     parser.add_argument("--regime", choices=("linear", "nonlinear"), default=None)
+    parser.add_argument("--setting", default=None, help="Registry setting name to select")
     parser.add_argument(
         "--stage",
         choices=("fixed_steps", "window_001", "rollout", "rollout_short", "rollout_full"),
@@ -612,14 +616,23 @@ def main() -> None:
         not args.no_registry
         and not args.legacy_paths
         and args.registry.exists()
-        and (args.regime is not None or args.stage is not None or args.cases is not None)
+        and (
+            args.regime is not None
+            or args.stage is not None
+            or args.setting is not None
+            or args.cases is not None
+        )
     )
     results: list[dict[str, Any]] = []
     case_json_paths: list[Path] = []
     if use_registry:
         registry = _load_registry(args.registry)
         records = _select_registry_records(
-            registry, cases=args.cases, regime=args.regime, stage=args.stage
+            registry,
+            cases=args.cases,
+            regime=args.regime,
+            stage=args.stage,
+            setting=args.setting,
         )
         for record in records:
             gkw_dir, rollout_dir, case_json = _registry_dirs(record)

@@ -260,6 +260,7 @@ def _select_registry_records(
     cases: list[str],
     regime: str | None,
     stage: str | None,
+    setting: str | None,
 ) -> list[dict[str, Any]]:
     requested = set(cases)
     records: list[dict[str, Any]] = []
@@ -269,6 +270,8 @@ def _select_registry_records(
         if regime is not None and record.get("regime") != regime:
             continue
         if stage is not None and record.get("stage") != stage:
+            continue
+        if setting is not None and record.get("setting") != setting:
             continue
         if not requested and record.get("stage") == "source":
             continue
@@ -299,6 +302,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--no-registry", action="store_true")
     parser.add_argument("--legacy-paths", action="store_true")
     parser.add_argument("--regime", choices=("linear", "nonlinear"), default=None)
+    parser.add_argument("--setting", default=None, help="Registry setting name to select")
     parser.add_argument(
         "--stage",
         choices=("fixed_steps", "window_001", "rollout", "rollout_short", "rollout_full"),
@@ -348,7 +352,11 @@ def main(argv: list[str] | None = None) -> int:
     if use_registry and not args.legacy_paths:
         registry = _load_registry(args.registry)
         records = _select_registry_records(
-            registry, cases=args.cases, regime=args.regime, stage=args.stage
+            registry,
+            cases=args.cases,
+            regime=args.regime,
+            stage=args.stage,
+            setting=args.setting,
         )
         for record in records:
             input_path = _registry_input_path(record, input_dir)
@@ -372,8 +380,8 @@ def main(argv: list[str] | None = None) -> int:
             status = "DRY" if args.dry_run else "OK"
             print(f"[{status}] {manifest['case']} -> {manifest['run_dir']}")
     else:
-        if args.regime is not None or args.stage is not None:
-            raise ValueError("--regime/--stage filters require registry mode")
+        if args.regime is not None or args.stage is not None or args.setting is not None:
+            raise ValueError("--regime/--stage/--setting filters require registry mode")
         for input_path in _resolve_inputs(input_dir, args.cases):
             manifest = _run_case(
                 input_path=input_path,

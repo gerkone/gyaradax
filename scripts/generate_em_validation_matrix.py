@@ -183,6 +183,12 @@ def _setting(case: str) -> str:
         return "fixed_step_apar_only"
     if case.startswith("bpar_only"):
         return "fixed_step_bpar_only"
+    if case.startswith("linear_open_apar_bpar"):
+        return "linear_open_boundary_apar_bpar_no_rotation"
+    if case.startswith("linear_high_beta_apar_bpar"):
+        return "linear_high_beta_apar_bpar_scan"
+    if case.startswith("linear_high_beta_bpar_only"):
+        return "linear_high_beta_bpar_only_scan"
     if case.startswith("linear_apar_bpar"):
         return "linear_apar_bpar_waltz"
     if case.startswith("linear_apar"):
