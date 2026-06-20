@@ -55,5 +55,6 @@ mkdir -p _build && cd _build && cmake .. -DCMAKE_BUILD_TYPE=Release && cmake --b
 
 ## Files
 - `CMakeLists.txt`: Build system configuration.
-- `kernels/cufft_bracket.cu`: Consolidated Graph-based Poisson brackets (Mixed Precision, FP64 Z2Z, and FP64 Direct). `_cuda.py` by default uses the mixed precision version.
+- `kernels/cufft_graph_bracket_true_fp32.cu`: production mixed-precision cuFFT Poisson bracket FFI target.
+- `kernels/cufft_graph_bracket_fp64.cu`: production FP64 cuFFT Poisson bracket FFI target.
 - `kernels/*.cu`: Stencil and linear RHS fused kernels.
