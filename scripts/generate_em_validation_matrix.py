@@ -171,6 +171,14 @@ def _setting(case: str) -> str:
         return "bpar_waltz_open_parallel_boundary"
     if case.startswith("diag_lin_all_em"):
         return "diag_lin_all_em"
+    if case.startswith("em_adiabat_apar"):
+        return "em_adiabat_apar_unit"
+    if case.startswith("em_cbc_apar"):
+        return "em_cbc_apar_unit"
+    if case.startswith("nl_em_cbc_apar_bpar") or case.startswith("nl_em_full"):
+        return "nonlinear_cbc_apar_bpar_unit"
+    if case.startswith("nl_em_cbc_apar") or case.startswith("nl_em_apar"):
+        return "nonlinear_cbc_apar_unit"
     if case.startswith("nonlinear_apar_bpar"):
         return "nonlinear_apar_bpar_waltz"
     if case.startswith("nonlinear_apar"):

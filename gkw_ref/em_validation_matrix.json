@@ -59,6 +59,10 @@
     },
     {"template": "waltz_bpar_linear.input.dat", "cases": [{"case": "waltz_bpar_linear", "replacements": {}}]},
     {"template": "diag_lin_all_em.input.dat", "cases": [{"case": "diag_lin_all_em", "replacements": {}}]},
+    {"template": "em_adiabat_apar.input.dat", "cases": [{"case": "em_adiabat_apar", "replacements": {}}]},
+    {"template": "em_cbc_apar.input.dat", "cases": [{"case": "em_cbc_apar", "replacements": {}}]},
+    {"template": "nl_em_cbc_apar.input.dat", "cases": [{"case": "nl_em_apar", "replacements": {}}]},
+    {"template": "nl_em_cbc_apar_bpar.input.dat", "cases": [{"case": "nl_em_full", "replacements": {}}]},
     {
       "template": "linear_apar.input.dat",
       "cases": [

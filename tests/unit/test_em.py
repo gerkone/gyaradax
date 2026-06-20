@@ -10,6 +10,9 @@ Tests are structured in layers:
 """
 
 import os
+import subprocess
+import sys
+from typing import Any
 
 import jax
 import jax.numpy as jnp
@@ -35,17 +38,62 @@ from gyaradax import load_geometry
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 GKW_CASES_DIR = os.path.join(os.path.dirname(__file__), "..", "data", "gkw_cases")
 GKW_EM_DATA_ROOT = os.environ.get("GKW_EM_DATA_ROOT", GKW_CASES_DIR)
+EM_MATRIX_TEMPLATE_DIR = os.path.join(REPO_ROOT, "gkw_ref", "em_validation_templates")
+EM_MATRIX_INPUT_DIR = os.path.join(REPO_ROOT, "gkw_ref", "em_validation_inputs")
+EM_MATRIX_CASE_INPUTS = {
+    # Keep reference outputs in tests/data, but resolve EM inputs from the
+    # canonical EM validation templates/matrix instead of duplicate fixtures.
+    "em_bpar_waltz": (EM_MATRIX_TEMPLATE_DIR, "waltz_bpar_linear.input.dat"),
+    "bpar_waltz_linear": (EM_MATRIX_TEMPLATE_DIR, "waltz_bpar_linear.input.dat"),
+    "em_adiabat_apar": (EM_MATRIX_TEMPLATE_DIR, "em_adiabat_apar.input.dat"),
+    "em_cbc_apar": (EM_MATRIX_TEMPLATE_DIR, "em_cbc_apar.input.dat"),
+    "nl_em_apar": (EM_MATRIX_TEMPLATE_DIR, "nl_em_cbc_apar.input.dat"),
+    "nl_em_full": (EM_MATRIX_TEMPLATE_DIR, "nl_em_cbc_apar_bpar.input.dat"),
+    "nl_em_waltz_b005": (EM_MATRIX_TEMPLATE_DIR, "nonlinear_apar.input.dat"),
+    "nl_em_waltz_b01": (EM_MATRIX_INPUT_DIR, "nonlinear_apar_b01.input.dat"),
+}
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 
 
 def _load_em_case(name):
-    """Load an EM test case directory, skip if missing."""
+    """Load an EM test/reference case directory, skip if missing."""
     d = os.path.join(GKW_CASES_DIR, name)
-    if not os.path.exists(d):
+    if not os.path.exists(d) and name not in EM_MATRIX_CASE_INPUTS:
         pytest.skip(f"EM reference data not found at {d}")
+    if name in EM_MATRIX_CASE_INPUTS:
+        _em_case_input_path(d)
     return d
+
+
+def _materialize_em_matrix_inputs():
+    """Materialize ignored EM matrix inputs when a test needs one."""
+    subprocess.run(
+        [
+            sys.executable,
+            os.path.join(REPO_ROOT, "scripts", "generate_em_validation_matrix.py"),
+            "--materialize",
+        ],
+        cwd=REPO_ROOT,
+        check=True,
+        stdout=subprocess.DEVNULL,
+    )
+
+
+def _em_case_input_path(case_dir):
+    """Return the canonical input.dat path for an EM test/reference case."""
+    case_name = os.path.basename(os.path.normpath(case_dir))
+    if case_name in EM_MATRIX_CASE_INPUTS:
+        base_dir, filename = EM_MATRIX_CASE_INPUTS[case_name]
+        path = os.path.join(base_dir, filename)
+        if base_dir == EM_MATRIX_INPUT_DIR and not os.path.exists(path):
+            _materialize_em_matrix_inputs()
+    else:
+        path = os.path.join(case_dir, "input.dat")
+    if not os.path.exists(path):
+        pytest.skip(f"canonical EM input.dat not found at {path}")
+    return path
 
 
 def _load_external_em_case(name):
@@ -70,7 +118,7 @@ def _load_generated_em_case(case, step):
 
 def _generated_case_input(case_dir):
     """Return parsed input.dat for a generated GKW EM validation case."""
-    return parse_input_dat(os.path.join(case_dir, "input.dat"))
+    return parse_input_dat(_em_case_input_path(case_dir))
 
 
 def _generated_case_ntimes(case_dir):
@@ -90,7 +138,7 @@ def _gkw_disables_linear_window_normalization(case_dir):
 def _generated_case_state(case_dir):
     """Load geometry, params, precompute, and GKW FDS for a generated EM case."""
     geometry = _load_em_reference_geometry(case_dir)
-    params = gkparams_from_input_and_geometry(os.path.join(case_dir, "input.dat"), geometry)
+    params = gkparams_from_input_and_geometry(_em_case_input_path(case_dir), geometry)
     pre = linear_precompute(geometry, params)
     nsp = 1 if params.adiabatic_electrons else int(jnp.asarray(params.mas).shape[0])
     shape = (
@@ -106,7 +154,7 @@ def _generated_case_state(case_dir):
 
 def _load_em_geometry(case_dir):
     """Load geometry for an EM test case using compute_geometry_from_input."""
-    input_path = os.path.join(case_dir, "input.dat")
+    input_path = _em_case_input_path(case_dir)
     return compute_geometry_from_input(input_path)
 
 
@@ -146,7 +194,7 @@ def _median_tail_abs_ratio(a, b, n_tail=3):
 def _run_em_flux_windows(case_dir, n_windows):
     """Run gyaradax and return EM-only flux diagnostics for each averaging window."""
     geometry = _load_em_geometry(case_dir)
-    params = gkparams_from_input_and_geometry(os.path.join(case_dir, "input.dat"), geometry)
+    params = gkparams_from_input_and_geometry(_em_case_input_path(case_dir), geometry)
     pre = linear_precompute(geometry, params)
     nsp = 1 if params.adiabatic_electrons else int(jnp.asarray(params.mas).shape[0])
     df = init_f(geometry, finit=params.finit, amp_init_real=params.amp_init, n_species=nsp)
@@ -204,7 +252,7 @@ class TestEMParams:
     def test_em_params_from_input_dat(self):
         """Parse EM params from a GKW input.dat with nlapar."""
         case_dir = _load_em_case("em_adiabat_apar")
-        input_path = os.path.join(case_dir, "input.dat")
+        input_path = _em_case_input_path(case_dir)
         geometry = compute_geometry_from_input(input_path)
         params = gkparams_from_input_and_geometry(input_path, geometry)
         assert params.nlapar is True
@@ -220,7 +268,7 @@ class TestEMParams:
     def test_nl_em_waltz_yaml_matches_gkw_input(self, case_name, config_name, beta, n_steps):
         """The nonlinear Waltz EM YAMLs mirror the corresponding GKW input.dat files."""
         case_dir = _load_em_case(case_name)
-        input_path = os.path.join(case_dir, "input.dat")
+        input_path = _em_case_input_path(case_dir)
         config = load_config(os.path.join(REPO_ROOT, "configs", config_name))
 
         geometry = compute_geometry_from_input(input_path)
@@ -259,7 +307,7 @@ class TestEMPrecompute:
         """Small EM setup for precompute tests."""
         case_dir = _load_em_case("em_bpar_waltz")
         geometry = _load_em_geometry(case_dir)
-        params = gkparams_from_input_and_geometry(os.path.join(case_dir, "input.dat"), geometry)
+        params = gkparams_from_input_and_geometry(_em_case_input_path(case_dir), geometry)
         return geometry, params
 
     def test_precompute_has_apar_keys(self, em_setup):
@@ -297,7 +345,7 @@ class TestEMPrecompute:
         """No EM precomputed keys when nlapar=False."""
         case_dir = _load_em_case("em_bpar_waltz")
         geometry = _load_em_geometry(case_dir)
-        params = gkparams_from_input_and_geometry(os.path.join(case_dir, "input.dat"), geometry)
+        params = gkparams_from_input_and_geometry(_em_case_input_path(case_dir), geometry)
         params = replace(params, nlapar=False, nlbpar=False, beta=0.0)
         pre = linear_precompute(geometry, params)
         assert "apar_weight" not in pre
@@ -321,7 +369,7 @@ class TestEMPrecompute:
         """Adiabatic-electron B_parallel is rejected until its field solve is implemented."""
         case_dir = _load_em_case("em_adiabat_apar")
         geometry = _load_em_geometry(case_dir)
-        params = gkparams_from_input_and_geometry(os.path.join(case_dir, "input.dat"), geometry)
+        params = gkparams_from_input_and_geometry(_em_case_input_path(case_dir), geometry)
         params = replace(params, nlapar=True, nlbpar=True)
 
         with pytest.raises(NotImplementedError, match="adiabatic electrons"):
@@ -367,9 +415,7 @@ def _candy_geometry(nvpar, nmu, vpar_max, ns=8, krhomax=0.5):
         krhomax=krhomax,
     )
     geom_sp = dict(geometry)
-    for key, val in dict(
-        mas=[1.0], signz=[1.0], tmp=[1.0], de=[1.0], vthrat=[1.0]
-    ).items():
+    for key, val in dict(mas=[1.0], signz=[1.0], tmp=[1.0], de=[1.0], vthrat=[1.0]).items():
         geom_sp[key] = jnp.asarray(val, dtype=jnp.float64)
     return geometry, geom_sp
 
@@ -425,7 +471,7 @@ class TestAmpereCandyMoment:
         from gyaradax.integrals import _species_bessel_gamma
 
         geometry, geom_sp = _candy_geometry(nvpar=16, nmu=8, vpar_max=3.0)
-        common = dict(
+        common: dict[str, Any] = dict(
             dt=0.002,
             naverage=10,
             disp_par=0.1,
@@ -521,7 +567,7 @@ class TestAmpereSolve:
     def _a_only_setup(case_name):
         case_dir = _load_em_case(case_name)
         geometry = _load_em_geometry(case_dir)
-        params = gkparams_from_input_and_geometry(os.path.join(case_dir, "input.dat"), geometry)
+        params = gkparams_from_input_and_geometry(_em_case_input_path(case_dir), geometry)
         assert params.nlapar is True
         assert params.nlbpar is False
         pre = linear_precompute(geometry, params)
@@ -532,7 +578,7 @@ class TestAmpereSolve:
         """Full EM setup with precomputed arrays."""
         case_dir = _load_em_case("em_bpar_waltz")
         geometry = _load_em_geometry(case_dir)
-        params = gkparams_from_input_and_geometry(os.path.join(case_dir, "input.dat"), geometry)
+        params = gkparams_from_input_and_geometry(_em_case_input_path(case_dir), geometry)
         pre = linear_precompute(geometry, params)
         nsp = 2
         nvpar = len(geometry["vpgr"])
@@ -635,7 +681,7 @@ class TestBParallelLowRiskDeltas:
     def _bpar_waltz_setup():
         case_dir = _load_em_case("em_bpar_waltz")
         geometry = _load_em_geometry(case_dir)
-        params = gkparams_from_input_and_geometry(os.path.join(case_dir, "input.dat"), geometry)
+        params = gkparams_from_input_and_geometry(_em_case_input_path(case_dir), geometry)
         pre = linear_precompute(geometry, params)
         shape = (
             len(np.atleast_1d(np.asarray(params.mas))),
@@ -651,7 +697,7 @@ class TestBParallelLowRiskDeltas:
     def _bpar_only_setup():
         case_dir = _load_em_case("em_bpar_waltz")
         geometry = _load_em_geometry(case_dir)
-        params = gkparams_from_input_and_geometry(os.path.join(case_dir, "input.dat"), geometry)
+        params = gkparams_from_input_and_geometry(_em_case_input_path(case_dir), geometry)
         params = replace(params, nlapar=False, nlbpar=True, non_linear=False)
         pre = linear_precompute(geometry, params)
         shape = (
@@ -785,7 +831,7 @@ class TestBParallelLowRiskDeltas:
 
         case_dir = _load_em_case("em_bpar_waltz")
         geometry = _load_em_geometry(case_dir)
-        params = gkparams_from_input_and_geometry(os.path.join(case_dir, "input.dat"), geometry)
+        params = gkparams_from_input_and_geometry(_em_case_input_path(case_dir), geometry)
         pre = linear_precompute(geometry, params)
         assert params.nlbpar is True
         assert "bpar_chi_factor" in pre
@@ -845,7 +891,7 @@ class TestBParallelLowRiskDeltas:
 
         case_dir = _load_em_case("em_adiabat_apar")
         geometry = _load_em_geometry(case_dir)
-        params = gkparams_from_input_and_geometry(os.path.join(case_dir, "input.dat"), geometry)
+        params = gkparams_from_input_and_geometry(_em_case_input_path(case_dir), geometry)
         pre = linear_precompute(geometry, params)
 
         shape = (
@@ -922,7 +968,7 @@ class TestG2FTransform:
 
         case_dir = _load_em_case("em_bpar_waltz")
         geometry = _load_em_geometry(case_dir)
-        params = gkparams_from_input_and_geometry(os.path.join(case_dir, "input.dat"), geometry)
+        params = gkparams_from_input_and_geometry(_em_case_input_path(case_dir), geometry)
         pre = linear_precompute(geometry, params)
 
         nsp = 2
@@ -944,7 +990,7 @@ class TestG2FTransform:
 
         case_dir = _load_em_case("em_bpar_waltz")
         geometry = _load_em_geometry(case_dir)
-        params = gkparams_from_input_and_geometry(os.path.join(case_dir, "input.dat"), geometry)
+        params = gkparams_from_input_and_geometry(_em_case_input_path(case_dir), geometry)
         pre = linear_precompute(geometry, params)
 
         nsp = 2
@@ -972,7 +1018,7 @@ class TestAlfvenCFL:
         """With finite beta and kinetic electrons, tmax_field should be finite and positive."""
         case_dir = _load_em_case("em_bpar_waltz")
         geometry = _load_em_geometry(case_dir)
-        params = gkparams_from_input_and_geometry(os.path.join(case_dir, "input.dat"), geometry)
+        params = gkparams_from_input_and_geometry(_em_case_input_path(case_dir), geometry)
         pre = linear_precompute(geometry, params)
 
         tmax_field = float(pre.get("tmax_field", 0.0))
@@ -983,7 +1029,7 @@ class TestAlfvenCFL:
         """EM CFL (tmax_field) should differ from ES when beta > 0."""
         case_dir = _load_em_case("em_bpar_waltz")
         geometry = _load_em_geometry(case_dir)
-        params_em = gkparams_from_input_and_geometry(os.path.join(case_dir, "input.dat"), geometry)
+        params_em = gkparams_from_input_and_geometry(_em_case_input_path(case_dir), geometry)
         params_es = replace(params_em, nlapar=False, nlbpar=False, beta=0.0)
 
         pre_em = linear_precompute(geometry, params_em)
@@ -1010,9 +1056,7 @@ class TestEMBackwardsCompat:
 
         case_dir = _load_em_case("em_bpar_waltz")
         geometry = _load_em_geometry(case_dir)
-        params_base = gkparams_from_input_and_geometry(
-            os.path.join(case_dir, "input.dat"), geometry
-        )
+        params_base = gkparams_from_input_and_geometry(_em_case_input_path(case_dir), geometry)
         # EM disabled
         params_es = replace(params_base, nlapar=False, nlbpar=False, beta=0.0)
 
@@ -1050,7 +1094,6 @@ class TestEMFDSParity:
     @staticmethod
     def _run_gkw_and_compare(gkw_input_template, overrides=None, n_procs=16):
         """Run GKW from input template, run gyaradax, compare FDS."""
-        import subprocess
         import tempfile
         import shutil
 
@@ -1113,36 +1156,14 @@ class TestEMFDSParity:
 
     def test_bpar_waltz_em_ion_mode_shape(self):
         """bpar_waltz EM: ion mode shape matches GKW (>95% correlation)."""
-        gkw_ref = os.path.join(
-            os.path.dirname(__file__),
-            "..",
-            "..",
-            "gkw_ref",
-            "tests",
-            "standard",
-            "bpar_waltz_linear",
-            "input.dat",
-        )
-        if not os.path.exists(gkw_ref):
-            pytest.skip("GKW bpar_waltz_linear input.dat not available")
+        gkw_ref = _em_case_input_path(os.path.join(GKW_CASES_DIR, "bpar_waltz_linear"))
         template = open(gkw_ref).read().replace("NTIME = 20", "NTIME = 1")
         corrs = self._run_gkw_and_compare(template)
         assert corrs["ion"] > 0.95, f"Ion corr {corrs['ion']:.4f} < 0.95"
 
     def test_bpar_waltz_em_electron_mode_shape(self):
         """bpar_waltz EM: electron mode shape matches GKW (>60% correlation)."""
-        gkw_ref = os.path.join(
-            os.path.dirname(__file__),
-            "..",
-            "..",
-            "gkw_ref",
-            "tests",
-            "standard",
-            "bpar_waltz_linear",
-            "input.dat",
-        )
-        if not os.path.exists(gkw_ref):
-            pytest.skip("GKW bpar_waltz_linear input.dat not available")
+        gkw_ref = _em_case_input_path(os.path.join(GKW_CASES_DIR, "bpar_waltz_linear"))
         template = open(gkw_ref).read().replace("NTIME = 20", "NTIME = 1")
         corrs = self._run_gkw_and_compare(template)
         assert corrs["electron"] > 0.60, f"Electron corr {corrs['electron']:.4f} < 0.60"
@@ -1176,7 +1197,7 @@ class TestEMGKWValidation:
         ref_fluxes = np.loadtxt(os.path.join(case_dir, "fluxes.dat"))
 
         geometry = _load_em_geometry(case_dir)
-        params = gkparams_from_input_and_geometry(os.path.join(case_dir, "input.dat"), geometry)
+        params = gkparams_from_input_and_geometry(_em_case_input_path(case_dir), geometry)
         pre = linear_precompute(geometry, params)
         nsp = 1 if params.adiabatic_electrons else int(jnp.asarray(params.mas).shape[0])
         df = init_f(geometry, finit=params.finit, amp_init_real=params.amp_init, n_species=nsp)
@@ -1222,7 +1243,7 @@ class TestEMGKWValidation:
         case_dir = _load_em_case("em_adiabat_apar")
 
         geometry = _load_em_geometry(case_dir)
-        params = gkparams_from_input_and_geometry(os.path.join(case_dir, "input.dat"), geometry)
+        params = gkparams_from_input_and_geometry(_em_case_input_path(case_dir), geometry)
         pre = linear_precompute(geometry, params)
         nsp = 1 if params.adiabatic_electrons else int(jnp.asarray(params.mas).shape[0])
         df = init_f(geometry, finit=params.finit, amp_init_real=params.amp_init, n_species=nsp)
@@ -1251,7 +1272,7 @@ class TestEMGKWValidation:
         ref_fluxes = np.loadtxt(os.path.join(case_dir, "fluxes.dat"))
 
         geometry = _load_em_geometry(case_dir)
-        params = gkparams_from_input_and_geometry(os.path.join(case_dir, "input.dat"), geometry)
+        params = gkparams_from_input_and_geometry(_em_case_input_path(case_dir), geometry)
         pre = linear_precompute(geometry, params)
         nsp = 1 if params.adiabatic_electrons else int(jnp.asarray(params.mas).shape[0])
         df = init_f(geometry, finit=params.finit, amp_init_real=params.amp_init, n_species=nsp)
@@ -1432,7 +1453,7 @@ class TestExternalEMGKWValidation:
             pytest.skip(f"external EM fixture is incomplete: {missing}")
 
         geometry = _load_em_reference_geometry(case_dir)
-        params = gkparams_from_input_and_geometry(os.path.join(case_dir, "input.dat"), geometry)
+        params = gkparams_from_input_and_geometry(_em_case_input_path(case_dir), geometry)
         pre = linear_precompute(geometry, params)
         nsp = 1 if params.adiabatic_electrons else int(jnp.asarray(params.mas).shape[0])
         shape = (
