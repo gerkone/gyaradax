@@ -19,32 +19,49 @@ import argparse
 import os
 import time
 from dataclasses import replace
+from typing import Any, TypedDict, cast
 
 import numpy as np
 
-# parse --device before any jax import so cuda sees the right gpu
+from _runtime_config_loader import configure_runtime_env
+
+# parse --device / --device-list before any jax import so cuda sees the right gpus
 _parser = argparse.ArgumentParser(add_help=False)
 _parser.add_argument("--device", type=int, default=-1)
+_parser.add_argument("--device-list", type=str, default=None)
+_parser.add_argument("--n-gpus-sp", type=int, default=1)
+_parser.add_argument("--n-gpus-vp", type=int, default=1)
+_parser.add_argument("--n-gpus-mu", type=int, default=1)
 _early_args, _ = _parser.parse_known_args()
-if _early_args.device != -1:
-    os.environ["CUDA_VISIBLE_DEVICES"] = str(_early_args.device)
-os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
+configure_runtime_env(
+    device=_early_args.device,
+    device_list=_early_args.device_list,
+    n_gpus_sp=_early_args.n_gpus_sp,
+    n_gpus_vp=_early_args.n_gpus_vp,
+    n_gpus_mu=_early_args.n_gpus_mu,
+)
 
 import jax
+from gyaradax.jax_config import enable_x64
+
+enable_x64()
+
 import jax.numpy as jnp
 
 from gyaradax import load_config
 from gyaradax.utils import load_geometry
-from gyaradax.params import gkparams_from_config
+from gyaradax.geometry import compute_geometry_from_config
+from gyaradax.params import GKParams, gkparams_from_config
 from gyaradax.simulate import (
     gk_init,
     gksimulate,
     gk_run_batched,
-    _geometry_from_config,
     _compute_phi_for_init,
     _ensure_species_arrays,
 )
-from gyaradax.solver import GKState, linear_precompute, mode_amplitude
+from gyaradax.precompute import linear_precompute
+from gyaradax.state import GKPre, GKState
+from gyaradax.solver import mode_amplitude
 from gyaradax.utils import (
     load_gkw_k_dump,
     read_gkw_dump_time,
@@ -83,16 +100,29 @@ def _find_k_file(data_dir, resume_from=None):
     return k01 if os.path.exists(k01) else None
 
 
-def _setup_run(config_path, args):
+class _RunSetup(TypedDict):
+    df: jnp.ndarray
+    geometry: dict[str, jnp.ndarray]
+    params: GKParams
+    state: GKState
+    pre: GKPre
+    output_dir: str
+    n_steps: int
+    block_size: int
+    name: str
+    data_dir: str | None
+
+
+def _setup_run(config_path: str, args: argparse.Namespace) -> _RunSetup:
     """Build (df, geometry, params, state, pre) and metadata for one config."""
     cfg = load_config(config_path)
     data_dir = getattr(cfg.run, "data_dir", None)
     name = cfg.run.name
     kinetic = args.kinetic
 
-    output_dir = args.output_dir or f"validation_{'kinetic' if kinetic else 'outputs'}_{name}"
+    output_dir: str = args.output_dir or f"validation_{'kinetic' if kinetic else 'outputs'}_{name}"
 
-    overrides = {}
+    overrides: dict[str, Any] = {}
     if args.mp:
         overrides["mixed_precision"] = True
     if args.z2z is not None:
@@ -101,12 +131,18 @@ def _setup_run(config_path, args):
         overrides["backend"] = args.backend
     if kinetic:
         overrides["adaptive_dt"] = True
+    if args.n_gpus_sp > 1:
+        overrides["n_gpus_sp"] = args.n_gpus_sp
+    if args.n_gpus_vp > 1:
+        overrides["n_gpus_vp"] = args.n_gpus_vp
+    if args.n_gpus_mu > 1:
+        overrides["n_gpus_mu"] = args.n_gpus_mu
     params = gkparams_from_config(cfg, **overrides)
 
     if _has_geom_dat(data_dir):
-        geometry = load_geometry(data_dir)
+        geometry = cast(dict[str, jnp.ndarray], load_geometry(data_dir))
     else:
-        geometry = _geometry_from_config(cfg)
+        geometry = cast(dict[str, jnp.ndarray], compute_geometry_from_config(cfg))
 
     n_species = 1
     if not params.adiabatic_electrons:
@@ -147,7 +183,18 @@ def _setup_run(config_path, args):
     else:
         df, geometry, state = gk_init(geometry, params, n_species=n_species)
 
-    pre = linear_precompute(geometry, params)
+    from gyaradax import sharding as _sharding
+
+    mesh = _sharding.build_mesh(params)
+    if mesh is not None:
+        grid = _sharding.grid_shape_from(params, geometry)
+        # precompute_sharded compiles linear_precompute with out_shardings so
+        # full-size arrays never materialise on a single device — the only safe
+        # path when the grid doesn't fit on one GPU.
+        pre = _sharding.precompute_sharded(geometry, params, mesh, grid)
+        df = _sharding.shard_df(df, mesh, grid)
+    else:
+        pre = linear_precompute(geometry, params)
 
     block_size = args.block_size
     if not kinetic:
@@ -178,37 +225,47 @@ def _setup_run(config_path, args):
     }
 
 
-def run(config_path, args):
+def run(config_path: str, args: argparse.Namespace) -> None:
     """Single-config execution path."""
     s = _setup_run(config_path, args)
     kinetic = args.kinetic
+    df = s["df"]
+    geometry = s["geometry"]
+    params = s["params"]
+    state = s["state"]
+    pre = s["pre"]
+    n_steps = s["n_steps"]
+    block_size = s["block_size"]
+    output_dir = s["output_dir"]
+    data_dir = s["data_dir"]
+    name = s["name"]
 
     print("=" * 88)
-    print(f"{'kinetic' if kinetic else 'adiabatic'}: {s['name']} ({config_path})")
+    print(f"{'kinetic' if kinetic else 'adiabatic'}: {name} ({config_path})")
     print("=" * 88)
-    print_params(s["params"], grid_shape=s["df"].shape)
-    print(f"  n_steps={s['n_steps']}, checkpoint_interval={s['block_size']}")
+    print_params(params, grid_shape=df.shape)
+    print(f"  n_steps={n_steps}, checkpoint_interval={block_size}")
 
     t0 = time.time()
     gksimulate(
-        s["df"],
-        s["geometry"],
-        s["params"],
-        s["state"],
-        s["n_steps"],
-        pre=s["pre"],
-        output_dir=s["output_dir"],
-        checkpoint_interval=s["block_size"],
+        df,
+        geometry,
+        params,
+        state,
+        n_steps,
+        pre=pre,
+        output_dir=output_dir,
+        checkpoint_interval=block_size,
         save_snapshots=args.save_dumps,
     )
     runtime = time.time() - t0
-    print(f"\ncompleted in {runtime:.1f}s ({s['n_steps'] / runtime:.1f} steps/s)")
+    print(f"\ncompleted in {runtime:.1f}s ({n_steps / runtime:.1f} steps/s)")
 
-    if s["data_dir"]:
-        report(s["output_dir"], s["data_dir"], s["name"], kinetic)
+    if data_dir:
+        report(output_dir, data_dir, name, kinetic)
 
 
-def run_multi(args):
+def run_multi(args: argparse.Namespace) -> None:
     """Batched multi-config execution: vmap over configs with the same grid."""
     setups = [_setup_run(inp, args) for inp in args.inputs]
     names = [s["name"] for s in setups]
@@ -233,7 +290,7 @@ def run_multi(args):
     print(f"  n_steps={n_steps}, checkpoint_interval={block_size}")
 
     # stack into batched pytrees
-    def _stack_pytrees(trees):
+    def _stack_pytrees(trees: list[Any]) -> Any:
         leaves_list = [jax.tree_util.tree_leaves(t) for t in trees]
         stacked_leaves = [jnp.stack(leaf_group) for leaf_group in zip(*leaves_list)]
         treedef = jax.tree_util.tree_structure(trees[0])
@@ -246,7 +303,9 @@ def run_multi(args):
     pre_batch = _stack_pytrees([s["pre"] for s in setups])
 
     # per-config accumulators
-    accum = {s["name"]: {"fluxes": [], "growth": [], "times": []} for s in setups}
+    accum: dict[str, dict[str, list[Any]]] = {
+        s["name"]: {"fluxes": [], "growth": [], "times": []} for s in setups
+    }
 
     for out_dir in set(s["output_dir"] for s in setups):
         os.makedirs(out_dir, exist_ok=True)
@@ -318,12 +377,19 @@ def run_multi(args):
     # save per-config in standard format
     for s in setups:
         a = accum[s["name"]]
-        common = {"time": np.array(a["times"]), "step": np.arange(len(a["times"])) * block_size}
+        time_arr = np.array(a["times"])
+        step_arr = np.arange(len(a["times"])) * block_size
         np.savez(
-            os.path.join(s["output_dir"], "fluxes.npz"), fluxes=np.stack(a["fluxes"]), **common
+            os.path.join(s["output_dir"], "fluxes.npz"),
+            fluxes=np.stack(a["fluxes"]),
+            time=time_arr,
+            step=step_arr,
         )
         np.savez(
-            os.path.join(s["output_dir"], "growth.npz"), growth=np.stack(a["growth"]), **common
+            os.path.join(s["output_dir"], "growth.npz"),
+            growth=np.stack(a["growth"]),
+            time=time_arr,
+            step=step_arr,
         )
 
     runtime = time.time() - t0
@@ -334,7 +400,7 @@ def run_multi(args):
             report(s["output_dir"], s["data_dir"], s["name"], args.kinetic)
 
 
-def report(output_dir, data_dir, name, kinetic):
+def report(output_dir: str, data_dir: str, name: str, kinetic: bool) -> None:
     flux_path = os.path.join(output_dir, "fluxes.npz")
     growth_path = os.path.join(output_dir, "growth.npz")
     if not os.path.exists(flux_path):
@@ -378,7 +444,7 @@ def report(output_dir, data_dir, name, kinetic):
         print(f"  sim={sim_avg:.4e}  ref={ref_avg:.4e}  abs_err={err:.2e}")
 
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser(description="run gyaradax simulations.")
     parser.add_argument("inputs", nargs="+", help="yaml config paths")
     parser.add_argument("--kinetic", action="store_true")
@@ -409,6 +475,15 @@ def main():
     parser.add_argument("--output-dir", type=str, default=None, help="override output directory")
     parser.add_argument(
         "--save-dumps", action="store_true", help="save full 5D df snapshots at each checkpoint"
+    )
+    parser.add_argument("--n-gpus-sp", type=int, default=1, help="species-axis mesh size (>=1)")
+    parser.add_argument("--n-gpus-vp", type=int, default=1, help="vpar-axis mesh size (>=1)")
+    parser.add_argument("--n-gpus-mu", type=int, default=1, help="mu-axis mesh size (>=1)")
+    parser.add_argument(
+        "--device-list",
+        type=str,
+        default=None,
+        help="comma-separated CUDA device ids for multi-GPU (overrides --device)",
     )
 
     args = parser.parse_args()

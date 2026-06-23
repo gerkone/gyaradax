@@ -1,0 +1,79 @@
+&CONTROL
+ testing = .false.,
+ silent = .true.,
+ order_of_the_scheme = 'fourth_order'
+ parallel_boundary_conditions = 'zero'
+ matrix_format = 'complex'
+ READ_FILE  = .false.
+ NON_LINEAR = .false.
+ zonal_adiabatic = .true.,
+ METHOD = 'EXP',
+ METH   = 2,
+ DTIM   = 0.004
+ NAVERAGE = 50,
+ nlapar = .false., 
+ collisions = .false.
+ disp_par = 0.5 
+ disp_vp  = 0.2
+ vp_trap = 0
+ NTIME = 600,
+ io_format = 'ascii',
+ io_testdata = .true.,
+ normalized = .false.,
+ normalize_per_toroidal_mode = .false.,
+ /
+ &GRIDSIZE
+ NX = 1,   
+ n_trapped = 8
+ N_s_grid = 112, 
+ N_mu_grid = 8, 
+ n_vpar_grid = 32, 
+ NMOD = 1,
+ nperiod = 4,
+ number_of_species = 2 
+ /
+ &MODE
+ CHIN    = 0.,
+ KTHRHO  = 0.5
+ mode_box = .false.,
+ krhomax = 0.075,
+ ikxspace = 1, 
+ /
+ &GEOM 
+ SHAT = 1.,
+ Q    = 2.,
+ EPS  = 0.16666,
+ /
+&SPCGENERAL
+ beta = 0.000,
+ adiabatic_electrons = .false.
+ amp_init = 1e-1
+ /
+ &SPECIES
+ MASS  = 1.0, 
+ Z     = 1.0, 
+ TEMP  = 1.0, 
+ DENS  = 1.0,
+ rlt   = 9.0,
+ rln   = 3.0,
+ uprim = 0.,
+ / 
+&SPECIES
+ MASS  = 2.72e-4,
+ Z     = -1.0, 
+ TEMP  = 1.0,
+ dens  = 1.0,
+ rlt   = 9.0,
+ rln   = 3.0,
+ uprim = 0.000000,
+ /
+ &ROTATION
+ VCOR = 0.0,
+ / 
+ &DIAGNOSTIC
+ lcalc_freq = .true.,
+ lfinal_output = .true.,
+ xy_estep = .true.,
+ xy_fluxes = .true.,
+ kykxs_phi = .true.,
+ /

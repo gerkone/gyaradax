@@ -2,27 +2,29 @@
 
 import os
 import time
-from typing import Dict, Optional, Tuple
+from typing import Any, Dict, Literal, Optional, Tuple, overload
 
 import jax
 import jax.numpy as jnp
 
-jax.config.update("jax_enable_x64", True)
+from gyaradax.jax_config import enable_x64
+
+enable_x64()
 
 from gyaradax.utils import load_geometry
-from gyaradax.geometry import compute_geometry
+from gyaradax.geometry import compute_geometry_from_config
 from gyaradax.integrals import (
     get_integrals,
     calculate_phi,
 )
 from gyaradax.params import gkparams_from_config, load_config, GKParams
+from gyaradax.precompute import linear_precompute
 from gyaradax.solver import (
     gksolve,
     init_f,
     GKState,
     GKPre,
     default_state,
-    linear_precompute,
     mode_amplitude,
 )
 from gyaradax.utils import save_dumps as save_dumps_fn
@@ -34,37 +36,8 @@ def _compute_phi_for_init(df, geometry, params):
 
 
 def _geometry_from_config(cfg):
-    """Build geometry from config when no data_dir is provided.
-
-    defaults are defined in compute_geometry(); we only forward
-    values that are actually present in the config.
-    """
-    gc = getattr(cfg, "geometry", {})
-    gr = cfg.grid
-    kwargs = {}
-    _float_keys = {"q", "shat", "eps", "kxmax", "signB", "Rref", "vpar_max", "krhomax"}
-    _int_keys = {"ns", "nkx", "nky", "nvpar", "nmu", "nperiod", "ikxspace"}
-    for key, section in [
-        ("q", gc),
-        ("shat", gc),
-        ("eps", gc),
-        ("kxmax", gc),
-        ("signB", gc),
-        ("Rref", gc),
-        ("ns", gr),
-        ("nkx", gr),
-        ("nky", gr),
-        ("nvpar", gr),
-        ("nmu", gr),
-        ("vpar_max", gr),
-        ("nperiod", gr),
-        ("krhomax", gr),
-        ("ikxspace", gr),
-    ]:
-        val = getattr(section, key, None)
-        if val is not None:
-            kwargs[key] = int(val) if key in _int_keys else float(val)
-    return compute_geometry(**kwargs)
+    """Compatibility wrapper for the public geometry config helper."""
+    return compute_geometry_from_config(cfg)
 
 
 def log_step(fluxes, state: GKState, wall_time: float, n_steps: int = 0):
@@ -85,11 +58,9 @@ def _ensure_species_arrays(
 ) -> Dict[str, jnp.ndarray]:
     """Ensure geometry carries multi-species arrays consistent with params.
 
-    ``compute_geometry`` always creates single-element species placeholders
-    (``mas=[1.0]``, etc.).  When params describes multiple species the
-    downstream flux diagnostics (``calculate_fluxes_kinetic``) need per-species
-    arrays in the geometry dict.  This helper copies them from params when the
-    geometry arrays are too short.
+    ``compute_geometry`` always creates single-element placeholders. Multi-species
+    runs need per-species arrays in the geometry dict for downstream flux
+    diagnostics (``calculate_fluxes_kinetic``); copy them over from params.
     """
     _SPECIES_KEYS = ("mas", "signz", "de", "tmp", "vthrat", "rlt", "rln")
     mas = jnp.asarray(params.mas, dtype=jnp.float64)
@@ -101,7 +72,7 @@ def _ensure_species_arrays(
     if geom_nsp >= nsp:
         return geometry
 
-    geometry = dict(geometry)  # shallow copy
+    geometry = dict(geometry)
     for k in _SPECIES_KEYS:
         val = getattr(params, k, None)
         if val is not None:
@@ -116,11 +87,10 @@ def gk_init(
 ) -> Tuple[jnp.ndarray, Dict[str, jnp.ndarray], GKState]:
     """Create initial (df, geometry, state) from geometry and params. No IO.
 
-    When *params* indicates kinetic electrons, the geometry dict is
-    augmented with per-species arrays from *params* if they are missing
-    (e.g. when using ``compute_geometry`` which only creates single-species
-    placeholders).  The **returned** geometry must be used for all
-    subsequent calls (``gksolve``, ``linear_precompute``, fluxes, etc.).
+    For kinetic electrons the geometry dict is augmented with per-species arrays
+    from ``params`` when they are missing (e.g. when using ``compute_geometry``
+    which only creates single-species placeholders). The returned geometry
+    must be used for all subsequent calls.
     """
     if not params.adiabatic_electrons:
         mas = jnp.asarray(params.mas, dtype=jnp.float64)
@@ -134,6 +104,7 @@ def gk_init(
         amp_init_real=params.amp_init,
         norm_eps=params.norm_eps,
         n_species=n_species,
+        params=params,
     )
     phi0 = _compute_phi_for_init(df, geometry, params)
     amp0 = mode_amplitude(phi0, geometry, params.norm_eps)
@@ -149,6 +120,7 @@ def gk_init(
     return df, geometry, state
 
 
+@overload
 def gk_run(
     df: jnp.ndarray,
     geometry: Dict[str, jnp.ndarray],
@@ -156,10 +128,91 @@ def gk_run(
     state: GKState,
     n_steps: int,
     pre: Optional[GKPre] = None,
-) -> Tuple[jnp.ndarray, jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray], GKState]:
-    """Run n_steps. Pure, no IO. Returns (df, phi, fluxes, state)."""
+    return_dt_info: Literal[False] = False,
+) -> Tuple[jnp.ndarray, jnp.ndarray, Any, GKState]: ...
+
+
+@overload
+def gk_run(
+    df: jnp.ndarray,
+    geometry: Dict[str, jnp.ndarray],
+    params: GKParams,
+    state: GKState,
+    n_steps: int,
+    pre: Optional[GKPre],
+    return_dt_info: Literal[True],
+) -> Tuple[jnp.ndarray, jnp.ndarray, Any, GKState, Dict[str, Any]]: ...
+
+
+@overload
+def gk_run(
+    df: jnp.ndarray,
+    geometry: Dict[str, jnp.ndarray],
+    params: GKParams,
+    state: GKState,
+    n_steps: int,
+    pre: Optional[GKPre] = None,
+    *,
+    return_dt_info: Literal[True],
+) -> Tuple[jnp.ndarray, jnp.ndarray, Any, GKState, Dict[str, Any]]: ...
+
+
+@overload
+def gk_run(
+    df: jnp.ndarray,
+    geometry: Dict[str, jnp.ndarray],
+    params: GKParams,
+    state: GKState,
+    n_steps: int,
+    pre: Optional[GKPre],
+    return_dt_info: bool,
+) -> (
+    Tuple[jnp.ndarray, jnp.ndarray, Any, GKState]
+    | Tuple[jnp.ndarray, jnp.ndarray, Any, GKState, Dict[str, Any]]
+): ...
+
+
+@overload
+def gk_run(
+    df: jnp.ndarray,
+    geometry: Dict[str, jnp.ndarray],
+    params: GKParams,
+    state: GKState,
+    n_steps: int,
+    pre: Optional[GKPre] = None,
+    *,
+    return_dt_info: bool,
+) -> (
+    Tuple[jnp.ndarray, jnp.ndarray, Any, GKState]
+    | Tuple[jnp.ndarray, jnp.ndarray, Any, GKState, Dict[str, Any]]
+): ...
+
+
+def gk_run(
+    df: jnp.ndarray,
+    geometry: Dict[str, jnp.ndarray],
+    params: GKParams,
+    state: GKState,
+    n_steps: int,
+    pre: Optional[GKPre] = None,
+    return_dt_info: bool = False,
+) -> (
+    Tuple[jnp.ndarray, jnp.ndarray, Any, GKState]
+    | Tuple[jnp.ndarray, jnp.ndarray, Any, GKState, Dict[str, Any]]
+):
+    """Run n_steps. Pure, no IO.
+
+    Returns ``(df, phi, fluxes, state)`` by default. When
+    ``return_dt_info=True``, returns ``(df, phi, fluxes, state, dt_info)``
+    with per-step adaptive-CFL diagnostics from the underlying scan.
+    """
     if pre is None:
         pre = linear_precompute(geometry, params)
+    if return_dt_info:
+        final_df, (phi, fluxes), final_state, dt_info = gksolve(
+            df, geometry, params, state, n_steps=n_steps, pre=pre, return_dt_info=True
+        )
+        return final_df, phi, fluxes, final_state, dt_info
     final_df, (phi, fluxes), final_state = gksolve(
         df, geometry, params, state, n_steps=n_steps, pre=pre
     )
@@ -200,7 +253,7 @@ def gksimulate(
     checkpoint_interval: Optional[int] = None,
     save_snapshots: bool = False,
     save_final: bool = True,
-) -> Tuple[jnp.ndarray, jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray], GKState]:
+) -> Tuple[jnp.ndarray, jnp.ndarray, Any, GKState]:
     """Run n_steps with optional IO checkpointing and logging.
 
     Returns:
@@ -227,20 +280,31 @@ def gksimulate(
             state,
             geometry,
             save_dumps=save_snapshots,
+            params=params,
+            pre=pre,
         )
 
     start_step = int(state.step)
     target_step = start_step + n_steps
     current_df = df
     current_state = state
-    current_phi = None
-    current_fluxes = None
+    current_phi: Any = None
+    current_fluxes: Any = None
 
-    # warmup (compilation)
+    # warmup compile with the same return_dt_info as the body loop, otherwise
+    # the first block hits a second cache miss for a different specialization
     if n_steps > 0:
         print("warmup (compilation)...")
         w_t0 = time.time()
-        _ = gk_run(current_df, geometry, params, current_state, min(interval, n_steps), pre=pre)
+        _ = gk_run(
+            current_df,
+            geometry,
+            params,
+            current_state,
+            min(interval, n_steps),
+            pre=pre,
+            return_dt_info=True,
+        )
         jax.block_until_ready(_[0])
         print(f"compilation: {time.time() - w_t0:.2f}s")
 
@@ -250,10 +314,19 @@ def gksimulate(
         if block_steps <= 0:
             break
 
+        block_start_step = int(current_state.step)
+        block_start_time = float(current_state.time)
         t0 = time.time()
-        current_df, current_phi, current_fluxes, current_state = gk_run(
-            current_df, geometry, params, current_state, block_steps, pre=pre
+        run_result: Any = gk_run(
+            current_df,
+            geometry,
+            params,
+            current_state,
+            block_steps,
+            pre=pre,
+            return_dt_info=True,
         )
+        current_df, current_phi, current_fluxes, current_state, dt_info = run_result
         jax.block_until_ready(current_df)
         wall_time = time.time() - t0
 
@@ -267,6 +340,11 @@ def gksimulate(
                 current_state,
                 geometry,
                 save_dumps=save_snapshots or (save_final and is_final),
+                params=params,
+                pre=pre,
+                dt_info=dt_info,
+                block_start_step=block_start_step,
+                block_start_time=block_start_time,
             )
 
         log_step(current_fluxes, current_state, wall_time, n_steps=block_steps)
@@ -349,7 +427,7 @@ def gk_from_config(
     if data_dir:
         geometry = load_geometry(data_dir)
     else:
-        geometry = _geometry_from_config(cfg)
+        geometry = compute_geometry_from_config(cfg)
 
     n_species = 1
     if not params.adiabatic_electrons:

@@ -2,7 +2,8 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 import pytest
-from conftest import ALL_BACKENDS
+from typing import cast
+from conftest import ALL_BACKENDS  # type: ignore[import-not-found]
 
 from gyaradax.solver import gksolve, init_f, default_state
 from gyaradax.params import GKParams
@@ -56,7 +57,8 @@ def test_phi_adiabatic_no_zonal_bug():
     }
 
     params = GKParams(adiabatic_electrons=True)
-    gt = geom_tensors(geometry, params=params)
+    typed_geometry = cast(dict[str, jnp.ndarray], geometry)
+    gt = geom_tensors(typed_geometry, params=params)
 
     # has_zonal should be 0.0 because krho[0] != 0
     assert gt["has_zonal"] == 0.0
@@ -69,9 +71,21 @@ def test_phi_adiabatic_no_zonal_bug():
 
     # Optimized path
     pw, pcw, tmp, de, signz, gamma, ints, has_zonal, ixz, iyz = precompute_phi_adiabatic(
-        geometry, params
+        typed_geometry, params
     )
-    phi_new = calculate_phi_adiabatic(df, pw, pcw, tmp, de, signz, gamma, ints, has_zonal, ixz, iyz)
+    phi_new = calculate_phi_adiabatic(
+        df,
+        pw,
+        pcw,
+        tmp,
+        de,
+        signz,
+        gamma,
+        ints,
+        cast(float, has_zonal),
+        cast(int, ixz),
+        cast(int, iyz),
+    )
 
     diff = float(jnp.linalg.norm(phi_new - phi_ref))
     assert diff < 1e-12, f"calculate_phi_adiabatic deviates from _phi_adiabatic; diff={diff:.3e}"
@@ -158,7 +172,13 @@ def test_growth_rates_mapping(lin_dir):
     mode_label = np.loadtxt(f"{lin_dir}/mode_label")
     kxrh = np.loadtxt(f"{lin_dir}/kxrh")
 
-    projected = np.asarray(project_all_modes_to_kx0(growth_all, mode_label, kxrh))
+    projected = np.asarray(
+        project_all_modes_to_kx0(
+            cast(jnp.ndarray, growth_all),
+            cast(jnp.ndarray, mode_label),
+            cast(jnp.ndarray, kxrh),
+        )
+    )
     assert projected.shape == growth.shape
     np.testing.assert_allclose(projected, growth, rtol=1e-10, atol=1e-10)
 

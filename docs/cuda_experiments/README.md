@@ -1,21 +1,63 @@
 # CUDA Experiments
 
-Historical optimization experiments for the CUDA backend. These files
-are **not** part of the build — the production kernels live in
-`gyaradax/backends/cuda_kernels/`.
+This directory is a small active harness for trying CUDA kernels before they are
+promoted to the production backend in `gyaradax/backends/cuda_kernels/`.
 
-## Contents
+Historical prototypes, binaries, cuFFT examples, HLO dumps, and optimization
+notes were intentionally removed from this directory. Use git history if an old
+experiment is needed.
 
-- **`cufft_graph_bracket*.cu`** — iterations on the cuFFT graph-captured
-  Poisson bracket (FP32, FP64, mixed precision, direct variants).
-- **`bracket_*_cb.cu`** — cuFFT LTO load/store callback prototypes
-  (D2Z, Z2Z, versioned iterations from v1 through v5).
-- **`apply_vpar*.cu`, `apply_parallel*.cu`** — stencil kernel drafts
-  and optimization notes (`apply_parallel_opt.md`).
-- **`linear_rhs_fused.cu`, `linear_rhs_vtiled.cu`** — fused linear RHS
-  kernel experiments (velocity-tiled and fully fused).
-- **`compute_scale_factors.cu`** — dealiasing scale factor kernel.
-- **`cuFFT_LTO_example/`** — standalone cuFFT LTO callback example.
-- **`test_z2z_cb*`** — host/device test harnesses for Z2Z callbacks.
-- **`hlo_dumps/`** — XLA HLO dumps used for performance analysis.
-- **`jax_ffi_benchmark.py`** — JAX FFI microbenchmark script.
+## Contract
+
+- Keep experiments self-contained under `docs/cuda_experiments/`.
+- Add CUDA sources under `kernels/*.cu`.
+- Build only into `_build/`; do not write generated libraries or binaries into
+  the source directory.
+- Compare numerical behavior against a JAX reference before promoting code.
+- Once an experiment becomes production code, move the minimal implementation to
+  `gyaradax/backends/cuda_kernels/` and add backend parity tests there.
+
+## Build
+
+From this directory:
+
+```bash
+mkdir -p _build
+cd _build
+cmake .. -DCMAKE_BUILD_TYPE=Release
+cmake --build . -j$(nproc)
+```
+
+CMake auto-detects the active Python executable, `jaxlib` version, and JAX FFI
+include directory using `python3`, matching the production CUDA build style.
+
+The shared library is written to:
+
+```text
+docs/cuda_experiments/_build/libgyaradax_cuda_experiments.so
+```
+
+## Compare against JAX
+
+Use the lightweight harness as a starting point:
+
+```bash
+python compare_against_jax.py --library _build/libgyaradax_cuda_experiments.so
+```
+
+The checked-in script is intentionally conservative: it verifies that the
+experiment library exists and computes a deterministic JAX reference problem.
+Extend it for a specific kernel only after the kernel's C ABI or JAX FFI contract
+is clear.
+
+## Layout
+
+```text
+docs/cuda_experiments/
+  README.md
+  CMakeLists.txt
+  compare_against_jax.py
+  kernels/
+    README.md
+    example_kernel.cu
+```

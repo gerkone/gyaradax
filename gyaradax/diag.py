@@ -1,12 +1,12 @@
 import jax.numpy as jnp
 from typing import Dict, Tuple, Any
-from gyaradax.solver import (
-    linear_precompute,
-    nonlinear_term_iii,
+from gyaradax.precompute import (
+    build_jind,
     extended_firstdim_fft_size,
     extended_seconddim_fft_size,
-    build_jind,
+    linear_precompute,
 )
+from gyaradax.solver import nonlinear_term_iii
 from gyaradax.utils import pack_half_spectrum, unpack_half_spectrum
 from gyaradax.params import GKParams
 

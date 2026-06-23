@@ -1,11 +1,11 @@
 import os
 import re
 import pytest
-import jax
 import numpy as np
 from gyaradax import load_geometry
+from gyaradax.jax_config import enable_x64
 
-jax.config.update("jax_enable_x64", True)
+enable_x64()
 
 # ── Backend registry ─────────────────────────────────────────────────────────
 # Centralised backend lists used by all test files via:

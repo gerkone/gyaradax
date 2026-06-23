@@ -16,21 +16,34 @@ import sys
 import time
 import json
 import argparse
-import numpy as np
+from typing import Any
 
-os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
+from _runtime_config_loader import configure_runtime_env
+
+
+def _configure_device_from_argv() -> None:
+    """Apply --device before importing JAX so CUDA device visibility is honored."""
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--device", type=int, default=None)
+    args, _ = parser.parse_known_args()
+    configure_runtime_env(device=args.device)
+
+
+_configure_device_from_argv()
+
+import numpy as np
 
 import jax
 
-jax.config.update("jax_enable_x64", True)
-
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+from gyaradax.jax_config import enable_x64
+
+enable_x64()
+
 from gyaradax import load_geometry, GKParams, gk_init, gksolve
-from gyaradax.solver import (
-    linear_precompute,
-    _compute_phi,
-)
+from gyaradax.fields import _compute_phi
+from gyaradax.precompute import linear_precompute
 from gyaradax.backends import create_ops
 from gyaradax.params import gkparams_from_config, load_config
 
@@ -39,9 +52,9 @@ from gyaradax.params import gkparams_from_config, load_config
 # ---------------------------------------------------------------------------
 
 
-def parse_gkw_perform(path):
+def parse_gkw_perform(path: str) -> dict[str, dict[str, int | float]]:
     """Parse GKW perform.dat into a dict of {label: (n_calls, total_sec, pct)}."""
-    results = {}
+    results: dict[str, dict[str, int | float]] = {}
     with open(path) as f:
         for line in f:
             line = line.strip()
@@ -69,9 +82,9 @@ def parse_gkw_perfloop(path):
     return np.array(times)
 
 
-def parse_slurm_info(path):
+def parse_slurm_info(path: str) -> dict[str, Any]:
     """Extract basic info from a slurm output file."""
-    info = {}
+    info: dict[str, Any] = {}
     with open(path) as f:
         text = f.read()
     m = re.search(r"numtasks=(\d+)", text)
@@ -86,9 +99,9 @@ def parse_slurm_info(path):
     return info
 
 
-def collect_gkw_timing(data_dir):
+def collect_gkw_timing(data_dir: str) -> dict[str, Any]:
     """Collect all available GKW timing info from a data directory."""
-    result = {}
+    result: dict[str, Any] = {}
 
     perform_path = os.path.join(data_dir, "perform.dat")
     if os.path.exists(perform_path):
@@ -137,10 +150,10 @@ def bench_fn(fn, n_warmup=2, n_iters=10, label=""):
     return mean_ms, std_ms
 
 
-def get_device_info():
+def get_device_info() -> dict[str, Any]:
     """Get JAX device info."""
     dev = jax.devices()[0]
-    info = {
+    info: dict[str, Any] = {
         "platform": dev.platform,
         "device_kind": dev.device_kind,
     }
@@ -155,7 +168,7 @@ def get_device_info():
     return info
 
 
-def get_memory_usage():
+def get_memory_usage() -> dict[str, float]:
     """Get current JAX memory usage."""
     dev = jax.devices()[0]
     try:
@@ -205,22 +218,22 @@ def estimate_flops_per_step(grid_shape, non_linear=True, n_species=1):
 
 
 def benchmark_gyaradax(
-    config_path,
-    n_steps=120,
-    n_blocks=5,
-    device=None,
-    args=None,
-    mp=False,
-    dp=False,
-    z2z=None,
-    backend="jax",
-):
+    config_path: str,
+    n_steps: int = 120,
+    n_blocks: int = 5,
+    device: int | None = None,
+    args: argparse.Namespace | None = None,
+    mp: bool = False,
+    dp: bool = False,
+    z2z: bool | None = None,
+    backend: str = "jax",
+) -> dict[str, Any]:
     """Run full gyaradax benchmark. Returns a results dict."""
     if device is not None:
-        os.environ["CUDA_VISIBLE_DEVICES"] = str(device)
+        configure_runtime_env(device=device, preallocate=None)
 
     cfg = load_config(config_path)
-    overrides = {}
+    overrides: dict[str, Any] = {}
     if args is not None:
         if args.dp:
             overrides["mixed_precision"] = False
@@ -242,20 +255,17 @@ def benchmark_gyaradax(
     params = gkparams_from_config(cfg, **overrides)
 
     # force nonlinear for fair comparison
-    params = GKParams(
-        **{
-            **{k: getattr(params, k) for k in params.__dataclass_fields__},
-            "non_linear": True,
-        }
-    )
+    params_values: dict[str, Any] = {k: getattr(params, k) for k in params.__dataclass_fields__}
+    params_values["non_linear"] = True
+    params = GKParams(**params_values)
 
     # geometry
     if hasattr(cfg.run, "data_dir") and os.path.exists(cfg.run.data_dir):
         geometry = load_geometry(cfg.run.data_dir)
     else:
-        from gyaradax.simulate import _geometry_from_config
+        from gyaradax.geometry import compute_geometry_from_config
 
-        geometry = _geometry_from_config(cfg)
+        geometry = compute_geometry_from_config(cfg)
 
     df, geometry, state = gk_init(geometry, params)
     grid_shape = df.shape
@@ -265,7 +275,7 @@ def benchmark_gyaradax(
     print(f"mode: {mode}, grid: {grid_shape}, dt: {params.dt}")
     print(f"device: {jax.devices()[0]}")
 
-    results = {
+    results: dict[str, Any] = {
         "config": config_path,
         "mode": mode,
         "grid_shape": list(grid_shape),
@@ -379,7 +389,7 @@ def benchmark_gyaradax(
         ms_per_step = dt_block * 1000 / n_steps
         vram_str = f", {block_peaks[-1]:.0f} MB VRAM" if block_peaks else ""
         print(
-            f"  block {i+1}/{n_blocks}: {dt_block:.3f}s ({sps:.1f} steps/s, {ms_per_step:.2f} ms/step{vram_str})"
+            f"  block {i + 1}/{n_blocks}: {dt_block:.3f}s ({sps:.1f} steps/s, {ms_per_step:.2f} ms/step{vram_str})"
         )
 
     times = np.array(block_times)
@@ -387,7 +397,7 @@ def benchmark_gyaradax(
     std_sps = n_steps * np.std(times) / np.mean(times) ** 2
     ms_per_step = np.mean(times) * 1000 / n_steps
 
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"  total: {n_steps * n_blocks} steps in {np.sum(times):.3f}s")
     print(f"  throughput: {mean_sps:.2f} +/- {std_sps:.2f} steps/s")
     print(f"  latency: {ms_per_step:.2f} ms/step")
@@ -410,8 +420,8 @@ def benchmark_gyaradax(
     results["est_flops_per_step"] = est_flops
     results["est_gflops"] = achieved_flops / 1e9
     print(f"  est. FLOP/step: {est_flops:.2e}")
-    print(f"  est. throughput: {achieved_flops/1e9:.2f} GFLOP/s")
-    print(f"{'='*60}")
+    print(f"  est. throughput: {achieved_flops / 1e9:.2f} GFLOP/s")
+    print(f"{'=' * 60}")
 
     return results
 
@@ -421,7 +431,7 @@ def benchmark_gyaradax(
 # ---------------------------------------------------------------------------
 
 
-def print_gkw_summary(data_dir, label="GKW"):
+def print_gkw_summary(data_dir: str, label: str = "GKW") -> dict[str, Any]:
     """Print GKW timing summary from a data directory."""
     gkw = collect_gkw_timing(data_dir)
     if not gkw:
@@ -459,7 +469,7 @@ def print_gkw_summary(data_dir, label="GKW"):
     if "perfloop" in gkw:
         pl = gkw["perfloop"]
         # perfloop measures wall-time per "large step" (naverage RK4 steps)
-        print(f"  per-block wall time: {pl['mean_s']*1000:.1f} +/- {pl['std_s']*1000:.1f} ms")
+        print(f"  per-block wall time: {pl['mean_s'] * 1000:.1f} +/- {pl['std_s'] * 1000:.1f} ms")
 
     return gkw
 
@@ -501,7 +511,7 @@ def main():
     )
     args = parser.parse_args()
 
-    all_results = {}
+    all_results: dict[str, Any] = {}
 
     # --- GKW reference timing ---
     cfg = load_config(args.config)
@@ -525,9 +535,9 @@ def main():
         return
 
     # --- gyaradax benchmark ---
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print("gyaradax (adiabatic)")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
     results_adiabatic = benchmark_gyaradax(
         args.config,
         n_steps=args.steps,
@@ -539,9 +549,9 @@ def main():
     all_results["gyaradax_adiabatic"] = results_adiabatic
 
     if args.kinetic_config:
-        print(f"\n{'='*60}")
+        print(f"\n{'=' * 60}")
         print("gyaradax (kinetic)")
-        print(f"{'='*60}")
+        print(f"{'=' * 60}")
         results_kinetic = benchmark_gyaradax(
             args.kinetic_config,
             n_steps=args.steps,
@@ -553,9 +563,9 @@ def main():
         all_results["gyaradax_kinetic"] = results_kinetic
 
     # --- comparison table ---
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print("COMPARISON SUMMARY")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
     print(f"{'':30s} {'gyaradax':>15s} {'GKW':>15s} {'speedup':>10s}")
     print("-" * 72)
 

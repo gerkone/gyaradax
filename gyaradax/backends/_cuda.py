@@ -8,22 +8,53 @@ is not compiled.
 import ctypes
 import logging
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 from jax import ffi
 
-from gyaradax import stencils
+import gyaradax.stencils as stencils
 from gyaradax.backends.ops import SolverOps
-from gyaradax.types import GKPre
+from gyaradax.state import GKPre
 
 log = logging.getLogger(__name__)
 
 _CUDA_KERNELS_DIR = Path(__file__).parent / "cuda_kernels"
 LIB_PATH = _CUDA_KERNELS_DIR / "libgyaradax_cuda.so"
 _ffi_registered = False
+
+
+def _concrete_int_or_none(value: Any) -> int | None:
+    """Return a Python int for concrete scalar metadata, or None for tracers."""
+    try:
+        arr = np.asarray(value)
+    except (jax.errors.ConcretizationTypeError, jax.errors.TracerArrayConversionError, TypeError):
+        return None
+    if arr.shape != ():
+        raise ValueError(f"expected scalar metadata, got shape {arr.shape}")
+    return int(arr.item())
+
+
+def _cuda_zero_mode_index(pre: GKPre, key: str, fallback: int, size: int) -> np.int32:
+    """Get concrete zero-mode metadata for CUDA FFI static attributes.
+
+    CUDA FFI attributes must be Python-concrete at trace time. Prefer the
+    precomputed zero-mode index when available; when ``pre`` was constructed
+    inside a JIT trace, scalar metadata can be traced, so fall back to the
+    current mode-box convention while still validating all concrete metadata.
+    """
+    concrete = _concrete_int_or_none(pre[key])
+    if concrete is None:
+        if key == "ixzero" and size % 2 != 1:
+            raise ValueError("CUDA nonlinear mode-box fallback requires odd nkx")
+        idx = fallback
+    else:
+        idx = concrete
+    if not 0 <= idx < size:
+        raise ValueError(f"{key}={idx} out of bounds for size {size}")
+    return np.int32(idx)
 
 
 def _register_ffi():
@@ -113,6 +144,7 @@ class CUDAOps(SolverOps):
         return ffi.ffi_call(
             "apply_vpar_stencil_ffi",
             [jax.ShapeDtypeStruct(field.shape, field.dtype)],
+            vmap_method="sequential",
         )(
             field,
             c0=float(coeffs[0]),
@@ -122,9 +154,7 @@ class CUDAOps(SolverOps):
             c4=float(coeffs[4]),
             nv=np.int32(nv),
             inner_size=np.int32(inner_size),
-        )[
-            0
-        ]
+        )[0]
 
     def _apply_vpar_dual(
         self, field: jnp.ndarray, coeffs_d1, coeffs_d4
@@ -132,13 +162,14 @@ class CUDAOps(SolverOps):
         """Apply d1 and d4 vpar stencils in a single fused kernel."""
         nv = field.shape[0]
         inner_size = field.size // nv
-        return ffi.ffi_call(
+        out = ffi.ffi_call(
             "apply_vpar_dual_stencil_ffi",
             [
                 jax.ShapeDtypeStruct(field.shape, field.dtype),
                 jax.ShapeDtypeStruct(field.shape, field.dtype),
             ],
-        )(
+            vmap_method="sequential",
+)(
             field,
             c0_d1=float(coeffs_d1[0]),
             c1_d1=float(coeffs_d1[1]),
@@ -153,6 +184,7 @@ class CUDAOps(SolverOps):
             nv=np.int32(nv),
             inner_size=np.int32(inner_size),
         )
+        return out[0], out[1]
 
     def _apply_parallel(self, field: jnp.ndarray, coeffs: jnp.ndarray) -> jnp.ndarray:
         """Apply 9-point parallel stencil via CUDA kernel."""
@@ -163,6 +195,7 @@ class CUDAOps(SolverOps):
         return ffi.ffi_call(
             "apply_parallel_ffi",
             [jax.ShapeDtypeStruct(field_b.shape, field_b.dtype)],
+            vmap_method="sequential",
         )(
             field_b,
             c_1d,
@@ -172,9 +205,7 @@ class CUDAOps(SolverOps):
             ns=np.int32(ns),
             nky=np.int32(nky),
             nmu=np.int32(nmu),
-        )[
-            0
-        ]
+        )[0]
 
     def _apply_parallel_dual(
         self,
@@ -186,9 +217,9 @@ class CUDAOps(SolverOps):
         """Apply parallel stencils to two fields in a single fused kernel."""
         nv1, nmu1, ns1, nkx1, nky1 = field1.shape
         nv2, nmu2, ns2, nkx2, nky2 = field2.shape
-        assert (
-            ns1 == ns2 and nkx1 == nkx2 and nky1 == nky2
-        ), f"spatial mismatch: field1={(ns1, nkx1, nky1)}, field2={(ns2, nkx2, nky2)}"
+        assert ns1 == ns2 and nkx1 == nkx2 and nky1 == nky2, (
+            f"spatial mismatch: field1={(ns1, nkx1, nky1)}, field2={(ns2, nkx2, nky2)}"
+        )
         nv, nmu = max(nv1, nv2), max(nmu1, nmu2)
         ns, nkx, nky = ns1, nkx1, nky1
 
@@ -200,12 +231,13 @@ class CUDAOps(SolverOps):
         c2_1d = self._prepare_parallel_coeffs(coeffs2, nv, nmu, ns, nkx, nky).reshape(-1)
         packed_maps = self._pack_shift_maps()
 
-        return ffi.ffi_call(
+        out = ffi.ffi_call(
             "apply_parallel_dual_ffi",
             [
                 jax.ShapeDtypeStruct(target_shape, field1.dtype),
                 jax.ShapeDtypeStruct(target_shape, field2.dtype),
             ],
+            vmap_method="sequential",
         )(
             f1_b,
             f2_b,
@@ -218,6 +250,7 @@ class CUDAOps(SolverOps):
             nky=np.int32(nky),
             nmu=np.int32(nmu),
         )
+        return out[0], out[1]
 
     def _linear_rhs_fused(
         self,
@@ -297,7 +330,8 @@ class CUDAOps(SolverOps):
             attrs["v_tile"] = np.int32(_V_TILE)
 
         _register_ffi()
-        return ffi.ffi_call(target_name, [jax.ShapeDtypeStruct(df.shape, df.dtype)])(
+        return ffi.ffi_call(target_name, [jax.ShapeDtypeStruct(df.shape, df.dtype)],
+                            vmap_method="sequential")(
             df.copy(),
             phi.copy(),
             bessel,
@@ -378,6 +412,8 @@ class CUDAOps(SolverOps):
         geometry: Dict[str, jnp.ndarray],
         params,
         pre: Dict[str, jnp.ndarray],
+        apar: Optional[jnp.ndarray] = None,
+        bpar: Optional[jnp.ndarray] = None,
     ) -> jnp.ndarray:
         """Fused linear RHS for single or multi-species.
 
@@ -385,6 +421,17 @@ class CUDAOps(SolverOps):
         For 6D df (kinetic): per-species loop to handle non-uniform species params
         (ions + electrons have different signz, tmp, etc.).
         """
+        if apar is not None or bpar is not None:
+            raise NotImplementedError(
+                "CUDA backend does not implement electromagnetic linear_rhs "
+                "coupling for apar/bpar; use backend='jax' for EM/B_parallel runs."
+            )
+        if "s_disp_par" in pre:
+            raise NotImplementedError(
+                "CUDA backend does not implement disp_par_conserve "
+                "(conservative parallel dissipation); use backend='jax'."
+            )
+
         if df.ndim == 5:
             return self._linear_rhs_fused(
                 df, phi, pre, params.dvp, params.disp_vp, params.drive_scale
@@ -404,7 +451,14 @@ class CUDAOps(SolverOps):
         fft_prefactor: complex = 1.0 + 0.0j,
         exclude_zero_mode: bool = True,
         bessel: Optional[jnp.ndarray] = None,
+        chi_correction: Optional[jnp.ndarray] = None,
     ) -> jnp.ndarray:
+        if chi_correction is not None:
+            raise NotImplementedError(
+                "CUDA backend does not implement the EM chi_correction "
+                "branch of nonlinear_term_iii — use backend='jax' when "
+                "running with apar/bpar."
+            )
         """Nonlinear bracket via CUDA graph-captured cuFFT pipeline.
 
         Uses z2z 2-for-1 packing with phi at its natural (nmu*ns) batch
@@ -452,6 +506,12 @@ class CUDAOps(SolverOps):
             kernel_name = "cufft_graph_bracket_fp64_ffi"
         _register_ffi()
 
+        # Fallback convention for currently supported CUDA mode-box grids.
+        # _cuda_zero_mode_index uses concrete precomputed metadata when it can,
+        # and only falls back here when the metadata is traced under JIT.
+        ixzero_static = _cuda_zero_mode_index(pre, "ixzero", nkx // 2, nkx)
+        iyzero_static = _cuda_zero_mode_index(pre, "iyzero", 0, nky)
+
         def _call_5d(df5, bessel5):
             batch = nv * nmu * ns
             df_flat = df5.reshape(-1, nkx, nky) * efun_sign
@@ -459,6 +519,7 @@ class CUDAOps(SolverOps):
             return ffi.ffi_call(
                 kernel_name,
                 jax.ShapeDtypeStruct((batch, nkx, nky), jnp.complex128),
+                vmap_method="sequential",
             )(
                 df_flat,
                 p_phi,
@@ -473,8 +534,8 @@ class CUDAOps(SolverOps):
                 nkx=np.int32(nkx),
                 nky=np.int32(nky),
                 nspec=np.int32(ns),
-                ixzero=np.int32(pre["ixzero"]),
-                iyzero=np.int32(pre["iyzero"]),
+                ixzero=ixzero_static,
+                iyzero=iyzero_static,
             )
 
         if bessel is None:
@@ -492,5 +553,5 @@ class CUDAOps(SolverOps):
             nl = fft_prefactor * pre["nl_fft_scale"] * jnp.stack(results, axis=0)
 
         if exclude_zero_mode:
-            return nl.at[..., pre["ixzero"], pre["iyzero"]].set(0.0)
+            return nl.at[..., int(ixzero_static), int(iyzero_static)].set(0.0)
         return nl

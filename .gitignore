@@ -33,6 +33,19 @@ baseline_*.npz
 tmp/
 cache/
 gkw_ref/
+!gkw_ref/
+gkw_ref/*
+# gkw_ref/em_validation_inputs/
+# gkw_ref/em_validation_cases/
+# !gkw_ref/em_validation_templates/
+# gkw_ref/em_validation_templates/*
+# !gkw_ref/em_validation_templates/*.input.dat
+# !gkw_ref/em_validation_matrix.json
+instabilities/
+torax/
+em_canon/
+gradients/
+experiments/
 
 # --- VCS / IDE / Editor noise ---
 .vscode/
@@ -54,13 +67,33 @@ hlo_dump/*.txt
 *.hlo.txt
 validation_*/
 /figs/
-!docs/figs/
+docs/**/*.png
+docs/**/*.jpg
+docs/**/*.gif
+docs/**/*.pdf
 *egg-info/
 .nfs*
 configs/sweep
+configs/scan/
+configs/scan_retry/
+scripts/run_scan.py
+scripts/precompute_scan_geometries.py
 upload_changed_py.sh
 **/CUDALibrarySamples/
 **/jax_cache/
 .claude/
 .opencode/
+.pi-lens/
+pyrightconfig.json
+p0-implementation.md
+p0-review.md
+progress.md
+collegue_dump/
+docs/cleanup-plan.md
+docs/em-physics-todo.md
+em-physics-*.md
+p1-*.md
+p2-*.md
 paper/
+lsp-type-cleanup/
+data/

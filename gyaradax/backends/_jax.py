@@ -5,15 +5,16 @@ using pure JAX. This is the direct port of GKW's non_linear_terms.F90
 and linear_terms.f90 stencil application.
 """
 
-from typing import Dict, Tuple
+from typing import Any, Dict, Tuple
 
 import jax
 import jax.numpy as jnp
 
-from gyaradax import stencils
+import gyaradax.stencils as stencils
 from gyaradax.backends.ops import SolverOps
+from gyaradax.collisions import collision_rhs, conservation_correction
 from gyaradax.params import GKParams
-from gyaradax.types import GKPre
+from gyaradax.state import GKPre
 from gyaradax.utils import pack_half_spectrum, unpack_half_spectrum
 
 
@@ -94,8 +95,6 @@ class JAXOps(SolverOps):
             out2 = out2 + coeffs2[i] * shifted2
         return out1, out2
 
-    # ── nonlinear term III ──────────────────────────────────────────────
-
     def _nonlinear_term_iii_core(
         self,
         df: jnp.ndarray,
@@ -105,9 +104,15 @@ class JAXOps(SolverOps):
         efun_sign: float = 1.0,
         fft_prefactor: complex = 1.0 + 0.0j,
         exclude_zero_mode: bool = True,
-        bessel: jnp.ndarray = None,
+        bessel: jnp.ndarray | None = None,
+        chi_correction: jnp.ndarray | None = None,
     ) -> jnp.ndarray:
-        """Nonlinear ExB advection (term III) for 5D df. Shared skeleton for R2C and Z2Z."""
+        """Nonlinear ExB advection (term III) for 5D df. Shared skeleton for R2C and Z2Z.
+
+        When chi_correction is provided (EM mode), it is added to gyro_phi
+        to form the generalized potential chi = J0*phi + chi_correction.
+        chi_correction shape: (nvpar, nmu, ns, nkx, nky).
+        """
         pre = self.pre
         mrad, mphi, mphiw3 = pre["nl_mrad"], pre["nl_mphi"], pre["nl_mphiw3"]
         fft_scale, jind = pre["nl_fft_scale"], pre["nl_jind"]
@@ -116,6 +121,14 @@ class JAXOps(SolverOps):
             bessel = pre["bessel"]
         dum_s, ixzero, iyzero = pre["nl_dum_s"], pre["ixzero"], pre["iyzero"]
         nky = df.shape[-1]
+
+        # chi_correction per-s slices: vmap axis 2 (s-axis in 5D arrays)
+        if chi_correction is not None:
+            chi_corr_vmap = chi_correction
+            chi_in_axis = 2
+        else:
+            chi_corr_vmap = jnp.zeros(1)  # dummy, ignored
+            chi_in_axis = None
 
         if self.use_z2z:
             kx_1d = kx2d[:, 0]
@@ -126,12 +139,13 @@ class JAXOps(SolverOps):
                 .set(jnp.arange(len(jind), dtype=jnp.int32))
             )
 
-            def _per_s_wrapper(df_s, phi_s, bessel_s, dum):
+            def _per_s_wrapper(df_s, phi_s, bessel_s, dum, chi_s):
                 return _per_s_z2z(
                     df_s,
                     phi_s,
                     bessel_s,
                     dum,
+                    chi_correction_s=chi_s if chi_correction is not None else None,
                     mixed_precision=self.mixed_precision,
                     efun_sign=efun_sign,
                     fft_prefactor=fft_prefactor,
@@ -150,12 +164,13 @@ class JAXOps(SolverOps):
             ikx_packed = 1j * pack_half_spectrum(kx2d, jind, mrad, mphiw3)
             iky_packed = 1j * pack_half_spectrum(ky2d, jind, mrad, mphiw3)
 
-            def _per_s_wrapper(df_s, phi_s, bessel_s, dum):
+            def _per_s_wrapper(df_s, phi_s, bessel_s, dum, chi_s):
                 return _per_s_r2c(
                     df_s,
                     phi_s,
                     bessel_s,
                     dum,
+                    chi_correction_s=chi_s if chi_correction is not None else None,
                     mixed_precision=self.mixed_precision,
                     efun_sign=efun_sign,
                     fft_prefactor=fft_prefactor,
@@ -169,7 +184,9 @@ class JAXOps(SolverOps):
                     nky=nky,
                 )
 
-        nl = jax.vmap(_per_s_wrapper, in_axes=(2, 0, 2, 0), out_axes=2)(df, phi, bessel, dum_s)
+        nl = jax.vmap(_per_s_wrapper, in_axes=(2, 0, 2, 0, chi_in_axis), out_axes=2)(
+            df, phi, bessel, dum_s, chi_corr_vmap
+        )
         return nl.at[:, :, :, ixzero, iyzero].set(0.0) if exclude_zero_mode else nl
 
     def nonlinear_term_iii(
@@ -181,12 +198,14 @@ class JAXOps(SolverOps):
         efun_sign: float = 1.0,
         fft_prefactor: complex = 1.0 + 0.0j,
         exclude_zero_mode: bool = True,
-        bessel: jnp.ndarray = None,
+        bessel: jnp.ndarray | None = None,
+        chi_correction: jnp.ndarray | None = None,
     ) -> jnp.ndarray:
         """Nonlinear ExB advection with shape dispatch.
 
         Dispatches on df.ndim: 5D direct, 6D via vmap over species with per-species bessel.
         Mixed precision is controlled by self.mixed_precision (set at construction time).
+        chi_correction: velocity-dependent EM correction added to gyro_phi to form chi.
         """
         if df.ndim == 5:
             return self._nonlinear_term_iii_core(
@@ -197,12 +216,13 @@ class JAXOps(SolverOps):
                 fft_prefactor=fft_prefactor,
                 exclude_zero_mode=exclude_zero_mode,
                 bessel=bessel,
+                chi_correction=chi_correction,
             )
         elif df.ndim == 6:
             if bessel is None:
                 bessel = self.pre["bessel"]
 
-            def _per_species(df_sp, bes_sp):
+            def _per_species(df_sp, bes_sp, chi_sp):
                 return self._nonlinear_term_iii_core(
                     df_sp,
                     phi,
@@ -211,51 +231,157 @@ class JAXOps(SolverOps):
                     fft_prefactor=fft_prefactor,
                     exclude_zero_mode=exclude_zero_mode,
                     bessel=bes_sp,
+                    chi_correction=chi_sp if chi_correction is not None else None,
                 )
 
-            return jax.vmap(_per_species)(df, bessel)
+            if chi_correction is not None:
+                return jax.vmap(_per_species)(df, bessel, chi_correction)
+            else:
+                dummy = jnp.zeros((df.shape[0],))
+                return jax.vmap(_per_species)(df, bessel, dummy)
         else:
             raise ValueError(f"nonlinear_term_iii: expected df with ndim 5 or 6, got {df.ndim}")
+
+    def _linear_rhs_terms(
+        self,
+        df: jnp.ndarray,
+        phi: jnp.ndarray,
+        params: GKParams,
+        pre: GKPre | dict[str, Any],
+        apar: jnp.ndarray | None = None,
+        bpar: jnp.ndarray | None = None,
+    ) -> dict[str, jnp.ndarray]:
+        """Return each linear-RHS term as a dict entry.
+
+        Implements Terms I, II, IV, V, VII, VIII, X, XI + dissipation + collisions.
+        The total RHS is the sum of all values in the returned dict.
+
+        chi = J0*phi - 2*vR*vpar*J0*apar + (2*mu*T/Z)*J1hat*bpar
+        Drive terms V, VIII use chi/phi; Term VII uses gyro_phi only.
+
+        Term I (streaming) and parallel dissipation share a fused 9-point stencil
+        ('s_total_upar') — exposed together in the dict as 'I_par_streaming_plus_diss'.
+        """
+        gyro_phi = pre["bessel"] * phi[None, None, :, :, :]
+
+        gyro_chi = gyro_phi
+        if apar is not None and "apar_chi_factor" in pre:
+            apar_b = apar[None, None, :, :, :]
+            gyro_chi = gyro_chi + pre["apar_chi_factor"] * apar_b
+        if bpar is not None and "bpar_chi_factor" in pre:
+            bpar_b = bpar[None, None, :, :, :]
+            gyro_chi = gyro_chi + pre["bpar_chi_factor"] * bpar_b
+
+        # parallel stencil (fused: streaming + parallel dissipation + Landau)
+        term_I_par, term_VII_landau = self._apply_parallel_dual(
+            df, gyro_phi, pre["s_total_upar"], pre["s_total_t7"]
+        )
+
+        # vpar stencil (trapping + vpar dissipation; 5-point central)
+        out_d1, out_d4 = self._apply_vpar_dual(df, stencils.VPAR_D1, stencils.VPAR_D4)
+        term_IV_trapping = pre["utrap"] * out_d1 / pre["dvp"]
+        term_IV_vp_diss = params.disp_vp * pre["abs_dum2_vp"] * out_d4 / pre["dvp"]
+
+        kdotvd = pre["drift_x"] * pre["kx_b"] + pre["drift_y"] * pre["ky_b"]
+
+        # term II: drift on perturbed distribution (β-independent)
+        term_II_drift_df = -1j * kdotvd * df
+
+        # term V: gradient drive on chi
+        term_V_drive_chi = 1j * params.drive_scale * pre["dmaxwel_fm_ek"] * gyro_chi
+
+        # term VIII: curvature drift × F_M × phi (NOT chi -- verified vs GKW iphi_ga)
+        term_VIII_curv_phi = (
+            -1j
+            * params.drive_scale
+            * pre["signz0"]
+            * kdotvd
+            * (pre["fmaxwl"] / jnp.maximum(pre["tmp0"], 1e-15))
+            * gyro_phi
+        )
+
+        # term X: parallel derivative of gyro-averaged bpar (B_par compression)
+        term_X_bpar_par = jnp.zeros_like(df)
+        # term XI: curvature drift × F_M × bpar coupling (B_par analog of VIII).
+        # GKW vd_grad_phi_fm elem2 at linear_terms.f90:2664-2667; equivalent
+        # to VIII with gyro_phi replaced by bpar_chi_factor*bpar.
+        term_XI_curv_bpar = jnp.zeros_like(df)
+        if bpar is not None and "bpar_chi_factor" in pre:
+            bpar_b = bpar[None, None, :, :, :]
+            gyro_bpar_scaled = pre["bpar_chi_factor"] * bpar_b
+            term_X_bpar_par = self._apply_parallel(gyro_bpar_scaled, pre["s_total_t7"])
+            term_XI_curv_bpar = (
+                -1j
+                * params.drive_scale
+                * pre["signz0"]
+                * kdotvd
+                * (pre["fmaxwl"] / jnp.maximum(pre["tmp0"], 1e-15))
+                * gyro_bpar_scaled
+            )
+
+        term_hyper_diss = pre["hyper"] * df
+
+        # conservative parallel dissipation (CGYRO trick): subtract from the
+        # dissipation its projection onto the F_M*J0*{1, vpar} components, so
+        # disp_par sources neither Poisson nor Ampere (cures the EM low-ky
+        # numerical instability, GKW issue #201).
+        term_disp_proj = jnp.zeros_like(df)
+        if "s_disp_par" in pre:
+            m0 = jnp.sum(pre["dproj_w0"] * df, axis=(0, 1), keepdims=True)
+            m1 = jnp.sum(pre["dproj_w1"] * df, axis=(0, 1), keepdims=True)
+            proj = pre["dproj_e0"] * m0 + pre["dproj_e1"] * m1
+            term_disp_proj = -self._apply_parallel(proj, pre["s_disp_par"])
+
+        term_collisions = jnp.zeros_like(df)
+        if params.collisions and "coll_stencil" in pre:
+            term_collisions = collision_rhs(df, pre["coll_stencil"])
+            if (
+                params.coll_mom_conservation or params.coll_ene_conservation
+            ) and "coll_mom_factor" in pre:
+                term_collisions = term_collisions + conservation_correction(
+                    term_collisions,
+                    pre["coll_mom_factor"],
+                    pre["coll_ene_factor"],
+                    pre["coll_vpar_weight"],
+                    pre["coll_vsq_weight"],
+                )
+
+        return {
+            "I_par_streaming_plus_diss": term_I_par,
+            "II_drift_df": term_II_drift_df,
+            "IV_trapping": term_IV_trapping,
+            "IV_vp_diss": term_IV_vp_diss,
+            "V_drive_chi": term_V_drive_chi,
+            "VII_landau_phi": term_VII_landau,
+            "VIII_curv_phi": term_VIII_curv_phi,
+            "X_bpar_par": term_X_bpar_par,
+            "XI_curv_bpar": term_XI_curv_bpar,
+            "hyper_diss": term_hyper_diss,
+            "disp_par_conserve": term_disp_proj,
+            "collisions": term_collisions,
+        }
 
     def _linear_rhs_core(
         self,
         df: jnp.ndarray,
         phi: jnp.ndarray,
         params: GKParams,
-        pre: GKPre,
+        pre: GKPre | dict[str, Any],
+        apar: jnp.ndarray | None = None,
+        bpar: jnp.ndarray | None = None,
     ) -> jnp.ndarray:
-        """Fused linear RHS for single species (5D df).
+        """Total linear RHS = sum of all linear terms.
 
-        Implements Terms I, II, IV, V, VII, VIII + dissipation.
-        Matches GKW linear_terms.f90 and GKW's calc_linear_terms.
+        Convenience wrapper around _linear_rhs_terms; numerically identical to
+        the fused expression. JAX/XLA will fuse term computations under JIT.
         """
-        gyro_phi = pre["bessel"] * phi[None, None, :, :, :]
-
-        term_par, term_vii = self._apply_parallel_dual(
-            df, gyro_phi, pre["s_total_upar"], pre["s_total_t7"]
-        )
-
-        out_d1, out_d4 = self._apply_vpar_dual(df, stencils.VPAR_D1, stencils.VPAR_D4)
-        term_iv = pre["utrap"] * out_d1 / params.dvp
-        term_vp_diss = params.disp_vp * pre["abs_dum2_vp"] * out_d4 / params.dvp
-
-        kdotvd = pre["drift_x"] * pre["kx_b"] + pre["drift_y"] * pre["ky_b"]
-
-        return (
-            term_par
-            + term_iv
-            + term_vp_diss
-            - 1j * kdotvd * df
-            + pre["hyper"] * df
-            + 1j
-            * params.drive_scale
-            * (
-                pre["dmaxwel_fm_ek"]
-                - pre["signz0"] * kdotvd * (pre["fmaxwl"] / jnp.maximum(pre["tmp0"], 1e-15))
-            )
-            * gyro_phi
-            + term_vii
-        )
+        terms = self._linear_rhs_terms(df, phi, params, pre, apar=apar, bpar=bpar)
+        total = terms["I_par_streaming_plus_diss"]
+        for k, v in terms.items():
+            if k == "I_par_streaming_plus_diss":
+                continue
+            total = total + v
+        return total
 
     def linear_rhs(
         self,
@@ -264,18 +390,18 @@ class JAXOps(SolverOps):
         geometry: Dict[str, jnp.ndarray],
         params: GKParams,
         pre: GKPre,
+        apar: jnp.ndarray | None = None,
+        bpar: jnp.ndarray | None = None,
     ) -> jnp.ndarray:
         """Linear RHS with shape dispatch.
 
-        Implements Terms I, II, IV, V, VII, VIII + dissipation.
+        Implements Terms I, II, IV, V, VII, VIII, X, XI + dissipation.
         Dispatches on df.ndim: 5D direct, 6D via vmap over species.
+        When apar/bpar are provided, includes EM coupling terms.
         """
         if df.ndim == 5:
-            return self._linear_rhs_core(df, phi, params, pre)
+            return self._linear_rhs_core(df, phi, params, pre, apar=apar, bpar=bpar)
         elif df.ndim == 6:
-            # Per-species arrays: leading axis is nsp, vmap slices along axis 0.
-            # s_total_upar/t7 are (9, nsp, ...) from _fuse_stencils; moveaxis brings
-            # nsp to front so each vmap slice is (9, ...) — correct for _apply_parallel_dual.
             sp_arrays = {
                 "bessel": pre["bessel"],
                 "fmaxwl": pre["fmaxwl"],
@@ -289,21 +415,36 @@ class JAXOps(SolverOps):
                 "s_total_upar": jnp.moveaxis(pre["s_total_upar"], 1, 0),
                 "s_total_t7": jnp.moveaxis(pre["s_total_t7"], 1, 0),
             }
+            if "s_disp_par" in pre:
+                sp_arrays["s_disp_par"] = jnp.moveaxis(pre["s_disp_par"], 1, 0)
+                for k in ("dproj_w0", "dproj_w1", "dproj_e0", "dproj_e1"):
+                    sp_arrays[k] = pre[k]
+            # chi factors for em
+            if apar is not None and "apar_chi_factor" in pre:
+                sp_arrays["apar_chi_factor"] = pre["apar_chi_factor"]
+            if bpar is not None and "bpar_chi_factor" in pre:
+                sp_arrays["bpar_chi_factor"] = pre["bpar_chi_factor"]
+            # per-species collision stencil shape (nsp, 9, nv, nmu, ns); axis 0 mapped
+            if params.collisions and "coll_stencil" in pre:
+                sp_arrays["coll_stencil"] = pre["coll_stencil"]
+                if "coll_mom_factor" in pre:
+                    sp_arrays["coll_mom_factor"] = pre["coll_mom_factor"]
+                    sp_arrays["coll_ene_factor"] = pre["coll_ene_factor"]
+                    sp_arrays["coll_vpar_weight"] = pre["coll_vpar_weight"]
+                    sp_arrays["coll_vsq_weight"] = pre["coll_vsq_weight"]
             sp_in_axes = {k: 0 for k in sp_arrays}
 
-            # kx_b/ky_b in pre are 6D for kinetic (1,1,1,1,nkx,1); squeeze to 5D
-            # so that per-species _linear_rhs_core (with 5D df_sp) stays 5D.
-            # s_shift/kx_shift/valid_shift are read from self.pre by _apply_parallel_dual
-            # and are species-independent, so they don't belong in the vmapped dict.
             shared = {
                 "kx_b": pre["kx_b"].ravel().reshape(1, 1, 1, -1, 1),
                 "ky_b": pre["ky_b"].ravel().reshape(1, 1, 1, 1, -1),
                 "hyper": pre["hyper"],
+                # static grid spacing (python float; species-independent)
+                "dvp": pre["dvp"],
             }
 
             def _per_species(df_sp, sp):
                 sp_pre = {**sp, **shared}
-                return self._linear_rhs_core(df_sp, phi, params, sp_pre)
+                return self._linear_rhs_core(df_sp, phi, params, sp_pre, apar=apar, bpar=bpar)
 
             return jax.vmap(_per_species, in_axes=(0, sp_in_axes))(df, sp_arrays)
         else:
@@ -370,6 +511,7 @@ def _per_s_r2c(
     bessel_s,
     dum,
     *,
+    chi_correction_s=None,
     mixed_precision,
     efun_sign,
     fft_prefactor,
@@ -391,6 +533,8 @@ def _per_s_r2c(
     real_dtype = jnp.float32 if mixed_precision else jnp.float64
 
     gyro_phi = bessel_s * phi_s[None, None, :, :]
+    if chi_correction_s is not None:
+        gyro_phi = gyro_phi + chi_correction_s
 
     df_packed = pack_half_spectrum(df_s, jind, mrad, mphiw3).astype(fft_dtype)
     phi_packed = pack_half_spectrum(gyro_phi, jind, mrad, mphiw3).astype(fft_dtype)
@@ -430,6 +574,7 @@ def _per_s_z2z(
     bessel_s,
     dum,
     *,
+    chi_correction_s=None,
     mixed_precision,
     efun_sign,
     fft_prefactor,
@@ -454,6 +599,8 @@ def _per_s_z2z(
     real_dtype = jnp.float32 if mixed_precision else jnp.float64
 
     gyro_phi = bessel_s * phi_s[None, None, :, :]
+    if chi_correction_s is not None:
+        gyro_phi = gyro_phi + chi_correction_s
 
     ws_df = _pack_full_z2z(df_s, kx_vec, ky_vec, jind, rev_jind, mrad, mphi, mphiw3, nky, fft_dtype)
     ws_phi = _pack_full_z2z(

@@ -14,21 +14,23 @@ these baselines using both JAX and CUDA backends.
 """
 
 import argparse
-import os
 import sys
 from pathlib import Path
+from typing import Any, cast
+
+from _runtime_config_loader import configure_runtime_env
 
 # parse --device before JAX import
 _p = argparse.ArgumentParser(add_help=False)
 _p.add_argument("--device", type=int, default=1)
 _p.add_argument("--config", type=str, default="configs/iteration_13.yaml")
 _early, _ = _p.parse_known_args()
-os.environ["CUDA_VISIBLE_DEVICES"] = str(_early.device)
-os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
+configure_runtime_env(device=_early.device)
 
 import jax
+from gyaradax.jax_config import enable_x64
 
-jax.config.update("jax_enable_x64", True)
+enable_x64()
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -37,9 +39,9 @@ from common import load_setup, BASELINES_DIR
 BASELINES_DIR.mkdir(exist_ok=True)
 
 
-def save(name: str, **arrays):
+def save(name: str, **arrays: Any) -> None:
     path = BASELINES_DIR / f"{name}.npz"
-    np.savez(path, **{k: np.array(v) for k, v in arrays.items()})
+    np.savez(str(path), **cast(Any, {k: np.array(v) for k, v in arrays.items()}))
     print(f"  saved {path.name}  ({', '.join(arrays)})")
 
 
@@ -130,7 +132,7 @@ def main():
 
     # ── C5: _compute_phi ─────────────────────────────────────────────────
     print("\nC5: _compute_phi")
-    from gyaradax.solver import _compute_phi
+    from gyaradax.fields import _compute_phi
 
     @jax.jit
     def _phi():
@@ -173,11 +175,11 @@ def main():
 
     # ── C7: gkstep_single (full RK4 step) ───────────────────────────────────
     print("\nC7: gkstep_single")
-    from gyaradax.solver import gkstep_single, default_state, GKPre
+    from gyaradax.solver import gkstep_single, default_state
     from dataclasses import replace
 
     state = default_state(nky=df.shape[-1])
-    pre_gk = GKPre(pre)
+    pre_gk = pre
 
     @jax.jit
     def _rk4_linear(d, s):

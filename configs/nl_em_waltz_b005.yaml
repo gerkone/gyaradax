@@ -1,0 +1,44 @@
+run:
+  name: nl_em_waltz_b005_gyaradax
+  data_dir: tests/data/gkw_cases/nl_em_waltz_b005
+solver:
+  dt: 0.005
+  naverage: 50
+  n_steps: 24000
+  dump_interval: 20
+  disp_par: 1.0
+  disp_vp: 0.2
+  disp_x: 0.1
+  disp_y: 0.1
+  idisp: 2
+  non_linear: true
+  adaptive_dt: true
+  finit: cosine2
+  amp_init: 1.0e-3
+  nlapar: true
+  nlbpar: false
+  backend: jax
+physics:
+  rlt: [9.0, 9.0]
+  rln: [3.0, 3.0]
+  mas: [1.0, 2.72e-4]
+  tmp: [1.0, 1.0]
+  de: [1.0, 1.0]
+  signz: [1.0, -1.0]
+  dgrid: 1.0
+  tgrid: 1.0
+  beta: 0.005
+geometry:
+  geometry_model: circ
+  shat: 1.0
+  q: 2.0
+  eps: 0.166
+  Rref: 100.0
+  signB: 1.0
+grid:
+  nvpar: 32
+  nmu: 8
+  ns: 16
+  nkx: 55
+  nky: 8
+  adiabatic_electrons: false

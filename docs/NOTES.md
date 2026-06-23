@@ -5,8 +5,9 @@ simulations. Supports both adiabatic and kinetic electron configurations.
 
 ## 1. physics overview
 
-gyaradax solves the electrostatic gyrokinetic Vlasov-Poisson system in the
-local (flux-tube) limit. The code evolves the perturbed gyrocenter distribution
+gyaradax solves the gyrokinetic Vlasov-Poisson system in the
+local (flux-tube) limit (this section describes the electrostatic core;
+the electromagnetic extension is in §10). The code evolves the perturbed gyrocenter distribution
 function $\delta f_s$ for each kinetic species $s$ in a 5D phase space
 $(v_\parallel, \mu, s, k_x, k_y)$, where the perpendicular coordinates are
 Fourier-decomposed.
@@ -134,11 +135,23 @@ $$-\frac{Z_s}{T_s} (k_x v_{d,x} + k_y v_{d,y}) F_{M,s} J_0 \phi$$
 ### 2.2 dissipation
 
 - **parallel dissipation**: 4th-order damping on the streaming operator,
-  coefficient `disp_par`, using upwinded 4th-derivative stencils
+  coefficient `disp_par`, using upwinded 4th-derivative stencils.
+  Optional conservative projection (`disp_par_conserve=2`,
+  `disp_par_conserve_kycut=0.15`, default off): for modes with
+  $0 < k_\theta\rho \le$ kycut the dissipated distribution is projected
+  orthogonal to the Poisson/Ampère field-solve moments, curing the GKW
+  issue #201 EM low-ky numerical instability — plain dissipation corrupts
+  a physical KBM at $k_\theta\rho=0.1$, $\beta=1\%$ by +73%; the projection
+  restores it to 1.1% of the dissipation-free value. See
+  `instabilities/REPORT.md` (added 2026-06-11)
 - **velocity dissipation**: 4th-order smoothing in $v_\parallel$,
   coefficient `disp_vp`
 - **perpendicular hyper-dissipation**: spectral damping
-  $(k_x/k_{x,max})^4 + (k_y/k_{y,max})^4$, coefficients `disp_x`, `disp_y`
+  $(k_x/k_{x,max})^4 + (k_y/k_{y,max})^4$, coefficients `disp_x`, `disp_y`.
+  $k_{x,max}$/$k_{y,max}$ are sourced from the geometry dict in
+  `precompute.py`, not from `GKParams` — the params defaults (1.0)
+  silently misnormalized the damping for direct-constructed params
+  (corrected 2026-06-11)
 
 ### 2.3 field equation (quasineutrality)
 
@@ -164,7 +177,7 @@ denominator is set to 1. No flux-surface averaging is needed.
 
 The heat flux for species $s$ is:
 
-$$Q_s = \text{Im} \sum_{s, k_x, k_y, v_\parallel, \mu} P_{k_y} \Delta s \cdot k_y E_\alpha \left(v_\parallel^2 + 2\mu B\right) \delta f_s (J_0 \phi)^* B \Delta\mu \Delta v_\parallel \Delta s \cdot d^2 X$$
+$$Q_s = \text{Im} \sum_{s, k_x, k_y, v_\parallel, \mu} P_{k_y} \Delta s \cdot k_y E_\alpha \left(v_\parallel^2 + 2\mu B\right) \delta f_s (J_0 \phi)^* B \Delta\mu \Delta v_\parallel \cdot d^2 X$$
 
 where $P_{k_y}$ is the Parseval factor (1 for $k_y=0$, 2 otherwise)
 and $d^2 X$ is the velocity-space volume element.
@@ -208,9 +221,19 @@ RK4-specific stability factors:
    $$t_{max,4} = \max\!\left(\frac{\nu_\parallel\, |u_\parallel|_\infty \cdot c_{D4}}{\Delta s},\;
    \frac{\nu_v\, |u_{trap}|_\infty \cdot c_{V4}}{\Delta v_\parallel}\right)$$
 
-4. **Nonlinear ExB CFL**: $\Delta t_{NL} = \sigma \times 2 / \max|\nabla\phi|$,
-   computed from the dealiased real-space potential gradient. Safety factor
-   $\sigma = 0.95$ by default (`cfl_safety` parameter).
+4. **Nonlinear ExB CFL**: $\Delta t_{NL} = \sigma \times 2 / \max_\text{NL}$
+   with $\max_\text{NL} = \max(\max|\partial_y\phi|\cdot m_\text{rad}^2 m_\text{phi}/L_x,\,
+   \max|\partial_x\phi|\cdot m_\text{rad} m_\text{phi}^2/L_y) + 2 v_{th,\max} v_{pmax} \cdot (\text{same for } A_\parallel)$,
+   computed from the dealiased real-space potential gradients. The factors
+   $m_\text{rad}^2 m_\text{phi}/L_x$ (y-branch) and $m_\text{rad} m_\text{phi}^2/L_y$
+   (x-branch) match GKW's FFTW-unnormalized scaling
+   (`non_linear_terms.F90:1538`); since gyaradax uses
+   `jnp.fft.irfft2(norm="backward")` which applies $1/N$ on the inverse,
+   an extra $N \cdot l_\text{inv}$ factor is needed per branch.
+   Safety factor $\sigma = 0.95$ by default (`cfl_safety` parameter,
+   matching GKW's `fac_dtim_est`). The 2026-04-18 EM benchmarks in
+   §10.13 were run with `cfl_safety=0.5`, which explains the 0.53×
+   mean dt reported there (corrected 2026-06-11).
 
 The combined constraint for RK4 (`meth=2` in GKW):
 $$t_{max} = \max\!\left(\frac{\max(t_{max,1},\, t_{max,\text{field}})}{2.4},\;
@@ -251,17 +274,25 @@ per-step branching on the sign of $v_\parallel$.
 
 ### 4.1 modules
 
+(table refreshed 2026-06-11: precompute/CFL/field-solve split out of
+`solver.py`; `geometry.py` is now the `geometry/` package)
+
 | module | purpose |
 |--------|---------|
-| `solver.py` | RK4 integrator, linear RHS, nonlinear term III, precomputation, CFL |
-| `integrals.py` | phi solvers (adiabatic + kinetic), flux calculations |
+| `solver.py` | RK4 integrator (`gkstep_single`, `gksolve`), per-ky normalization; linear/nonlinear RHS dispatch via `backends/` |
+| `precompute.py` | one-time precomputation: stencils, species coefficients, EM weights, dissipation arrays |
+| `cfl.py` | adaptive CFL timestep estimation (nonlinear + von Neumann + field) |
+| `fields.py` | field solve dispatch (`_compute_fields`), g↔f transforms |
+| `integrals.py` | phi solvers (adiabatic + kinetic), flux calculations (ES + EM) |
 | `params.py` | `GKParams` dataclass, config/input.dat loading |
-| `geometry.py` | analytic circular geometry + mode connectivity (primary path) |
+| `geometry/` | geometry package: circular (Lapillonne), s-alpha, Miller, tensors, grids, mode connectivity |
 | `stencils.py` | finite difference coefficient tables |
+| `collisions.py` | Fokker-Planck collision stencil precompute + apply |
+| `quasilinear/` | quasilinear flux rule (saturation), calibration, linear pipeline |
 | `utils.py` | K-dump loading, checkpoint save/load, diagnostics, GKW file-loading (`load_geometry`, `parse_input_dat`) |
 | `simulate.py` | high-level simulation runner from YAML config |
 | `diag.py` | spectral diagnostics, 1D projections, nonlinear term analysis |
-| `bootstrap.py` | centralized JAX configuration and device initialization |
+| `jax_config.py` | centralized JAX configuration and device initialization |
 | `plot_utils.py` | publication-quality visualization |
 
 ### 4.2 key interfaces
@@ -354,8 +385,9 @@ The GKW manual (`gkw_ref/manual/`) contains:
 - `implementation.tex`: code structure and term-by-term mapping
 - `diagnostics.tex`: output file conventions
 - `buildandrun.tex`: input options and run configuration
-- `collisions.tex`: collision operator (not implemented in gyaradax)
-- `rotation.tex`: centrifugal and Coriolis effects (not implemented)
+- `collisions.tex`: collision operator (implemented — see §11)
+- `rotation.tex`: centrifugal and Coriolis effects (Coriolis drift `vcor`
+  + `uprim` drive implemented; centrifugal not — corrected 2026-06-11)
 - `neoclassics.tex`: neoclassical corrections (not implemented)
 
 ## 6. reference data
@@ -391,79 +423,44 @@ order. Species is the outermost (slowest) index.
 
 ### 7.1 implemented
 
-- electrostatic gyrokinetics (no $A_\parallel$, no $B_\parallel$)
+- electrostatic gyrokinetics
+- electromagnetic $A_\parallel$ (shear Alfvén, Ampere's law, mixed variable $g$)
+- electromagnetic $B_\parallel$ (magnetic compression, coupled 2×2 Poisson-Bpar solve)
 - adiabatic and kinetic electron models
-- all 7 linear RHS terms (I, II, III, IV, V, VII, VIII)
+- linearized Fokker-Planck collision operator (pitch-angle, energy diffusion,
+  friction; inter-species pairs, Coulomb-log path, Xu-style momentum/energy
+  conservation corrections — see §11; corrected 2026-06-11, no longer MVP-only)
+- toroidal rotation: Coriolis drift (`vcor`) + `uprim` drive (added
+  2026-06-11; no centrifugal terms; the uprim drive is ~25% strong vs
+  GKW — known refinement item, see `instabilities/LOG.md`)
+- all 7 linear RHS terms (I, II, III, IV, V, VII, VIII) plus EM terms X and XI
 - nonlinear ExB advection (pseudospectral, spectral Poisson bracket)
 - 4th-order parallel and velocity dissipation
 - perpendicular hyper-dissipation
 - RK4 explicit time integration
 - per-$k_y$ normalization (linear mode)
-- CFL-adaptive timestep (nonlinear ExB + linear parallel streaming)
+- CFL-adaptive timestep (nonlinear ExB + linear parallel streaming + EM Alfvén)
 - standalone circular geometry computation (no precomputed GKW files needed)
+- Miller flux-surface parametrisation (elongation κ, triangularity δ, squareness ζ, skappa/sdelta/ssquare, Zmil, dRmil, dZmil) — ports GKW `geom_miller` with Simpson flux-surface integrals; matches GKW `geom.dat` to ≤1e-5 max rel-error
 
 ### 7.2 not implemented
 
+(rows for collision conservation corrections and inter-species collisions
+removed 2026-06-11 — both are now implemented, see §11)
+
 | feature | GKW module | notes |
 |---------|-----------|-------|
-| electromagnetic ($A_\parallel$) | `fields.F90`, `ampere_*` | shear Alfvén physics |
-| compressional ($B_\parallel$) | `fields.F90`, `bpar_*` | magnetic compression |
-| collisions | `collisions.f90` | Lenard-Bernstein, Lorentz, full FP |
 | neoclassical | `neoclassics.f90` | equilibrium corrections to $F_M$ |
-| rotation | `rotation.f90` | centrifugal (`cfen`), Coriolis, toroidal shear |
+| centrifugal rotation, ExB shear | `rotation.f90` | centrifugal (`cfen`, `cf_trap`/`cf_drift`) and toroidal ExB shear; Coriolis (`vcor`) + `uprim` are implemented (corrected 2026-06-11) |
 | energetic particles | `components.f90` | `types='EP'`, `types='alpha'` |
 | implicit integration | `imp_integration.F90` | for stiff parallel streaming |
 | RK-Chebyshev | `exp_integration.F90` | for diffusion-dominated regimes |
 | real-space nonlinear | `non_linear_terms.F90` | Arakawa bracket variant |
 | global effects | `global.f90` | radial profile variation |
 | source terms | various | Krook operator, external sources |
+| general geometry (Fourier / MXH / chease) | `geom.f90` | only `s-alpha`, `circ` (Lapillonne), and `miller` supported |
 
-### 7.3 known limitations
-
-- adaptive CFL uses one-step lag (current step uses previous step's CFL estimate)
-- no multi-species output in `save_dumps` (fluxes are summed over species)
-- **kinetic init from scratch**: the reference cases ARE cold-started
-  (confirmed by reproducing with `read_file=.false.`; output is
-  bit-identical). The earlier 6-12× amplitude deficit was caused by
-  using `configs/kinetic.yaml` parameters (wrong electron mass 0.0003
-  vs 0.000272, wrong rln 3.0 vs 3.031, wrong amp_init 1e-4 vs 0.001).
-  With correct parameters from `parse_input_dat` + adaptive dt:
-  electron max|df| matches within 0.3%, ion within 11%.
-- **NL CFL estimator**: GKW's nonlinear timestep estimator reduces dt
-  from 2.13e-3 to 1.01e-3 mid-run. gyaradax's `estimate_nl_timestep`
-  never triggers (returns dt_input for all 300 steps). The NL gradient
-  computed by gyaradax is too small. Causes flux trajectory divergence
-  (1.5-3.4× by window 3).
-
-### 7.4 bugs fixed (2026-03-28)
-
-1. **Parseval factor** (`geometry.py:507,714`, `utils.py:622`): was
-   `[1, nky, nky, ...]`, now `[1, 2, 2, ...]` (standard half-spectrum,
-   confirmed from GKW `diagnos_generic.f90:572-576`).
-
-2. **Duplicate `ints` in flux d3v** (`integrals.py:303`): was
-   `d3v = ints * d2X * intmu * bn * intvp` (double-counted with `ints`
-   in `dum`), now `d3v = d2X * intmu * bn * intvp` (confirmed from
-   GKW `diagnos_fluxes_vspace.F90:414-517`). Bugs 1 and 2 were
-   compensating: `ints × (nky/2) = 1` for the standard grid.
-
-3. **Init Maxwellian normalization** (`solver.py:946`): the zonal init
-   used `exp(-E)` instead of `exp(-E/T) / (sqrt(T*pi))^3`. Now matches
-   GKW's `fmaxwl` from `components.f90`.
-
-4. **idisp=2 dissipation speed** (`solver.py:640`): used `params.dvp`
-   (grid spacing ≈ 0.047) instead of `vpgr_rms` (RMS velocity ≈ 1.73).
-   Similarly `mu_rms=1.0` → `mugr_rms`. 37× error. Confirmed from GKW
-   `linear_terms.f90:643,911`.
-
-5. **disp_x/disp_y defaults** (`utils.py:460-461`): defaulted to 0.1
-   when GKW input.dat omits them, but GKW defaults to 0.0. Caused
-   spurious perpendicular hyper-dissipation. At `kx=kxmax`: dissipation
-   rate = `0.1 * (kx/kxmax)^4 = 0.1` per unit time. **Root cause of
-   the Rosenbluth-Hinton 38% residual error.** After fix: RH residual
-   converges to Xiao-Catto 0.0711 within 0.1% at t>80.
-
-### 7.4 growth rate convention
+### 7.3 growth rate convention
 
 gyaradax matches the GKW growth rate definition (`diagnos_growth_freq.f90`).
 
@@ -501,6 +498,12 @@ consecutive windows. See `solver.py:advance_state`.
 | CFL vs GKW dtim | all 3 cases | `ratio(dt_est, dtim)` | `0.3 – 3.0` |
 | adaptive CFL 20 steps | all 3 cases | finiteness (dt=0.004) | pass |
 | adiabatic fallback | 4 iterations | shapes + finiteness | pass |
+| **nl_em_apar** (β=0.001, 30k steps) | ion eflux | `ratio(gyra, GKW)` | **1.04** |
+| **nl_em_apar** (β=0.001, 30k steps) | elec eflux | `ratio(gyra, GKW)` | **1.02** |
+| **nl_em_apar** (β=0.001) | φ(ky) Pearson lin/log | rel L2 log | **1.000 / 0.999, 0.034** |
+| **nl_em_beta01** (β=0.01, 420k steps adaptive) | ion eflux | `ratio(gyra, GKW)` | **0.97** |
+| **nl_em_beta01** (β=0.01) | elec eflux | `ratio(gyra, GKW)` | **0.95** |
+| **nl_em_beta01** (β=0.01) | adaptive dt range | `min / mean / max` | `0.00038 / 0.00107 / 0.00297` (GKW: `0.00064 / 0.00202 / 0.00432`) |
 
 ### 8.3 analytical benchmarks
 
@@ -548,7 +551,7 @@ nvpar=64, nmu=16, nperiod=5, disp_par=1.0, dt=0.003, naverage=100.
 - **naverage ≥ 10** (naverage=1 gives spurious negative growth from mode phase
   rotation within a single step)
 
-## 9. circular geometry model (`geometry.py`)
+## 9. circular geometry model (`geometry/` package, formerly `geometry.py`)
 
 Formulas translated from `gkw_ref/src/geom.f90` (`geom_circ` lines 1444-1616,
 `calc_geom_tensors` lines 3487-3634). `compute_geometry()` produces the full
@@ -621,3 +624,729 @@ are unaffected.
 
 68 tests in `tests/unit/test_analytic_geometry.py`.
 
+
+## 10. electromagnetic formulation
+
+Extension of the electrostatic solver to include the parallel vector
+potential $A_\parallel$ (shear Alfvén physics) and the parallel magnetic
+field perturbation $B_{1\parallel}$ (magnetic compression). Derived from
+the GKW Fortran source (`fields.F90`, `linear_terms.f90`) and the GKW
+manual (`theory.tex`, `practise.tex`).
+
+### 10.1 mixed variable (g vs f)
+
+GKW evolves the **mixed variable** $\hat{g}$, not the physical
+perturbation $\delta\hat{f}$ directly. The relation is:
+
+$$\hat{g}_s = \delta\hat{f}_s + \frac{2 Z_s}{T_{R,s}}\,v_{R,s}\,v_\parallel\,
+\langle\hat{A}_\parallel\rangle_s\,F_{M,s}$$
+
+where $\langle\hat{A}_\parallel\rangle_s = J_0(k_\perp\rho_s)\,\hat{A}_\parallel$
+is the gyro-averaged vector potential and $v_{R,s} = v_{th,s}/v_{th,ref}$
+(`vthrat` in code).
+
+**g-to-f transform** (from `g2f_correct` in `linear_terms.f90:4587`):
+
+$$\delta\hat{f}_s = \hat{g}_s - \frac{2 Z_s}{T_{R,s}}\,v_{R,s}\,v_\parallel\,
+J_0(k_\perp\rho_s)\,\hat{A}_\parallel\,F_{M,s}$$
+
+The g2f matrix element in GKW is:
+```
+mat_elem = -2.0 * signz(is) * vthrat(is) * vpgr(i,j,k,is) * J0 * fmaxwl / tmp(ix,is)
+```
+
+**Why the mixed variable?** Evolving $g$ instead of $f$ avoids a stiff
+$\partial A_\parallel/\partial t$ cancellation problem that would otherwise
+require implicit time stepping. With $g$, the time derivative of the
+$A_\parallel$ coupling is absorbed into the field equation.
+
+When `nlapar=False`, $g = \delta f$ (identity transform, no EM correction).
+
+The g2f transform is controlled by the `lg2f_correction` flag in GKW
+(`linear_term_switches` namelist). When True (default when `nlapar=True`),
+the correction matrix `matg2f` is applied.
+
+**How GKW applies g2f** (`exp_integration.F90:800–912`):
+
+1. **Field solve** (`calculate_fields`): fields are **zeroed** first, then
+   `mat_poisson * fdis` computes the Poisson/Ampere integrals from $g$
+   alone. Since `matg2f` maps `iapar → ifdis` and $A_\parallel = 0$
+   before the solve, the g2f entries contribute nothing. The field solve
+   uses the **bare Ampere denominator** — no self-consistent g2f correction.
+
+2. **g→f conversion**: after the field solve, `fdis_tmp(i) = g(i) +
+   matg2f%mat(i) * apar` converts the distribution from $g$ to $f$.
+
+3. **Linear RHS**: `mat * fdis_tmp` applies all linear terms (I–VIII)
+   to $f$ (the physical distribution), not $g$.
+
+4. **Nonlinear terms**: use $g$ (not $f$), per the comment at line 875:
+   "distribution g = f + Z v∥ A∥ etc., rather than f".
+
+### 10.2 modified potential χ
+
+The electromagnetic ExB drift uses the generalized potential $\chi$
+instead of $\phi$ alone:
+
+$$\hat{\chi} = \langle\hat{\phi}\rangle
++ \frac{2\mu T_{R,s}}{Z_s}\,\langle\hat{B}_{1\parallel}\rangle
+- 2\,v_{R,s}\,v_\parallel\,\langle\hat{A}_\parallel\rangle$$
+
+The ExB velocity becomes $\mathbf{v}_\chi = (\mathbf{b}\times\nabla\chi)/B_0$.
+This affects the nonlinear Term III (Poisson bracket uses $\chi$ instead
+of just $\phi$) and the drive terms (V, VIII).
+
+### 10.3 Ampere's law for $A_\parallel$
+
+The parallel component of Ampere's law in normalized GKW form
+(`theory.tex` eq. 401–405, `ampere_int` + `ampere_dia` in `linear_terms.f90`):
+
+$$\left[k_{\perp,N}^2 + \beta_\text{ref}\sum_s
+\frac{Z_s^2\,n_{R,s}}{m_{R,s}}\,e^{-\mathcal{E}_s/T_{R,s}}\,
+\Gamma_0(b_s)\right]\hat{A}_\parallel
+= \beta_\text{ref}\sum_s Z_s\,v_{R,s}\,n_{R,s}\;
+2\pi B_N\int v_\parallel\,J_0(k_\perp\rho_s)\,\hat{g}_s\,
+\mathrm{d}v_\parallel\,\mathrm{d}\mu$$
+
+where:
+- $k_{\perp,N}^2 = k_\perp^2\rho_\text{ref}^2$ (`krloc**2` in code)
+- $\beta_\text{ref} = 2\mu_0 n_\text{ref} T_\text{ref}/B_\text{ref}^2$
+- $\Gamma_0(b_s) = I_0(b_s)\,e^{-b_s}$ with $b_s = k_\perp^2\rho_s^2/2$
+- $\mathcal{E}_s$ is the centrifugal energy correction (`cfen` in code)
+- The RHS integrates $v_\parallel J_0 \hat{g}$ over velocity space (the parallel current)
+
+**LHS (diagonal)** from `ampere_dia` (`linear_terms.f90:3753–3789`):
+```
+mat_elem = -krloc^2
+dum = sum_sp[ -veta * signz^2 * de * gamma_num / mas ]
+  where gamma_num = sum_{j,k}[ 2*bn*intmu*intvp * J0^2 * vpgr^2 * fmaxwl ]
+elem%val = -1.0 / (mat_elem + dum)
+```
+
+**RHS (integral)** from `ampere_int` (`linear_terms.f90:3246`):
+```
+elem%val = signz * de * veta * intvp * intmu * vthrat * bn * vpgr * J0
+```
+
+**Key detail:** The Ampere equation is diagonal in $(k_x, k_y)$ space
+(no parallel coupling), so it reduces to a pointwise division at each
+$(s, k_x, k_y)$ grid point. This makes the solve trivial — no matrix
+inversion needed beyond the precomputed inverse denominator.
+
+**Bare denominator (no g2f self-consistency):** GKW's `calculate_fields`
+zeros all field entries before the `mat_poisson` multiply. Since the g2f
+matrix maps `iapar → ifdis`, it produces zero contribution (apar is zero
+at that point). The effective Ampere solve is simply:
+
+$$A_\parallel = \frac{\text{numerator}(g)}{\text{diag}(k_\perp^2 + \beta\sum\ldots)}$$
+
+There is **no** self-consistent g2f correction to the denominator. A
+naive self-consistent solve would replace `diag` with `diag − g2f_correction`,
+where $g2f\_correction = -\text{diag\_em}$ analytically, effectively
+doubling the EM part of the denominator and halving $A_\parallel$. This
+is incorrect for matching GKW.
+
+**Numerical denominator:** GKW uses a numerically computed $\Gamma_\text{num}$
+(`ampere_dia:3768–3777`) rather than the analytical $\Gamma_0(b)$:
+```
+gamma_num = sum_{j,k}[ 2*bn*intmu*intvp * J0^2 * vpgr^2 * fmaxwl ]
+```
+This integral sums $2 B\,J_0^2\,v_\parallel^2\,F_M$ over velocity space.
+It matches the analytical $\Gamma_0$ to $<0.1\%$ at the waltz_linear grid
+resolution but eliminates discretization-dependent discrepancies.
+
+**Zonal mode (ky=0):** When $k_\perp \approx 0$, $\Gamma_0 \to 1$ and
+$J_0 \to 1$. The denominator simplifies but remains well-defined.
+
+### 10.4 $B_{1\parallel}$ equation (perpendicular Ampere)
+
+The perpendicular component of Ampere's law gives the magnetic
+compression equation (`theory.tex` eq. 412–418):
+
+$$\left[1 + \beta_\text{ref}\sum_s
+\frac{T_{R,s}\,n_{R,s}}{B_N^2}\,e^{-\mathcal{E}_s/T_{R,s}}\,
+\bigl(\Gamma_0(b_s) - \Gamma_1(b_s)\bigr)\right]\hat{B}_{1\parallel}$$
+$$= -\beta_\text{ref}\sum_s\left[
+2\pi B_N\,T_{R,s}\,n_{R,s}\int\mu\,\hat{J}_1(k_\perp\rho_s)\,
+\hat{g}_s\,\mathrm{d}v_\parallel\,\mathrm{d}\mu
++ e^{-\mathcal{E}_s/T_{R,s}}\,
+\bigl(\Gamma_0 - \Gamma_1\bigr)\,
+\frac{Z_s\,n_{R,s}}{2B_N}\,\hat{\phi}\right]$$
+
+where:
+- $\Gamma_1(b_s) = I_1(b_s)\,e^{-b_s}$ (modified Bessel of first kind, order 1)
+- $\hat{J}_1 = 2J_1(k_\perp\rho_s)/(k_\perp\rho_s)$ is the **modified J1**
+  (`mod_besselj1_gkw` in code)
+- The $\hat{\phi}$ coupling makes the B_par equation coupled to Poisson
+
+**Coupling structure:** When `nlbpar=True`, the Poisson equation and
+B_par equation are solved as a coupled 2×2 system at each $(s,k_x,k_y)$.
+The coupling is mediated by $(\Gamma_0 - \Gamma_1)$ terms. GKW decouples
+them using intermediate coefficients:
+
+From `poisson_dia` (`linear_terms.f90:3446–3512`):
+```
+F_sp1 = sum_sp[ signz^2 * de * (gamma - 1) / tmp ]
+F_sp2 = sum_sp[ signz * veta * de * gamma_diff / (2*bn) ]
+B_sp1 = sum_sp[ signz * de * gamma_diff / bn ]
+B_sp2 = sum_sp[ tmp * de * veta * gamma_diff / bn^2 ]
+  where gamma_diff = (Gamma_0 - Gamma_1) * exp(-cfen)
+
+diagonal = F_sp1 * (1 + B_sp2) - F_sp2 * B_sp1
+elem%val = -1.0 / diagonal
+```
+
+### 10.5 modified RHS terms with EM
+
+The standard 8-term RHS is modified as follows when `nlapar=True`:
+
+| term | ES formula | EM modification | GKW code |
+|------|-----------|-----------------|----------|
+| I (parallel streaming) | $-v_R v_\parallel \partial_s \delta f$ | acts on $f$ not $g$ (via g2f) | `vpar_grd_df` |
+| II (magnetic drift) | $-i\,\mathbf{k}\cdot\mathbf{v}_d\,\delta f$ | acts on $f$ not $g$ (via g2f) | `vdgradf` |
+| III (nonlinear ExB) | $\{\langle\phi\rangle, \delta f\}$ | bracket uses $\chi$ instead of $\phi$; acts on $g$ | `calculate_nonlinear` |
+| IV (trapping) | $v_{th}\mu B g(s)\,\partial_{v_\parallel}\delta f$ | acts on $f$ not $g$ (via g2f) | `dfdvp_trap` |
+| V (equilibrium drive) | $i k_y E_\alpha J_0\phi(\ldots)F_M$ | add $-2 v_{R,s} v_\parallel$ factor coupling to $A_\parallel$ | `ve_grad_fm:2452` |
+| VII (parallel field drive) | $-\frac{Z}{T}v_{th}v_\parallel F_M\partial_s(J_0\phi)$ | add $\nabla_\parallel(J_0 A_\parallel)$ with rhostar effects | `vpar_grd_phi:2957` |
+| VIII (drift field drive) | $-\frac{Z}{T}\mathbf{k}\cdot\mathbf{v}_d F_M J_0\phi$ | add $-2 v_{R,s} v_\parallel$ factor coupling to $A_\parallel$ | `vd_grad_phi_fm` |
+
+**g2f in kinetic terms:** GKW converts $g \to f$ via `matg2f` before
+the linear RHS multiply (`exp_integration.F90:805`). Terms I, II, IV,
+and dissipation act on $f$, not $g$. Confirmed by running GKW with
+`lg2f_correction=.false.`: the 1-step mode shape changes by 1.1%.
+gyaradax matches this: `g_to_f` is applied before `linear_rhs`.
+
+**Term VII uses $J_0\phi$ only, not $\chi$:** GKW's Term VII has
+`elem%itloc = iphi` — it reads from $\phi$, not $A_\parallel$. The
+EM $A_\parallel$ correction to Term VII (lines 2957–3004) is only active
+when `rhostar_linear > 0`. gyaradax separates `gyro_phi` (for Term VII)
+from `gyro_chi` (for drive terms V, VIII, XI).
+
+**New terms when `nlbpar=True`:**
+
+| term | formula | description |
+|------|---------|-------------|
+| X | $-2 v_R v_\parallel \mu F_M \mathcal{F}\,\partial_s\langle\hat{B}_{1\parallel}\rangle$ | mirror force from $B_{1\parallel}$ perturbation |
+| XI | $-\frac{i}{Z}F_M\,2T_R\mu\,(\text{drift})\,k\,\langle\hat{B}_{1\parallel}\rangle$ | drift coupling to $B_{1\parallel}$ |
+
+**EM coefficient in Terms V and VIII** (`linear_terms.f90:2452`):
+```
+elem2%val = -2.0 * vthrat(is) * vpgr(i,j,k,is) * [ES_coefficient]
+```
+This multiplies the electrostatic drive by $-2 v_{R,s} v_\parallel$ and
+couples to $A_\parallel$ instead of $\phi$.
+
+**EM coefficient in Term VII** (`linear_terms.f90:2959`):
+```
+dum = -2 * tmp / vthrat / mas * vpgr * (term5+term9) / signz
+```
+This creates $\nabla_\parallel(J_0 A_\parallel)$ using the same parallel
+stencil infrastructure as $\nabla_\parallel(J_0\phi)$.
+
+### 10.6 normalization
+
+Field normalizations from `practise.tex`:
+
+$$\phi = \rho_*\frac{T_\text{ref}}{e}\,\phi_N, \qquad
+A_\parallel = B_\text{ref}R_\text{ref}\rho_*^2\,A_{\parallel,N}, \qquad
+B_{1\parallel} = B_\text{ref}\rho_*\,B_{1\parallel,N}$$
+
+where $\rho_* = \rho_\text{ref}/R_\text{ref}$ is the normalized
+gyroradius. Note that $A_\parallel$ scales as $\rho_*^2$ (one order
+higher in $\rho_*$ than $\phi$), reflecting the subsidiary ordering
+of the parallel vector potential in the gyrokinetic expansion.
+
+### 10.7 Alfvén CFL constraint
+
+When `nlapar=True` with kinetic electrons, the shear Alfvén wave
+introduces a tight CFL constraint. From `matdat.F90:1918`:
+
+$$\Delta t_\text{Alfvén} = 2\pi q\,\Delta s\,B(s)\,
+\sqrt{m_{ir}\,(v_{\eta} + k_{\perp,\min}^2\,m_{er})}$$
+
+where:
+- $m_{ir} = \sum_\text{ion} m_s n_s$ (ion inertial mass)
+- $m_{er} = m_e/n_e$ (electron mass/density ratio)
+- $v_\eta$ = `veta` (plasma $\beta$ at radial point)
+- $k_{\perp,\min}^2 = k_{y,1}^2 g_{\zeta\zeta}(s)$ (smallest nonzero ky mode)
+
+The timestep is $\Delta t_\text{max} = 1/\Delta t_\text{Alfvén}$, minimized
+over all $s$ grid points. This constraint is only active when
+`adiabatic_electrons=False` (kinetic electrons required for Alfvén CFL).
+
+### 10.8 Bessel functions for EM
+
+| function | definition | usage | code |
+|----------|-----------|-------|------|
+| $J_0(k_\perp\rho_s)$ | Bessel first kind, order 0 | gyro-averaging of $\phi$ and $A_\parallel$ | `besselj0_gkw` |
+| $\hat{J}_1 = 2J_1(x)/x$ | modified Bessel, order 1 | $B_{1\parallel}$ gyro-averaging | `mod_besselj1_gkw` |
+| $\Gamma_0(b) = I_0(b)e^{-b}$ | modified Bessel envelope | Poisson and Ampere diagonals | `gamma_gkw` |
+| $\Gamma_1(b) = I_1(b)e^{-b}$ | modified Bessel envelope, order 1 | $B_{1\parallel}$ coupling | `gamma1_gkw` |
+
+where $b_s = k_\perp^2\rho_s^2/2$ is the Bessel argument.
+
+Limits for $k_\perp\rho \to 0$: $J_0 \to 1$, $\hat{J}_1 \to 1$,
+$\Gamma_0 \to 1$, $\Gamma_1 \to 0$, $\Gamma_0 - \Gamma_1 \to 1$.
+
+### 10.9 GKW control flags
+
+| flag | namelist | default | description |
+|------|---------|---------|-------------|
+| `nlapar` | `control` | `.false.` | enable $A_\parallel$ field variable |
+| `nlbpar` | `control` | `.false.` | enable $B_{1\parallel}$ field variable |
+| `lampere` | `linear_term_switches` | `.true.` | enable Ampere coupling in linear RHS |
+| `lbpar` | `linear_term_switches` | `.true.` | enable $B_\parallel$ coupling in linear RHS |
+| `lg2f_correction` | `linear_term_switches` | `.true.` | enable g-to-f transform |
+| `beta_ref` | `spcgeneral` | `0.0` | reference plasma beta |
+
+Auto-downgrade: if `beta_ref ≈ 0` and `nlapar=True`, GKW warns and
+sets `nlapar=False`, `nlbpar=False` (`components.f90:848–853`).
+
+Adiabatic electrons can coexist with `nlapar=True` (test case:
+`adiabat_apar`), but the Alfvén CFL constraint is only active with
+kinetic electrons.
+
+### 10.10 GKW EM reference test cases
+
+Available in `gkw_ref/tests/standard/`:
+
+| test case | nlapar | nlbpar | beta | adiab. e⁻ | species | grid (s×μ×v×modes) | np |
+|-----------|--------|--------|------|-----------|---------|-------------------|-----|
+| `bpar_waltz_linear` | T | T | 0.01 | F | 2 | 112×8×32×1 | 16 |
+| `adiabat_apar` | T | F | 0.234 | **T** | 3 | 45×8×16×1 | 12 |
+| `non_spectral_apar_noampere` | T | F | 0.003 | F | 2 | 8×4×16×1 | 16 |
+| `kin_nl_bpar` | T | T | 0.002 | F | 3 | 12×4×8×11 | 24 |
+| `slab_itg` | F | F | 3e-6 | T | 2 | 11×4×12×1 | 4 |
+
+### 10.11 GKW → gyaradax variable mapping (EM)
+
+| GKW Fortran | gyaradax | shape | description |
+|-------------|----------|-------|-------------|
+| `fdis(iapar,...)` | `apar` | `(ns, nkx, nky)` | parallel vector potential |
+| `fdis(ibpar,...)` | `bpar` | `(ns, nkx, nky)` | parallel magnetic perturbation |
+| `matg2f` | `g2f_factor` | `(nv, nmu, ns, nkx, nky)` | g-to-f correction matrix element |
+| `gamma_gkw` | `gamma` / `phi_gamma` | `(ns, nkx, nky)` | $\Gamma_0 = I_0(b)e^{-b}$ |
+| `gamma1_gkw` | `gamma1` | `(ns, nkx, nky)` | $\Gamma_1 = I_1(b)e^{-b}$ |
+| `mod_besselj1_gkw` | `j1_hat` | `(nv, nmu, ns, nkx, nky)` | $\hat{J}_1 = 2J_1/x$ |
+| `krloc**2` | `kperp_sq` | `(ns, nkx, nky)` | $k_\perp^2\rho_\text{ref}^2$ |
+| `veta` | `beta` (param) | scalar | reference $\beta$ |
+| `vpgr` | `vpar_grid` | `(nv,)` | parallel velocity grid |
+| `ampere_int` weight | `apar_weight` | `(nsp, nv, nmu, ns, nkx, nky)` | Ampere numerator weight |
+| `ampere_dia` inverse | `apar_diag` | `(ns, nkx, nky)` | Ampere denominator (precomputed inverse) |
+
+### 10.12 EM validation results
+
+Test case: `bpar_waltz_linear` (kinetic 2-species, beta=0.01, 112×8×32×1).
+Both codes start from the same evolved ES distribution (GKW FDS file).
+
+**20k-step distribution correlation (dt=0.001, t=20.0):**
+
+| case | ion | electron |
+|------|-----|----------|
+| ES (beta=0) | 99.64% | 99.30% |
+| A_par only | 99.28% | 98.96% |
+| A_par + B_par | 99.36% | 98.98% |
+
+EM parity matches ES at all timescales (100–20000 steps). Fluxes
+computed from the same distribution match GKW to machine precision
+after parseval and flux-surface-average corrections.
+
+**Linear EM γ parity update (2026-06-11,
+`instabilities/em_suite_report.json`):** across a β = 0.001–0.01
+ladder at $k_\theta\rho = 0.4$ (through the KBM transition; both
+apar-only and apar+bpar batches) gyaradax matches GKW to 0.02–0.1%
+(e.g. β=0.01 KBM: γ = 0.9236 vs GKW 0.9238). With rotation
+(vcor + uprim) on: 0.3%. In the low-ky band ($k_\theta\rho = 0.1$,
+β=0.01) with the issue-#201 cure active in both codes: 0.9%.
+
+### 10.13 EM gotchas from GKW benchmarking
+
+Collected from the CBC NL-EM vs GKW benchmark (see `docs/em_debug_report.md`
+for full numbers).
+
+**CFL terms add as max-frequencies, not multiplicatively.** The Alfvén CFL
+lives in `tmax_field`; the parallel streaming CFL lives in `tmax1`. GKW
+takes the max — no extra $(1 + \beta v_{th,e}^2)^2$ multiplier on top of
+the streaming bound. For CBC kinetic electrons at $\beta=0.001$ the naive
+squaring mistake is 22× in $\Delta t$ because $v_{th,e} \approx 60.6$ and
+$(1 + 0.001 \cdot 60.6^2)^2 \approx 21.8$. Invisible at low $\beta$ with
+adiabatic electrons; catastrophic once electrons go kinetic.
+
+**Diagnostics use $f$, not $g$.** GKW's `diagnos_fluxes_vspace.F90:444`
+applies `get_f_from_g()` before every flux, field, and k-spectrum. `pflux`
+and `eflux` are unchanged by skipping the transform (the g→f correction
+$-(2Z/T) v_\parallel v_R J_0 A_\parallel F_M$ is odd in $v_\parallel$; the
+flux integrands are even) but `vflux` and phi-based spectra quietly
+differ. `gksolve` applies `g_to_f` before the final `get_integrals` to
+match GKW's convention even for the flux channels that are invariant by
+parity.
+
+**Per-code `geom_type` defaults differ.** GKW defaults to `s-alpha` when
+`input.dat` doesn't set `geom_type`; gyaradax's Python `compute_geometry`
+defaults to `circ` (Lapillonne) — though `compute_geometry_from_input`
+now mirrors GKW's `s-alpha` default for input.dat-driven runs. These geometries differ by ~50% in linear γ at finite ε
+(§8.3.2). Set the geometry explicitly on both sides when benchmarking —
+never rely on the default.
+
+**Constant `pred/ref` ratio across windows ≠ physics bug.** In an
+exponentially growing linear phase, a stable `pred/ref ≈ const` signals
+an initialization or normalization difference, not a growth-rate
+difference. Compare log-space slopes of |flux| vs window index instead
+of absolute magnitudes. GKW's default `amp_init` is `1.0e-3`; gyaradax
+had inherited `1.0e-4` in the YAML loader — a clean "constant ratio"
+signature.
+
+**Sub-percent linear perturbations can shift NL saturation by tens of
+percent.** At CBC $\beta=0.001$ the $B_\parallel$ contribution to RHS is
+~0.08% of the total, yet including vs excluding it changes saturated
+flux by ~46% in gyaradax and ~12% in GKW. Both codes are correct; both
+codes are sensitive. Validating $B_\parallel$-related formulas requires
+stateless, hand-rolled comparisons at fixed fields — not saturated-flux
+regression.
+
+**Zonal-vs-drift saturation balance as the first NL suspect.** Once
+matched-geometry runs produce (ky, kx) spectrum Pearson ≥ 0.99 but the
+absolute flux amplitudes still disagree, the next thing to look at is
+the zonal-flow vs drift-wave weight in the saturated state. The CBC
+apar-only benchmark has GKW drift-wave-dominant (zonal/drift = 0.78)
+while gyaradax is zonal-dominant (zonal/drift = 2.4). Zonal flows do
+not transport heat, so the ratio sets the overall amplitude. Tracing
+back, the linear γ(ky) peak is shifted from ky=0.7 (GKW) to ky=0.5
+(gyaradax) with a 20× under-drive at ky=0.1 — a linear spectrum shift
+that the NL mode coupling amplifies into zonal vs drift rebalancing.
+
+**Re-audit 2026-04-18 — CFL bugs fixed, flux parity achieved.**
+A four-axis line-by-line audit against GKW source (RHS / field solve /
+mode connectivity / CFL) found five concrete bugs, all since fixed:
+
+1. **NL A_∥ CFL missing `2·vthrat_s`** (`solver.py:251-256`). GKW bakes
+   `2·vthrat(is)` into `a_apar` at `non_linear_terms.F90:1241`;
+   gyaradax used only `vpmax`. Fixed via `pre["vthrat_max"]`.
+2. **Collisions in wrong CFL bucket** (`solver.py:320-333`). Moved
+   from `tmax4/2.4` to an independent `tmax2` bucket (undivided),
+   matching GKW `matdat.F90:1498` for `meth=2`.
+3. **`tmax_field` missing `min(2π·lxinv, ky_min²·g_yy)`**
+   (`solver.py:817` vs `matdat.F90:1911-1914`). Added.
+4. **`calculate_em_fluxes` missing `em_vflux`** + wrong-sign 5D path
+   (`integrals.py:672`). Now returns `(em_pflux, em_eflux, em_vflux)`
+   and 5D path matches GKW `diagnos_fluxes_vspace.F90:464` with
+   `-2·vthrat·vpgr`.
+5. **NL CFL FFT-normalisation mismatch (the big one).** GKW uses FFTW
+   c2r unnormalized (`|ar| = N·|∂phi|_real` with `N = mrad·mphi`);
+   gyaradax uses `jnp.fft.irfft2(norm="backward")` which returns
+   `|∂phi|_real` directly. GKW's formula `max|ar|·mrad·lxinv` scales
+   as `mrad²·mphi·lxinv·|∂phi|`; gyaradax was scaling as `mrad·|∂phi|`
+   — under-conservative by factor `N·lxinv ≈ 15`. Fix: added
+   `pre["nl_lxinv"]`, `pre["nl_lyinv"]` and multiplied
+   `estimate_nl_timestep` and `gkstep_single::_max_grad_inline` by
+   `ycorr = mrad²·mphi·lxinv` (y-branch) and
+   `xcorr = mrad·mphi²·lyinv` (x-branch), matching GKW exactly.
+
+What is NOT a bug (audited clean): linear RHS formulas for all terms
+I–VIII+X, field solves for φ/A_∥/coupled-B_∥, parallel boundary/mode
+connectivity.
+
+**Post-fix validation (2026-04-18).** All EM unit tests (67) pass.
+
+| case | metric | pre-fix | post-fix | GKW |
+|------|--------|---------|----------|-----|
+| nl_em_apar (β=0.001) | ion eflux | 76.6 | **49.5** | 47.8 |
+| nl_em_apar (β=0.001) | elec eflux | 32.2 | **22.1** | 21.6 |
+| nl_em_apar (β=0.001) | φ(ky) Pearson | 0.984 | **1.000** | — |
+| nl_em_beta01 10× (β=0.01) | ion eflux | 113* | **124** | 128 |
+| nl_em_beta01 10× (β=0.01) | elec eflux | 61* | **67** | 70 |
+| nl_em_beta01 10× (β=0.01) | dt adaptive range | 0.001 capped | **[0.00038, 0.00297]** | [0.00064, 0.00432] |
+
+*: with `dt=0.001` hard cap (pre-fix blew up otherwise).
+
+Both codes now adapt dt similarly through the linear-to-NL crossover
+at β=0.01 (gyra mean dt is 0.53× GKW's, consistent with the
+`cfl_safety=0.5` used in that benchmark vs GKW's `fac_dtim_est=0.95`;
+the `cfl_safety` default is 0.95, matching GKW). The previously
+reported "1.5× over at β=0.001, 0.87× under at β=0.01" flux gap was
+a CFL artefact of the FFT-normalisation mismatch, not a physics
+issue. The `configs/nl_em_beta01.yaml` `dt=0.001` cap is removed.
+
+**The §10.13 §7 "linear γ(ky) peak shift" narrative remains
+unverified**: it was inferred from NL saturation spectra and never
+confirmed with a controlled single-mode γ scan. With the CFL fix
+closing most of the flux gap, that narrative is likely wrong.
+
+Full investigation trail in `docs/em_debug_report.md` §11.
+
+## 11. linearized Fokker-Planck collision operator
+
+Port of GKW's `collision_differential_numu` (`collisionop.f90:1547-2228`)
+to JAX. Handles three operator pieces, each independently toggleable:
+**pitch-angle scattering** $D_{\theta\theta}$, **energy diffusion**
+$D_{vv}$, and **friction** $F_v$. Discretization matches GKW's
+conservative flux form on the uniform-$v_\perp$ $\mu$ grid that
+gyaradax already uses (see §1.3).
+
+### 11.1 scope
+
+(scope bullets corrected 2026-06-11: earlier MVP-only restrictions —
+self-collisions only, freq_override-only, no conservation corrections —
+no longer apply and contradicted the bullets above them)
+
+- Adiabatic electrons + single kinetic ion (original MVP) **and**
+  kinetic-electron / multi-kinetic-species configurations. In the
+  kinetic case `precompute_collisions` vmaps the 9-point stencil over
+  species axis, giving shape `(nsp, 9, nv, nmu, ns)`. Each target
+  stencil sums over **all background species** (kinetic + adiabatic),
+  each pair contributing the full Fokker-Planck operator with
+  $\Gamma^{a/b}$, thermal-velocity ratio `vtb = v·vthrat_a/vthrat_b`,
+  and mass-ratio friction — inter-species pairs are included
+  (linearized test-particle form: no field-particle back-reaction).
+- Both `freq_override=True` (scalar `coll_freq` → `Γ^{a/b} =
+  Z_a²·Z_b²·coll_freq·de_b·(L_ab/L_ref)/T_a²`) and
+  `freq_override=False` (Coulomb-log path via `rref, tref, nref` →
+  `Γ^{a/b} = 6.5141e-5·rref·nref/tref²·de_b·Z_a²·Z_b²·L_ab/T_a²`;
+  `_coulomb_log_pair` covers e-e, e-i, i-e, and i-i pairs).
+- Optional **Xu-style momentum and energy conservation corrections**
+  (`coll_mom_conservation`, `coll_ene_conservation`), added via
+  `conservation_correction` as a scalar rebalance on top of the base
+  operator RHS. Drives `Δp, ΔE → 0` to machine precision.
+- `mass_conserve=True` (zero outward flux at $v_\parallel = \pm v_{par,\max}$
+  and $v_\perp = v_{\perp,\max}$).
+- JAX backend only; no CUDA fused kernel.
+
+### 11.2 operator and discretization
+
+In $(v_\parallel, v_\perp)$ the full operator has the flux form
+
+$$C(f) = \partial_{v_\parallel}\bigl(A\,\partial_{v_\parallel} f + B\,\partial_{v_\perp} f\bigr)
+     + \partial_{v_\perp}\bigl(B\,\partial_{v_\parallel} f + C\,\partial_{v_\perp} f\bigr)
+     + \partial_{v_\parallel}(G_\parallel f) + \partial_{v_\perp}(G_\perp f)$$
+
+with coefficients assembled from $D_{\theta\theta}$, $D_{vv}$, $F_v$
+(manual eqs. 81-109). Velocity-dependent $D$, $F$ are the error-function
+formulas in `caldthth`, `caldvv`, `calfv` (`collisionop.f90:697-870`).
+
+Discretely each grid point gets a **9-point $(v_\parallel, v_\perp)$ stencil**
+— self, four axis neighbors, and four diagonal corners — precomputed once
+in `gyaradax/collisions.py:precompute_collisions` and stored in
+`GKPre["coll_stencil"]` with shape `(9, nv, nmu, ns)`. At RHS time
+`collision_rhs(df, stencil)` applies the stencil with zero-padded
+boundaries. The boundary mass-conserve flux-zeroing is baked into the
+precomputed coefficients.
+
+### 11.3 config and plumbing
+
+YAML section `collisions:` and GKW namelist `&collisions` both map to
+`GKParams` fields:
+
+```
+collisions            master switch (default False)
+coll_pitch_angle      D_theta_theta (default True)
+coll_en_scatter       D_vv            (default True)
+coll_friction         F_v             (default True)
+coll_freq             scalar collision frequency for freq_override mode
+coll_freq_override    True: scalar coll_freq; False: Coulomb-log path (default True)
+coll_mass_conserve    zero boundary flux (default True)
+coll_mom_conservation Xu momentum conservation correction (default False)
+coll_ene_conservation Xu energy conservation correction (default False)
+```
+
+(flag list corrected 2026-06-11: `coll_freq_override`/`coll_mass_conserve`
+are no longer MVP-locked, and the conservation flags exist)
+
+All are static pytree fields (resolved at trace time). When
+`collisions=False` the compile-time branch in `_linear_rhs_core` drops
+out entirely, so existing non-collisional runs are unaffected.
+
+### 11.4 validation
+
+Unit tests in `tests/unit/test_collisions.py`:
+
+| test | what it checks |
+|------|----------------|
+| `test_full_operator_preserves_maxwellian` | full operator residual on $F_M$ is below $10^{-2}$ (FDT cancellation) |
+| `test_pitch_angle_preserves_isotropic_function` | $C_{\text{pitch}}(v^2) \approx 0$ in the interior |
+| `test_perturbation_relaxes_to_maxwellian` | a $v_\parallel$-perturbed Maxwellian decays under the operator |
+| `test_xu_conservation_zeroes_deltas` | with mom/ene conservation ON, $\Delta p, \Delta E \to 0$ to machine precision |
+| `test_coulomb_log_path_runs_and_scales` | freq_override=False yields gamma_pref $=6.5\!\times\!10^{-5} L_\text{ii}$ |
+| `test_kinetic_produces_per_species_stencil` | 6D path yields `(nsp, 9, nv, nmu, ns)` and per-species residuals stay small |
+| `test_disabled_gives_zero_stencil` | `collisions=False` emits no stencil |
+
+Trajectory parity test in `tests/unit/test_gk_cases.py::test_adiabat_collisions_weak_1step_parity` checks 1-step FDS parity to rel L2 < $10^{-4}$ (measured 1.75e-5).
+
+GKW parity (weak case, `coll_freq=1e-4`, $50\times4\times16$, nperiod=3,
+kthrho=0.5, s-alpha, normalization disabled on both codes):
+
+| horizon | rel L2 $\|df\|$ | rel $L_\infty$ | eflux ratio (parseval-corrected) |
+|---------|-----------------|-----------------|----------------------------------|
+| 1 step | $1.75\times 10^{-5}$ | $1.15\times 10^{-4}$ | **1.0000** |
+| 1000 steps | $1.30\times 10^{-3}$ | $1.47\times 10^{-3}$ | 0.9973 |
+| 20000 steps | $4.26\times 10^{-2}$ | $4.27\times 10^{-2}$ | 0.9241 |
+
+The 1-step error is **identical** to the no-collisions baseline
+(`adiabat_collisions_weak_1step_nocoll`, same 1.75e-5), so the
+collision operator itself matches GKW to machine precision — the
+remaining 1.75e-5 is pre-existing parallel-stencil/drive-term float
+ordering drift. Long-horizon drift at 20k steps is amplified by
+exponential ITG growth with normalization disabled (expected).
+
+Run via `python scripts/validate_collisions.py`.
+
+### 11.5 gotchas
+
+- **Parseval convention for single non-zonal mode — FIXED (corrected
+  2026-06-11).** gyaradax used to hardcode `parseval[0]=1`, assuming the
+  first ky index is the zonal (ky=0) mode, so a `mode_box=False, nmod=1,
+  kthrho≠0` run got fluxes 2× smaller than GKW's (the validation script
+  compensated by multiplying by 2). The parseval factor is now
+  wavenumber-based, `where(|krho| < eps, 1, 2)`, in
+  `gyaradax/geometry/{assembly,geom,loaded}.py` — no compensation needed.
+- **Normalization timing.** GKW's `normalize_per_toroidal_mode` is
+  default false and `normalized` default true (single global factor);
+  gyaradax normalizes per-ky. For parity validation the cleanest path
+  is to set `normalized=.false.` in the GKW input and force
+  `naverage` large in gyaradax, so both run without normalization.
+- **Coordinate singularity at $\mu=0$.** Individual operator pieces
+  (pitch-only, energy-only, friction-only) have O(1) discretization
+  error at the lowest $v_\perp$ grid cell due to the $1/v_\perp$ factor
+  in the operator. The *full* operator cancels these to $O(\Delta v^2)$
+  thanks to the FDT balance $F_v = 2v\,D_{vv}/T$ — this is why the
+  `test_full_operator_preserves_maxwellian` threshold (1e-2) is much
+  tighter than the per-term isolation would suggest.
+- **CFL contribution.** The collision stencil adds a spectral-radius
+  bound to `tmax4` via `pre["coll_stencil"][0]` (diagonal). At
+  `coll_freq ≤ 1` this is never the limiting constraint; above
+  `coll_freq ~ 10` it can dominate velocity dissipation.
+
+## 12. bugs and limitations
+
+Known open issues and limitations of the current implementation,
+grouped by severity/impact.
+
+### 12.1 numerical / solver
+
+- **Adaptive CFL one-step lag (minor).** Each step's $\Delta t$ is
+  estimated from the previous step's $\phi$/$A_\parallel$. Fine in
+  practice for smoothly evolving states; post-2026-04-18 FFT-norm
+  fix, the estimator binds correctly at high β and reproduces GKW's
+  adaptive dt trajectory. A potential "pre-step clamp" refinement
+  was designed but not needed in practice.
+- **`circ` vs `s-alpha` at extreme ky.** Linear gyaradax runs with
+  `s-alpha` blow up at ky=0.1 (over-drive) and ky=1.0 (under-damped).
+  NL runs use `circ` for this reason. Root cause likely in the
+  finite-ε correction to drift tensors or in missing high-ky
+  dissipation. (Update 2026-06-11: at finite β the low-ky blow-up is
+  the GKW issue #201 parallel-dissipation instability — present in
+  *both* codes, β-gated, geometry-independent — and is cured by
+  `disp_par_conserve=2, disp_par_conserve_kycut=0.15`; see
+  `instabilities/REPORT.md`. The electrostatic high-ky observation
+  above remains unexplained.)
+
+### 12.2 electromagnetic
+
+- **Term VIII potential fix (2026-05-08).** GKW's `vd_grad_phi_fm`
+  (Term VIII, curvature drift × F_M) acts on `phi` only, not on
+  `chi = phi − 2·vthrat·vpar·Apar`. The GKW source has
+  `elem%itloc = iphi_ga` with no second `iapar_ga` element for this
+  term (linear_terms.f90 lines 2572–2611). Gyaradax incorrectly
+  used `gyro_chi` for both Term V and Term VIII. After the fix
+  (Term V → chi, Term VIII → phi):
+  - ES γ = 0.611 vs GKW 0.589 (+4%, acceptable — needs ~12k steps to converge)
+  - EM γ = 0.939 vs GKW 1.132 (−17% at the time; superseded — see next bullet)
+  - EM−ES Δγ = 0.328 vs GKW 0.543 — KBM NOW ACTIVATES at physical mass ✓
+  All 25 EM unit tests and all 67 non-sharding tests pass after the fix.
+
+- **KBM at physical mass ratio — RESOLVED (corrected 2026-06-11).**
+  Superseded by current measurement
+  (`instabilities/em_suite_report.json`): linear EM γ matches GKW to
+  0.02–0.1% across a β = 0.001–0.01 ladder at kθρ=0.4 through the KBM
+  transition (β=0.01: γ = 0.9236 vs GKW 0.9238), and to 0.3% with
+  rotation on. The "shared velocity grid" root-cause narrative recorded
+  below was wrong on its own terms: GKW uses the *same* shared vpgr
+  grid for all species (`velocitygrid.f90:197`) — per-species velocity
+  grids are not how GKW handles kinetic electrons, and no grid change
+  was needed. (The 2026-05-08 GKW reference of γ = 1.132 came from a
+  differently-configured Waltz setup; the current matched-config suite
+  gives GKW γ = 0.9238 on the same box.) Historical (superseded)
+  analysis:
+
+  The kinetic-electron Alfvénic (KBM) mode at β=0.01 Waltz benchmark
+  partially activated after the Term VIII fix:
+  GKW gave γ_EM = 1.132 (above the ES γ_ES = 0.589), while
+  gyaradax gave γ_EM ≈ 0.939 (−17% vs GKW, EM−ES Δγ = 0.328 vs 0.543).
+  The gap was attributed to the shared vpgr ∈ [−3, 3] v_thi grid
+  truncating the electron Alfvénic resonance, with per-species
+  velocity grids proposed as the fix — refuted above.
+
+  **Convergence note**: both ES and EM growth rates require ~12000 steps
+  (t ≈ 12) to converge at these parameters. Measurements at ≤4000 steps
+  give transient values (ES: 0.51, EM: 0.94) that underestimate the true
+  asymptotic rates. Use block=1000 and ≥15k total steps for diagnostics.
+
+  **Streaming-on-g hypothesis (2026-05-08, ruled out).** GKW's
+  `exp_integration.F90:802-814` explicitly converts g→f before
+  computing linear terms (`fdis_tmp = g + matg2f * Apar = f`).
+  All GKW terms act on f, not g. Gyaradax correctly converts g→f
+  before `linear_rhs`. The 17% gap is NOT from streaming-on-g;
+  the shared velocity grid explanation stands.
+
+  **Alfvén wave test**: direct ω ∝ 1/√β measurement in flux-tube
+  s-alpha geometry is not feasible — toroidal curvature drives
+  ITG-like modes even at rlt=rln=0 (Term VIII depends on kdotvd
+  which is non-zero in curved geometry). The `em_analytical.ipynb`
+  notebook uses a γ vs β sweep instead.
+
+  **What works**: kinetic ES (+4% vs GKW with 15k steps),
+  NL EM at β=0.001 (ITG-dominated, small EM corrections),
+  linear EM with m_i/m_e=100 (full KBM, Δγ ≈ +0.46) — and, as of
+  2026-06-11, linear EM at physical mass ratio to 0.0–0.1% (see the
+  correction at the top of this bullet).
+
+- **apar-only NL flux (β=0.001, CBC)** — matches GKW within 4% on
+  both species' eflux after the FFT-norm fix (2026-04-18). Previously
+  reported "1.5× over" was a CFL artefact. φ(ky,kx) Pearson = 1.00/0.97.
+- **β=0.01 apar-only NL** — matches GKW within 3-5% on eflux after
+  the FFT-norm fix. Adaptive dt works without a cap and tracks GKW's
+  dt trajectory (gyra mean 0.53× GKW, consistent with
+  `cfl_safety=0.5` vs GKW's `fac_dtim_est=0.95`).
+- **Full EM (apar+bpar) NL flux 0.5–0.7× GKW at CBC.** All
+  $B_\parallel$ formulas (coupled solve, chi factor, Term X) verified
+  to match GKW to machine precision by isolated tests at fixed
+  fields. May also be a CFL-related artefact now that the
+  normalisation is fixed — NL re-benchmark still pending. (Linear
+  apar+bpar γ now matches GKW to 0.0–0.1% across the β ladder,
+  see §10.12 update.)
+- **Linear γ(ky) peak shift vs GKW** (old, unverified). Never
+  confirmed via a controlled single-mode γ scan; with the CFL fix
+  closing the flux gap, the narrative is likely wrong. Re-run if
+  the issue resurfaces.
+- **Adiabatic + apar absolute amplitude at high β.** The
+  `em_adiabat_apar` benchmark (β=0.234) has gyaradax ion eflux
+  ~O(90×) smaller than GKW at the same window. Sign and exponential
+  growth are correct. Contributing factors: high-β normalization
+  convention and the Boltzmann-electron's implied flux contribution
+  that GKW reports as 6 columns (both species) while gyaradax
+  reports only the kinetic-ion 3 columns.
+
+### 12.3 diagnostics / I/O
+
+- **`save_dumps` fluxes are per-species but not per-kx/ky.** The
+  saved `fluxes.npz` array is `(nsp, 3)` (time-collapsed). Spectra
+  are saved separately as `kyspec.npz` / `kxspec.npz` from the same
+  final state. There is no per-(kx, ky) flux decomposition *output*;
+  in-memory, `calculate_fluxes(..., reduce=False)` returns per-(kx, ky)
+  flux fields (used by the quasilinear pipeline).
+- **EM fluxes are a separate file.** `fluxes_em.npz` sits alongside
+  `fluxes.npz`; it carries `(pflux_em, eflux_em, vflux_em)` shaped like
+  the ES output — `em_vflux` was added in the 2026-04-18 audit (§10.13
+  item 4), matching GKW's `diagnos_fluxes_vspace.F90:464` (corrected
+  2026-06-11; an earlier note here claimed the vflux slot was zero).
+- **B_par flux is kinetic-only.** `calculate_em_fluxes` implements the
+  compressional B_par flux in the 6D (kinetic) branch only; the 5D
+  (adiabatic) branch raises on `bpar` instead of silently dropping it
+  (guard added 2026-06-11, `quasilinear/REVIEW.md` §5).
+
+### 12.4 scope / missing features (intentional)
+
+See §7.2 for the full not-implemented list. The most commonly
+requested gaps (updated 2026-06-11 — collisions, Coriolis rotation and
+Miller geometry are now implemented): centrifugal rotation terms,
+neoclassical corrections, global/radial-varying profiles, implicit
+time stepping.

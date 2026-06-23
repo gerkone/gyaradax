@@ -87,9 +87,7 @@ set(LTO_HEADERS
 
 # ── Shared library ────────────────────────────────────────────────
 add_library(gyaradax_cuda SHARED
-    kernels/cufft_graph_bracket.cu
     kernels/cufft_graph_bracket_fp64.cu
-    kernels/cufft_graph_bracket_fp64_direct.cu
     kernels/cufft_graph_bracket_true_fp32.cu
     lto_callbacks/bracket_v5_lto_fatbins.cu
     kernels/apply_parallel.cu
@@ -98,7 +96,6 @@ add_library(gyaradax_cuda SHARED
     kernels/apply_vpar_dual_stencil.cu
     kernels/linear_rhs_fused.cu
     kernels/linear_rhs_vtiled.cu
-    kernels/compute_scale_factors.cu
     ${LTO_HEADERS})
 
 set_target_properties(gyaradax_cuda PROPERTIES

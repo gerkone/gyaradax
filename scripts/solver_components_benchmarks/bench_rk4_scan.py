@@ -18,11 +18,12 @@ Usage:
 """
 
 import argparse
-import os
 import sys
 import functools
 from pathlib import Path
 from dataclasses import replace
+
+from _runtime_config_loader import configure_runtime_env
 
 # ---------------------------------------------------------------------------
 # Early device selection (before any JAX import)
@@ -30,13 +31,13 @@ from dataclasses import replace
 _p = argparse.ArgumentParser(add_help=False)
 _p.add_argument("--device", type=int, default=1)
 _early, _ = _p.parse_known_args()
-os.environ["CUDA_VISIBLE_DEVICES"] = str(_early.device)
-os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
+configure_runtime_env(device=_early.device)
 
 import jax  # noqa: E402
 import jax.lax  # noqa: E402
+from gyaradax.jax_config import enable_x64  # noqa: E402
 
-jax.config.update("jax_enable_x64", True)
+enable_x64()
 import jax.numpy as jnp  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -48,7 +49,7 @@ from common import (  # noqa: E402
     analyze_cost,
     BASELINES_DIR,
 )
-from gyaradax.solver import gkstep_single, default_state, GKPre  # noqa: E402
+from gyaradax.solver import gkstep_single, default_state  # noqa: E402
 from gyaradax.backends import create_ops  # noqa: E402
 
 # ---------------------------------------------------------------------------
@@ -366,7 +367,7 @@ def run(
 
     df, phi, geom, params, pre = load_setup(config, mixed_precision)
     state = default_state(nky=df.shape[-1])
-    pre_gk = GKPre(pre)
+    pre_gk = pre
 
     baseline = BASELINES_DIR / "rk4_step.npz"
     if not baseline.exists():

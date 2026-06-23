@@ -1,0 +1,86 @@
+! EM validation short-step fixture: kinetic A_parallel + B_parallel, 1 step
+! Grid follows collegue_dump/gkw_b005.input.dat / gkw_b01.input.dat.
+ &CONTROL
+ fac_dtim_est = 0.95
+ silent = .false.
+ order_of_the_scheme = 'fourth_order'
+ parallel_boundary_conditions = "open"
+ read_file  = .false.
+ NON_LINEAR = .false.
+ zonal_adiabatic = .false.
+ METHOD = 'EXP'
+ METH   = 2
+ DTIM   = 0.005
+ NTIME  = 1
+ NAVERAGE = 1
+ nlapar = .true.
+ nlbpar = .true.
+ collisions = .false.
+ normalized = .false.
+ normalize_per_toroidal_mode = .false.
+ disp_par = 1.0
+ disp_vp  = 0.2
+ disp_x   = 0.1
+ disp_y   = 0.1
+ lverbose = .false.
+ io_format = 'ascii'
+ io_testdata = .true.
+ /
+ &GRIDSIZE
+ n_procs_s = 2
+ n_procs_vpar = 2
+ n_procs_mu = 2
+ n_procs_sp = 2
+ NX = 11
+ N_s_grid = 16
+ N_mu_grid = 8
+ nperiod = 1
+ N_vpar_grid = 32
+ NMOD = 8
+ number_of_species = 2
+ /
+ &MODE
+ CHIN    = 0.,
+ mode_box = .true.,
+ krhomax = 1.485,
+ ikxspace = 5,
+ /
+ &GEOM
+ SHAT = 1.0,
+ Q    = 2.,
+ EPS  = 0.166
+ GEOM_TYPE = 'circ'
+ SIGNB = 1,
+ SIGNJ = 1
+ /
+ &SPCGENERAL
+ beta = 0.005
+ adiabatic_electrons = .false.
+ amp_init = 1e-3
+ finit = 'cosine2'
+ /
+ &SPECIES
+ MASS  = 1.,
+ Z     = 1.,
+ TEMP  = 1.,
+ dens  = 1.,
+ rlt   = 9.,
+ rln   = 3.,
+ uprim = 0.0,
+ /
+ &SPECIES
+ MASS  = 2.72e-4,
+ Z     = -1.0,
+ TEMP  = 1.0
+ dens  = 1.0,
+ rlt   = 9.,
+ rln   = 3.,
+ uprim = 0.0,
+ /
+ &ROTATION
+ VCOR = 0.0
+ /
+ &DIAGNOSTIC
+ lcalc_freq = .false.
+ lfinal_output = .false.
+ /

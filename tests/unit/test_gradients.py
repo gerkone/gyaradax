@@ -1,10 +1,11 @@
 import jax
 import jax.numpy as jnp
 import pytest
-from conftest import JAX_BACKENDS
+from conftest import JAX_BACKENDS  # type: ignore[import-not-found]
 
 from gyaradax.params import GKParams
-from gyaradax.solver import gkstep_single, default_state, linear_precompute
+from gyaradax.precompute import linear_precompute
+from gyaradax.solver import gkstep_single, default_state
 
 
 @pytest.mark.parametrize("backend, use_z2z, mixed_precision", JAX_BACKENDS)

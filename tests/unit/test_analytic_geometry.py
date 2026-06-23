@@ -1,12 +1,12 @@
 """tests for analytic circular geometry computation."""
 
 import os
+from typing import Any
+
 import numpy as np
 import pytest
 import jax
 import jax.numpy as jnp
-
-jax.config.update("jax_enable_x64", True)
 
 from gyaradax.utils import load_geometry
 from gyaradax.geometry import compute_geometry, compute_geometry_from_input
@@ -213,7 +213,7 @@ def test_ifun_zeta(gkw_dir_all):
 # Differentiability tests: AD gradients vs finite differences
 # ---------------------------------------------------------------------------
 
-_GEOM_KWARGS = dict(
+_GEOM_KWARGS: dict[str, Any] = dict(
     ns=16,
     nkx=9,
     nky=8,

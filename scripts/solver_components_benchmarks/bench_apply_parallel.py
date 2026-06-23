@@ -6,18 +6,19 @@ kernel side-by-side, with full roofline analysis.
 """
 
 import argparse
-import os
 from pathlib import Path
+
+from _runtime_config_loader import configure_runtime_env
 
 _p = argparse.ArgumentParser(add_help=False)
 _p.add_argument("--device", type=int, default=1)
 _early, _ = _p.parse_known_args()
-os.environ["CUDA_VISIBLE_DEVICES"] = str(_early.device)
-os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
+configure_runtime_env(device=_early.device)
 
 import jax
+from gyaradax.jax_config import enable_x64
 
-jax.config.update("jax_enable_x64", True)
+enable_x64()
 import jax.numpy as jnp
 
 LIB_PATH = Path(__file__).parent.parent / "cuda_augmentations" / "liblto_bracket.so"
@@ -30,8 +31,6 @@ from common import (
     BenchTimer,
     roofline_report,
 )
-from gyaradax.solver import GKPre
-
 # Reporters and Main removed; now integrated into run()
 
 
@@ -39,13 +38,13 @@ from gyaradax.solver import GKPre
 
 
 def run(config="configs/iteration_13.yaml", mixed_precision=False):
-    print(f"\n{'='*75}")
+    print(f"\n{'=' * 75}")
     print("C1: _apply_parallel  (9-point parallel stencil)")
-    print(f"{'='*75}")
+    print(f"{'=' * 75}")
 
     df, phi, geom, params, pre = load_setup(config, mixed_precision)
     field = df
-    pre_gk = GKPre(pre)
+    pre_gk = pre
     baseline = BASELINES_DIR / "apply_parallel.npz"
 
     from gyaradax.backends import create_ops
@@ -94,7 +93,7 @@ def run(config="configs/iteration_13.yaml", mixed_precision=False):
             roofline_report(f"_apply_parallel ({bname})", mean_ms, flops, bytes_rw_ffi)
 
     if "jax" in backend_times and "cuda" in backend_times:
-        print(f"     Speedup: {backend_times['jax']/backend_times['cuda']:.2f}x")
+        print(f"     Speedup: {backend_times['jax'] / backend_times['cuda']:.2f}x")
 
     # 2. Dual Fused Stencil (Merge from bench_apply_parallel_cuda.py)
     print("\n  -- Dual Stencil Fusion (_apply_parallel_dual)")
@@ -138,7 +137,7 @@ def run(config="configs/iteration_13.yaml", mixed_precision=False):
             roofline_report(f"_apply_parallel_dual ({bname})", mean_ms, flops, bytes_rw)
 
     if "jax" in dual_times and "cuda" in dual_times:
-        print(f"     Speedup: {dual_times['jax']/dual_times['cuda']:.2f}x")
+        print(f"     Speedup: {dual_times['jax'] / dual_times['cuda']:.2f}x")
 
     return results
 

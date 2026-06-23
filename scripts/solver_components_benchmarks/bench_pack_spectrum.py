@@ -2,19 +2,20 @@
 """C6: pack_half_spectrum / unpack_half_spectrum — FFT index permutation."""
 
 import argparse
-import os
 import sys
 from pathlib import Path
+
+from _runtime_config_loader import configure_runtime_env
 
 _p = argparse.ArgumentParser(add_help=False)
 _p.add_argument("--device", type=int, default=1)
 _early, _ = _p.parse_known_args()
-os.environ["CUDA_VISIBLE_DEVICES"] = str(_early.device)
-os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
+configure_runtime_env(device=_early.device)
 
 import jax
+from gyaradax.jax_config import enable_x64
 
-jax.config.update("jax_enable_x64", True)
+enable_x64()
 
 sys.path.insert(0, str(Path(__file__).parent))
 from common import (
@@ -25,17 +26,15 @@ from common import (
     analyze_cost,
     BASELINES_DIR,
 )
-from gyaradax.solver import pack_half_spectrum, unpack_half_spectrum, GKPre
+from gyaradax.solver import pack_half_spectrum, unpack_half_spectrum
 
 
 def run(config="configs/iteration_13.yaml", mixed_precision=False):
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print("C6: pack_half_spectrum / unpack_half_spectrum")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
 
     df, phi, geom, params, pre = load_setup(config, mixed_precision)
-
-    GKPre(pre)
 
     jind = pre["nl_jind"]
     mrad = int(pre["nl_mrad"])
