@@ -38,6 +38,7 @@ class GeometrySpec:
     nvpar: int
     nmu: int
     vpar_max: float = 3.0
+    # absent from the config/input.dat -> 1, matching GKW's namelist default
     nperiod: int = 1
     kxmax: float = 0.0
     krhomax: float = 1.4
@@ -122,6 +123,10 @@ def geometry_spec_from_config(cfg: Any) -> GeometrySpec:
     This mirrors the historical ``simulate._geometry_from_config`` wrapper:
     missing ``geometry.geometry_model`` defaults through the direct geometry
     API to ``circ``; only values present in the config are forwarded.
+
+    Anything the config omits therefore falls through to the ``GeometrySpec``
+    default. Notably ``grid.nperiod`` defaults to 1, a single poloidal turn,
+    which is what GKW's ``gridsize`` namelist does when nperiod is absent.
     """
     gc = _section_get(cfg, "geometry", {})
     gr = _section_get(cfg, "grid")

@@ -181,7 +181,7 @@ def _compute_geometry_impl(
         kxrh_np = np.asarray(jax.lax.stop_gradient(kxrh))
         krho_np = np.asarray(jax.lax.stop_gradient(krho))
         nkx_actual = len(kxrh_np)
-        ml = _build_mode_label(nkx_actual, nky, ikxspace)
+        ml = _build_mode_label(nkx_actual, nky, ikxspace, nperiod)
         ml_kxky, ixp, ixm, ixz, iyz, iyz_bc = _build_mode_connectivity(ml, kxrh_np, krho_np)
         pos = _build_pos_par_grid_classes(ixp, ixm, ns)
         ss, ks, vs = _build_parallel_shift_maps(ixp, ixm, iyz_bc, ns, max_shift=4)
@@ -221,12 +221,15 @@ register_circular_geometry_models(_compute_geometry_impl)
 register_miller_geometry_model(_compute_geometry_impl)
 
 
-def build_topology(nkx, nky, ikxspace, ns, max_shift=4):
+def build_topology(nkx, nky, ikxspace, ns, max_shift=4, nperiod=1):
     """Build the discrete-topology pytree for a (nkx, nky, ikxspace, ns) grid.
 
-    Topology depends only on grid shape, not on (q, shat, eps, miller). The
-    centered kx grid puts zero at index (nkx-1)//2; the ky grid starts at
-    zero, so ixzero/iyzero are determined by shape alone.
+    Topology depends only on grid shape and nperiod, not on (q, shat, eps,
+    miller): the twist-shift stride is an integer number of kx cells by
+    construction, since the radial grid spacing is defined as the one-turn
+    shift divided by ikxspace. The centered kx grid puts zero at index
+    (nkx-1)//2 and the ky grid starts at zero, so ixzero/iyzero follow from
+    the shape alone.
 
     Returns a dict of jnp.int32/bool/int8 arrays plus concrete python ints.
     Safe to close over inside ``@jax.jit``.
@@ -237,7 +240,7 @@ def build_topology(nkx, nky, ikxspace, ns, max_shift=4):
     krho_surrogate = np.arange(nky, dtype=np.float64)
     nkx_actual = kxrh_surrogate.shape[0]
 
-    ml = _build_mode_label(nkx_actual, nky, ikxspace)
+    ml = _build_mode_label(nkx_actual, nky, ikxspace, nperiod)
     ml_kxky, ixp, ixm, ixz, iyz, iyz_bc = _build_mode_connectivity(
         ml, kxrh_surrogate, krho_surrogate
     )
@@ -390,6 +393,7 @@ def geometry_spec_from_input_dat(input_dat_path: str) -> GeometrySpec:
         nvpar=int(grid_sec.get("n_vpar_grid", 32)),
         nmu=int(grid_sec.get("n_mu_grid", 8)),
         vpar_max=vpar_max,
+        # GKW gridsize namelist default (grid.F90:416): absent -> single turn
         nperiod=int(grid_sec.get("nperiod", 1)),
         kxmax=kxmax,
         krhomax=krhomax,
@@ -445,6 +449,7 @@ def geometry_from_geom_dat_and_input(input_dat_path: str) -> Dict[str, Any]:
     nvpar = int(grid_sec.get("n_vpar_grid", 32))
     nmu = int(grid_sec.get("n_mu_grid", 8))
     ns = int(grid_sec.get("n_s_grid", 16))
+    # GKW gridsize namelist default (grid.F90:416): absent -> single turn
     nperiod = int(grid_sec.get("nperiod", 1))
     krhomax = float(mode_sec.get("krhomax", 1.4))
     ikxspace = int(mode_sec.get("ikxspace", 5))
@@ -473,7 +478,7 @@ def geometry_from_geom_dat_and_input(input_dat_path: str) -> Dict[str, Any]:
     sgrid = _parallel_grid(ns, nperiod)
 
     nkx_actual = len(kxrh)
-    ml = _build_mode_label(nkx_actual, nky, ikxspace)
+    ml = _build_mode_label(nkx_actual, nky, ikxspace, nperiod)
     ml_kxky, ixp, ixm, ixz, iyz, iyz_bc = _build_mode_connectivity(ml, kxrh, krho)
     pos = _build_pos_par_grid_classes(ixp, ixm, ns)
     ss, ks, vs = _build_parallel_shift_maps(ixp, ixm, iyz_bc, ns, max_shift=4)

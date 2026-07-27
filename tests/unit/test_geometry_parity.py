@@ -61,9 +61,23 @@ _PARITY_CONFIGS = [
 ]
 
 
+# deliberately diverged from the snapshot; see test_parity_with_pre_refactor
+_CONNECTIVITY_KEYS = frozenset(
+    {"mode_label", "ixplus", "ixminus", "pos_par_grid_class",
+     "s_shift", "kx_shift", "valid_shift"}
+)
+
+
 @pytest.mark.parametrize("geom_type,q,shat,eps,ns,nkx,nky,ikxspace", _PARITY_CONFIGS)
 def test_parity_with_pre_refactor(geom_type, q, shat, eps, ns, nkx, nky, ikxspace):
-    """Refactored compute_geometry matches the original numerically (bit-identical)."""
+    """Refactored compute_geometry matches the original numerically.
+
+    The parallel-boundary connectivity in _CONNECTIVITY_KEYS is excluded: the
+    snapshot built the twist-shift kx chains with a fixed ikxspace stride at
+    every ky instead of GKW's ikxspace*iy (mode.f90:776), which was a bug. Those
+    keys are validated against GKW's own mode_label dumps in
+    tests/unit/test_mode_connectivity.py.
+    """
     old_mod = _load_old_geom()
     kwargs = dict(
         q=q, shat=shat, eps=eps, ns=ns, nkx=nkx, nky=nky,
@@ -77,6 +91,8 @@ def test_parity_with_pre_refactor(geom_type, q, shat, eps, ns, nkx, nky, ikxspac
     # (New keys may be added; we don't check those.)
     for k in old:
         assert k in new, f"key {k!r} present in OLD but missing in NEW"
+        if k in _CONNECTIVITY_KEYS:
+            continue
         a = np.asarray(old[k]); b = np.asarray(new[k])
         if np.issubdtype(a.dtype, np.floating):
             assert np.array_equal(a, b), (

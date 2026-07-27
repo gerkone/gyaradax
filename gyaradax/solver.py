@@ -91,12 +91,24 @@ def normalize_per_ky(
     pre: Optional[Precompute] = None,
 ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     phi = calculate_phi(geometry, df, params=params, pre=pre)
+    # per-ky amplitude over the kx=0 chain (GKW diagnos_growth_freq convention);
+    # returned for the growth-rate bookkeeping in advance_state, so gamma is unchanged
     amp_per_ky = mode_amplitude(phi, geometry, params.norm_eps)
-    # only normalize modes with meaningful amplitude
     active = amp_per_ky > jnp.sqrt(params.norm_eps)
     inv = jnp.where(active, 1.0 / amp_per_ky, 1.0)
-    inv_shape = (1,) * (df.ndim - 1) + (-1,)
-    return df * jnp.reshape(inv, inv_shape), inv, amp_per_ky
+    # normalize EACH connected-kx chain to unit amplitude, not just the kx=0 chain.
+    # each ky holds ikxspace independent eigenmode chains; pinning only kx=0 lets the
+    # other chains grow/decay freely, so the full |phi(ky)|^2 collapses onto one mode
+    # over long runs. per-chain norm keeps the spectrum flat (matches GKW).
+    ds = jnp.asarray(geometry["ints"], dtype=jnp.float64)[0]
+    mode_label = jnp.asarray(geometry["mode_label"], dtype=jnp.int32)  # (nkx, nky)
+    pxy = ds * jnp.sum(jnp.abs(phi) ** 2, axis=0)  # (nkx, nky) power per mode, summed over s
+    same = (mode_label[:, None, :] == mode_label[None, :, :]).astype(pxy.dtype)  # (nkx,nkx,nky)
+    chain_amp = jnp.sqrt(jnp.maximum(jnp.einsum("ijk,jk->ik", same, pxy), params.norm_eps))
+    active_xy = chain_amp > jnp.sqrt(params.norm_eps)
+    inv_xy = jnp.where(active_xy, 1.0 / chain_amp, 1.0)  # (nkx, nky), per-chain factor
+    inv_shape = (1,) * (df.ndim - 2) + inv_xy.shape
+    return df * jnp.reshape(inv_xy, inv_shape), inv, amp_per_ky
 
 
 def nonlinear_term_iii(
