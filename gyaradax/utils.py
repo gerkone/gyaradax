@@ -140,6 +140,7 @@ def save_dumps(
     dt_info: Any = None,
     block_start_step: int = 0,
     block_start_time: float = 0.0,
+    snapshot_f32: bool = False,
 ):
     """Handle simulation output. Saves heavy 5D distribution snapshots if requested
     and appends diagnostic history to persistent files.
@@ -259,9 +260,15 @@ def save_dumps(
     if save_dumps:
         ckpt_name = f"step_{int(state.step):06d}.npz"
         path = os.path.join(output_dir, ckpt_name)
+        # halve on-disk size: 5D df/phi to complex64, diagnostics stay f64
+        df_out = np.asarray(df)
+        phi_out = np.asarray(phi)
+        if snapshot_f32:
+            df_out = df_out.astype(np.complex64)
+            phi_out = phi_out.astype(np.complex64)
         checkpoint: dict[str, Any] = {
-            "df": np.array(df),
-            "phi": np.array(phi),
+            "df": df_out,
+            "phi": phi_out,
             "fluxes": fluxes_arr,
             "time": np.array(state.time),
             "step": np.array(state.step),
@@ -276,6 +283,35 @@ def save_dumps(
         if last_dt is not None:
             checkpoint["dt_last"] = np.array(last_dt, dtype=np.float64)
         np.savez(path, **cast(Any, checkpoint))
+
+
+def save_run_metadata(output_dir: str, config: Any, geometry: Dict[str, Any]) -> None:
+    """Write config.yaml and geometry.pkl alongside a run's dumps.
+
+    Downstream preprocessing/inference otherwise reconstructs a trajectory from
+    GKW's ``input.dat`` (physical parameters) and ``geom.dat`` (geometry), which
+    gyaradax runs do not produce. This records the equivalent information: the
+    run configuration as ``config.yaml`` and the full geometry dict as
+    ``geometry.pkl`` (jax arrays converted to numpy, mirroring how the dataset
+    metadata stores ``geometry``).
+    """
+    import pickle
+
+    from omegaconf import OmegaConf
+
+    os.makedirs(output_dir, exist_ok=True)
+    if config is not None:
+        cfg = config if OmegaConf.is_config(config) else OmegaConf.create(config)
+        OmegaConf.save(cfg, os.path.join(output_dir, "config.yaml"))
+
+    np_geom: Dict[str, Any] = {}
+    for key, value in geometry.items():
+        try:
+            np_geom[key] = np.asarray(value)
+        except Exception:
+            np_geom[key] = value  # keep non-array metadata (labels, classes) as-is
+    with open(os.path.join(output_dir, "geometry.pkl"), "wb") as handle:
+        pickle.dump(np_geom, handle)
 
 
 def load_checkpoint(path: str) -> Dict[str, Any]:

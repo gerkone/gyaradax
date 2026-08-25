@@ -253,6 +253,7 @@ def gksimulate(
     checkpoint_interval: Optional[int] = None,
     save_snapshots: bool = False,
     save_final: bool = True,
+    snapshot_f32: bool = False,
 ) -> Tuple[jnp.ndarray, jnp.ndarray, Any, GKState]:
     """Run n_steps with optional IO checkpointing and logging.
 
@@ -282,6 +283,7 @@ def gksimulate(
             save_dumps=save_snapshots,
             params=params,
             pre=pre,
+            snapshot_f32=snapshot_f32,
         )
 
     start_step = int(state.step)
@@ -345,6 +347,7 @@ def gksimulate(
                 dt_info=dt_info,
                 block_start_step=block_start_step,
                 block_start_time=block_start_time,
+                snapshot_f32=snapshot_f32,
             )
 
         log_step(current_fluxes, current_state, wall_time, n_steps=block_steps)
