@@ -24,6 +24,7 @@ gyaradax/
   bootstrap.py   — bootstrap utilities
   utils.py       — GKW I/O (K-dumps, geom.dat, input.dat parsing)
   plot_utils.py  — publication-quality plotting functions
+  cli.py         — `gyaradax` console script: run/bench/info (see docs/CLI.md)
 
   backends/
     __init__.py  — create_ops(): backend dispatch (auto/jax/cuda)
@@ -162,17 +163,22 @@ python -m pytest tests/ -x -q -k "cuda"
 
 ## Running simulations
 
-```bash
-# adiabatic
-python -u scripts/run.py configs/iteration_13.yaml --device=N
+Use the `gyaradax` console script (implemented in `gyaradax/cli.py`; see
+`docs/CLI.md`). Adiabatic vs kinetic, EM terms and sharding are all read from
+the config — there is no `--kinetic` flag any more.
 
-# kinetic electrons
-python -u scripts/run.py configs/kinetic.yaml --kinetic --device=N
+```bash
+gyaradax run configs/iteration_13.yaml --device=N     # adiabatic
+gyaradax run configs/kinetic.yaml --device=N          # kinetic (auto-detected)
+gyaradax run configs/nl_em_apar.yaml --n-gpus-vp=4    # EM, sharded over 4 GPUs
+gyaradax bench configs/adiabatic_a.yaml --backend=cuda
+gyaradax info
 ```
 
 Add `--from-scratch` to cold-start instead of resuming from K-files.
 Add `--block-size=300` for faster checkpoint cadence.
-Add `--backend=cuda` to force CUDA backend.
+Add `--backend=cuda` to force CUDA backend (not available for EM runs).
+`scripts/run.py` is a back-compat shim that forwards to `gyaradax run`.
 
 ## Building the CUDA backend
 
@@ -190,6 +196,15 @@ cmake --install .
 ```
 
 Requires CUDA Toolkit >= 13.1, compute capability >= 80.
+
+On older toolkits, override the two architecture lists — `GPU_ARCHITECTURES`
+(the kernels) and `LTO_ARCHITECTURES` (the cuFFT LTO callbacks). `compute_100`
+needs CUDA >= 12.8, so e.g. on a CUDA 12.6 / GH200 system:
+```bash
+cmake .. -DCMAKE_BUILD_TYPE=Release -DGPU_ARCHITECTURES=90 -DLTO_ARCHITECTURES="80;90"
+```
+`scripts/make_cuda_root.sh` builds a merged toolkit root when nvcc and cuFFT
+live in separate trees (e.g. the NVIDIA HPC SDK).
 Pip-installed cuFFT/nvJitLink (`nvidia-cufft-cu12`, `nvidia-nvjitlink-cu12`)
 are auto-detected by CMake — look for `CUDA::cufft from pip:` in configure output.
 

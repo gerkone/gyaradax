@@ -191,7 +191,7 @@ def init_f(
                         sharding._AXIS_SP, sharding._AXIS_VP, sharding._AXIS_MU, None, None, None
                     )
                 else:
-                    spec = PartitionSpec(sharding._AXIS_VP, sharding._AXIS_MU, sharding._AXIS_S, None, None)
+                    spec = PartitionSpec(sharding._AXIS_VP, sharding._AXIS_MU, None, None, None)
                 out_sharding = NamedSharding(mesh, spec)
 
     nv, nmu, ns, nkx, nky = (

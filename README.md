@@ -61,19 +61,37 @@ CMake prints the detected compute capability, jaxlib version, and cudatoolkit. E
 
 ### Basic usage
 
-The `scripts/run.py` script provides a convenient way to execute simulations, supporting single or multiple configuration files, batch execution, and specifying runtime options like the device and number of blocks.
+Installing the package provides a `gyaradax` command. Everything that defines a
+run — adiabatic vs kinetic electrons, electromagnetic terms, velocity-space
+sharding, backend — is read from the YAML config; flags only override it.
 
 ```bash
-# Run a single configuration
-python -u -m scripts.run configs/iteration_13.yaml --device 0
+gyaradax run configs/iteration_13.yaml --device 0   # run a simulation
+gyaradax bench configs/adiabatic_a.yaml --backend cuda   # measure throughput
+gyaradax info                                        # devices and backends
 ```
 
-When multiple YAML configuration files are provided, and they share the same grid resolution and static parameters, `scripts/run.py` can automatically batch them using `jax.vmap` for parallel execution on a single device.
+Electromagnetic and multi-GPU runs need no extra flags — a config carrying
+`solver.nlapar` or a `sharding:` block is picked up automatically:
 
 ```bash
-# Run two configurations in parallel on device 0
-python -u -m scripts.run configs/adiabatic_a.yaml configs/adiabatic_b.yaml --device 0
+gyaradax run configs/nl_em_apar.yaml            # electromagnetic, kinetic electrons
+gyaradax run configs/my_big_case.yaml           # sharded if the config says so
+gyaradax run configs/my_case.yaml --n-gpus-vp 4 # or override the mesh
 ```
+
+When several YAML configs share the same grid and static parameters they are
+batched automatically under one `jax.vmap`:
+
+```bash
+gyaradax run configs/adiabatic_a.yaml configs/adiabatic_b.yaml --device 0
+```
+
+**See [docs/CLI.md](docs/CLI.md) for the full command reference**, including
+the auto-detection table, multi-GPU guidance and every flag.
+
+`python scripts/run.py CONFIG ...` still works as a thin shim over
+`gyaradax run`.
 
 ### Usage
 #### Run a simulation
