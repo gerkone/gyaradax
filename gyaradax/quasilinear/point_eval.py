@@ -15,6 +15,7 @@ import numpy as np
 from gyaradax.integrals import calculate_fluxes, geom_tensors
 from gyaradax.solver import default_state, gksolve, linear_precompute
 
+from .rules import RULES
 from .saturation import ql_flux
 
 DF_SEED_AMPLITUDE = 1e-3
@@ -89,6 +90,7 @@ def ql_at_point(
     grid_shape: Tuple[int, int, int, int, int],
     *,
     cn,
+    rule="canonical",
     n_steps_linear=2000,
     early_stop=True,
     early_stop_opts: Dict[str, Any] | None = None,
@@ -96,7 +98,9 @@ def ql_at_point(
     qi_tiny=1e-8,
     return_diagnostics=False,
 ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
-    """Linear solve + canonical saturation rule at one point -> (qi, qe, pfe) in GKW GB units.
+    """Linear solve + saturation rule at one point -> (qi, qe, pfe) in GKW GB units.
+
+    `rule` names an entry of quasilinear.rules.RULES; each has its own cn.
 
     Electromagnetic (params.nlapar) runs convert the mixed g to physical f
     for diagnostics and add the A_par flutter flux into the QL weight,
@@ -106,6 +110,54 @@ def ql_at_point(
     `return_diagnostics` appends a dict of traced per-call solver diagnostics
     (blocks and steps actually run, converged growth rates).
     """
+    spec, n_blocks, n_steps, gamma = _linear_harvest(
+        params, geom, grid_shape, n_steps_linear=n_steps_linear,
+        early_stop=early_stop, early_stop_opts=early_stop_opts,
+    )
+    q_i = RULES[rule](cn=cn, **spec)
+    q_i = jnp.where(jnp.isfinite(q_i), jnp.clip(q_i, 0.0, qi_clip), 0.0)
+    # zero below noise floor so linear-transient residues don't feed TORAX gradients
+    q_i = jnp.where(jnp.abs(q_i) < qi_tiny, 0.0, q_i)
+    if return_diagnostics:
+        diagnostics = {
+            "n_blocks": n_blocks,
+            "n_steps": n_steps,
+            "gamma_max": jnp.max(gamma),
+            "cn": jnp.asarray(cn),
+        }
+        return q_i, q_i, jnp.asarray(0.0), diagnostics
+    return q_i, q_i, jnp.asarray(0.0)
+
+
+def ql_rules_at_point(
+    params,
+    geom,
+    grid_shape: Tuple[int, int, int, int, int],
+    *,
+    rules,
+    cn=1.0,
+    n_steps_linear=2000,
+    early_stop=True,
+    early_stop_opts: Dict[str, Any] | None = None,
+) -> Dict[str, jnp.ndarray]:
+    """Several saturation rules on ONE linear solve -> {rule: Q_i}, for calibration."""
+    spec, _b, _s, _g = _linear_harvest(
+        params, geom, grid_shape, n_steps_linear=n_steps_linear,
+        early_stop=early_stop, early_stop_opts=early_stop_opts,
+    )
+    return {r: RULES[r](cn=cn, **spec) for r in rules}
+
+
+def _linear_harvest(
+    params,
+    geom,
+    grid_shape,
+    *,
+    n_steps_linear,
+    early_stop,
+    early_stop_opts,
+):
+    """Linear solve -> the (gamma, spectra, geometry) kwargs every rule consumes."""
     nv, nmu, ns, nkx, nky = grid_shape
     df = initial_df(nv, nmu, ns, nkx, nky)
     sim_state = default_state(nky=nky)
@@ -141,7 +193,7 @@ def ql_at_point(
     ints = jnp.asarray(geom["ints"])
     phi2 = jnp.abs(phi) ** 2
     lg = jnp.asarray(geom["little_g"])
-    q_i = ql_flux(
+    spec = dict(
         growth_rate=sim_final.last_growth_rate,
         phi2=phi2,
         phi2_kxy=jnp.sum(phi2 * ints[:, None, None], axis=0),
@@ -150,20 +202,8 @@ def ql_at_point(
         kxrh=jnp.asarray(geom["kxrh"], dtype=jnp.float64),
         little_g=lg.T if lg.shape[0] != 3 else lg,
         ds=jnp.mean(ints),
-        cn=cn,
     )
-    q_i = jnp.where(jnp.isfinite(q_i), jnp.clip(q_i, 0.0, qi_clip), 0.0)
-    # zero below noise floor so linear-transient residues don't feed TORAX gradients
-    q_i = jnp.where(jnp.abs(q_i) < qi_tiny, 0.0, q_i)
-    if return_diagnostics:
-        diagnostics = {
-            "n_blocks": n_blocks,
-            "n_steps": n_steps,
-            "gamma_max": jnp.max(sim_final.last_growth_rate),
-            "cn": jnp.asarray(cn),
-        }
-        return q_i, q_i, jnp.asarray(0.0), diagnostics
-    return q_i, q_i, jnp.asarray(0.0)
+    return spec, n_blocks, n_steps, sim_final.last_growth_rate
 
 
 def nl_at_point(
