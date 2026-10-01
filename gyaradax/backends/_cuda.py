@@ -293,7 +293,8 @@ class CUDAOps(SolverOps):
         fmaxwl = pre["fmaxwl"].reshape(nv, nmu, ns).copy()
         dmaxwel = pre["dmaxwel_fm_ek"].reshape(nv, nmu, ns, nky).copy()
 
-        hyper = jnp.broadcast_to(pre["hyper"].squeeze(), (ns, nkx, nky)).copy()
+        # squeeze() would also drop the ky axis when nky == 1
+        hyper = jnp.broadcast_to(pre["hyper"].reshape(nkx, nky), (ns, nkx, nky)).copy()
         kx_vals = pre["kx_b"].reshape(-1)[:nkx].copy()
         ky_vals = pre["ky_b"].reshape(-1)[:nky].copy()
 

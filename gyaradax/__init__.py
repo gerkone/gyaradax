@@ -39,6 +39,8 @@ __all__ = [
     "compute_geometry",
     "get_integrals",
     "load_gkw_k_dump",
+    "eigensolve",
+    "eigensolve_ky_spectrum",
 ]
 
 _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
@@ -68,6 +70,8 @@ _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
     "get_integrals": ("gyaradax.integrals", "get_integrals"),
     "load_geometry": ("gyaradax.utils", "load_geometry"),
     "load_gkw_k_dump": ("gyaradax.utils", "load_gkw_k_dump"),
+    "eigensolve": ("gyaradax.eigenvalue", "eigensolve"),
+    "eigensolve_ky_spectrum": ("gyaradax.eigenvalue", "eigensolve_ky_spectrum"),
 }
 
 
