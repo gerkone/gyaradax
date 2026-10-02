@@ -14,6 +14,9 @@ dependencies = [
   "scipy",
 ]
 
+[project.scripts]
+gyaradax = "gyaradax.cli:main"
+
 [project.optional-dependencies]
 cuda13 = ["jax[cuda13-local]"]
 dev = ["pytest", "ruff", "black"]

@@ -253,8 +253,13 @@ def gksimulate(
     checkpoint_interval: Optional[int] = None,
     save_snapshots: bool = False,
     save_final: bool = True,
+    snapshot_f32: bool = False,
+    stop_on_nan: bool = True,
 ) -> Tuple[jnp.ndarray, jnp.ndarray, Any, GKState]:
     """Run n_steps with optional IO checkpointing and logging.
+
+    ``stop_on_nan`` halts at the first block with a non-finite ``df``, writing a
+    ``DIVERGED`` marker into ``output_dir``; the corrupted block is not archived.
 
     Returns:
         (df, phi, fluxes, state)
@@ -282,9 +287,11 @@ def gksimulate(
             save_dumps=save_snapshots,
             params=params,
             pre=pre,
+            snapshot_f32=snapshot_f32,
         )
 
     start_step = int(state.step)
+    diverged = False
     target_step = start_step + n_steps
     current_df = df
     current_state = state
@@ -330,6 +337,20 @@ def gksimulate(
         jax.block_until_ready(current_df)
         wall_time = time.time() - t0
 
+        # every step after the first NaN is wasted; keep the last good snapshot
+        if stop_on_nan and not bool(jnp.isfinite(current_df).all()):
+            msg = (
+                f"non-finite df at step {int(current_state.step)} "
+                f"(t={float(current_state.time):.4f}); stopping after "
+                f"{int(current_state.step) - start_step} steps"
+            )
+            print(f"\n*** DIVERGED: {msg}")
+            if output_dir is not None:
+                with open(os.path.join(output_dir, "DIVERGED"), "w") as fh:
+                    fh.write(msg + "\n")
+            diverged = True
+            break
+
         if output_dir is not None:
             is_final = int(current_state.step) >= target_step
             save_dumps_fn(
@@ -345,6 +366,7 @@ def gksimulate(
                 dt_info=dt_info,
                 block_start_step=block_start_step,
                 block_start_time=block_start_time,
+                snapshot_f32=snapshot_f32,
             )
 
         log_step(current_fluxes, current_state, wall_time, n_steps=block_steps)

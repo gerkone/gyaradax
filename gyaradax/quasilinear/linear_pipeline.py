@@ -37,6 +37,12 @@ def _harvest(geometry, df, phi, state, params=None, apar=None, bpar=None, pre=No
 
     Handles adiabatic (5D df) and kinetic (6D df) transparently, and adds
     A_∥ / B_∥ contributions when `apar` / `bpar` are provided.
+
+    Kinetic runs additionally return ``fluxes_kxy_sp`` of shape
+    (nsp, 3, nkx, nky) — per-species per-channel flux fields INCLUDING the
+    EM flutter contributions, so the species-summed channels equal
+    ``jnp.sum(fluxes_kxy_sp[:, c], axis=0)`` exactly. Feed it to
+    ``rules.ql_flux_per_species`` for per-species QL fluxes.
     """
     from gyaradax.integrals import (
         calculate_em_fluxes,
@@ -44,35 +50,45 @@ def _harvest(geometry, df, phi, state, params=None, apar=None, bpar=None, pre=No
         calculate_fluxes_kinetic,
         geom_tensors,
     )
+    from gyaradax.simulate import _ensure_species_arrays
 
-    gt = geom_tensors(geometry)
     is_kinetic = df.ndim == 6
 
     if is_kinetic:
-        # (nsp, 3, nkx, nky); sum species into a single (nkx, nky) per channel
-        fluxes_sp = calculate_fluxes_kinetic(gt, df, phi, reduce=False)
-        pflux_kxy = jnp.sum(fluxes_sp[:, 0], axis=0)
-        eflux_kxy = jnp.sum(fluxes_sp[:, 1], axis=0)
-        vflux_kxy = jnp.sum(fluxes_sp[:, 2], axis=0)
+        # calculate_fluxes_kinetic needs raw geometry with per-species arrays
+        geometry_sp = _ensure_species_arrays(geometry, params) if params is not None else geometry
+        fluxes_sp = calculate_fluxes_kinetic(geometry_sp, df, phi, reduce=False)
     else:
         fluxes_sp = None
+        gt = geom_tensors(geometry)
         pflux_kxy, eflux_kxy, vflux_kxy = calculate_fluxes(gt, df, phi, reduce=False)
 
     # em flutter contributions; kinetic returns a stacked (nsp, 3, nkx, nky) array
     if (apar is not None) or (bpar is not None):
-        em = calculate_em_fluxes(gt, df, apar, params=params, bpar=bpar, pre=pre, reduce=False)
+        em = calculate_em_fluxes(
+            geometry, df, apar, params=params, bpar=bpar, pre=pre, reduce=False
+        )
         if is_kinetic:
+            fluxes_sp = fluxes_sp + em
             em_pflux_kxy = jnp.sum(em[:, 0], axis=0)
             em_eflux_kxy = jnp.sum(em[:, 1], axis=0)
             em_vflux_kxy = jnp.sum(em[:, 2], axis=0)
         else:
             em_pflux_kxy, em_eflux_kxy, em_vflux_kxy = em
-        pflux_kxy = pflux_kxy + em_pflux_kxy
-        eflux_kxy = eflux_kxy + em_eflux_kxy
-        vflux_kxy = vflux_kxy + em_vflux_kxy
+            pflux_kxy = pflux_kxy + em_pflux_kxy
+            eflux_kxy = eflux_kxy + em_eflux_kxy
+            vflux_kxy = vflux_kxy + em_vflux_kxy
+    elif is_kinetic:
+        em_pflux_kxy = em_eflux_kxy = em_vflux_kxy = jnp.zeros(df.shape[-2:])
     else:
         zk = jnp.zeros_like(pflux_kxy)
         em_pflux_kxy = em_eflux_kxy = em_vflux_kxy = zk
+
+    if is_kinetic:
+        # summed after the EM addition
+        pflux_kxy = jnp.sum(fluxes_sp[:, 0], axis=0)
+        eflux_kxy = jnp.sum(fluxes_sp[:, 1], axis=0)
+        vflux_kxy = jnp.sum(fluxes_sp[:, 2], axis=0)
 
     # FSA |φ|²(kx, ky) using gyaradax integration weights
     ints = jnp.asarray(geometry["ints"])

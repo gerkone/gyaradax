@@ -48,12 +48,15 @@ message(STATUS "Found CUDA toolkit:  ${CUDAToolkit_VERSION}")
 
 # ── LTO fatbin tooling ────────────────────────────────────────────
 
-# LTO gencode flags for cuFFT callbacks (Ampere, Hopper, Blackwell)
-set(GENCODE_FLAGS_LTO
-    --generate-code arch=compute_80,code=lto_80
-    --generate-code arch=compute_90,code=lto_90
-    --generate-code arch=compute_100,code=lto_100
-    --ptxas-options=-v)
+# cuFFT LTO callback archs. Override on older toolkits: compute_100 needs CUDA >= 12.8.
+set(LTO_ARCHITECTURES "80;90;100" CACHE STRING
+    "Compute capabilities to emit cuFFT LTO callback fatbins for")
+set(GENCODE_FLAGS_LTO "")
+foreach(_lto_arch IN LISTS LTO_ARCHITECTURES)
+    list(APPEND GENCODE_FLAGS_LTO
+        --generate-code arch=compute_${_lto_arch},code=lto_${_lto_arch})
+endforeach()
+list(APPEND GENCODE_FLAGS_LTO --ptxas-options=-v)
 
 get_filename_component(CUDA_COMPILER_DIR ${CMAKE_CUDA_COMPILER} DIRECTORY)
 set(BIN2C_EXECUTABLE ${CUDA_COMPILER_DIR}/bin2c)

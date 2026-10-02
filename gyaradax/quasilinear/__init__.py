@@ -22,6 +22,14 @@ from .saturation import (
     k_perp_squared,
     k_perp_eff_squared,
 )
+from .rules import (
+    RULES,
+    ql_flux_per_species,
+    ql_flux_sat0,
+    ql_flux_sat1,
+    ql_flux_sat2,
+    ql_flux_sat3,
+)
 from .data import (
     load_linear_outputs,
     load_nonlinear_target,
@@ -66,6 +74,12 @@ from .models import load_weights_from_name as load_cn_weights_from_name
 __all__ = [
     "ql_flux",
     "ql_flux_diagnostics",
+    "RULES",
+    "ql_flux_per_species",
+    "ql_flux_sat0",
+    "ql_flux_sat1",
+    "ql_flux_sat2",
+    "ql_flux_sat3",
     "k_perp_squared",
     "k_perp_eff_squared",
     "load_linear_outputs",
