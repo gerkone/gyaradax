@@ -1,67 +1,39 @@
 """Eigenvalue solver for the gyaradax linear operator.
 
-Mirrors GKW's `eiv_integration.F90` `mat_vec_product_rhs` / `mat_vec_product_exp`:
-the linear RHS (including the self-consistent field solve and, for EM runs,
-the mixed-variable g -> f transform) is wrapped as a matrix-free matvec and
-handed to an Arnoldi eigensolver to find the top-k eigenvalues.  This exposes
-subdominant linear modes that an initial-value solver cannot reach since IVP
-only converges to the dominant root.
+Mirrors GKW's `eiv_integration.F90`: the linear RHS -- field solve, g -> f
+transform and collisions included -- is wrapped as a matrix-free matvec and
+handed to Arnoldi. Unlike an initial-value run, which only ever converges to
+the dominant root, this reaches the subdominant and damped modes too. The
+matvec is the exact operator the IVP integrates (`gkstep_single._rhs` with
+``non_linear=False``).
 
-The matvec is the EXACT operator integrated by the IVP (`gkstep_single._rhs`
-with ``non_linear=False``): fields are solved from the evolved variable g,
-then ``g_to_f`` is applied before ``ops.linear_rhs`` (collisions included via
-``pre['coll_stencil']`` when enabled).
+Eigenvalues follow GKW's convention, lambda = gamma + i*omega for
+d(g)/dt = L g: Re is the growth rate (matching the IVP's per-ky
+``last_growth_rate``) and Im the real frequency, signed as in frequencies.dat.
 
-Conventions (matches GKW `trafo_eiv_to_gf`, mat_vec_routine=2):
+:func:`eigensolve` selects the driver with ``solver=``: 'arpack' is scipy's
+implicitly restarted Arnoldi on a jitted matvec (the reference -- slower but
+battle-tested), 'jax' a thick-restarted Krylov-Schur Arnoldi kept on device,
+differentiable apart from the small dense eigendecomposition.
 
-  lambda = gamma + i*omega    with d(g)/dt = L g, g ~ exp(lambda t)
+``mode='exp'`` (recommended) uses ``n_steps_per_matvec`` RK4 steps, whose
+eigenvalues mu = exp(lambda*n_steps*dt) make the dominant physical mode the
+largest-|mu| one, so Arnoldi converges quickly; ``dt`` must be RK4-stable.
+``mode='rhs'`` applies L directly and converges slowly, since the physical
+modes are not the largest-magnitude eigenvalues of L. Recovering lambda from
+log(mu) is branch-ambiguous once |Im(lambda)|*n_steps*dt > pi, so by default
+``refine=True`` re-evaluates each eigenvector through the 'rhs' matvec as a
+Rayleigh quotient, removing both that ambiguity and the RK4 error.
 
-  Re(lambda) = growth rate gamma  == IVP ``state.last_growth_rate`` (per ky)
-  Im(lambda) = real frequency omega, same sign as GKW's frequencies.dat.
-
-Two Arnoldi drivers are available behind :func:`eigensolve`, selected with
-``solver=``:
-
-  - 'arpack' (:func:`eigensolve_linear`): scipy's implicitly restarted
-    Arnoldi on a jitted JAX matvec, so the solve is hybrid host/device. The
-    reference implementation -- slower, but battle-tested.
-
-  - 'jax' (:func:`eigensolve_linear_jax`): thick-restarted (Krylov-Schur)
-    Arnoldi with the whole factorization on device. Agrees with ARPACK to
-    the requested `tol` and is differentiable apart from the small dense
-    eigendecomposition of the projected block.
-
-Two matvec modes are supported:
-
-  - mode='rhs': matvec is L(g) = ops.linear_rhs(g_to_f(g), fields(g)).
-    Eigenvalues are returned directly (lambda).  ARPACK selector defaults to
-    'LR' (largest real part).  Convergence can be slow because the dominant
-    physical modes are not the largest-magnitude eigenvalues of L.
-
-  - mode='exp' (recommended): matvec is ``n_steps_per_matvec`` RK4 steps of
-    the linear operator; eigenvalues of the step operator are
-    mu = exp(lambda * n_steps * dt) (to RK4 accuracy) and the dominant
-    physical mode IS the largest-|mu| eigenvalue, so Arnoldi converges fast.
-    ARPACK selector defaults to 'LM'.  ``dt`` must be RK4-stable for the
-    linear operator (use the IVP's working dt).  Raw eigenvalues are
-    recovered as log(mu)/(n_steps*dt), which is branch-ambiguous when
-    |Im(lambda)|*n_steps*dt > pi; with the default ``refine=True`` each
-    converged eigenvector v is re-evaluated through the 'rhs' matvec via the
-    Rayleigh quotient lambda = <v, L v>/<v, v>, which removes both the log
-    branch ambiguity and the RK4 discretization error.
-
-Per-ky spectra: the linear operator block-diagonalizes over ky (and over
-connected-kx chains within each ky).  A global Arnoldi mixes all blocks and
-returns globally-dominant eigenvalues, whereas the IVP reports per-ky growth
-rates.  Pass ``ky_select=<iky>`` to restrict the solve to a single ky block
-(the start vector and every matvec output are masked to that ky column);
-the dominant eigenvalue then matches the IVP's ``state.last_growth_rate[iky]``.
+The operator block-diagonalizes over ky, so a global solve returns
+globally-dominant eigenvalues while the IVP reports per-ky rates. Passing
+``ky_select=<iky>`` restricts the problem to that block -- geometry and
+coefficients are sliced, not masked, so the solve is nky times smaller -- and
+the dominant eigenvalue then matches ``last_growth_rate[iky]``.
 
 Example
 -------
-    geometry = compute_geometry_from_input("input.dat")
-    params = gkparams_from_input_and_geometry("input.dat", geometry)
-    eigvals, eigvecs = eigensolve_linear(
+    eigvals, eigvecs = eigensolve(
         geometry, params, k=4, mode="exp", n_steps_per_matvec=50, ky_select=1
     )
     gamma, omega = eigvals[0].real, eigvals[0].imag

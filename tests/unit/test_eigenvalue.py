@@ -207,10 +207,16 @@ def _ivp_reference(geom, params, pre, n_species, max_blocks=400, tol=1e-5):
     p_nonorm = replace(params, disable_per_ky_norm=True)
     phi0, _, _ = _compute_fields(df, geom, params, pre)
     df1, (phi1, _), _ = gkstep_single(df, geom, p_nonorm, state, pre)
+    # a ky slab splits into independent connected-kx chains and the per-ky
+    # normalization holds them all at equal amplitude, so the phase must be
+    # read on the kx=0 chain, the one last_growth_rate is measured on
+    mode_label = np.asarray(geom["mode_label"])
+    ixzero = int(np.asarray(geom["ixzero"]))
     lam = np.zeros(nky, dtype=complex)
     for iky in range(nky):
-        a0 = np.asarray(phi0[..., iky]).ravel()
-        a1 = np.asarray(phi1[..., iky]).ravel()
+        chain = mode_label[:, iky] == mode_label[ixzero, iky]
+        a0 = np.asarray(phi0[:, chain, iky]).ravel()
+        a1 = np.asarray(phi1[:, chain, iky]).ravel()
         i = int(np.argmax(np.abs(a0)))
         # a dead ky (zonal) carries no phase to measure
         lam[iky] = (np.log(a1[i] / a0[i]) / float(params.dt)
@@ -367,7 +373,9 @@ class TestSubdominantResiduals:
             v = jnp.asarray(eigvecs[i])
             lv = mv(v)
             res = float(jnp.linalg.norm(lv - eigvals[i] * v) / jnp.linalg.norm(eigvals[i] * v))
-            assert res < 1e-4, f"pair {i}: lambda={eigvals[i]}, residual={res:.3e}"
+            # 1e-4 passes vectors Arnoldi never converged; a converged one
+            # at tol=1e-12 sits near machine precision
+            assert res < 1e-9, f"pair {i}: lambda={eigvals[i]}, residual={res:.3e}"
         # eigenvalues are distinct and sorted by descending growth rate
         assert np.all(np.diff(eigvals.real) <= 1e-12)
 
