@@ -19,6 +19,11 @@ differentiable apart from the small dense eigendecomposition.
 ``mode='exp'`` (recommended) uses ``n_steps_per_matvec`` RK4 steps, whose
 eigenvalues mu = exp(lambda*n_steps*dt) make the dominant physical mode the
 largest-|mu| one, so Arnoldi converges quickly; ``dt`` must be RK4-stable.
+What separates the modes is the time window n_steps*dt, not the step count,
+so scale `n_steps_per_matvec` with 1/dt rather than fixing it: kinetic
+electrons push dt to the electron Alfven CFL (~3e-4 against ~1e-2 adiabatic),
+where a count tuned on an adiabatic run spans too little time and Arnoldi
+stops converging -- residual 2e-1 at t = 0.017, 7e-14 at t = 2.5.
 ``mode='rhs'`` applies L directly and converges slowly, since the physical
 modes are not the largest-magnitude eigenvalues of L. Recovering lambda from
 log(mu) is branch-ambiguous once |Im(lambda)|*n_steps*dt > pi, so by default
