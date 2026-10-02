@@ -1,55 +1,44 @@
 """Eigenvalue solver for the gyaradax linear operator.
 
-Mirrors GKW's `eiv_integration.F90` `mat_vec_product_rhs` / `mat_vec_product_exp`:
-the linear RHS (including the self-consistent field solve and, for EM runs,
-the mixed-variable g -> f transform) is wrapped as a matrix-free matvec and
-handed to an Arnoldi eigensolver to find the top-k eigenvalues.  This exposes
-subdominant linear modes that an initial-value solver cannot reach since IVP
-only converges to the dominant root.
+Mirrors GKW's `eiv_integration.F90`: the linear RHS -- field solve, g -> f
+transform and collisions included -- is wrapped as a matrix-free matvec and
+handed to Arnoldi. Unlike an initial-value run, which only ever converges to
+the dominant root, this reaches the subdominant and damped modes too. The
+matvec is the exact operator the IVP integrates (`gkstep_single._rhs` with
+``non_linear=False``).
 
-The matvec is the EXACT operator integrated by the IVP (`gkstep_single._rhs`
-with ``non_linear=False``): fields are solved from the evolved variable g,
-then ``g_to_f`` is applied before ``ops.linear_rhs`` (collisions included via
-``pre['coll_stencil']`` when enabled).
+Eigenvalues follow GKW's convention, lambda = gamma + i*omega for
+d(g)/dt = L g: Re is the growth rate (matching the IVP's per-ky
+``last_growth_rate``) and Im the real frequency, signed as in frequencies.dat.
 
-Conventions (matches GKW `trafo_eiv_to_gf`, mat_vec_routine=2):
+:func:`eigensolve` selects the driver with ``solver=``: 'arpack' is scipy's
+implicitly restarted Arnoldi on a jitted matvec (the reference -- slower but
+battle-tested), 'jax' a thick-restarted Krylov-Schur Arnoldi kept on device,
+differentiable apart from the small dense eigendecomposition.
 
-  lambda = gamma + i*omega    with d(g)/dt = L g, g ~ exp(lambda t)
+``mode='exp'`` (recommended) uses ``n_steps_per_matvec`` RK4 steps, whose
+eigenvalues mu = exp(lambda*n_steps*dt) make the dominant physical mode the
+largest-|mu| one, so Arnoldi converges quickly; ``dt`` must be RK4-stable.
+What separates the modes is the time window n_steps*dt, not the step count,
+so scale `n_steps_per_matvec` with 1/dt rather than fixing it: kinetic
+electrons push dt to the electron Alfven CFL (~3e-4 against ~1e-2 adiabatic),
+where a count tuned on an adiabatic run spans too little time and Arnoldi
+stops converging -- residual 2e-1 at t = 0.017, 7e-14 at t = 2.5.
+``mode='rhs'`` applies L directly and converges slowly, since the physical
+modes are not the largest-magnitude eigenvalues of L. Recovering lambda from
+log(mu) is branch-ambiguous once |Im(lambda)|*n_steps*dt > pi, so by default
+``refine=True`` re-evaluates each eigenvector through the 'rhs' matvec as a
+Rayleigh quotient, removing both that ambiguity and the RK4 error.
 
-  Re(lambda) = growth rate gamma  == IVP ``state.last_growth_rate`` (per ky)
-  Im(lambda) = real frequency omega, same sign as GKW's frequencies.dat.
-
-Two matvec modes are supported:
-
-  - mode='rhs': matvec is L(g) = ops.linear_rhs(g_to_f(g), fields(g)).
-    Eigenvalues are returned directly (lambda).  ARPACK selector defaults to
-    'LR' (largest real part).  Convergence can be slow because the dominant
-    physical modes are not the largest-magnitude eigenvalues of L.
-
-  - mode='exp' (recommended): matvec is ``n_steps_per_matvec`` RK4 steps of
-    the linear operator; eigenvalues of the step operator are
-    mu = exp(lambda * n_steps * dt) (to RK4 accuracy) and the dominant
-    physical mode IS the largest-|mu| eigenvalue, so Arnoldi converges fast.
-    ARPACK selector defaults to 'LM'.  ``dt`` must be RK4-stable for the
-    linear operator (use the IVP's working dt).  Raw eigenvalues are
-    recovered as log(mu)/(n_steps*dt), which is branch-ambiguous when
-    |Im(lambda)|*n_steps*dt > pi; with the default ``refine=True`` each
-    converged eigenvector v is re-evaluated through the 'rhs' matvec via the
-    Rayleigh quotient lambda = <v, L v>/<v, v>, which removes both the log
-    branch ambiguity and the RK4 discretization error.
-
-Per-ky spectra: the linear operator block-diagonalizes over ky (and over
-connected-kx chains within each ky).  A global Arnoldi mixes all blocks and
-returns globally-dominant eigenvalues, whereas the IVP reports per-ky growth
-rates.  Pass ``ky_select=<iky>`` to restrict the solve to a single ky block
-(the start vector and every matvec output are masked to that ky column);
-the dominant eigenvalue then matches the IVP's ``state.last_growth_rate[iky]``.
+The operator block-diagonalizes over ky, so a global solve returns
+globally-dominant eigenvalues while the IVP reports per-ky rates. Passing
+``ky_select=<iky>`` restricts the problem to that block -- geometry and
+coefficients are sliced, not masked, so the solve is nky times smaller -- and
+the dominant eigenvalue then matches ``last_growth_rate[iky]``.
 
 Example
 -------
-    geometry = compute_geometry_from_input("input.dat")
-    params = gkparams_from_input_and_geometry("input.dat", geometry)
-    eigvals, eigvecs = eigensolve_linear(
+    eigvals, eigvecs = eigensolve(
         geometry, params, k=4, mode="exp", n_steps_per_matvec=50, ky_select=1
     )
     gamma, omega = eigvals[0].real, eigvals[0].imag
@@ -57,6 +46,7 @@ Example
 
 from __future__ import annotations
 
+import warnings
 from typing import Any, Callable, Dict, Optional, Tuple
 
 import jax
@@ -96,42 +86,62 @@ def _check_linear(params: Any) -> None:
         )
 
 
-def _ky_mask(df_shape: Tuple[int, ...], ky_select: Optional[int]) -> Optional[jnp.ndarray]:
-    """Boolean (1.0/0.0) mask over the trailing ky axis, broadcast to df_shape."""
-    if ky_select is None:
-        return None
-    nky = df_shape[-1]
-    iky = int(ky_select)
+# every ky-dependent geometry array carries ky as its trailing axis
+_KY_GEOM_KEYS = (
+    "ixminus", "ixplus", "krho", "kx_shift", "mode_label", "parseval",
+    "pos_par_grid_class", "s_shift", "valid_shift",
+)
+
+
+def _slice_ky_geometry(geometry: Dict[str, jnp.ndarray], iky: int) -> Dict[str, jnp.ndarray]:
+    """Geometry restricted to a single ky.
+
+    The linear operator is exactly block-diagonal over ky, so one block is an
+    independent problem of size n/nky. Restricting beats masking the full grid:
+    the work drops by nky and the masked-out directions no longer sit in the
+    Krylov space as an artificial kernel.
+    """
+    nky = int(np.shape(geometry["krho"])[0])
     if not (0 <= iky < nky):
-        raise ValueError(f"ky_select={ky_select} out of range [0, {nky})")
-    mask = jnp.zeros((nky,), dtype=jnp.float64).at[iky].set(1.0)
-    return mask.reshape((1,) * (len(df_shape) - 1) + (nky,))
+        raise ValueError(f"ky_select={iky} out of range [0, {nky})")
+    out = dict(geometry)
+    for key in _KY_GEOM_KEYS:
+        v = geometry[key]
+        if int(np.shape(v)[-1]) != nky:
+            raise ValueError(
+                f"geometry[{key!r}] has shape {np.shape(v)}, expected a trailing "
+                f"ky axis of size {nky}"
+            )
+        out[key] = v[..., iky:iky + 1]
+    return out
 
 
-def _build_rhs_matvec(geometry, params, pre, ops, ky_mask=None):
+def _embed_ky(vecs: np.ndarray, full_shape: Tuple[int, ...], iky: int) -> np.ndarray:
+    """Scatter single-ky eigenvectors back into the full df shape."""
+    out = np.zeros((vecs.shape[0],) + tuple(full_shape), dtype=vecs.dtype)
+    out[..., iky:iky + 1] = vecs
+    return out
+
+
+def _build_rhs_matvec(geometry, params, pre, ops):
     """Pure linear-operator matvec: L(dg) = linear_rhs(g_to_f(dg), fields(dg)).
 
     Identical to the operator integrated by ``gkstep_single`` when
-    ``params.non_linear`` is False (solver.py `_rhs`).  ``ky_mask`` restricts
-    input and output to one ky block (the operator is exactly block-diagonal
-    over ky in linear runs; the mask only guards against roundoff leakage).
+    ``params.non_linear`` is False (solver.py `_rhs`).
     """
 
     @jax.jit
     def matvec(df):
-        if ky_mask is not None:
-            df = df * ky_mask
         phi, apar, bpar = _compute_fields(df, geometry, params, pre)
         df_for_rhs = g_to_f(df, apar, params, pre) if apar is not None else df
-        out = ops.linear_rhs(df_for_rhs, phi, geometry, params, pre, apar=apar, bpar=bpar)
-        if ky_mask is not None:
-            out = out * ky_mask
-        return out
+        return ops.linear_rhs(
+            df_for_rhs, phi, geometry, params, pre, apar=apar, bpar=bpar
+        )
 
     return matvec
 
 
-def _build_exp_matvec(geometry, params, pre, ops, dt, n_steps=1, ky_mask=None):
+def _build_exp_matvec(geometry, params, pre, ops, dt, n_steps=1):
     """N-step linear RK4 matvec: M(df) = (one_step)^n_steps · df.
 
     Each one_step is M_1 = df + dt/6 (k1+2k2+2k3+k4); eigenvalues of M are
@@ -140,7 +150,7 @@ def _build_exp_matvec(geometry, params, pre, ops, dt, n_steps=1, ky_mask=None):
     improving Arnoldi convergence. Matches GKW's advance_large_step_explicit
     pattern in mat_vec_product_exp.
     """
-    rhs = _build_rhs_matvec(geometry, params, pre, ops, ky_mask=ky_mask)
+    rhs = _build_rhs_matvec(geometry, params, pre, ops)
 
     def one_step(df):
         k1 = rhs(df)
@@ -151,15 +161,9 @@ def _build_exp_matvec(geometry, params, pre, ops, dt, n_steps=1, ky_mask=None):
 
     @jax.jit
     def matvec(df):
-        if ky_mask is not None:
-            df = df * ky_mask
         if n_steps == 1:
-            out = one_step(df)
-        else:
-            out = jax.lax.fori_loop(0, n_steps, lambda _, x: one_step(x), df)
-        if ky_mask is not None:
-            out = out * ky_mask
-        return out
+            return one_step(df)
+        return jax.lax.fori_loop(0, n_steps, lambda _, x: one_step(x), df)
 
     return matvec
 
@@ -178,6 +182,14 @@ def _rayleigh_refine(rhs_matvec_flat: Callable, eigvecs_flat: np.ndarray) -> np.
         lv = rhs_matvec_flat(v)
         out[i] = complex(jnp.vdot(v, lv) / jnp.vdot(v, v))
     return out
+
+
+def _residual(rhs_matvec: Callable, lam: complex, vec: np.ndarray) -> float:
+    """||L v - lambda v|| / (|lambda| ||v||) against the direct operator."""
+    v = jnp.asarray(vec, dtype=jnp.complex128)
+    return float(
+        jnp.linalg.norm(rhs_matvec(v) - lam * v) / (abs(lam) * jnp.linalg.norm(v))
+    )
 
 
 def eigensolve_linear(
@@ -199,6 +211,7 @@ def eigensolve_linear(
     n_steps_per_matvec: int = 1,
     ky_select: Optional[int] = None,
     refine: bool = True,
+    return_residuals: bool = False,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Top-k eigenvalues of the gyaradax linear operator (matrix-free ARPACK).
 
@@ -214,7 +227,10 @@ def eigensolve_linear(
         k: number of eigenpairs to return.
         which: ARPACK selector. Defaults to 'LM' for mode='exp' (largest
             |mu| == largest growth rate) and 'LR' for mode='rhs'.
-        tol: ARPACK relative tolerance.
+        tol: ARPACK relative tolerance. Together with `ncv` and
+            `n_steps_per_matvec` this is the accuracy/cost dial: at n~3e5 the
+            same eigenvalue costs 165 s at tol=1e-10 with the default ncv and
+            75 s at tol=1e-7 with ncv=60.
         mode: 'exp' (eigenvalues of the RK4 step operator, recommended) or
             'rhs' (direct eigenvalues of L).
         backend: solver backend ('jax' recommended; 'cuda' is not differentiable).
@@ -226,11 +242,14 @@ def eigensolve_linear(
         ky_select: restrict the solve to one ky block (see module docstring).
         refine: mode='exp' only — re-evaluate each eigenvalue with a Rayleigh
             quotient through the 'rhs' matvec (fixes log-branch ambiguity).
+        return_residuals: also return ||L v - lambda v|| / (|lambda| ||v||)
+            per eigenpair, measured against the direct 'rhs' operator.
 
     Returns:
         eigenvalues: shape (k,), complex (lambda = gamma + i*omega); sorted by
             descending Re(lambda).
         eigenvectors: shape (k, *df_shape), complex; eigvecs[i] matches eigvals[i].
+        residuals: shape (k,), float, only when `return_residuals`.
     """
     if mode not in ("rhs", "exp"):
         raise ValueError(f"mode must be 'rhs' or 'exp', got {mode!r}")
@@ -238,9 +257,13 @@ def eigensolve_linear(
 
     kinetic = not bool(params.adiabatic_electrons)
     n_species = _resolve_n_species(params, n_species)
+    full_shape = _df_shape(geometry, n_species=n_species, kinetic=kinetic)
+    iky = None if ky_select is None else int(ky_select)
+    if iky is not None:
+        geometry = _slice_ky_geometry(geometry, iky)
+        pre = linear_precompute(geometry, params)
     df_shape = _df_shape(geometry, n_species=n_species, kinetic=kinetic)
     n = int(np.prod(df_shape))
-    ky_mask = _ky_mask(df_shape, ky_select)
 
     if pre is None:
         pre = linear_precompute(geometry, params)
@@ -252,7 +275,7 @@ def eigensolve_linear(
         mixed_precision=getattr(params, "mixed_precision", False),
     )
 
-    rhs_matvec = _build_rhs_matvec(geometry, params, pre, ops, ky_mask=ky_mask)
+    rhs_matvec = _build_rhs_matvec(geometry, params, pre, ops)
     if mode == "rhs":
         jmatvec = rhs_matvec
         which = which or "LR"
@@ -265,7 +288,6 @@ def eigensolve_linear(
             ops,
             jnp.asarray(dt_val, dtype=jnp.float64),
             n_steps=n_steps_per_matvec,
-            ky_mask=ky_mask,
         )
         which = which or "LM"
 
@@ -283,8 +305,6 @@ def eigensolve_linear(
         v0 = (rng.standard_normal(n) + 1j * rng.standard_normal(n)).astype(np.complex128)
     else:
         v0 = np.asarray(v0, dtype=np.complex128).reshape(-1)
-    if ky_mask is not None:
-        v0 = v0 * np.asarray(jnp.broadcast_to(ky_mask, df_shape)).reshape(-1)
     v0 = v0 / np.linalg.norm(v0)
 
     eigvals, eigvecs = spla.eigs(
@@ -311,179 +331,41 @@ def eigensolve_linear(
     eigvecs_reshaped = np.stack(
         [eigvecs[:, i].reshape(df_shape) for i in range(eigvals.shape[0])], axis=0
     )
-    return eigvals, eigvecs_reshaped
+    res = None
+    if return_residuals:
+        res = np.array([
+            _residual(rhs_matvec, eigvals[i], eigvecs_reshaped[i])
+            for i in range(eigvals.shape[0])
+        ])
+    if iky is not None:
+        eigvecs_reshaped = _embed_ky(eigvecs_reshaped, full_shape, iky)
+    if not return_residuals:
+        return eigvals, eigvecs_reshaped
+    return eigvals, eigvecs_reshaped, res
 
 
-def _make_arnoldi(matvec_flat: Callable, ncv: int):
-    """Build a JIT'd Arnoldi iteration with `matvec_flat` closed over.
-
-    Returns a function `arnoldi(v0_flat) -> (V, H)` where V is (ncv+1, n)
-    orthonormal and H is (ncv+1, ncv) upper Hessenberg. The leading-k
-    eigenvalues of L are approximated by the eigenvalues of H[:ncv, :ncv].
-    Two-pass modified Gram-Schmidt for numerical stability.  Breakdown
-    (norm of the new direction ~ 0, i.e. an exact invariant subspace) is
-    guarded with a safe division; the corresponding subdiagonal entry of H
-    is ~0 so the Ritz values of the converged block are unaffected.
-    """
-
-    @jax.jit
-    def arnoldi(v0_flat: jnp.ndarray):
-        n = v0_flat.shape[0]
-        dtype = v0_flat.dtype
-
-        V = jnp.zeros((ncv + 1, n), dtype=dtype)
-        H = jnp.zeros((ncv + 1, ncv), dtype=dtype)
-        V = V.at[0].set(v0_flat / jnp.linalg.norm(v0_flat))
-
-        def step(j, state):
-            V, H = state
-            w = matvec_flat(V[j])
-            mask = jnp.arange(ncv + 1) <= j
-            # two-pass Gram-Schmidt
-            coeffs1 = V.conj() @ w
-            coeffs1 = jnp.where(mask, coeffs1, jnp.zeros_like(coeffs1))
-            w = w - coeffs1 @ V
-            coeffs2 = V.conj() @ w
-            coeffs2 = jnp.where(mask, coeffs2, jnp.zeros_like(coeffs2))
-            w = w - coeffs2 @ V
-            coeffs = coeffs1 + coeffs2
-
-            norm_w = jnp.linalg.norm(w)
-            col = jnp.where(mask, coeffs, jnp.zeros_like(coeffs))
-            col = col.at[j + 1].set(norm_w)
-            H = H.at[:, j].set(col)
-            # breakdown guard: norm_w ~ 0 means an invariant subspace was hit
-            safe_norm = jnp.where(norm_w > 1e-300, norm_w, 1.0)
-            V = V.at[j + 1].set(w / safe_norm)
-            return V, H
-
-        V, H = jax.lax.fori_loop(0, ncv, step, (V, H))
-        return V, H
-
-    return arnoldi
 
 
-def eigensolve_linear_jax(
+
+
+def eigensolve(
     geometry: Dict[str, jnp.ndarray],
     params: Any,
     *,
-    pre=None,
-    n_species: int = 1,
-    k: int = 4,
-    ncv: int = 20,
-    mode: str = "exp",
-    backend: str = "jax",
-    seed: int = 42,
-    v0: Optional[jnp.ndarray] = None,
-    dt: Optional[float] = None,
-    n_steps_per_matvec: int = 1,
-    ky_select: Optional[int] = None,
-    refine: bool = True,
-    return_eigvecs: bool = True,
+    solver: str = "jax",
+    **kwargs,
 ):
-    """Pure-JAX Arnoldi eigensolve (single fixed-size Krylov subspace).
+    """Top-k eigenpairs of the linear operator, via the JAX Arnoldi or ARPACK.
 
-    No scipy LinearOperator host roundtrips per matvec; the entire Arnoldi
-    loop is one jitted computation.  No restarts: accuracy is controlled by
-    ``ncv`` and (for mode='exp') by ``n_steps_per_matvec``.
-
-    `n_steps_per_matvec` (only for mode='exp'): each Arnoldi matvec advances
-    the df by this many RK4 steps. Larger values widen the magnitude gap
-    between unstable/stable modes — Arnoldi converges in fewer iterations.
-    For typical ITG (gamma ~ 0.3, dt ~ 0.01), use ~50-100.
-
-    ``ky_select``/``refine``: see :func:`eigensolve_linear`.
-
-    Returns:
-        eigvals: (k,) complex (lambda = gamma + i*omega), sorted by
-            descending Re(lambda).
-        eigvecs: (k, *df_shape) complex if return_eigvecs else None.
+    `solver='jax'` uses the thick-restarted on-device Arnoldi,
+    `solver='arpack'` the scipy reference. Remaining keywords are forwarded to
+    the chosen driver; see those functions for the knobs each accepts.
     """
-    if mode not in ("rhs", "exp"):
-        raise ValueError(f"mode must be 'rhs' or 'exp', got {mode!r}")
-    _check_linear(params)
-
-    kinetic = not bool(params.adiabatic_electrons)
-    n_species = _resolve_n_species(params, n_species)
-    df_shape = _df_shape(geometry, n_species=n_species, kinetic=kinetic)
-    n = int(np.prod(df_shape))
-    ky_mask = _ky_mask(df_shape, ky_select)
-
-    if pre is None:
-        pre = linear_precompute(geometry, params)
-    ops = create_ops(
-        pre,
-        backend=backend,
-        use_z2z=getattr(params, "use_z2z", False),
-        mixed_precision=getattr(params, "mixed_precision", False),
-    )
-
-    rhs_mv = _build_rhs_matvec(geometry, params, pre, ops, ky_mask=ky_mask)
-    if mode == "rhs":
-        _mv = rhs_mv
-        dt_eff = None
-    else:
-        dt_val = float(dt) if dt is not None else float(params.dt)
-        _mv = _build_exp_matvec(
-            geometry,
-            params,
-            pre,
-            ops,
-            jnp.asarray(dt_val, dtype=jnp.float64),
-            n_steps=n_steps_per_matvec,
-            ky_mask=ky_mask,
-        )
-        dt_eff = dt_val * n_steps_per_matvec
-
-    # flat-vector matvec (df_shape is closed over)
-    def matvec_flat(v):
-        return _mv(v.reshape(df_shape)).reshape(-1)
-
-    if v0 is None:
-        key = jax.random.PRNGKey(seed)
-        k1, k2 = jax.random.split(key)
-        v0_flat = (jax.random.normal(k1, (n,), dtype=jnp.float64)
-                   + 1j * jax.random.normal(k2, (n,), dtype=jnp.float64))
-    else:
-        v0_flat = jnp.asarray(v0, dtype=jnp.complex128).reshape(-1)
-    if ky_mask is not None:
-        v0_flat = (v0_flat.reshape(df_shape) * ky_mask).reshape(-1)
-    v0_flat = v0_flat / jnp.linalg.norm(v0_flat)
-
-    arnoldi = _make_arnoldi(matvec_flat, ncv)
-    V, H = arnoldi(v0_flat)
-
-    # eigendecompose the small Hessenberg on host
-    H_host = np.asarray(H[:ncv, :ncv])
-    ritz_vals, ritz_vecs = np.linalg.eig(H_host)
-
-    # mode='exp': convert Ritz of M = exp-step operator back to lambda
-    if mode == "exp":
-        with np.errstate(divide="ignore", invalid="ignore"):
-            eigvals = np.log(ritz_vals) / dt_eff
-        eigvals = np.where(np.isfinite(eigvals), eigvals, -np.inf + 0j)
-    else:
-        eigvals = ritz_vals
-    order = np.argsort(-eigvals.real)
-
-    eigvals = eigvals[order][:k]
-
-    # reconstruct full-space eigenvectors: y_i = V[:ncv].T @ ritz_vecs[:, i]
-    V_host = np.asarray(V[:ncv])
-    rv = ritz_vecs[:, order][:, :k]
-    eigvecs_full_flat = (V_host.T @ rv).T  # (k, n)
-
-    if mode == "exp" and refine:
-        eigvals = _rayleigh_refine(
-            lambda v: rhs_mv(v.reshape(df_shape)).reshape(-1), eigvecs_full_flat
-        )
-        order2 = np.argsort(-eigvals.real)
-        eigvals = eigvals[order2]
-        eigvecs_full_flat = eigvecs_full_flat[order2]
-
-    if not return_eigvecs:
-        return eigvals, None
-    return eigvals, eigvecs_full_flat.reshape((eigvals.shape[0],) + df_shape)
+    if solver == "jax":
+        return eigensolve_linear_jax(geometry, params, **kwargs)
+    if solver == "arpack":
+        return eigensolve_linear(geometry, params, **kwargs)
+    raise ValueError(f"solver must be 'jax' or 'arpack', got {solver!r}")
 
 
 def random_initial_df(
@@ -507,3 +389,226 @@ def random_initial_df(
     x = rng.standard_normal(shape) + 1j * rng.standard_normal(shape)
     x = x / np.linalg.norm(x)
     return jnp.asarray(x * amp, dtype=jnp.complex128)
+
+
+def eigensolve_ky_spectrum(
+    geometry: Dict[str, jnp.ndarray],
+    params: Any,
+    *,
+    pre=None,
+    kys=None,
+    k: int = 2,
+    solver: str = "jax",
+    **kwargs,
+) -> Dict[int, Tuple[np.ndarray, np.ndarray]]:
+    """Top-k eigenpairs per ky block, TGLF style.
+
+    The linear operator is exactly block-diagonal over ky, so each block is an
+    independent problem of size n/nky; solving them separately is both cheaper
+    and the form a saturation rule wants (a few unstable roots per ky). Blocks
+    are solved in sequence here; they are independent and can be fanned out.
+
+    Returns {iky: (eigenvalues, residuals)}, each sorted by descending growth
+    rate.
+    """
+    if pre is None:
+        pre = linear_precompute(geometry, params)
+    nky = int(np.asarray(geometry["krho"]).shape[0])
+    if kys is None:
+        kys = range(nky)
+    out = {}
+    for iky in kys:
+        vals, _vecs, res = eigensolve(
+            geometry, params, solver=solver, pre=pre, k=k, ky_select=int(iky),
+            return_residuals=True, **kwargs
+        )
+        out[int(iky)] = (vals, res)
+    return out
+
+def _arnoldi_factory(matvec_flat: Callable, m: int, dtype, start: int = 0):
+    """Jitted Arnoldi filling columns `start`..m-1, two-pass Gram-Schmidt.
+
+    With ``start > 0`` the first `start` basis vectors and the leading block
+    of H are taken as given, which is what a thick restart needs.
+    """
+
+    @jax.jit
+    def arnoldi(V, H):
+        def step(j, state):
+            V, H = state
+            w = matvec_flat(V[j]).astype(dtype)
+            keep = jnp.arange(m + 1) <= j
+            c1 = jnp.where(keep, V.conj() @ w, 0)
+            w = w - c1 @ V
+            c2 = jnp.where(keep, V.conj() @ w, 0)
+            w = w - c2 @ V
+            nw = jnp.linalg.norm(w)
+            col = jnp.where(keep, c1 + c2, 0).at[j + 1].set(nw)
+            safe = jnp.where(nw > 1e-30, nw, 1.0)
+            return V.at[j + 1].set(w / safe), H.at[:, j].set(col)
+
+        return jax.lax.fori_loop(start, m, step, (V, H))
+
+    return arnoldi
+
+
+def _thick_restart(V, H, m, k, wanted):
+    """Collapse an m-step factorization onto the k wanted Ritz directions.
+
+    Returns the restarted (V, H) plus the Arnoldi residual bound. V holds an
+    orthonormal basis of the k wanted Ritz directions followed by the residual
+    vector, so the next cycle continues from column k instead of starting over.
+    """
+    Hs = np.asarray(H[:m, :m])
+    h_last = complex(np.asarray(H[m, m - 1]))
+    theta, Y = np.linalg.eig(Hs)
+    sel = np.argsort(wanted(theta))[:k]
+    Q, _ = np.linalg.qr(Y[:, sel])
+    T = Q.conj().T @ Hs @ Q
+    resid = (np.abs(h_last) * np.abs(Y[m - 1, sel])
+             / np.maximum(np.abs(theta[sel]), 1e-300))
+
+    Vk = jnp.asarray(Q, dtype=V.dtype).T @ V[:m]
+    V_new = jnp.zeros_like(V).at[:k].set(Vk).at[k].set(V[m])
+    H_new = jnp.zeros_like(H)
+    H_new = H_new.at[:k, :k].set(jnp.asarray(T, dtype=H.dtype))
+    H_new = H_new.at[k, :k].set(jnp.asarray(h_last * Q[m - 1, :], dtype=H.dtype))
+    return V_new, H_new, float(np.max(resid))
+
+
+def eigensolve_linear_jax(
+    geometry: Dict[str, jnp.ndarray],
+    params: Any,
+    *,
+    pre=None,
+    n_species: int = 1,
+    k: int = 4,
+    ncv: int = 40,
+    mode: str = "exp",
+    backend: str = "jax",
+    seed: int = 42,
+    v0: Optional[jnp.ndarray] = None,
+    dt: Optional[float] = None,
+    n_steps_per_matvec: int = 1,
+    ky_select: Optional[int] = None,
+    refine: bool = True,
+    tol: float = 1e-6,
+    max_restarts: int = 40,
+    return_eigvecs: bool = True,
+    return_residuals: bool = False,
+):
+    """Thick-restarted Arnoldi in JAX, matching :func:`eigensolve_linear`.
+
+    The Krylov window stays at `ncv`; each cycle keeps all `k` wanted Ritz
+    directions and extends from column `k`, so accuracy no longer requires an
+    unaffordable `ncv`. Convergence uses the Arnoldi residual bound
+    |h_{m+1,m} y_m| / |theta|, which costs no extra matvec.
+
+    `tol` is the accuracy/cost dial: a restart cycle costs `ncv - k` matvecs.
+    """
+    if mode not in ("rhs", "exp"):
+        raise ValueError(f"mode must be 'rhs' or 'exp', got {mode!r}")
+    _check_linear(params)
+
+    kinetic = not bool(params.adiabatic_electrons)
+    n_species = _resolve_n_species(params, n_species)
+    full_shape = _df_shape(geometry, n_species=n_species, kinetic=kinetic)
+    iky = None if ky_select is None else int(ky_select)
+    if iky is not None:
+        geometry = _slice_ky_geometry(geometry, iky)
+        pre = linear_precompute(geometry, params)
+    df_shape = _df_shape(geometry, n_species=n_species, kinetic=kinetic)
+    n = int(np.prod(df_shape))
+
+    if pre is None:
+        pre = linear_precompute(geometry, params)
+    ops = create_ops(
+        pre,
+        backend=backend,
+        use_z2z=getattr(params, "use_z2z", False),
+        mixed_precision=getattr(params, "mixed_precision", False),
+    )
+
+    rhs_mv = _build_rhs_matvec(geometry, params, pre, ops)
+    if mode == "rhs":
+        _mv = rhs_mv
+        dt_eff = None
+    else:
+        dt_val = float(dt) if dt is not None else float(params.dt)
+        _mv = _build_exp_matvec(
+            geometry, params, pre, ops, jnp.asarray(dt_val, dtype=jnp.float64),
+            n_steps=n_steps_per_matvec,
+        )
+        dt_eff = dt_val * n_steps_per_matvec
+
+    def matvec_flat(v):
+        return _mv(v.reshape(df_shape)).reshape(-1)
+
+    if v0 is None:
+        key = jax.random.PRNGKey(seed)
+        k1, k2 = jax.random.split(key)
+        v = (jax.random.normal(k1, (n,), dtype=jnp.float64)
+             + 1j * jax.random.normal(k2, (n,), dtype=jnp.float64))
+    else:
+        v = jnp.asarray(v0, dtype=jnp.complex128).reshape(-1)
+    v = v / jnp.linalg.norm(v)
+
+    first = _arnoldi_factory(matvec_flat, ncv, jnp.complex128, start=0)
+    cont = _arnoldi_factory(matvec_flat, ncv, jnp.complex128, start=k)
+    # step operator wants the largest |mu|, L the largest real part
+    wanted = (lambda w: -np.abs(w)) if mode == "exp" else (lambda w: -w.real)
+
+    V = jnp.zeros((ncv + 1, n), dtype=jnp.complex128).at[0].set(v)
+    H = jnp.zeros((ncv + 1, ncv), dtype=jnp.complex128)
+    V, H = first(V, H)
+    converged = False
+    for _ in range(max_restarts):
+        V, H, resid = _thick_restart(V, H, ncv, k, wanted)
+        converged = resid < tol
+        if converged:
+            break
+        V, H = cont(V, H)
+    else:
+        # the loop ended on an extension, collapse it so H[:k, :k] is the block
+        V, H, resid = _thick_restart(V, H, ncv, k, wanted)
+    if not converged:
+        warnings.warn(
+            f"eigensolve_linear_jax: residual bound {resid:.2e} > tol {tol:g} "
+            f"after {max_restarts} restarts; raise max_restarts or ncv.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+    # V[:k] spans the wanted subspace, the Ritz pairs live in the k x k block
+    Tk = np.asarray(H[:k, :k])
+    theta, Z = np.linalg.eig(Tk)
+    eigvecs_flat = np.asarray(jnp.asarray(Z, dtype=jnp.complex128).T @ V[:k])
+    if mode == "exp":
+        if refine:
+            eigvals = _rayleigh_refine(matvec_rhs_flat(rhs_mv, df_shape), eigvecs_flat)
+        else:
+            with np.errstate(divide="ignore", invalid="ignore"):
+                eigvals = np.log(theta) / dt_eff
+    else:
+        eigvals = theta
+
+    order = np.argsort(-eigvals.real)
+    eigvals = eigvals[order]
+    eigvecs_flat = eigvecs_flat[order]
+
+    res = None
+    if return_residuals:
+        res = np.array([
+            _residual(rhs_mv, eigvals[i], eigvecs_flat[i].reshape(df_shape))
+            for i in range(eigvals.shape[0])
+        ])
+    out_vecs = eigvecs_flat.reshape((eigvals.shape[0],) + df_shape) if return_eigvecs else None
+    if out_vecs is not None and iky is not None:
+        out_vecs = _embed_ky(out_vecs, full_shape, iky)
+    if not return_residuals:
+        return eigvals, out_vecs
+    return eigvals, out_vecs, res
+
+
+def matvec_rhs_flat(rhs_mv: Callable, df_shape) -> Callable:
+    """Flat-vector view of the direct operator, for the Rayleigh refinement."""
+    return lambda v: rhs_mv(v.reshape(df_shape)).reshape(-1)
