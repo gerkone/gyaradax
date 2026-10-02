@@ -487,3 +487,56 @@ class TestAPI:
         )
         assert evec.shape[1] == nsp
         assert np.all(np.isfinite(ev))
+
+
+# ── (vii) multi-chain ky: the regime nkx=1 cases cannot reach ───────────────
+
+
+class TestMultiChain:
+    """With nkx > 1 a ky slab holds several connected-kx chains.
+
+    `normalize_per_ky` keeps every chain at equal amplitude while
+    `last_growth_rate` is measured on the kx=0 chain, so a phase probe that
+    scans the whole slab lands on the wrong chain and reports a frequency
+    belonging to a different mode. Every other case here runs at nkx=1, where
+    a ky has exactly one chain and that cannot happen.
+    """
+
+    @staticmethod
+    def _case():
+        geom = compute_geometry(
+            q=1.4, shat=0.78, eps=0.19, ns=6, nkx=5, nky=4,
+            nvpar=6, nmu=3, nperiod=1, krhomax=0.9,
+        )
+        params = GKParams(
+            dt=0.01, naverage=100, disp_par=1.0, disp_vp=0.2,
+            dvp=float(geom["dvp"]), sgr_dist=float(geom["sgr_dist"]),
+            kxmax=float(geom["kxmax"]), kymax=float(geom["kymax"]),
+            rlt=6.9, rln=2.2, mas=1.0, tmp=1.0, de=1.0, signz=1.0,
+            vthrat=1.0, shat=0.78, q=1.4, eps=0.19,
+            kthnorm=float(np.asarray(geom["kthnorm"]).reshape(-1)[0]),
+            adiabatic_electrons=True,
+        )
+        return geom, params, 1
+
+    def test_slab_really_has_several_chains(self):
+        geom, _, _ = self._case()
+        labels = np.asarray(geom["mode_label"])
+        counts = [len(np.unique(labels[:, iky])) for iky in range(labels.shape[1])]
+        assert max(counts) > 1, f"no multi-chain ky, chains per ky: {counts}"
+
+    def test_dominant_matches_ivp_on_every_growing_ky(self):
+        geom, params, nsp = self._case()
+        pre = linear_precompute(geom, params)
+        gamma, lam, _ = _ivp_reference(geom, params, pre, nsp, tol=1e-7, max_blocks=600)
+        checked = 0
+        for iky in range(1, len(geom["krho"])):
+            if not np.isfinite(lam[iky]) or gamma[iky] < 1e-3:
+                continue
+            ev, _ = eigensolve_linear(
+                geom, params, pre=pre, k=1, mode="exp", tol=1e-10,
+                n_steps_per_matvec=25, ky_select=iky,
+            )
+            _assert_eig_matches_ivp(ev[0], gamma[iky], lam[iky], rtol=2e-2)
+            checked += 1
+        assert checked, "no growing ky to compare"
