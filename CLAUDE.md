@@ -6,7 +6,7 @@ electromagnetic A_parallel (shear Alfvén via Ampere's law, mixed variable g)
 and B_parallel (magnetic compression via coupled Poisson-Bpar solve),
 linearized Fokker-Planck collision operator (pitch-angle, energy, friction;
 adiabatic + single ion MVP), and an optional CUDA backend for fused
-stencil and cuFFT kernels.
+stencil and cuFFT kernels (electrostatic and electromagnetic).
 
 ## File map
 
@@ -61,8 +61,9 @@ gksimulate / gk_run_batched          <- entry points (simulate.py)
        |    |    +- _phi_kinetic     <- kinetic: multi-species Poisson
        |    |    +- calculate_apar   <- EM: Ampere's law for A_parallel (when nlapar=True)
        |    |    +- g_to_f           <- EM: mixed variable g -> physical f (when nlapar=True)
-       |    +- ops.linear_rhs        <- Terms I, II, IV, V, VII, VIII + dissipation (backend dispatch)
+       |    +- ops.linear_rhs_from_g <- Terms I, II, IV, V, VII, VIII, X, XI + dissipation on f = g_to_f(g)
        |    |    +- _linear_rhs_core <- inner RHS (JAX backend, 5D/6D, uses chi=phi-2*v_R*v_par*A_par)
+       |    |    +- linear_rhs_fused <- CUDA backend: all species in one launch, g -> f formed in-kernel
        |    +- ops.nonlinear_term_iii<- Term III: pseudospectral ExB (backend dispatch)
        |         +- _nonlinear_term_iii_core <- 2D FFT Poisson bracket per s-slice (JAX backend)
        +- estimate_timestep          <- adaptive CFL (nonlinear + von Neumann + field)
@@ -72,7 +73,7 @@ gksimulate / gk_run_batched          <- entry points (simulate.py)
 linear_precompute                    <- one-time setup of all static coefficients
   +- _precompute_shared              <- stencils, mode connectivity, FFT metadata
   +- _compute_species_coeffs         <- per-species: Bessel, Maxwellian, drifts, drives
-  +- _fuse_stencils                  <- merge streaming + dissipation into 9-point stencil
+  +- _stencil_class_tables          <- fused streaming + dissipation stencils per (class, shift)
   +- precompute_phi_kinetic          <- static arrays for kinetic field solve
   +- precompute_apar                 <- EM: Ampere weights, g2f factor, chi factor (when nlapar=True)
 
@@ -97,8 +98,9 @@ create_ops(pre, backend="auto", use_z2z=False, mixed_precision=True)
   backend="auto" -> CUDAOps if GPU + libgyaradax_cuda.so, else JAXOps
 ```
 
-SolverOps interface: `linear_rhs()`, `nonlinear_term_iii()`.
-5D input (adiabatic), 6D input (kinetic: vmap over species in JAX, loop in CUDA).
+SolverOps interface: `linear_rhs()`, `linear_rhs_from_g()`, `nonlinear_term_iii()`
+(`apar`/`bpar` kwargs build the EM potential chi).
+5D input (adiabatic), 6D input (kinetic: vmap over species in JAX, one batched launch in CUDA).
 
 ## GKW <-> gyaradax mapping
 
@@ -141,7 +143,8 @@ SolverOps interface: `linear_rhs()`, `nonlinear_term_iii()`.
   For kinetic electrons, the field CFL (electron Alfven frequency) dominates.
   With finite beta, the Alfven CFL is tighter: includes beta in field period.
 - **Grid**: 5D `(vpar, mu, s, kx, ky)` for adiabatic; 6D `(species, ...)` for kinetic.
-- **Backends**: JAX (default, differentiable, R2C/Z2Z), CUDA (fused kernels, Z2Z only, ~10x NL speedup).
+- **Backends**: JAX (default, differentiable, R2C/Z2Z), CUDA (fused kernels, Z2Z only, ~10x NL speedup;
+  covers A_par/B_par, conservative parallel dissipation and collisions — see docs/NOTES.md §10.14).
 
 ## Running tests
 
@@ -170,14 +173,14 @@ the config — there is no `--kinetic` flag any more.
 ```bash
 gyaradax run configs/iteration_13.yaml --device=N     # adiabatic
 gyaradax run configs/kinetic.yaml --device=N          # kinetic (auto-detected)
-gyaradax run configs/nl_em_apar.yaml --n-gpus-vp=4    # EM, sharded over 4 GPUs
+gyaradax run configs/nl_em_apar.yaml --n-gpus-mu=4    # EM, sharded over 4 GPUs
 gyaradax bench configs/adiabatic_a.yaml --backend=cuda
 gyaradax info
 ```
 
 Add `--from-scratch` to cold-start instead of resuming from K-files.
 Add `--block-size=300` for faster checkpoint cadence.
-Add `--backend=cuda` to force CUDA backend (not available for EM runs).
+Add `--backend=cuda` to force CUDA backend.
 `scripts/run.py` is a back-compat shim that forwards to `gyaradax run`.
 
 ## Building the CUDA backend
@@ -196,6 +199,8 @@ cmake --install .
 ```
 
 Requires CUDA Toolkit >= 13.1, compute capability >= 80.
+One library can serve several GPU generations, e.g. `-DGPU_ARCHITECTURES="90;103"`
+(H100 + B300).
 
 On older toolkits, override the two architecture lists — `GPU_ARCHITECTURES`
 (the kernels) and `LTO_ARCHITECTURES` (the cuFFT LTO callbacks). `compute_100`
@@ -219,6 +224,13 @@ are auto-detected by CMake — look for `CUDA::cufft from pip:` in configure out
   terms and field solver use FP64.
 - **CUDA backend**: Z2Z only (use_z2z flag ignored). FFI custom calls are not
   AD-differentiable; gradient tests use JAX backend for nonlinear path.
+- **Parallel stencils**: both backends read the per-class stencil tables
+  (`s_upar_tab`, `s_t7_tab`, `s_disp_par_tab`, indexed by `par_stencil_class`);
+  the full 9 x 6D stencil arrays are no longer stored. The CUDA kernel also reads
+  the EM velocity factors (`apar_chi_vfac`, `g2f_vfac`) from `linear_precompute`.
+- **Large grids (JAX)**: the bracket loops over species / vpar chunks once one
+  real-space intermediate would exceed `_NL_CHUNK_BYTES` (1 GiB); smaller grids
+  run the single batched path.
 
 ## Multi-GPU Sharding
 
@@ -257,6 +269,15 @@ The mesh is built automatically from available GPUs. Arrays are sharded as:
 **Note**: Field solves require all-reduce operations over velocity axes,
 which can limit scaling for small grids. Sharding is most beneficial for
 large grids (≥128×32 velocity space) that don't fit on a single GPU.
+
+`gksolve` passes the mesh to `create_ops(mesh=...)`. GSPMD cannot partition
+the FFI kernels or the bracket's FFTs (it all-gathers their operands), so the
+bracket (both backends) and the CUDA linear / field-moment kernels run on the
+local (sp, vp, mu) blocks via `sharding.velocity_map` (`shard_map`); sharding
+vpar adds a 2-plane halo exchange (`sharding.vpar_halo`) per stage. Prefer
+`n_gpus_mu` and `n_gpus_sp` (no halo); the JAX vpar stencil still gathers df
+along vpar under GSPMD. Multi-GPU needs NCCL (`nvidia-nccl-cu13`, in the
+`cuda13` extra). See docs/NOTES.md §10.14.
 
 ## Skills
 

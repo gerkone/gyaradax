@@ -70,20 +70,6 @@ def _mesh_request(args: argparse.Namespace, facts: ConfigFacts) -> tuple[int, in
     )
 
 
-def _resolve_backend(args: argparse.Namespace, facts: ConfigFacts) -> str | None:
-    """Pick a backend. The CUDA backend has no electromagnetic ``linear_rhs``,
-    so an explicit ``cuda`` on an EM run is an error and ``auto`` falls back."""
-    electromagnetic = facts["nlapar"] or facts["nlbpar"]
-    if args.backend == "cuda" and electromagnetic:
-        raise SystemExit(
-            "error: the CUDA backend does not implement the electromagnetic "
-            "linear_rhs coupling (nlapar/nlbpar). Use --backend jax."
-        )
-    if args.backend == "auto" and electromagnetic:
-        return "jax"
-    return args.backend
-
-
 def _configure_env(args: argparse.Namespace, facts_list: Sequence[ConfigFacts]) -> tuple[int, ...]:
     """Set device visibility and XLA flags before JAX initialises its backend."""
     mesh = max((_mesh_request(args, f) for f in facts_list), key=lambda m: m[0] * m[1] * m[2])
@@ -193,7 +179,7 @@ def _setup_run(config_path: str, args: argparse.Namespace) -> RunSetup:
         overrides["mixed_precision"] = False
     if args.z2z is not None:
         overrides["use_z2z"] = args.z2z
-    backend = _resolve_backend(args, facts)
+    backend = args.backend
     if backend:
         overrides["backend"] = backend
     sp, vp, mu = _mesh_request(args, facts)

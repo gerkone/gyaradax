@@ -18,7 +18,7 @@ dependencies = [
 gyaradax = "gyaradax.cli:main"
 
 [project.optional-dependencies]
-cuda13 = ["jax[cuda13-local]"]
+cuda13 = ["jax[cuda13-local]", "nvidia-mathdx", "nvidia-nccl-cu13"]
 dev = ["pytest", "ruff", "black"]
 
 [tool.setuptools.packages.find]

@@ -8,6 +8,8 @@
 #include <cufftXt.h>
 #include <cuda_runtime.h>
 
+#include "bracket_v6_info.cuh"
+
 struct V5StoreInfo {
     double2*    out_packed;      // [batch, nkx, nky] -- FFI output buffer
     const int*  inverse_jind;    // [mrad] dense -> packed, -1 if absent
@@ -65,3 +67,35 @@ __device__ void d_v5_store_fp32_cb(
 
 __device__ cufftJITCallbackStoreZ d_v5_store_cb_addr       = d_v5_store_cb;
 __device__ cufftJITCallbackStoreC d_v5_store_fp32_cb_addr  = d_v5_store_fp32_cb;
+
+// v6 column pass: [mrad][n_df][nky] -> packed [n_df, nkx, nky], dropping dealiased kx rows
+template <class T>
+__device__ __forceinline__ static void v6_store(unsigned long long offset, T element, const V6StoreInfo* si)
+{
+    const unsigned long long row = (unsigned long long)si->n_df * si->nky;
+    const int i = (int)(offset / row);
+    const int i_pack = si->inverse_jind[i];
+    if (i_pack < 0) return;
+    const int c = (int)(offset - (unsigned long long)i * row);
+    const int gb = c / si->nky, k = c - gb * si->nky;
+    double2 v = make_double2((double)element.x, (double)element.y);
+    if (i_pack == si->ixzero && k == si->iyzero) v = make_double2(0.0, 0.0);
+    si->out_packed[((unsigned long long)gb * si->nkx + i_pack) * si->nky + k] = v;
+}
+
+__device__ void d_v6_store_fp32_cb(
+    void *dataOut, unsigned long long offset, cufftComplex element,
+    void *callerInfo, void *sharedPointer)
+{
+    v6_store(offset, element, (const V6StoreInfo*)callerInfo);
+}
+
+__device__ void d_v6_store_fp64_cb(
+    void *dataOut, unsigned long long offset, cufftDoubleComplex element,
+    void *callerInfo, void *sharedPointer)
+{
+    v6_store(offset, element, (const V6StoreInfo*)callerInfo);
+}
+
+__device__ cufftJITCallbackStoreC d_v6_store_fp32_cb_addr = d_v6_store_fp32_cb;
+__device__ cufftJITCallbackStoreZ d_v6_store_fp64_cb_addr = d_v6_store_fp64_cb;

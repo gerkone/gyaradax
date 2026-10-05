@@ -6,7 +6,6 @@ import math
 from typing import Dict, Tuple, cast
 
 import jax.numpy as jnp
-from einops import rearrange
 
 import gyaradax.stencils as stencils
 from gyaradax.collisions import precompute_collisions
@@ -164,6 +163,8 @@ def _precompute_shared(
         "s_d1_ineg": _parallel_coefficients(pos_par, stencils.D1_IPW_NEG),
         "s_d4_ipos": _parallel_coefficients(pos_par, stencils.D4_IPW_POS),
         "s_d4_ineg": _parallel_coefficients(pos_par, stencils.D4_IPW_NEG),
+        # stencil-table row of each point, the idx used by _parallel_coefficients
+        "par_stencil_class": jnp.clip(pos_par + 2, 0, 4).astype(jnp.int32),
         # grid spacings: geometry is the source of truth (always matches the
         # actual grids, incl. direct-GKParams users like the torax plugin);
         # params carries the config-derived value as fallback. Keep python
@@ -191,61 +192,34 @@ def _precompute_shared(
     }
 
 
-def _fuse_stencils(
-    upar,
-    abs_par,
-    term7_fac,
-    disp_par,
-    sgr_dist,
-    s_d1_ipos,
-    s_d1_ineg,
-    s_d4_ipos,
-    s_d4_ineg,
-    stencil_ndim,
-):
-    """Compute fused streaming + dissipation stencils.
+def _stencil_class_tables(upar, abs_par, term7_fac, disp_par, sgr_dist):
+    """Fused parallel stencils per stencil class and shift.
 
-    Works for both 5D (adiabatic) and 6D (kinetic) coefficient arrays.
-    stencil_ndim is the number of dimensions for the stencil coefficient
-    rearrange pattern: 5 for adiabatic, 6 for kinetic.
+    Streaming + parallel dissipation (s_upar_tab), Landau (s_t7_tab) and dissipation-only
+    (s_disp_tab) coefficients; the stencil of point (s, kx, ky) at shift i is
+    tab[..., s, par_stencil_class[s, kx, ky], i]. The trailing singleton (kx, ky) axes of
+    the coefficients become (class, shift).
     """
-    if stencil_ndim == 5:
-        # adiabatic: arrays are (nv, nmu, ns, nkx, nky)
-        pat_coeff = "v m s x y -> 1 v m s x y"
-        pat_stencil = "i s x y -> i 1 1 s x y"
-    else:
-        # kinetic: arrays are (nsp, nv, nmu, ns, nkx, nky)
-        pat_coeff = "sp v m s x y -> 1 sp v m s x y"
-        pat_stencil = "i s x y -> i 1 1 1 s x y"
+    d1p = jnp.asarray(stencils.D1_IPW_POS) / 12.0
+    d1n = jnp.asarray(stencils.D1_IPW_NEG) / 12.0
+    d4p = jnp.asarray(stencils.D4_IPW_POS) / 12.0
+    d4n = jnp.asarray(stencils.D4_IPW_NEG) / 12.0
+    if upar.shape[-2:] != (1, 1) or term7_fac.shape[-2:] != (1, 1):
+        raise ValueError("stencil class tables need (kx, ky)-independent coefficients")
 
-    s_d1p = rearrange(s_d1_ipos, pat_stencil)
-    s_d1n = rearrange(s_d1_ineg, pat_stencil)
-    s_d4p = rearrange(s_d4_ipos, pat_stencil)
-    s_d4n = rearrange(s_d4_ineg, pat_stencil)
+    upar_sign = jnp.sign(upar)
+    s_d1_upar = jnp.where(upar_sign > 0, d1p, d1n)
+    s_d4_upar = jnp.where(upar_sign > 0, d4p, d4n)
+    s_d1_t7 = jnp.where(jnp.sign(term7_fac) < 0, d1p, d1n)
 
-    upar_sign = rearrange(jnp.sign(upar), pat_coeff)
-    s_d1_upar = jnp.where(upar_sign > 0, s_d1p, s_d1n)
-    s_d4_upar = jnp.where(upar_sign > 0, s_d4p, s_d4n)
-
-    t7_sign = rearrange(jnp.sign(term7_fac), pat_coeff)
-    s_d1_t7 = jnp.where(t7_sign < 0, s_d1p, s_d1n)
-
-    s_total_upar = (
-        rearrange(upar, pat_coeff) * s_d1_upar
-        + jnp.asarray(disp_par, dtype=jnp.float64) * rearrange(abs_par, pat_coeff) * s_d4_upar
+    s_upar_tab = (
+        upar * s_d1_upar + jnp.asarray(disp_par, dtype=jnp.float64) * abs_par * s_d4_upar
     ) / jnp.asarray(sgr_dist, dtype=jnp.float64)
-
-    s_total_t7 = (rearrange(term7_fac, pat_coeff) * s_d1_t7) / jnp.asarray(
-        sgr_dist, dtype=jnp.float64
-    )
-
-    # dissipation-only stencil (for the conservative-dissipation projection);
-    # recomputed standalone so s_total_upar keeps its original fp association
-    s_disp_par = (
-        jnp.asarray(disp_par, dtype=jnp.float64) * rearrange(abs_par, pat_coeff) * s_d4_upar
+    s_t7_tab = (term7_fac * s_d1_t7) / jnp.asarray(sgr_dist, dtype=jnp.float64)
+    s_disp_tab = (
+        jnp.asarray(disp_par, dtype=jnp.float64) * abs_par * s_d4_upar
     ) / jnp.asarray(sgr_dist, dtype=jnp.float64)
-
-    return s_total_upar, s_total_t7, s_disp_par
+    return s_upar_tab, s_t7_tab, s_disp_tab
 
 
 def _compute_species_coeffs(
@@ -511,24 +485,15 @@ def _linear_precompute_core(geometry: Dict[str, jnp.ndarray], params: GKParams) 
                 jnp.abs(vthrat_6 * bn_6 * gfun_6 * mu_rms),
             )
 
-        sp["s_total_upar"], sp["s_total_t7"], s_disp_par = _fuse_stencils(
-            sp["upar"],
-            sp["abs_dum2_par"],
-            sp["term7_fac"],
-            params.disp_par,
-            out["sgr_dist"],
-            out["s_d1_ipos"],
-            out["s_d1_ineg"],
-            out["s_d4_ipos"],
-            out["s_d4_ineg"],
-            stencil_ndim=6,
+        sp["s_upar_tab"], sp["s_t7_tab"], s_disp_tab = _stencil_class_tables(
+            sp["upar"], sp["abs_dum2_par"], sp["term7_fac"], params.disp_par, out["sgr_dist"]
         )
         if params.disp_par_conserve:
             # conservative parallel dissipation (CGYRO trick, cgyro_upwind.F90):
             # the RHS subtracts disp(P[g]) where P projects g onto the
             # F_M*J0*{1, vpar} components that source Poisson/Ampere. On the
             # symmetric vpar grid the Gram matrix is diagonal by parity.
-            sp["s_disp_par"] = s_disp_par
+            sp["s_disp_par_tab"] = s_disp_tab
             intmu_p = jnp.asarray(geometry["intmu"], dtype=jnp.float64).reshape(
                 1, 1, -1, 1, 1, 1)
             intvp_p = jnp.asarray(geometry["intvp"], dtype=jnp.float64).reshape(
@@ -636,6 +601,9 @@ def _linear_precompute_core(geometry: Dict[str, jnp.ndarray], params: GKParams) 
             # chi factor: gyro_chi = gyro_phi + apar_chi_factor*apar with
             # chi = phi - 2*v_R*v_par*A_par (generalized EM potential)
             out["apar_chi_factor"] = -2.0 * vthrat_6 * vpgr_6 * sp["bessel"]
+            # velocity factors of g2f_factor / apar_chi_factor (compact CUDA kernel inputs)
+            out["g2f_vfac"] = -2.0 * signz_6 * vthrat_6 * vpgr_6
+            out["apar_chi_vfac"] = -2.0 * vthrat_6 * vpgr_6
 
         if params.nlbpar:
             # phi/bpar form a coupled 2x2 system; override phi_weight/phi_diag
@@ -714,21 +682,12 @@ def _linear_precompute_core(geometry: Dict[str, jnp.ndarray], params: GKParams) 
                 jnp.abs(params.vthrat * bn_b * gfun_b * mu_rms),
             )
 
-        sp["s_total_upar"], sp["s_total_t7"], s_disp_par = _fuse_stencils(
-            sp["upar"],
-            sp["abs_dum2_par"],
-            sp["term7_fac"],
-            params.disp_par,
-            out["sgr_dist"],
-            out["s_d1_ipos"],
-            out["s_d1_ineg"],
-            out["s_d4_ipos"],
-            out["s_d4_ineg"],
-            stencil_ndim=5,
+        sp["s_upar_tab"], sp["s_t7_tab"], s_disp_tab = _stencil_class_tables(
+            sp["upar"], sp["abs_dum2_par"], sp["term7_fac"], params.disp_par, out["sgr_dist"]
         )
         if params.disp_par_conserve:
             # conservative parallel dissipation — see kinetic branch above
-            sp["s_disp_par"] = s_disp_par
+            sp["s_disp_par_tab"] = s_disp_tab
             intmu_p = jnp.asarray(geometry["intmu"], dtype=jnp.float64).reshape(
                 1, -1, 1, 1, 1)
             intvp_p = jnp.asarray(geometry["intvp"], dtype=jnp.float64).reshape(
@@ -806,6 +765,8 @@ def _linear_precompute_core(geometry: Dict[str, jnp.ndarray], params: GKParams) 
             out["g2f_factor"] = g2f
             out["apar_g2f_correction"] = jnp.einsum("vmjkl,vmjkl->jkl", apar_w[0], g2f)
             out["apar_chi_factor"] = -2.0 * vthrat_b * vpgr_5 * sp["bessel"]
+            out["g2f_vfac"] = -2.0 * signz_b * vthrat_b * vpgr_5
+            out["apar_chi_vfac"] = -2.0 * vthrat_b * vpgr_5
 
     return GKPre(out)
 

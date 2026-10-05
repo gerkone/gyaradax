@@ -228,6 +228,13 @@ def roofline_report(
     }
 
 
+# per-class stencil table (..., s, class, 9) -> (9, ..., s, kx, ky)
+def full_stencil(pre, key: str) -> jnp.ndarray:
+    cls = pre["par_stencil_class"]
+    s_idx = jnp.arange(cls.shape[0])[:, None, None]
+    return jnp.moveaxis(pre[key][..., s_idx, cls, :], -1, 0)
+
+
 def check_accuracy(out: jnp.ndarray, baseline_path: str | Path, key: str) -> float:
     """Compare output against saved baseline; print and return rel_l2."""
     path = Path(baseline_path)

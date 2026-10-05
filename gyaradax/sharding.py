@@ -86,6 +86,47 @@ def is_active(mesh: Optional[Mesh]) -> bool:
     return mesh is not None
 
 
+def velocity_map(fn, mesh: Mesh, args, axes, out_specs):
+    """Run ``fn`` on the local blocks of ``args`` with ``shard_map``.
+
+    ``axes[i]`` names the mesh axis (``"sp"``, ``"vp"``, ``"mu"`` or None) of
+    each leading dimension of ``args[i]``; size-1 (broadcast) dimensions and
+    the remaining dimensions stay whole, ``()`` replicates the argument.
+    Replicated inputs are sliced locally (no communication).
+    """
+    in_specs = []
+    for x, ax in zip(args, axes):
+        dims = []
+        for d, a in enumerate(ax[: x.ndim]):
+            if a is None or x.shape[d] == 1:
+                dims.append(None)
+                continue
+            if x.shape[d] % mesh.shape[a] != 0:
+                raise ValueError(
+                    f"dimension {d} of size {x.shape[d]} is not divisible by mesh axis "
+                    f"'{a}' of size {mesh.shape[a]}"
+                )
+            dims.append(a)
+        in_specs.append(PartitionSpec(*dims))
+    return jax.shard_map(
+        fn, mesh=mesh, in_specs=tuple(in_specs), out_specs=out_specs, check_vma=False
+    )(*args)
+
+
+def vpar_halo(x, axis: int, n_vp: int, width: int = 2):
+    """Inside ``shard_map``: extend ``x`` by ``width`` vpar planes of each neighbour.
+
+    Planes beyond the global vpar grid are zero.
+    """
+    if x.shape[axis] < width:
+        raise ValueError(f"vpar halo of {width} needs >= {width} local vpar points")
+    lo = jax.lax.slice_in_dim(x, 0, width, axis=axis)
+    hi = jax.lax.slice_in_dim(x, x.shape[axis] - width, x.shape[axis], axis=axis)
+    from_right = jax.lax.ppermute(lo, _AXIS_VP, [(i + 1, i) for i in range(n_vp - 1)])
+    from_left = jax.lax.ppermute(hi, _AXIS_VP, [(i, i + 1) for i in range(n_vp - 1)])
+    return jax.numpy.concatenate([from_left, x, from_right], axis=axis)
+
+
 def _spec_for_shape(shape, grid: GridShape) -> PartitionSpec:
     """Classify an array by shape and return its partition spec.
 
@@ -104,9 +145,7 @@ def _spec_for_shape(shape, grid: GridShape) -> PartitionSpec:
         return PartitionSpec(None, _AXIS_VP, _AXIS_MU, None)
     if len(s) == 5 and s == (grid.nsp, 9, grid.nvpar, grid.nmu, grid.ns):
         return PartitionSpec(None, None, _AXIS_VP, _AXIS_MU, None)
-    # fused-stencil arrays from _fuse_stencils: 6D adiabatic (9, vp, mu, s, kx, ky)
-    # and 7D kinetic (9, sp, vp, mu, s, kx, ky), with broadcast singletons allowed
-    # on mu/kx/ky (mu becomes 1 after jnp.sign(upar)).
+    # stencil-leading arrays (9, [sp,] vp, mu, s, kx, ky), singleton mu/kx/ky allowed
     if len(s) == 6 and s[0] == 9 and s[1] == grid.nvpar:
         return PartitionSpec(
             None, _AXIS_VP, _AXIS_MU if s[2] == grid.nmu else None, None, None, None
@@ -207,6 +246,9 @@ def precompute_sharded(geometry, params, mesh: Optional[Mesh], grid: GridShape):
     for k, v in geometry.items():
         if isinstance(v, jax.Array) and v.ndim == 0 and jnp.issubdtype(v.dtype, jnp.integer):
             int_scalars[k] = int(v)
+        elif not hasattr(v, "shape") or v.ndim == 0:
+            # scalars (dvp, sgr_dist) stay concrete, as in linear_precompute
+            int_scalars[k] = v
         else:
             geom_rep[k] = _replicate(v)
     params_rep = jax.tree_util.tree_map(_replicate, params)
@@ -215,12 +257,18 @@ def precompute_sharded(geometry, params, mesh: Optional[Mesh], grid: GridShape):
     # dict/array structure — GKPre's custom flatten routes non-array leaves
     # into aux, which trips up tree_map(_leaf_sharding, ...).
     # Use _linear_precompute_core to avoid auto-sharding recursion.
+    # non-array items stay static: collected while tracing, re-attached after the jit
+    statics: dict[str, Any] = {}
+
     def _wrapped(geom, p):
         from gyaradax.precompute import _linear_precompute_core
 
         geom_with_scalars: dict[str, Any] = {**geom, **int_scalars}
         pre = _linear_precompute_core(geom_with_scalars, p)
-        return pre._items
+        for k, v in pre._items.items():
+            if not hasattr(v, "shape") and not isinstance(v, dict):
+                statics[k] = v
+        return {k: v for k, v in pre._items.items() if k not in statics}
 
     shapes = jax.eval_shape(_wrapped, geom_rep, params_rep)
 
@@ -234,7 +282,7 @@ def precompute_sharded(geometry, params, mesh: Optional[Mesh], grid: GridShape):
 
     from gyaradax.state import GKPre
 
-    return GKPre(result_dict)
+    return GKPre({**result_dict, **statics})
 
 
 def grid_shape_from(params, geometry) -> GridShape:

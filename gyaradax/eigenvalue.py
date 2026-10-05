@@ -55,7 +55,7 @@ import numpy as np
 import scipy.sparse.linalg as spla
 
 from gyaradax.backends import create_ops
-from gyaradax.solver import _compute_fields, linear_precompute, g_to_f
+from gyaradax.solver import linear_precompute
 from gyaradax.simulate import gk_init
 
 
@@ -132,11 +132,8 @@ def _build_rhs_matvec(geometry, params, pre, ops):
 
     @jax.jit
     def matvec(df):
-        phi, apar, bpar = _compute_fields(df, geometry, params, pre)
-        df_for_rhs = g_to_f(df, apar, params, pre) if apar is not None else df
-        return ops.linear_rhs(
-            df_for_rhs, phi, geometry, params, pre, apar=apar, bpar=bpar
-        )
+        phi, apar, bpar = ops.compute_fields(df, geometry, params, pre)
+        return ops.linear_rhs_from_g(df, phi, geometry, params, pre, apar=apar, bpar=bpar)
 
     return matvec
 

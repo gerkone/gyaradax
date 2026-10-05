@@ -9,7 +9,25 @@ from typing import Dict, Tuple
 
 import jax.numpy as jnp
 
+from gyaradax.fields import _compute_fields, g_to_f
 from gyaradax.state import GKPre
+
+
+def em_chi_correction(ndim: int, pre, apar=None, bpar=None):
+    """Velocity-dependent EM part of chi = J0*phi + chi_correction, or None."""
+    chi_corr = None
+    if apar is not None and "apar_chi_factor" in pre:
+        apar_b = apar[jnp.newaxis, jnp.newaxis, :, :, :]
+        if ndim == 6:
+            apar_b = apar_b[jnp.newaxis]
+        chi_corr = pre["apar_chi_factor"] * apar_b
+    if bpar is not None and "bpar_chi_factor" in pre:
+        bpar_b = bpar[jnp.newaxis, jnp.newaxis, :, :, :]
+        if ndim == 6:
+            bpar_b = bpar_b[jnp.newaxis]
+        bpar_chi = pre["bpar_chi_factor"] * bpar_b
+        chi_corr = bpar_chi if chi_corr is None else chi_corr + bpar_chi
+    return chi_corr
 
 
 class SolverOps(ABC):
@@ -20,19 +38,22 @@ class SolverOps(ABC):
         pre: GKPre,
         use_z2z: bool = False,
         mixed_precision: bool = True,
+        mesh=None,
     ):
         self.pre = pre
         self.use_z2z = use_z2z
         self.mixed_precision = mixed_precision
+        # device mesh of a sharded run (None on a single device)
+        self.mesh = mesh
 
     def tree_flatten(self):
-        return (self.pre,), (self.use_z2z, self.mixed_precision)
+        return (self.pre,), (self.use_z2z, self.mixed_precision, self.mesh)
 
     @classmethod
     def tree_unflatten(cls, aux_data, children):
         (pre,) = children
-        use_z2z, mixed_precision = aux_data
-        return cls(pre, use_z2z=use_z2z, mixed_precision=mixed_precision)
+        use_z2z, mixed_precision, mesh = aux_data
+        return cls(pre, use_z2z=use_z2z, mixed_precision=mixed_precision, mesh=mesh)
 
     @abstractmethod
     def _apply_vpar(self, field: jnp.ndarray, coeffs) -> jnp.ndarray:
@@ -74,6 +95,8 @@ class SolverOps(ABC):
         exclude_zero_mode: bool = True,
         bessel: jnp.ndarray | None = None,
         chi_correction: jnp.ndarray | None = None,
+        apar: jnp.ndarray | None = None,
+        bpar: jnp.ndarray | None = None,
     ) -> jnp.ndarray:
         """Compute term III (nonlinear ExB advection) via pseudospectral method.
 
@@ -90,6 +113,9 @@ class SolverOps(ABC):
             fft_prefactor: Prefactor for FFT
             exclude_zero_mode: Zero out (kx=0, ky=0) mode
             bessel: Optional Bessel function array
+            chi_correction: Optional velocity-dependent EM correction added to J0*phi
+            apar, bpar: Optional EM fields (ns, nkx, nky); the advecting potential becomes
+                chi = J0*phi + apar_chi_factor*apar + bpar_chi_factor*bpar
 
         Returns:
             Nonlinear RHS contribution (same shape as df)
@@ -133,3 +159,20 @@ class SolverOps(ABC):
             ValueError: If df has unsupported shape
         """
         raise NotImplementedError
+
+    def compute_fields(self, dg: jnp.ndarray, geometry, params, pre):
+        return _compute_fields(dg, geometry, params, pre)
+
+    def linear_rhs_from_g(
+        self,
+        dg: jnp.ndarray,
+        phi: jnp.ndarray,
+        geometry: Dict[str, jnp.ndarray],
+        params,
+        pre,
+        apar: jnp.ndarray | None = None,
+        bpar: jnp.ndarray | None = None,
+    ) -> jnp.ndarray:
+        # linear terms act on the physical f; backends may fuse the g -> f conversion
+        df = g_to_f(dg, apar, params, pre) if apar is not None else dg
+        return self.linear_rhs(df, phi, geometry, params, pre, apar=apar, bpar=bpar)

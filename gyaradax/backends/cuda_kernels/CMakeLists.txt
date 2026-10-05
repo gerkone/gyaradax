@@ -66,6 +66,8 @@ function(add_lto_fatbin_target NAME FILEPATH)
         OUTPUT  ${CMAKE_BINARY_DIR}/${NAME}.fatbin
                 ${CMAKE_BINARY_DIR}/${NAME}_fatbin.h
         DEPENDS ${FILEPATH}
+                ${CMAKE_CURRENT_SOURCE_DIR}/lto_callbacks/bracket_v5_z2z_pack.cuh
+                ${CMAKE_CURRENT_SOURCE_DIR}/lto_callbacks/bracket_v6_info.cuh
         COMMAND ${CMAKE_CUDA_COMPILER} ${GENCODE_FLAGS_LTO} -dc -fatbin
                 ${FILEPATH} -o ${CMAKE_BINARY_DIR}/${NAME}.fatbin
         COMMAND ${BIN2C_EXECUTABLE} --name ${NAME}_fatbin --type longlong
@@ -98,7 +100,7 @@ add_library(gyaradax_cuda SHARED
     kernels/apply_vpar_stencil.cu
     kernels/apply_vpar_dual_stencil.cu
     kernels/linear_rhs_fused.cu
-    kernels/linear_rhs_vtiled.cu
+    kernels/field_moments.cu
     ${LTO_HEADERS})
 
 set_target_properties(gyaradax_cuda PROPERTIES
@@ -119,6 +121,52 @@ target_link_libraries(gyaradax_cuda PRIVATE
     CUDA::cufft
     CUDA::cudart
     CUDA::nvJitLink)
+
+
+# ── Optional cuFFTDx (pip install nvidia-mathdx): v6 bracket ──────
+set(CUFFTDX_INCLUDE_DIR "" CACHE PATH "cuFFTDx include directory; empty = detect from Python")
+if(NOT CUFFTDX_INCLUDE_DIR)
+    execute_process(
+        COMMAND ${Python3_EXECUTABLE} -c
+            "import os, nvidia.mathdx as m; print(os.path.join(list(m.__path__)[0], 'include'))"
+        OUTPUT_VARIABLE _dx_inc
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        RESULT_VARIABLE _dx_exit
+        ERROR_QUIET)
+    if(_dx_exit EQUAL 0)
+        set(CUFFTDX_INCLUDE_DIR ${_dx_inc})
+    endif()
+endif()
+
+if(CUFFTDX_INCLUDE_DIR AND EXISTS "${CUFFTDX_INCLUDE_DIR}/cufftdx.hpp")
+    # cuFFTDx SM<> values of the kernel architectures (90 -> 900, 103 -> 1030)
+    if(GPU_ARCHITECTURES STREQUAL "native")
+        execute_process(COMMAND nvidia-smi --query-gpu=compute_cap --format=csv,noheader
+            OUTPUT_VARIABLE _caps OUTPUT_STRIP_TRAILING_WHITESPACE)
+        string(REPLACE "." "" _caps "${_caps}")
+        string(REPLACE "\n" ";" _dx_arch_list "${_caps}")
+    else()
+        set(_dx_arch_list ${GPU_ARCHITECTURES})
+    endif()
+    set(_dx_archs "")
+    foreach(_a IN LISTS _dx_arch_list)
+        string(REGEX MATCH "^[0-9]+" _n "${_a}")
+        math(EXPR _v "${_n} * 10")
+        list(APPEND _dx_archs ${_v})
+    endforeach()
+    list(REMOVE_DUPLICATES _dx_archs)
+    string(REPLACE ";" ", " _dx_archs_csv "${_dx_archs}")
+    # nvcc splits -D values at commas, so the list goes through a generated header
+    file(WRITE ${CMAKE_BINARY_DIR}/gyx_dx_archs.h "#define GYX_DX_ARCHS ${_dx_archs_csv}\n")
+
+    target_sources(gyaradax_cuda PRIVATE kernels/cufft_bracket_v6.cu)
+    target_include_directories(gyaradax_cuda PRIVATE
+        ${CUFFTDX_INCLUDE_DIR}
+        ${CUFFTDX_INCLUDE_DIR}/../external/cutlass/include)
+    message(STATUS "cuFFTDx:            ${CUFFTDX_INCLUDE_DIR} (v6 bracket for SM ${_dx_archs_csv})")
+else()
+    message(STATUS "cuFFTDx:            not found, v6 bracket disabled (pip install nvidia-mathdx)")
+endif()
 
 
 # ── Install: place .so next to this CMakeLists.txt ────────────────

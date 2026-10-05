@@ -23,9 +23,8 @@ gyaradax info                        # devices, backends, versions
 | Total steps | `solver.n_steps` | run length |
 | Checkpoint cadence | `solver.dump_interval` x `solver.naverage` | steps between checkpoints |
 
-The CUDA backend has no electromagnetic `linear_rhs`. Asking for
-`--backend cuda` on a config with `nlapar`/`nlbpar` is a hard error;
-`--backend auto` silently falls back to JAX.
+Both backends run electromagnetic (`nlapar`/`nlbpar`) configs;
+`--backend auto` picks CUDA whenever the kernel library is built.
 
 ## Quick start
 
@@ -49,15 +48,20 @@ Add a `sharding` block to the config and drop `--device`:
 
 ```yaml
 sharding:
-  n_gpus_sp: 1    # species axis (kinetic multi-species only)
-  n_gpus_vp: 4    # vparallel axis
-  n_gpus_mu: 1    # mu axis
+  n_gpus_sp: 2    # species axis (kinetic multi-species only)
+  n_gpus_vp: 1    # vparallel axis
+  n_gpus_mu: 4    # mu axis
 ```
 
 ```bash
 gyaradax run configs/my_big_case.yaml          # mesh comes from the config
-gyaradax run configs/my_case.yaml --n-gpus-vp 4  # or override on the fly
+gyaradax run configs/my_case.yaml --n-gpus-mu 4  # or override on the fly
 ```
+
+Prefer the species and mu axes: the velocity-space kernels need no data from
+neighbouring shards there. Sharding vparallel works but exchanges a vpar halo
+every RK stage (CUDA), and the JAX backend gathers df along vparallel.
+Multi-GPU runs need NCCL (`nvidia-nccl-cu13`, part of the `cuda13` extra).
 
 The product `n_gpus_sp * n_gpus_vp * n_gpus_mu` must equal the number of
 visible GPUs, and each sharded axis must divide evenly. Combining `--device`

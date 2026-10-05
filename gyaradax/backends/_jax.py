@@ -5,17 +5,44 @@ using pure JAX. This is the direct port of GKW's non_linear_terms.F90
 and linear_terms.f90 stencil application.
 """
 
+import math
 from typing import Any, Dict, Tuple
 
 import jax
 import jax.numpy as jnp
+from jax.sharding import PartitionSpec
 
+import gyaradax.sharding as sharding
 import gyaradax.stencils as stencils
-from gyaradax.backends.ops import SolverOps
+from gyaradax.backends.ops import SolverOps, em_chi_correction
 from gyaradax.collisions import collision_rhs, conservation_correction
 from gyaradax.params import GKParams
 from gyaradax.state import GKPre
 from gyaradax.utils import pack_half_spectrum, unpack_half_spectrum
+
+
+# budget for one full-batch real-space bracket intermediate before the bracket is looped
+_NL_CHUNK_BYTES = 1 << 30
+
+
+# smallest divisor of nv whose vpar chunks keep one real-space intermediate in budget
+def _nl_v_chunks(nv: int, planes_per_v: int, plane_bytes: int) -> int:
+    for n in range(1, nv + 1):
+        if nv % n == 0 and (nv // n) * planes_per_v * plane_bytes <= _NL_CHUNK_BYTES:
+            return n
+    return nv
+
+
+class _StencilTable:
+    """Per-class stencil table (..., s, class, 9) indexed like a (9, ..., s, kx, ky) array."""
+
+    def __init__(self, tab: jnp.ndarray, par_class: jnp.ndarray):
+        self.tab = tab
+        self.par_class = par_class
+
+    def __getitem__(self, i: int) -> jnp.ndarray:
+        s_idx = jnp.arange(self.par_class.shape[0], dtype=jnp.int32)[:, None, None]
+        return self.tab[..., s_idx, self.par_class, i]
 
 
 @jax.tree_util.register_pytree_node_class
@@ -27,8 +54,8 @@ class JAXOps(SolverOps):
     the mixed_precision flag.
     """
 
-    def __init__(self, pre: GKPre, use_z2z: bool = False, mixed_precision: bool = True):
-        super().__init__(pre, use_z2z, mixed_precision)
+    def __init__(self, pre: GKPre, use_z2z: bool = False, mixed_precision: bool = True, mesh=None):
+        super().__init__(pre, use_z2z, mixed_precision, mesh)
 
     def _apply_vpar(self, field: jnp.ndarray, coeffs) -> jnp.ndarray:
         """Apply 5-point vpar stencil (shifts -2..+2) with zero boundary."""
@@ -184,9 +211,26 @@ class JAXOps(SolverOps):
                     nky=nky,
                 )
 
-        nl = jax.vmap(_per_s_wrapper, in_axes=(2, 0, 2, 0, chi_in_axis), out_axes=2)(
-            df, phi, bessel, dum_s, chi_corr_vmap
-        )
+        def _per_v_chunk(df_c, chi_c):
+            return jax.vmap(_per_s_wrapper, in_axes=(2, 0, 2, 0, chi_in_axis), out_axes=2)(
+                df_c, phi, bessel, dum_s, chi_c
+            )
+
+        nv = df.shape[0]
+        plane_bytes = int(mrad) * int(mphi) * (4 if self.mixed_precision else 8)
+        n_chunks = _nl_v_chunks(nv, df.shape[1] * df.shape[2], plane_bytes)
+        if n_chunks == 1:
+            nl = _per_v_chunk(df, chi_corr_vmap)
+        else:
+            # sequential vpar chunks (leading-axis reshapes, no copies)
+            split = (n_chunks, nv // n_chunks)
+            df_c = df.reshape(split + df.shape[1:])
+            if chi_correction is not None and chi_correction.shape[0] == nv:
+                chi_c = chi_correction.reshape(split + chi_correction.shape[1:])
+                nl = jax.lax.map(lambda xs: _per_v_chunk(*xs), (df_c, chi_c))
+            else:
+                nl = jax.lax.map(lambda d: _per_v_chunk(d, chi_corr_vmap), df_c)
+            nl = nl.reshape(df.shape)
         return nl.at[:, :, :, ixzero, iyzero].set(0.0) if exclude_zero_mode else nl
 
     def nonlinear_term_iii(
@@ -200,13 +244,52 @@ class JAXOps(SolverOps):
         exclude_zero_mode: bool = True,
         bessel: jnp.ndarray | None = None,
         chi_correction: jnp.ndarray | None = None,
+        apar: jnp.ndarray | None = None,
+        bpar: jnp.ndarray | None = None,
     ) -> jnp.ndarray:
         """Nonlinear ExB advection with shape dispatch.
 
         Dispatches on df.ndim: 5D direct, 6D via vmap over species with per-species bessel.
         Mixed precision is controlled by self.mixed_precision (set at construction time).
-        chi_correction: velocity-dependent EM correction added to gyro_phi to form chi.
+        chi_correction: velocity-dependent EM correction added to gyro_phi to form chi;
+        built from apar/bpar when those are given instead.
         """
+        if apar is not None or bpar is not None:
+            if chi_correction is not None:
+                raise ValueError("pass either chi_correction or apar/bpar, not both")
+            chi_correction = em_chi_correction(df.ndim, self.pre, apar, bpar)
+        kw = dict(
+            efun_sign=efun_sign, fft_prefactor=fft_prefactor, exclude_zero_mode=exclude_zero_mode
+        )
+        if self.mesh is None:
+            return self._nonlinear_local(
+                df, phi, geometry, bessel=bessel, chi_correction=chi_correction, **kw
+            )
+        # the bracket is per plane: run it on the local (sp, vp, mu) blocks
+        vel = ("sp", "vp", "mu") if df.ndim == 6 else ("vp", "mu")
+        args = (df, phi, self.pre["bessel"] if bessel is None else bessel)
+        if chi_correction is not None:
+            args = args + (chi_correction,)
+
+        def local(d, p, b, *chi):
+            c = chi[0] if chi else None
+            return self._nonlinear_local(d, p, geometry, bessel=b, chi_correction=c, **kw)
+
+        axes = (vel, (), vel, vel)[: len(args)]
+        return sharding.velocity_map(local, self.mesh, args, axes, PartitionSpec(*vel))
+
+    def _nonlinear_local(
+        self,
+        df: jnp.ndarray,
+        phi: jnp.ndarray,
+        geometry: Dict[str, jnp.ndarray],
+        *,
+        efun_sign: float,
+        fft_prefactor: complex,
+        exclude_zero_mode: bool,
+        bessel: jnp.ndarray | None,
+        chi_correction: jnp.ndarray | None,
+    ) -> jnp.ndarray:
         if df.ndim == 5:
             return self._nonlinear_term_iii_core(
                 df,
@@ -234,11 +317,20 @@ class JAXOps(SolverOps):
                     chi_correction=chi_sp if chi_correction is not None else None,
                 )
 
-            if chi_correction is not None:
-                return jax.vmap(_per_species)(df, bessel, chi_correction)
-            else:
-                dummy = jnp.zeros((df.shape[0],))
-                return jax.vmap(_per_species)(df, bessel, dummy)
+            args = (
+                df,
+                bessel,
+                chi_correction if chi_correction is not None else jnp.zeros((df.shape[0],)),
+            )
+            plane_bytes = (
+                int(self.pre["nl_mrad"])
+                * int(self.pre["nl_mphi"])
+                * (4 if self.mixed_precision else 8)
+            )
+            if math.prod(df.shape[:4]) * plane_bytes > _NL_CHUNK_BYTES:
+                # sequential species keep the bracket intermediates per species
+                return jax.lax.map(lambda xs: _per_species(*xs), args)
+            return jax.vmap(_per_species)(*args)
         else:
             raise ValueError(f"nonlinear_term_iii: expected df with ndim 5 or 6, got {df.ndim}")
 
@@ -260,7 +352,7 @@ class JAXOps(SolverOps):
         Drive terms V, VIII use chi/phi; Term VII uses gyro_phi only.
 
         Term I (streaming) and parallel dissipation share a fused 9-point stencil
-        ('s_total_upar') — exposed together in the dict as 'I_par_streaming_plus_diss'.
+        ('s_upar_tab') — exposed together in the dict as 'I_par_streaming_plus_diss'.
         """
         gyro_phi = pre["bessel"] * phi[None, None, :, :, :]
 
@@ -273,8 +365,10 @@ class JAXOps(SolverOps):
             gyro_chi = gyro_chi + pre["bpar_chi_factor"] * bpar_b
 
         # parallel stencil (fused: streaming + parallel dissipation + Landau)
+        par_class = self.pre["par_stencil_class"]
+        s_t7 = _StencilTable(pre["s_t7_tab"], par_class)
         term_I_par, term_VII_landau = self._apply_parallel_dual(
-            df, gyro_phi, pre["s_total_upar"], pre["s_total_t7"]
+            df, gyro_phi, _StencilTable(pre["s_upar_tab"], par_class), s_t7
         )
 
         # vpar stencil (trapping + vpar dissipation; 5-point central)
@@ -309,7 +403,7 @@ class JAXOps(SolverOps):
         if bpar is not None and "bpar_chi_factor" in pre:
             bpar_b = bpar[None, None, :, :, :]
             gyro_bpar_scaled = pre["bpar_chi_factor"] * bpar_b
-            term_X_bpar_par = self._apply_parallel(gyro_bpar_scaled, pre["s_total_t7"])
+            term_X_bpar_par = self._apply_parallel(gyro_bpar_scaled, s_t7)
             term_XI_curv_bpar = (
                 -1j
                 * params.drive_scale
@@ -326,11 +420,13 @@ class JAXOps(SolverOps):
         # disp_par sources neither Poisson nor Ampere (cures the EM low-ky
         # numerical instability, GKW issue #201).
         term_disp_proj = jnp.zeros_like(df)
-        if "s_disp_par" in pre:
+        if "s_disp_par_tab" in pre:
             m0 = jnp.sum(pre["dproj_w0"] * df, axis=(0, 1), keepdims=True)
             m1 = jnp.sum(pre["dproj_w1"] * df, axis=(0, 1), keepdims=True)
             proj = pre["dproj_e0"] * m0 + pre["dproj_e1"] * m1
-            term_disp_proj = -self._apply_parallel(proj, pre["s_disp_par"])
+            term_disp_proj = -self._apply_parallel(
+                proj, _StencilTable(pre["s_disp_par_tab"], par_class)
+            )
 
         term_collisions = jnp.zeros_like(df)
         if params.collisions and "coll_stencil" in pre:
@@ -412,11 +508,11 @@ class JAXOps(SolverOps):
                 "abs_dum2_vp": pre["abs_dum2_vp"],
                 "tmp0": pre["tmp0"],
                 "signz0": pre["signz0"],
-                "s_total_upar": jnp.moveaxis(pre["s_total_upar"], 1, 0),
-                "s_total_t7": jnp.moveaxis(pre["s_total_t7"], 1, 0),
+                "s_upar_tab": pre["s_upar_tab"],
+                "s_t7_tab": pre["s_t7_tab"],
             }
-            if "s_disp_par" in pre:
-                sp_arrays["s_disp_par"] = jnp.moveaxis(pre["s_disp_par"], 1, 0)
+            if "s_disp_par_tab" in pre:
+                sp_arrays["s_disp_par_tab"] = pre["s_disp_par_tab"]
                 for k in ("dproj_w0", "dproj_w1", "dproj_e0", "dproj_e1"):
                     sp_arrays[k] = pre[k]
             # chi factors for em

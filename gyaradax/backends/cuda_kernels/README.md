@@ -53,8 +53,21 @@ mkdir -p _build && cd _build && cmake .. -DCMAKE_BUILD_TYPE=Release && cmake --b
    cmake --install .
    ```
 
+## Optional: cuFFTDx (v6 Poisson bracket)
+With the header-only `nvidia-mathdx` package installed (`pip install nvidia-mathdx`), CMake
+also builds the v6 Poisson bracket (`kernels/cufft_bracket_v6.cu`): cuFFT column passes on the
+retained ky columns plus cuFFTDx row kernels that fuse the inverse row FFT, the bracket and the
+forward row FFT. CMake prints `cuFFTDx: ... (v6 bracket for SM ...)`; point it at the headers with
+`-DCUFFTDX_INCLUDE_DIR=<.../nvidia/mathdx/include>` if Python cannot import `nvidia.mathdx`.
+Without it, or for dealiased grids the row kernels are not instantiated for, the v5 pipeline runs.
+Set `GYARADAX_BRACKET=v5` to force the v5 pipeline (bitwise reproduction of earlier runs).
+
 ## Files
 - `CMakeLists.txt`: Build system configuration.
-- `kernels/cufft_graph_bracket_true_fp32.cu`: production mixed-precision cuFFT Poisson bracket FFI target.
-- `kernels/cufft_graph_bracket_fp64.cu`: production FP64 cuFFT Poisson bracket FFI target.
-- `kernels/*.cu`: Stencil and linear RHS fused kernels.
+- `kernels/linear_rhs_fused.cu`: fused linear RHS (ES and EM: A_par, B_par, conservative parallel dissipation), all species in one launch.
+- `kernels/field_moments.cu`: velocity moments of the kinetic EM field solve (A_par, phi, B_par).
+- `kernels/cufft_graph_bracket_true_fp32.cu`, `kernels/cufft_graph_bracket_fp64.cu`: v5 cuFFT Poisson bracket (mixed precision / FP64).
+- `kernels/cufft_bracket_v6.cu`: v6 Poisson bracket (needs cuFFTDx, see above).
+- `kernels/bracket_v5_pack_select.cuh`: explicit pack kernel and the plan-time C2C path selection of the v5 bracket.
+- `lto_callbacks/`: cuFFT LTO load/store callbacks and the shared pack routines.
+- `kernels/apply_*.cu`: standalone stencil kernels (benchmarks).

@@ -26,7 +26,7 @@ def _load_cuda_backend():
 
 
 def create_ops(
-    pre, backend: str = "auto", use_z2z: bool = False, mixed_precision: bool = True
+    pre, backend: str = "auto", use_z2z: bool = False, mixed_precision: bool = True, mesh=None
 ) -> SolverOps:
     """Create a SolverOps instance for the given backend.
 
@@ -37,12 +37,14 @@ def create_ops(
                  Note: CUDA backend is Z2Z-only, this flag only affects JAX backend.
         mixed_precision: Use mixed precision (FP32 FFTs) for nonlinear bracket.
                         Set to False for full FP64 accuracy.
+        mesh: Device mesh of a sharded run (``sharding.build_mesh``); the
+              bracket and the CUDA kernels then run on the local blocks.
     """
     if backend == "jax":
         z2z_str = " (z2z)" if use_z2z else ""
         mp_str = " (mixed)" if mixed_precision else " (fp64)"
         log.info("Backend: JAX%s%s", z2z_str, mp_str)
-        return JAXOps(pre, use_z2z=use_z2z, mixed_precision=mixed_precision)
+        return JAXOps(pre, use_z2z=use_z2z, mixed_precision=mixed_precision, mesh=mesh)
 
     if backend in ("cuda", "auto"):
         has_gpu = any(d.platform == "gpu" for d in jax.devices())
@@ -63,13 +65,13 @@ def create_ops(
                 if is_available():
                     mp_str = " (mixed)" if mixed_precision else " (fp64)"
                     log.info("Backend: CUDA%s [Z2Z-only]", mp_str)
-                    return CUDAOps(pre, use_z2z=use_z2z, mixed_precision=mixed_precision)
+                    return CUDAOps(pre, use_z2z=use_z2z, mixed_precision=mixed_precision, mesh=mesh)
                 if backend == "cuda":
                     raise RuntimeError("backend='cuda' but extensions not compiled")
                 log.info("Backend: JAX (GPU present, extensions not compiled)")
 
         if backend == "auto":
             log.info("Backend: JAX (GPU not found or CUDA not available)")
-            return JAXOps(pre, use_z2z=use_z2z, mixed_precision=mixed_precision)
+            return JAXOps(pre, use_z2z=use_z2z, mixed_precision=mixed_precision, mesh=mesh)
 
     raise ValueError(f"Unknown backend: {backend!r}. Use 'jax', 'cuda', or 'auto'.")
