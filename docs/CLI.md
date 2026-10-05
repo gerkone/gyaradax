@@ -58,10 +58,10 @@ gyaradax run configs/my_big_case.yaml          # mesh comes from the config
 gyaradax run configs/my_case.yaml --n-gpus-mu 4  # or override on the fly
 ```
 
-Prefer the species and mu axes: the velocity-space kernels need no data from
-neighbouring shards there. Sharding vparallel works but exchanges a vpar halo
-every RK stage (CUDA), and the JAX backend gathers df along vparallel.
-Multi-GPU runs need NCCL (`nvidia-nccl-cu13`, part of the `cuda13` extra).
+Every axis keeps df distributed: species and mu need no communication beyond
+the small field all-reduce, vparallel adds a two-plane halo exchange per RK
+stage, and all three run at about the same speed. Multi-GPU runs need NCCL
+(`nvidia-nccl-cu13`, part of the `cuda13` extra).
 
 The product `n_gpus_sp * n_gpus_vp * n_gpus_mu` must equal the number of
 visible GPUs, and each sharded axis must divide evenly. Combining `--device`

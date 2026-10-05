@@ -449,32 +449,32 @@ class CUDAOps(SolverOps):
         _register_ffi()
 
         def kernel(*xs):
+            halo = (dummy_c, dummy_r, dummy_r)
             if n_vp > 1:
-                xs = list(xs)
-                for i, (name, ax) in enumerate(zip(names, axes)):
-                    if "vp" not in ax or ax.index("vp") >= xs[i].ndim:
-                        continue
-                    k = ax.index("vp")
-                    if xs[i].shape[k] == 1:
-                        continue
-                    if name in ("df", "fmaxwl", "g2f_vfac"):
-                        # read at the vpar neighbours: planes of the adjacent shards
-                        xs[i] = sharding.vpar_halo(xs[i], k, n_vp)
-                    else:
-                        # read at the centre only, so the halo planes feed discarded outputs
-                        pad = [(0, 0)] * xs[i].ndim
-                        pad[k] = (2, 2)
-                        xs[i] = jnp.pad(xs[i], pad)
+                # vpar neighbours beyond the shard edges, for the in-kernel g -> f and vpar stencil
+                halo = (sharding.vpar_halo_planes(xs[0], v_axis, n_vp), dummy_r, dummy_r)
+                if has_apar:
+                    fm, g2f = xs[names.index("fmaxwl")], xs[names.index("g2f_vfac")]
+                    halo = (
+                        halo[0],
+                        sharding.vpar_halo_planes(fm, 1, n_vp),
+                        sharding.vpar_halo_planes(g2f, 1, n_vp),
+                    )
             d = xs[0]
             nsp_l, nv_l, nmu_l = d.shape[:3] if kinetic else (1,) + d.shape[:2]
-            out = ffi.ffi_call(
+            return ffi.ffi_call(
                 "linear_rhs_fused_ffi",
                 [jax.ShapeDtypeStruct(d.shape, jnp.complex128)],
                 vmap_method="sequential",
-            )(*xs, nsp=np.int32(nsp_l), nv=np.int32(nv_l), nmu=np.int32(nmu_l), **attrs)[0]
-            if n_vp > 1:
-                out = jax.lax.slice_in_dim(out, 2, out.shape[v_axis] - 2, axis=v_axis)
-            return out
+            )(
+                *xs,
+                *halo,
+                nsp=np.int32(nsp_l),
+                nv=np.int32(nv_l),
+                nmu=np.int32(nmu_l),
+                has_halo=np.int32(n_vp > 1),
+                **attrs,
+            )[0]
 
         if self.mesh is None:
             return kernel(*args)

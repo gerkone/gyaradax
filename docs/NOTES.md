@@ -266,9 +266,10 @@ fused stencils) are precomputed once in `linear_precompute` and reused across
 all RK4 stages and `jax.lax.scan` steps. For kinetic electrons, these arrays
 gain a leading species dimension and are vmapped over during the RHS evaluation.
 
-Fused stencils (`s_total_upar`, `s_total_t7`) combine the streaming velocity
-with the upwinded finite-difference coefficients into a single array, avoiding
-per-step branching on the sign of $v_\parallel$.
+Fused stencils combine the streaming velocity with the upwinded
+finite-difference coefficients, avoiding per-step branching on the sign of
+$v_\parallel$. They are stored per stencil class and shift (`s_upar_tab`,
+`s_t7_tab`, indexed by `par_stencil_class`) rather than as full 9 x 6D arrays.
 
 ## 4. code architecture
 
@@ -280,6 +281,7 @@ per-step branching on the sign of $v_\parallel$.
 | module | purpose |
 |--------|---------|
 | `solver.py` | RK4 integrator (`gkstep_single`, `gksolve`), per-ky normalization; linear/nonlinear RHS dispatch via `backends/` |
+| `backends/` | `SolverOps` with the JAX and CUDA implementations of the field solve, linear RHS and Poisson bracket (§10.14) |
 | `precompute.py` | one-time precomputation: stencils, species coefficients, EM weights, dissipation arrays |
 | `cfl.py` | adaptive CFL timestep estimation (nonlinear + von Neumann + field) |
 | `fields.py` | field solve dispatch (`_compute_fields`), g↔f transforms |
@@ -291,6 +293,9 @@ per-step branching on the sign of $v_\parallel$.
 | `quasilinear/` | quasilinear flux rule (saturation), calibration, linear pipeline |
 | `utils.py` | K-dump loading, checkpoint save/load, diagnostics, GKW file-loading (`load_geometry`, `parse_input_dat`) |
 | `simulate.py` | high-level simulation runner from YAML config |
+| `cli.py` | `gyaradax run / bench / info` console script (docs/CLI.md) |
+| `sharding.py` | device mesh, sharded precompute and init, `shard_map` helpers for the kernels |
+| `eigenvalue.py` | linear eigenvalue solver (GKW `eiv_integration`) |
 | `diag.py` | spectral diagnostics, 1D projections, nonlinear term analysis |
 | `jax_config.py` | centralized JAX configuration and device initialization |
 | `plot_utils.py` | publication-quality visualization |
@@ -1194,15 +1199,17 @@ the FP64-bound linear kernel narrows the CUDA lead).
 **Sharding** (`n_gpus_sp/vp/mu`). GSPMD cannot partition the opaque FFI kernels, nor the
 bracket's FFT pipeline: it all-gathered every CUDA kernel operand (~5 df per step), and on the
 JAX path the bracket's FFT intermediates (~3.4 GiB per step for a 55 MiB df, HEAD included).
-`gksolve` now passes the mesh to `create_ops`, and the bracket (both backends) and the CUDA linear
-and field-moment kernels run on the local (sp, vp, mu) blocks through `sharding.velocity_map`
-(`shard_map`); the field moments are all-reduced (a few MiB per step). Sharding vpar exchanges
-two vpar planes of df (and of F_M and the g2f factor) with each neighbour per stage
-(`sharding.vpar_halo`), zero past the grid ends, so the kernel computes interior points exactly as
-on one device. The JAX linear vpar stencil stays with GSPMD (it gathers df along vpar), so JAX
-runs should shard over mu and species. Multi-GPU runs need NCCL (`nvidia-nccl-cu13`, in the
-`cuda13` extra). Sharded runs match single-device runs at round-off (reduction order of the field
-moments, 1e-15 to 1e-14 in FP64). On the 2 x 32 x 8 x 16 x 55 x 8 waltz A_par + B_par case on two
+`gksolve` now passes the mesh to `create_ops`, and the bracket (both backends), the CUDA linear
+and field-moment kernels and the JAX vpar stencil run on the local (sp, vp, mu) blocks through
+`sharding.velocity_map` (`shard_map`); the field moments are all-reduced (a few MiB per step).
+Sharding vpar exchanges the two vpar planes next to each shard edge per stage
+(`sharding.vpar_halo_planes`): df, plus F_M and the g2f factor for the in-kernel g -> f. The CUDA
+kernel reads them from separate halo buffers at the shard edges (HALO instantiations of the same
+compile-time-sized kernels), the JAX stencil from a halo-extended block; planes past the grid ends
+are zero, so the stencils match the single-device ones. Multi-GPU runs need NCCL
+(`nvidia-nccl-cu13`, in the `cuda13` extra). Sharded runs match single-device runs at round-off
+(reduction order of the field moments): 1e-15 to 1e-14 in FP64 over 3 EM steps, 2e-16 in df over
+100 adiabatic steps with vpar sharding. On the 2 x 32 x 8 x 16 x 55 x 8 waltz A_par + B_par case on two
 B300, the step went from 19.1 to 11.6 ms (CUDA, mu = 2) and from 55.5 to 31.9 ms (JAX, mu = 2).
 
 Large grid (2 x 64 x 16 x 32 x 85 x 64, A_par + B_par, mixed precision) on two B300:
@@ -1212,9 +1219,12 @@ Large grid (2 x 64 x 16 x 32 x 85 x 64, A_par + B_par, mixed precision) on two B
 | CUDA | one device | 593 ms | - |
 | CUDA | mu = 2 | 292 ms | 25.6 GiB |
 | CUDA | sp = 2 | 298 ms | 25.6 GiB |
-| CUDA | vp = 2 | 356 ms | 29.0 GiB |
 | JAX | one device | 1832 ms | - |
 | JAX | mu = 2 | 1298 ms | 52.7 GiB |
+
+vpar sharding runs as fast as mu sharding and with the same memory per device: on the medium grid
+(2 x 64 x 16 x 16 x 85 x 32) on two loaded B300, 207-272 vs 261-270 ms per step (CUDA) and
+765-768 vs 729-764 ms (JAX).
 
 ## 11. linearized Fokker-Planck collision operator
 

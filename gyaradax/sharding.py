@@ -1,9 +1,11 @@
 """Multi-GPU grid parallelism via JAX GSPMD.
 
-All sharding-specific logic lives here. The rest of the codebase
-(solver, backends, integrals, collisions, simulate) is unaware of the
-mesh — operations on `jax.Array`s with `NamedSharding` are partitioned
-automatically by XLA's GSPMD under `jit`.
+All sharding-specific logic lives here. Most of the codebase is unaware of
+the mesh — operations on `jax.Array`s with `NamedSharding` are partitioned
+automatically by XLA's GSPMD under `jit`. The exceptions are the opaque CUDA
+FFI kernels, the per-plane Poisson bracket and the vpar stencil: the backends
+get the mesh from ``create_ops(mesh=...)`` and run those on the local blocks
+with ``velocity_map`` and ``vpar_halo_planes``.
 
 Public API
 ----------
@@ -113,10 +115,11 @@ def velocity_map(fn, mesh: Mesh, args, axes, out_specs):
     )(*args)
 
 
-def vpar_halo(x, axis: int, n_vp: int, width: int = 2):
-    """Inside ``shard_map``: extend ``x`` by ``width`` vpar planes of each neighbour.
+def vpar_halo_planes(x, axis: int, n_vp: int, width: int = 2):
+    """Inside ``shard_map``: the ``width`` vpar planes before and after this shard.
 
-    Planes beyond the global vpar grid are zero.
+    Returns them stacked along ``axis`` (before, then after); planes beyond
+    the global vpar grid are zero.
     """
     if x.shape[axis] < width:
         raise ValueError(f"vpar halo of {width} needs >= {width} local vpar points")
@@ -124,7 +127,15 @@ def vpar_halo(x, axis: int, n_vp: int, width: int = 2):
     hi = jax.lax.slice_in_dim(x, x.shape[axis] - width, x.shape[axis], axis=axis)
     from_right = jax.lax.ppermute(lo, _AXIS_VP, [(i + 1, i) for i in range(n_vp - 1)])
     from_left = jax.lax.ppermute(hi, _AXIS_VP, [(i, i + 1) for i in range(n_vp - 1)])
-    return jax.numpy.concatenate([from_left, x, from_right], axis=axis)
+    return jax.numpy.concatenate([from_left, from_right], axis=axis)
+
+
+def vpar_halo(x, axis: int, n_vp: int, width: int = 2):
+    """Inside ``shard_map``: ``x`` extended by ``width`` vpar planes of each neighbour."""
+    h = vpar_halo_planes(x, axis, n_vp, width)
+    lo = jax.lax.slice_in_dim(h, 0, width, axis=axis)
+    hi = jax.lax.slice_in_dim(h, width, 2 * width, axis=axis)
+    return jax.numpy.concatenate([lo, x, hi], axis=axis)
 
 
 def _spec_for_shape(shape, grid: GridShape) -> PartitionSpec:

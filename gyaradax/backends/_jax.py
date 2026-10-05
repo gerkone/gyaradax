@@ -85,6 +85,29 @@ class JAXOps(SolverOps):
             out_d4 = out_d4 + c4 * jnp.where(valid_mask, shifted, 0.0)
         return out_d1, out_d4
 
+    def _vpar_dual_sharded(self, df: jnp.ndarray) -> Tuple[jnp.ndarray, jnp.ndarray]:
+        """d1 and d4 vpar stencils of a vpar-sharded df, with the neighbours' planes as halo.
+
+        Same arithmetic as _apply_vpar_dual; df is 5D or 6D.
+        """
+        vel = ("sp", "vp", "mu") if df.ndim == 6 else ("vp", "mu")
+        v_axis = 1 if df.ndim == 6 else 0
+        n_vp = self.mesh.shape["vp"]
+
+        def local(f):
+            ext = sharding.vpar_halo(f, v_axis, n_vp)
+            n = f.shape[v_axis]
+            out_d1 = jnp.zeros_like(f)
+            out_d4 = jnp.zeros_like(f)
+            for k, (c1, c4) in enumerate(zip(stencils.VPAR_D1, stencils.VPAR_D4)):
+                shifted = jax.lax.slice_in_dim(ext, k, k + n, axis=v_axis)
+                out_d1 = out_d1 + c1 * shifted
+                out_d4 = out_d4 + c4 * shifted
+            return out_d1, out_d4
+
+        spec = PartitionSpec(*vel)
+        return sharding.velocity_map(local, self.mesh, (df,), (vel,), (spec, spec))
+
     def _apply_parallel(self, field: jnp.ndarray, coeffs: jnp.ndarray) -> jnp.ndarray:
         """Apply 9-point parallel stencil using precomputed shift maps."""
         out = jnp.zeros_like(field)
@@ -342,6 +365,7 @@ class JAXOps(SolverOps):
         pre: GKPre | dict[str, Any],
         apar: jnp.ndarray | None = None,
         bpar: jnp.ndarray | None = None,
+        vpar_d: Tuple[jnp.ndarray, jnp.ndarray] | None = None,
     ) -> dict[str, jnp.ndarray]:
         """Return each linear-RHS term as a dict entry.
 
@@ -372,7 +396,10 @@ class JAXOps(SolverOps):
         )
 
         # vpar stencil (trapping + vpar dissipation; 5-point central)
-        out_d1, out_d4 = self._apply_vpar_dual(df, stencils.VPAR_D1, stencils.VPAR_D4)
+        if vpar_d is None:
+            out_d1, out_d4 = self._apply_vpar_dual(df, stencils.VPAR_D1, stencils.VPAR_D4)
+        else:
+            out_d1, out_d4 = vpar_d
         term_IV_trapping = pre["utrap"] * out_d1 / pre["dvp"]
         term_IV_vp_diss = params.disp_vp * pre["abs_dum2_vp"] * out_d4 / pre["dvp"]
 
@@ -465,13 +492,14 @@ class JAXOps(SolverOps):
         pre: GKPre | dict[str, Any],
         apar: jnp.ndarray | None = None,
         bpar: jnp.ndarray | None = None,
+        vpar_d: Tuple[jnp.ndarray, jnp.ndarray] | None = None,
     ) -> jnp.ndarray:
         """Total linear RHS = sum of all linear terms.
 
         Convenience wrapper around _linear_rhs_terms; numerically identical to
         the fused expression. JAX/XLA will fuse term computations under JIT.
         """
-        terms = self._linear_rhs_terms(df, phi, params, pre, apar=apar, bpar=bpar)
+        terms = self._linear_rhs_terms(df, phi, params, pre, apar=apar, bpar=bpar, vpar_d=vpar_d)
         total = terms["I_par_streaming_plus_diss"]
         for k, v in terms.items():
             if k == "I_par_streaming_plus_diss":
@@ -495,8 +523,11 @@ class JAXOps(SolverOps):
         Dispatches on df.ndim: 5D direct, 6D via vmap over species.
         When apar/bpar are provided, includes EM coupling terms.
         """
+        vpar_d = None
+        if self.mesh is not None and self.mesh.shape["vp"] > 1:
+            vpar_d = self._vpar_dual_sharded(df)
         if df.ndim == 5:
-            return self._linear_rhs_core(df, phi, params, pre, apar=apar, bpar=bpar)
+            return self._linear_rhs_core(df, phi, params, pre, apar=apar, bpar=bpar, vpar_d=vpar_d)
         elif df.ndim == 6:
             sp_arrays = {
                 "bessel": pre["bessel"],
@@ -538,10 +569,14 @@ class JAXOps(SolverOps):
                 "dvp": pre["dvp"],
             }
 
-            def _per_species(df_sp, sp):
+            def _per_species(df_sp, sp, vd_sp=None):
                 sp_pre = {**sp, **shared}
-                return self._linear_rhs_core(df_sp, phi, params, sp_pre, apar=apar, bpar=bpar)
+                return self._linear_rhs_core(
+                    df_sp, phi, params, sp_pre, apar=apar, bpar=bpar, vpar_d=vd_sp
+                )
 
+            if vpar_d is not None:
+                return jax.vmap(_per_species, in_axes=(0, sp_in_axes, 0))(df, sp_arrays, vpar_d)
             return jax.vmap(_per_species, in_axes=(0, sp_in_axes))(df, sp_arrays)
         else:
             raise ValueError(f"linear_rhs: expected df with ndim 5 or 6, got {df.ndim}")

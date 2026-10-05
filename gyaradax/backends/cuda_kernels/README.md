@@ -1,6 +1,6 @@
 # Gyradax CUDA Backend Kernels
 
-This directory the CUDA kernels for stencils and Poisson brackets, used via JAX FFI.
+This directory holds the CUDA kernels of the linear RHS, the EM field moments and the Poisson bracket, used via JAX FFI.
 
 ## Prerequisites
 - **CUDA Toolkit**: NVCC and cuFFT. Tested for cudatoolkit >=13.1
@@ -33,13 +33,14 @@ mkdir -p _build && cd _build && cmake .. -DCMAKE_BUILD_TYPE=Release && cmake --b
    ```bash
    cmake .. -DCMAKE_BUILD_TYPE=Release
    ```
-   To use a different GPU architecture, use the -DGPU_ARCHITECTURES="<arch>" flag. For example, to use Ampere (80), 
+   To use other GPU architectures, use the -DGPU_ARCHITECTURES="<arch>" flag; one library can serve
+   several, e.g. H100 and B300:
    ```bash
-   cmake .. -DCMAKE_BUILD_TYPE=Release -DGPU_ARCHITECTURES="80"
+   cmake .. -DCMAKE_BUILD_TYPE=Release -DGPU_ARCHITECTURES="90;103"
    ```
    Need compute capability >= 80.
    cmake prints the detected compute capability, jaxlib version, and cudatoolkit. Check that these are correct before proceeding.
-   Kernels were tuned for sm_103. 
+   Kernels were tuned on sm_90 (H100) and sm_103 (B300).
    
 
 3. **Build**:
@@ -64,7 +65,7 @@ Set `GYARADAX_BRACKET=v5` to force the v5 pipeline (bitwise reproduction of earl
 
 ## Files
 - `CMakeLists.txt`: Build system configuration.
-- `kernels/linear_rhs_fused.cu`: fused linear RHS (ES and EM: A_par, B_par, conservative parallel dissipation), all species in one launch.
+- `kernels/linear_rhs_fused.cu`: fused linear RHS (ES and EM: A_par, B_par, conservative parallel dissipation), all species in one launch; ky tiles for ns * nky > 1024 and HALO variants that read the vpar neighbours of a vpar shard from halo buffers.
 - `kernels/field_moments.cu`: velocity moments of the kinetic EM field solve (A_par, phi, B_par).
 - `kernels/cufft_graph_bracket_true_fp32.cu`, `kernels/cufft_graph_bracket_fp64.cu`: v5 cuFFT Poisson bracket (mixed precision / FP64).
 - `kernels/cufft_bracket_v6.cu`: v6 Poisson bracket (needs cuFFTDx, see above).

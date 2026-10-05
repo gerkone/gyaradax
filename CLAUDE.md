@@ -12,29 +12,34 @@ stencil and cuFFT kernels (electrostatic and electromagnetic).
 
 ```
 gyaradax/
-  solver.py      — RK4 integrator, linear RHS (Terms I–VIII), CFL, gksolve
+  solver.py      — RK4 step (gkstep_single) and multi-step driver (gksolve)
+  fields.py      — field solve wrapper (_compute_fields: phi, A_par, B_par), g <-> f transforms
   integrals.py   — phi solve (adiabatic + kinetic), Ampere solve (A_par), Bpar coupled solve, flux integrals, EM flux diagnostics
-  geometry.py    — circular/s-alpha geometry model, metric tensors, drift tensors
-  params.py      — GKParams dataclass (JAX pytree), YAML/input.dat loading
-  simulate.py    — high-level entry points (gksimulate, gk_run, gk_run_batched)
+  precompute.py  — linear_precompute: stencil class tables, species coefficients, EM factors
+  cfl.py         — adaptive CFL timestep estimates
   collisions.py  — Fokker-Planck stencil precompute + apply (9-point in (vpar, mu))
-  diag.py        — diagnostics: growth rates, spectra, term_iii_rhs
-  types.py       — GKPre (precomputed coeffs pytree), GKState (diagnostic state)
+  geometry/      — geometry models (circular, s-alpha, Miller, loaded geom.dat), metric and drift tensors
+  params.py      — GKParams dataclass (JAX pytree), YAML/input.dat loading
+  state.py       — GKPre (precomputed coeffs pytree), GKState (diagnostic state)
   stencils.py    — 4th-order FD stencil coefficients (parallel + velocity)
-  bootstrap.py   — bootstrap utilities
+  simulate.py    — high-level entry points (gksimulate, gk_run, gk_run_batched)
+  sharding.py    — device mesh, sharded precompute / init, shard_map helpers for the kernels
+  eigenvalue.py  — linear eigenvalue solver (GKW eiv_integration)
+  quasilinear/   — quasilinear transport: linear harvest, saturation rules, calibration
+  diag.py        — diagnostics: growth rates, spectra, term_iii_rhs
   utils.py       — GKW I/O (K-dumps, geom.dat, input.dat parsing)
   plot_utils.py  — publication-quality plotting functions
   cli.py         — `gyaradax` console script: run/bench/info (see docs/CLI.md)
 
   backends/
     __init__.py  — create_ops(): backend dispatch (auto/jax/cuda)
-    ops.py       — SolverOps ABC: linear_rhs, nonlinear_term_iii
+    ops.py       — SolverOps ABC: compute_fields, linear_rhs(_from_g), nonlinear_term_iii
     _jax.py      — pure JAX backend: stencils, R2C/Z2Z FFT bracket
     _cuda.py     — CUDA FFI backend: fused kernels via libgyaradax_cuda.so
     cuda_kernels/
-      CMakeLists.txt — build system (NVCC + cuFFT + LTO callbacks)
-      kernels/       — .cu files: stencils, brackets, linear_rhs_fused
-      lto_callbacks/ — cuFFT LTO fatbin callbacks (FP32 cast, store)
+      CMakeLists.txt — build system (NVCC + cuFFT + LTO callbacks, optional cuFFTDx)
+      kernels/       — .cu files: linear_rhs_fused, field_moments, v5 / v6 Poisson brackets
+      lto_callbacks/ — cuFFT LTO load / store callbacks
 
 scripts/
   run.py          — main entry for running simulations (adiabatic + kinetic)
@@ -122,7 +127,8 @@ SolverOps interface: `linear_rhs()`, `linear_rhs_from_g()`, `nonlinear_term_iii(
 
 - **Species**: ions (signz=+1) and optionally kinetic electrons (signz=-1).
   Adiabatic electrons use `_phi_adiabatic` with zonal FSA correction.
-  Kinetic electrons vmap the linear/nonlinear RHS over species.
+  Kinetic electrons vmap the linear/nonlinear RHS over species (JAX); CUDA runs all
+  species in one launch.
 - **Terms I-VIII**: GKW numbering for the gyrokinetic equation RHS.
   Term VI (neoclassical/rotation) is not implemented.
   `drive_scale` controls Terms V and VIII jointly -- do NOT set to 0.
@@ -138,13 +144,15 @@ SolverOps interface: `linear_rhs()`, `linear_rhs_from_g()`, `nonlinear_term_iii(
   Evolves the mixed variable g = f + (2Z/T)*v_R*v_par*J0*A_par*F_M.
   Field solve: self-consistent phi + A_par (Ampere's law with g2f correction).
   RHS uses generalized potential chi = phi - 2*v_R*v_par*A_par in drive terms.
-  B_parallel not yet implemented (Phase 2).
+- **Electromagnetic (B_parallel)**: `nlbpar=True` adds magnetic compression via the
+  coupled Poisson-B_par solve; chi gains bpar_chi_factor * B_par (terms X, XI).
 - **CFL**: adaptive dt from von Neumann analysis + nonlinear ExB velocity.
   For kinetic electrons, the field CFL (electron Alfven frequency) dominates.
   With finite beta, the Alfven CFL is tighter: includes beta in field period.
 - **Grid**: 5D `(vpar, mu, s, kx, ky)` for adiabatic; 6D `(species, ...)` for kinetic.
-- **Backends**: JAX (default, differentiable, R2C/Z2Z), CUDA (fused kernels, Z2Z only, ~10x NL speedup;
-  covers A_par/B_par, conservative parallel dissipation and collisions — see docs/NOTES.md §10.14).
+- **Backends**: JAX (default, differentiable, R2C/Z2Z), CUDA (fused kernels, Z2Z only; 2.8-4.4x faster
+  steps than JAX on H100, ES and EM incl. A_par/B_par, conservative parallel dissipation and
+  collisions — see docs/NOTES.md §10.14).
 
 ## Running tests
 
@@ -272,12 +280,12 @@ large grids (≥128×32 velocity space) that don't fit on a single GPU.
 
 `gksolve` passes the mesh to `create_ops(mesh=...)`. GSPMD cannot partition
 the FFI kernels or the bracket's FFTs (it all-gathers their operands), so the
-bracket (both backends) and the CUDA linear / field-moment kernels run on the
-local (sp, vp, mu) blocks via `sharding.velocity_map` (`shard_map`); sharding
-vpar adds a 2-plane halo exchange (`sharding.vpar_halo`) per stage. Prefer
-`n_gpus_mu` and `n_gpus_sp` (no halo); the JAX vpar stencil still gathers df
-along vpar under GSPMD. Multi-GPU needs NCCL (`nvidia-nccl-cu13`, in the
-`cuda13` extra). See docs/NOTES.md §10.14.
+bracket (both backends), the CUDA linear / field-moment kernels and the JAX
+vpar stencil run on the local (sp, vp, mu) blocks via `sharding.velocity_map`
+(`shard_map`). Sharding vpar exchanges the two vpar planes next to each shard
+edge per RK stage (`sharding.vpar_halo_planes`); species and mu need no halo.
+All three axes run at about the same speed. Multi-GPU needs NCCL
+(`nvidia-nccl-cu13`, in the `cuda13` extra). See docs/NOTES.md §10.14.
 
 ## Skills
 

@@ -28,7 +28,7 @@ CONFIG_ADIABATIC = os.path.join(
 
 def _build(params_overrides=None):
     cfg = load_config(CONFIG_ADIABATIC)
-    overrides = {"non_linear": True, "adaptive_dt": False, "dt": 0.005}
+    overrides = {"non_linear": True, "adaptive_dt": False, "dt": 0.005, "mixed_precision": False}
     if params_overrides:
         overrides.update(params_overrides)
     params = gkparams_from_config(cfg, **overrides)
@@ -171,7 +171,7 @@ def _build_kinetic(params_overrides=None):
     from gyaradax.geometry import compute_geometry_from_config
 
     cfg = load_config(CONFIG_KINETIC)
-    overrides = {"non_linear": True, "adaptive_dt": False, "dt": 0.002}
+    overrides = {"non_linear": True, "adaptive_dt": False, "dt": 0.002, "mixed_precision": False}
     if params_overrides:
         overrides.update(params_overrides)
     params = gkparams_from_config(cfg, **overrides)
@@ -294,9 +294,7 @@ def test_em_sharded_matches_single_device(backend, axis):
     df1 = sharding.shard_df(df, mesh, grid)
     run = jax.jit(lambda d, s, p: gksolve(d, geometry, p1, s, n_steps=3, pre=p))
     out = run(df1, state, pre1)
-    # the JAX vpar stencil is left to GSPMD, which gathers df along vpar
-    if not (backend == "jax" and axis == "n_gpus_vp"):
-        assert _all_gather_bytes(run.lower(df1, state, pre1).compile().as_text()) < df.nbytes / 100
+    assert _all_gather_bytes(run.lower(df1, state, pre1).compile().as_text()) < df.nbytes / 100
 
     def rel_l2(a, b):
         return float(np.linalg.norm(a - b) / max(np.linalg.norm(a), 1e-30))
