@@ -27,7 +27,7 @@ pip install -e ".[dev]"
 This installs `gyaradax` in editable mode with the base JAX dependency, numpy, and dev tools (pytest, ruff, black). The conda environment provides common build tools and, when CUDA work is needed, the CUDA toolkit (>= 13.1), cuDNN, cmake, and a C++ compiler.
 
 ### CUDA Backend
-The optional CUDA backend provides fused kernels for the linear RHS (electrostatic and electromagnetic), the electromagnetic field moments and the nonlinear Poisson bracket (cuFFT, plus cuFFTDx row kernels from `nvidia-mathdx`). On an H100 it runs 1.6-1.7x faster than the previous CUDA backend for electrostatic cases and 2.8-4.4x faster than JAX for electromagnetic ones. It requires a GPU with compute capability >= 80. Install the CUDA JAX extra (which also brings `nvidia-mathdx` and NCCL) before building or using CUDA kernels:
+The optional CUDA backend provides fused kernels for the linear RHS (electrostatic and electromagnetic), the electromagnetic field moments and the nonlinear Poisson bracket (cuFFT, plus cuFFTDx row kernels from `nvidia-mathdx`). On an H100 it runs 1.6-1.7x faster than the previous CUDA backend for electrostatic cases, and 2.6-3.0x (electrostatic) to 2.9-4.2x (electromagnetic) faster than JAX on nonlinear runs at production grid sizes. It requires a GPU with compute capability >= 80. Install the CUDA JAX extra (which also brings `nvidia-mathdx` and NCCL) before building or using CUDA kernels:
 
 ```bash
 pip install -e ".[cuda13,dev]"
@@ -91,7 +91,8 @@ gyaradax run configs/my_case.yaml --n-gpus 4    # shard over 4 GPUs, layout from
 ```
 
 When several YAML configs share the same grid and static parameters they are
-batched automatically under one `jax.vmap`:
+batched automatically under one `jax.vmap`, each member writing its own run
+directory as a single run would:
 
 ```bash
 gyaradax run configs/adiabatic_a.yaml configs/adiabatic_b.yaml --device 0
@@ -100,7 +101,7 @@ gyaradax run configs/adiabatic_a.yaml configs/adiabatic_b.yaml --device 0
 Every run writes into its output directory: the effective `config.yaml` (the
 input config with the command-line choices folded in), `geometry.pkl`, the
 diagnostics (`fluxes.npz`, spectra, `dt_history.npz`), a restart snapshot
-`step_*.npz` refreshed every block, and `run_info.jsonl` (one line per
+`step_*.npz` refreshed every `--snapshot-every` blocks (default 1), and `run_info.jsonl` (one line per
 invocation). Point `gyaradax run` at that directory to resume or extend it:
 
 ```bash

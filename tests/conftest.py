@@ -41,6 +41,36 @@ def rel_l2(pred, ref, eps=1e-30):
     )
 
 
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+
+
+def noisy_case(cfg_name, grid, overrides=None, seed=0, **param_kw):
+    """(df, geometry, params, state) for a repo config on a reduced grid with analytic geometry.
+
+    ``param_kw`` goes to ``gkparams_from_config``, ``overrides`` replaces fields afterwards;
+    df gets a seeded 1e-4 complex perturbation so every mode and species is exercised.
+    """
+    from dataclasses import replace
+
+    import jax
+    import jax.numpy as jnp
+
+    from gyaradax.geometry import compute_geometry_from_config
+    from gyaradax.params import gkparams_from_config, load_config
+    from gyaradax.simulate import gk_init
+
+    cfg = load_config(os.path.join(REPO_ROOT, "configs", cfg_name))
+    for key, value in grid.items():
+        cfg.grid[key] = value
+    params = replace(gkparams_from_config(cfg, **param_kw), **(overrides or {}))
+    geometry = compute_geometry_from_config(cfg)
+    nsp = 1 if params.adiabatic_electrons else int(np.asarray(params.mas).shape[0])
+    df, geometry, state = gk_init(geometry, params, n_species=nsp)
+    k1, k2 = jax.random.split(jax.random.PRNGKey(seed))
+    noise = jax.random.normal(k1, df.shape) + 1j * jax.random.normal(k2, df.shape)
+    return (df + 1e-4 * noise).astype(jnp.complex128), geometry, params, state
+
+
 def read_dump_time(dat_path):
     """read simulation TIME from a gkw .dat metadata file."""
     with open(dat_path, "r", encoding="utf-8") as f:

@@ -20,7 +20,7 @@ from jax.sharding import PartitionSpec
 import gyaradax.sharding as sharding
 import gyaradax.stencils as stencils
 from gyaradax.backends.ops import SolverOps
-from gyaradax.collisions import collision_rhs, conservation_correction
+from gyaradax.collisions import collision_term, collisions_on
 from gyaradax.fields import g_to_f
 from gyaradax.state import GKPre
 
@@ -328,7 +328,7 @@ class CUDAOps(SolverOps):
         drift_y = table("drift_y", v_mu_s, (nsp, nv, nmu, ns))
         fmaxwl = table("fmaxwl", v_mu_s, (nsp, nv, nmu, ns))
         dmaxwel = table("dmaxwel_fm_ek", (nsp, nv, nmu, ns, 1, nky), (nsp, nv, nmu, ns, nky))
-        # squeeze() would also drop the ky axis when nky == 1
+        # keeps the ky axis when nky == 1
         hyper = jnp.broadcast_to(pre["hyper"], (1, 1, 1, nkx, nky)).reshape(nkx, nky)
         kx_vals = pre["kx_b"].reshape(-1)[:nkx]
         ky_vals = pre["ky_b"].reshape(-1)[:nky]
@@ -452,13 +452,13 @@ class CUDAOps(SolverOps):
             halo = (dummy_c, dummy_r, dummy_r)
             if n_vp > 1:
                 # vpar neighbours beyond the shard edges, for the in-kernel g -> f and vpar stencil
-                halo = (sharding.vpar_halo_planes(xs[0], v_axis, n_vp), dummy_r, dummy_r)
+                halo = (sharding.halo_planes(xs[0], v_axis, "vp", n_vp), dummy_r, dummy_r)
                 if has_apar:
                     fm, g2f = xs[names.index("fmaxwl")], xs[names.index("g2f_vfac")]
                     halo = (
                         halo[0],
-                        sharding.vpar_halo_planes(fm, 1, n_vp),
-                        sharding.vpar_halo_planes(g2f, 1, n_vp),
+                        sharding.halo_planes(fm, 1, "vp", n_vp),
+                        sharding.halo_planes(g2f, 1, "vp", n_vp),
                     )
             d = xs[0]
             nsp_l, nv_l, nmu_l = d.shape[:3] if kinetic else (1,) + d.shape[:2]
@@ -561,36 +561,6 @@ class CUDAOps(SolverOps):
             m0, m1 = m0[None], m1[None]
         return m0, m1
 
-    @staticmethod
-    def _collision_term(df: jnp.ndarray, params, pre) -> jnp.ndarray:
-        """Collision RHS (pure JAX, as in the JAX backend), added to the fused kernel output."""
-        conserve = (
-            params.coll_mom_conservation or params.coll_ene_conservation
-        ) and "coll_mom_factor" in pre
-        weights = (
-            [
-                pre[k]
-                for k in (
-                    "coll_mom_factor",
-                    "coll_ene_factor",
-                    "coll_vpar_weight",
-                    "coll_vsq_weight",
-                )
-            ]
-            if conserve
-            else []
-        )
-
-        def _one(f, stencil, *w):
-            term = collision_rhs(f, stencil)
-            if conserve:
-                term = term + conservation_correction(term, *w)
-            return term
-
-        if df.ndim == 5:
-            return _one(df, pre["coll_stencil"], *weights)
-        return jax.vmap(_one)(df, pre["coll_stencil"], *weights)
-
     def _linear_rhs(self, df, phi, params, pre, apar, bpar, df_is_g):
         if df.ndim not in (5, 6):
             raise ValueError(f"linear_rhs: expected df with ndim 5 or 6, got {df.ndim}")
@@ -608,9 +578,9 @@ class CUDAOps(SolverOps):
         rhs = self._linear_rhs_fused(
             df, phi, pre, params, apar=apar, bpar=bpar, df_is_g=df_is_g, dproj=dproj
         )
-        if params.collisions and "coll_stencil" in pre:
+        if collisions_on(params, pre):
             f_phys = physical_f() if f_phys is None else f_phys
-            rhs = rhs + self._collision_term(f_phys, params, pre)
+            rhs = rhs + collision_term(f_phys, params, pre, self.mesh)
         return rhs
 
     def linear_rhs(

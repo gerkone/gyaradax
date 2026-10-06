@@ -1,23 +1,19 @@
 """The looped (species / vpar-chunk) JAX bracket must agree bitwise with the batched one."""
 
-import os
 from dataclasses import replace
 
 import jax
-import jax.numpy as jnp
 import numpy as np
 import pytest
+
+from conftest import noisy_case  # type: ignore[import-not-found]
 
 import gyaradax.backends._jax as jax_backend
 from gyaradax.backends import create_ops
 from gyaradax.fields import _compute_fields
-from gyaradax.geometry import compute_geometry_from_config
-from gyaradax.params import gkparams_from_config, load_config
 from gyaradax.precompute import linear_precompute
-from gyaradax.simulate import gk_init
 from gyaradax.solver import gksolve
 
-REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 GRID = dict(nvpar=8, nmu=2, ns=8, nkx=11, nky=5)
 
 CASES = {
@@ -30,18 +26,9 @@ CASES = {
 
 def _setup(name, mixed_precision):
     cfg_name, overrides = CASES[name]
-    cfg = load_config(os.path.join(REPO_ROOT, "configs", cfg_name))
-    for key, value in GRID.items():
-        cfg.grid[key] = value
-    params = replace(
-        gkparams_from_config(cfg, backend="jax", mixed_precision=mixed_precision), **overrides
+    df, geometry, params, state = noisy_case(
+        cfg_name, GRID, overrides, seed=5, backend="jax", mixed_precision=mixed_precision
     )
-    geometry = compute_geometry_from_config(cfg)
-    nsp = 1 if params.adiabatic_electrons else int(np.asarray(params.mas).shape[0])
-    df, geometry, state = gk_init(geometry, params, n_species=nsp)
-    k1, k2 = jax.random.split(jax.random.PRNGKey(5))
-    noise = jax.random.normal(k1, df.shape) + 1j * jax.random.normal(k2, df.shape)
-    df = (df + 1e-4 * noise).astype(jnp.complex128)
     return df, geometry, params, state, linear_precompute(geometry, params)
 
 

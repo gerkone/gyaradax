@@ -57,10 +57,10 @@ Every run writes into its output directory (`--output-dir`, default
 
 | File | Content |
 |---|---|
-| `config.yaml` | the input config with the command-line choices folded in (backend, precision, mesh, total steps, checkpoint cadence) |
+| `config.yaml` | the input config with the command-line choices folded in (backend, precision, mesh, total steps, checkpoint and snapshot cadence, `--save-dumps`) |
 | `geometry.pkl` | the geometry dict |
 | `fluxes.npz`, `fluxes_em.npz`, `kxspec.npz`, `kyspec.npz`, `growth.npz`, `dt_history.npz` | diagnostics history, one entry per block |
-| `step_NNNNNN.npz` | restart snapshot (df, phi, state), refreshed every block; `--save-dumps` keeps one per block |
+| `step_NNNNNN.npz` | restart snapshot (df, phi, state), refreshed every `--snapshot-every` blocks and after the last; `--save-dumps` keeps them all |
 | `run_info.jsonl` | one line per invocation: command, host, git revision, start and target step |
 | `telemetry.jsonl`, `profile/`, `profile_summary.json` | debug output, see below |
 
@@ -74,8 +74,26 @@ gyaradax run my_case.yaml --resume-from outputs_kinetic_my_case/step_004000.npz
 
 A resumed run continues the solver state bitwise as if it had not stopped,
 appends to the diagnostics history, and rewrites `config.yaml` with the new
-total. Flags
-still override the stored config (e.g. `--n-gpus 8` on the next leg).
+total. Resuming a directory continues from its latest snapshot and removes it
+once a newer one is written, unless the run archives snapshots (`--save-dumps`,
+which the run directory remembers until `--no-save-dumps`); a snapshot named
+with `--resume-from` is never removed. Flags still override the stored config
+(e.g. `--n-gpus 8` on the next leg).
+
+A run never mixes its outputs with another run's: starting a new trajectory
+(cold start, K-file, a snapshot from elsewhere) in a directory that already
+holds run outputs, or resuming an older snapshot while later ones exist, stops
+with an error; `--overwrite` replaces them instead.
+
+A run shorter than the checkpoint interval (`--n-steps 50` with a block size of
+1000) is a single block. The CLI asks whether to keep that short interval for
+later legs, which would write a snapshot every few steps; it keeps the original
+interval when nobody answers (non-interactive runs).
+
+Diagnostics are appended every block; the restart snapshot, the large file, is
+written every `--snapshot-every K` blocks (config `run.snapshot_every`, default
+1) and always after the last block. A run that stops in between resumes from
+the last snapshot and rewrites the diagnostics after it.
 `--resume-from K03` keeps resuming from GKW K-files in the config's `data_dir`.
 
 ## Debugging: telemetry and profiling
@@ -88,17 +106,20 @@ gyaradax run my_case.yaml --profile     # profile/ + profile_summary.json
 gyaradax run my_case.yaml --debug       # both
 ```
 
-or in the config: `debug: {telemetry: true, profile: true}`.
+or in the config: `debug: {telemetry: true, profile: true}`. The flags apply to
+one invocation and are not stored in the run's `config.yaml`.
 
 - `telemetry.jsonl` has a `start` record (host, git revision, JAX version,
   devices, backend and bracket, precision, mesh, grid, relevant `XLA_*` /
   `CUDA_*` / `GYARADAX_*` environment), the compile time, one `block` record
-  per checkpoint block (wall time, ms/step, dt min/mean/max, peak and current
-  memory per device) and an `end` record.
+  per checkpoint block (wall time, ms/step, dt min/mean/max, memory in use and
+  its peak since the process started, per device) and an `end` record.
 - `--profile` traces the first block after compilation with the JAX profiler
-  (open `profile/` in Perfetto or TensorBoard) and writes the GPU time per
-  kernel to `profile_summary.json`; that block's telemetry record is marked
-  `profiled` because tracing slows it down.
+  into `profile/step_NNNNNN/` (the block's first step; open it in Perfetto or
+  TensorBoard) and writes that block's GPU time per kernel to
+  `profile_summary.json`; that block's telemetry record is marked `profiled`
+  because tracing slows it down. A batched run traces once, into the first
+  member's directory, and copies the summary to the others.
 - `gyaradax bench CONFIG --profile` prints the same kernel breakdown for a
   timed block.
 
@@ -123,11 +144,13 @@ sharding:
 ```
 
 The automatic layout fills the species axis first, then mu, then vparallel:
-8 GPUs on a two-species grid with `nmu = 16` give `sp=2, mu=4`. Species and
-mu shards need nothing from their neighbours; vparallel shards exchange two
-vpar planes with each neighbour per RK stage (a fraction of a percent of the
-step) and are the reserve when more GPUs are wanted than `nsp * nmu`. All
-three axes measure about the same speed.
+8 GPUs on a two-species grid with `nmu = 16` give `sp=2, mu=4`. Species shards
+need nothing from their neighbours; vparallel shards exchange two vpar planes
+with each neighbour per RK stage, and with collisions on, vparallel and mu
+shards also exchange one plane for the collision stencil (each a fraction of
+the step). vparallel is the reserve when more GPUs are wanted than
+`nsp * nmu`. All three axes measure about the same speed, with or without
+collisions.
 
 Precedence: `--n-gpus-{sp,vp,mu}` (each overrides the config's value for that
 axis) > `--n-gpus` > the config's per-axis entries > `sharding.n_gpus` >
@@ -159,10 +182,13 @@ is large or does not fit one GPU.
 | `--n-gpus N` | shard over N GPUs, layout chosen from the grid |
 | `--n-gpus-{sp,vp,mu} N` | set the mesh per axis (overrides the config) |
 | `--mem-fraction F` | fraction of GPU memory XLA may use (e.g. 0.95 for grids near the limit) |
-| `--n-steps` / `--n-blocks` / `--block-size` | run length and checkpoint cadence |
-| `--from-scratch` | ignore K-files and snapshots, cold start |
+| `--n-steps N` | run N more steps (default: up to the config's `solver.n_steps`) |
+| `--n-blocks` / `--block-size` | run length in blocks, checkpoint cadence |
+| `--snapshot-every K` | restart snapshot every K blocks (default 1) |
+| `--from-scratch` | cold start: ignore K-files and the run directory's snapshots |
 | `--resume-from K03` / `--resume-from DIR/step_000400.npz` | resume from a GKW K-dump or a gyaradax snapshot |
-| `--save-dumps` | keep a df snapshot every block (default: only the latest) |
+| `--save-dumps` / `--no-save-dumps` | keep every snapshot (default: only the latest); stored in the run directory |
+| `--overwrite` | replace another run's outputs (or snapshots past the resumed step) in the output directory |
 | `--telemetry` / `--profile` / `--debug` | debug output into the run directory (off by default) |
 | `--output-dir DIR` | override the output directory |
 | `--dry-run` | build everything, print the summary, do not step |
@@ -171,7 +197,20 @@ Passing several configs with the same grid runs them batched under one `vmap`:
 
 ```bash
 gyaradax run configs/case_a.yaml configs/case_b.yaml
+gyaradax run configs/case_a.yaml configs/case_b.yaml --output-dir scan   # scan/<run.name>
+gyaradax run scan/case_a scan/case_b --n-steps 2000                      # resume both
 ```
+
+Each member writes its own run directory exactly as a single run would (config,
+diagnostics, snapshots, `run_info.jsonl`, telemetry, `DIVERGED`) and gets the
+results of its single run; a member that diverges stops writing while the others go on.
+With `--output-dir` the members go to `<dir>/<run.name>`. Members may differ in
+array-valued settings (e.g. gradients, `beta`); configs that cannot share one
+solve run one after another: different grids, geometries, start steps, step
+counts, block or snapshot cadence, sharded runs, or different static
+parameters, which include `dt`, the dissipation coefficients and the species
+masses, temperatures, densities and thermal velocities (see
+`GKParams._STATIC_FIELDS`).
 
 ## Benchmarking
 
@@ -181,16 +220,19 @@ gyaradax bench configs/adiabatic_a.yaml --device 0 --backend cuda --steps 100 --
 
 Always cold-starts, does no I/O, and reports the **steady-state** median
 throughput — the first block carries lazy-initialisation overhead and would
-otherwise skew the mean badly. With a mesh (`--n-gpus 4`) it reports the peak
-memory of the busiest GPU.
+otherwise skew the mean badly. It reports the device memory peak since the
+process started (setup included), for the busiest GPU of a mesh.
 
 ## Performance notes
 
 - `--backend cuda` is 1.6-1.7x faster than the previous CUDA kernels on
-  electrostatic runs and 2.8-4.4x faster than JAX on electromagnetic ones
-  (H100); JAX stays the reference for gradients and bitwise comparisons.
+  electrostatic runs; against JAX it is 2.6-3.0x faster on electrostatic and
+  2.9-4.2x on electromagnetic nonlinear runs at production grid sizes (H100;
+  less on small or linear runs). JAX stays the reference for gradients and
+  bitwise comparisons.
 - The CUDA nonlinear bracket uses cuFFTDx (v6) when the library was built with
-  `nvidia-mathdx`; `GYARADAX_BRACKET=v5` forces the cuFFT-only pipeline.
+  `nvidia-mathdx`, and the cuFFT-only v5 pipeline for plane sizes v6 has no
+  kernel for; `GYARADAX_BRACKET=v5` forces v5 everywhere.
 - Grids close to one GPU's memory can fail on allocator fragmentation even when
   they fit: try `--mem-fraction 0.95`, or shard.
 - `gyaradax info` shows the devices, whether the CUDA library and the v6

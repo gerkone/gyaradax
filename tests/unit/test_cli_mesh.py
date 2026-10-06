@@ -8,8 +8,6 @@ from gyaradax.cli import _auto_mesh, _check_mesh, _mesh_request
 
 KINETIC = dict(
     adiabatic=False,
-    nlapar=True,
-    nlbpar=False,
     nsp=2,
     nvpar=64,
     nmu=16,

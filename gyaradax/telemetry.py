@@ -2,10 +2,11 @@
 
 ``RunTelemetry`` appends JSON lines to ``telemetry.jsonl``: one ``start`` record
 (environment, devices, configuration), one ``block`` record per checkpoint block
-(wall time, throughput, dt statistics, peak device memory) and an ``end`` record.
-``profile_block`` records one block with the JAX profiler into ``profile/``
-(viewable in Perfetto / TensorBoard) and writes ``profile_summary.json`` with the
-GPU time per kernel. Both are off unless the run asks for them.
+(wall time, throughput, dt statistics, device memory in use and its peak since the
+process started) and an ``end`` record. ``profile_block`` records one block with the
+JAX profiler into ``profile/step_NNNNNN/`` (viewable in Perfetto / TensorBoard) and
+writes ``profile_summary.json`` with the GPU time per kernel of that block. Both are
+off unless the run asks for them.
 """
 
 from __future__ import annotations
@@ -15,6 +16,7 @@ import datetime
 import glob
 import json
 import os
+import shutil
 import socket
 import subprocess
 import sys
@@ -51,7 +53,7 @@ def _now() -> str:
     return datetime.datetime.now().astimezone().isoformat(timespec="seconds")
 
 
-def _memory(devices) -> dict[str, list[float]]:
+def device_memory(devices) -> dict[str, list[float]]:
     peak, in_use = [], []
     for d in devices:
         try:
@@ -60,7 +62,7 @@ def _memory(devices) -> dict[str, list[float]]:
             stats = {}
         peak.append(round(stats.get("peak_bytes_in_use", 0) / 2**30, 3))
         in_use.append(round(stats.get("bytes_in_use", 0) / 2**30, 3))
-    return {"peak_gib": peak, "in_use_gib": in_use}
+    return {"process_peak_gib": peak, "in_use_gib": in_use}
 
 
 class RunTelemetry:
@@ -86,18 +88,10 @@ class RunTelemetry:
             **info,
         }
         self._write(record)
-        self._reset_peaks()
 
     def _write(self, record: dict[str, Any]) -> None:
         with open(self.path, "a") as fh:
             fh.write(json.dumps(record, default=str) + "\n")
-
-    def _reset_peaks(self) -> None:
-        for d in self.devices:
-            try:
-                d.reset_memory_stats()
-            except Exception:
-                pass
 
     def compiled(self, seconds: float) -> None:
         self._write({"event": "compile", "time": _now(), "seconds": round(seconds, 3)})
@@ -121,7 +115,7 @@ class RunTelemetry:
             "wall_s": round(wall, 4),
             "ms_per_step": round(1e3 * wall / max(n_steps, 1), 4),
             "steps_per_s": round(n_steps / wall, 3) if wall > 0 else None,
-            **_memory(self.devices),
+            **device_memory(self.devices),
         }
         if dt_info is not None:
             dt = np.asarray(dt_info["dt_used"]).reshape(-1)
@@ -132,7 +126,6 @@ class RunTelemetry:
                     "max": float(dt.max()),
                 }
         self._write(record)
-        self._reset_peaks()
 
     def close(self, total_wall: float, steps: int, status: str = "completed") -> None:
         self._write(
@@ -183,13 +176,17 @@ def kernel_summary(trace_dir: str, n_steps: int, top: int = 40) -> dict[str, Any
 
 
 @contextlib.contextmanager
-def profile_block(output_dir: str, n_steps: int) -> Iterator[None]:
-    """Trace the enclosed block into ``<output_dir>/profile`` and summarise its kernels."""
-    trace_dir = os.path.join(output_dir, "profile")
-    os.makedirs(trace_dir, exist_ok=True)
+def profile_block(output_dir: str, n_steps: int, step: int) -> Iterator[None]:
+    """Trace the enclosed block, which starts at ``step``, into ``<output_dir>/profile/step_NNNNNN``.
+
+    ``profile_summary.json`` gets the kernel times of this trace only.
+    """
+    trace_dir = os.path.join(output_dir, "profile", f"step_{step:06d}")
+    shutil.rmtree(trace_dir, ignore_errors=True)
+    os.makedirs(trace_dir)
     with jax.profiler.trace(trace_dir):
         yield
-    summary = kernel_summary(trace_dir, n_steps)
+    summary = {"step": step, **kernel_summary(trace_dir, n_steps)}
     with open(os.path.join(output_dir, "profile_summary.json"), "w") as fh:
         json.dump(summary, fh, indent=1)
     print(f"profile: {trace_dir} ({summary.get('gpu_ms_per_step', 0):.3f} GPU ms/step)")

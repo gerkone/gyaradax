@@ -17,6 +17,7 @@ import json
 import math
 import os
 import re
+import shutil
 import sys
 import time
 from dataclasses import replace
@@ -43,8 +44,6 @@ class ConfigFacts(TypedDict):
     """What we can learn from a config without importing JAX."""
 
     adiabatic: bool
-    nlapar: bool
-    nlbpar: bool
     nsp: int
     nvpar: int
     nmu: int
@@ -58,7 +57,6 @@ def _peek_config(path: str) -> ConfigFacts:
     """Read the handful of switches needed to set up the process environment."""
     cfg = OmegaConf.load(path)
     grid = cfg.get("grid") or {}
-    solver = cfg.get("solver") or {}
     physics = cfg.get("physics") or {}
     shard = cfg.get("sharding") or {}
     adiabatic = bool(grid.get("adiabatic_electrons", True))
@@ -66,8 +64,6 @@ def _peek_config(path: str) -> ConfigFacts:
     nsp = 1 if adiabatic or not OmegaConf.is_list(mas) else len(mas)
     return {
         "adiabatic": adiabatic,
-        "nlapar": bool(solver.get("nlapar", False)),
-        "nlbpar": bool(solver.get("nlbpar", False)),
         "nsp": nsp,
         "nvpar": int(grid.get("nvpar", 0) or 0),
         "nmu": int(grid.get("nmu", 0) or 0),
@@ -81,8 +77,7 @@ def _peek_config(path: str) -> ConfigFacts:
 def _auto_mesh(n_devices: int, facts: ConfigFacts) -> tuple[int, int, int]:
     """Split ``n_devices`` over (species, vpar, mu): species first, then mu, then vpar.
 
-    Species and mu shards need no halo; vpar takes what is left and keeps at
-    least two vpar points per shard.
+    vpar takes what is left and keeps at least two vpar points per shard.
     """
     if facts["nvpar"] <= 0 or facts["nmu"] <= 0:
         raise SystemExit(
@@ -204,6 +199,10 @@ class RunSetup(TypedDict):
     output_dir: str
     n_steps: int
     block_size: int
+    snapshot_every: int
+    save_dumps: bool
+    previous_snapshot: str | None
+    stale: list[str]
     name: str
     data_dir: str | None
     mesh: Any
@@ -225,13 +224,60 @@ def _resolve_config(path: str) -> tuple[str, str | None]:
     return path, None
 
 
-def _latest_snapshot(run_dir: str) -> str | None:
+def _snapshots(run_dir: str) -> dict[int, str]:
     steps = {}
     for path in glob.glob(os.path.join(run_dir, "step_*.npz")):
         m = re.search(r"step_(\d+)\.npz$", path)
         if m:
             steps[int(m.group(1))] = path
+    return steps
+
+
+def _latest_snapshot(run_dir: str) -> str | None:
+    steps = _snapshots(run_dir)
     return steps[max(steps)] if steps else None
+
+
+def _in_dir(path: str, directory: str) -> bool:
+    return os.path.abspath(os.path.dirname(path)) == os.path.abspath(directory)
+
+
+_RUN_OUTPUTS = (
+    "fluxes.npz",
+    "fluxes_em.npz",
+    "kxspec.npz",
+    "kyspec.npz",
+    "growth.npz",
+    "dt_history.npz",
+    "run_info.jsonl",
+    "telemetry.jsonl",
+    "profile",
+    "profile_summary.json",
+    "DIVERGED",
+)
+
+
+def _foreign_outputs(output_dir: str, snapshot: str | None, start_step: int) -> list[str]:
+    """Files in ``output_dir`` that do not belong to the trajectory this run continues."""
+    snapshots = _snapshots(output_dir)
+    if snapshot is not None and _in_dir(snapshot, output_dir):
+        return [path for step, path in sorted(snapshots.items()) if step > start_step]
+    run_files = [os.path.join(output_dir, name) for name in _RUN_OUTPUTS]
+    return [*snapshots.values(), *(p for p in run_files if os.path.exists(p))]
+
+
+def _confirm(question: str) -> bool:
+    try:
+        interactive = sys.stdin.isatty()
+    except (AttributeError, OSError, ValueError):
+        interactive = False
+    if not interactive:
+        print(f"{question} [y/N] n (not interactive)")
+        return False
+    try:
+        return input(f"{question} [y/N] ").strip().lower() in ("y", "yes")
+    except EOFError:
+        return False
 
 
 def _has_geom_dat(data_dir: str | None) -> bool:
@@ -323,11 +369,13 @@ def _setup_run(config_path: str, args: argparse.Namespace, run_dir: str | None =
         n_species = int(jnp.asarray(params.mas).shape[0])
 
     snapshot = None
+    rolling = False
     if not args.from_scratch:
         if args.resume_from and args.resume_from.endswith(".npz"):
             snapshot = args.resume_from
         elif run_dir is not None and not args.resume_from:
             snapshot = _latest_snapshot(run_dir)
+            rolling = snapshot is not None
     k_path = None
     if not args.from_scratch and snapshot is None:
         k_path = _find_k_file(data_dir, args.resume_from)
@@ -379,6 +427,18 @@ def _setup_run(config_path: str, args: argparse.Namespace, run_dir: str | None =
     else:
         df, geometry, state = gk_init(geometry, params, n_species=n_species)
 
+    stale = _foreign_outputs(output_dir, snapshot, int(state.step)) if args.command == "run" else []
+    if stale and not args.overwrite:
+        names = sorted(os.path.basename(p) for p in stale)
+        listed = ", ".join(names[:4]) + (", ..." if len(names) > 4 else "")
+        own = snapshot is not None and _in_dir(snapshot, output_dir)
+        what = "snapshots past the resumed step" if own else "the outputs of another run"
+        raise SystemExit(
+            f"error: {output_dir} holds {what} ({listed}); resume it with "
+            f"`gyaradax run {output_dir}`, write elsewhere with --output-dir, or pass "
+            "--overwrite to replace them"
+        )
+
     mesh = _sharding.build_mesh(params)
     if mesh is not None:
         grid = _sharding.grid_shape_from(params, geometry)
@@ -398,8 +458,7 @@ def _setup_run(config_path: str, args: argparse.Namespace, run_dir: str | None =
         dump_interval = int(getattr(cfg.solver, "dump_interval", 0) or 0)
         block_size = dump_interval * params.naverage if dump_interval else 120
 
-    # step count: --n-steps > --n-blocks > config solver.n_steps > heuristic; a resumed
-    # snapshot runs up to solver.n_steps in total
+    # steps: --n-steps more > --n-blocks > up to solver.n_steps (resumed) > solver.n_steps > heuristic
     start_step = int(state.step)
     cfg_steps = int(getattr(cfg.solver, "n_steps", 0) or 0)
     if args.n_steps:
@@ -419,10 +478,26 @@ def _setup_run(config_path: str, args: argparse.Namespace, run_dir: str | None =
     else:
         n_steps = 265 * block_size
 
-    # clamp so at least one checkpoint is written
+    # a run shorter than the checkpoint interval is one block
+    saved_block_size = block_size
     if 0 < n_steps < block_size:
-        print(f"  note: checkpoint interval {block_size} > n_steps {n_steps}; using {n_steps}")
+        print(f"  note: checkpoint interval {block_size} > n_steps {n_steps}; this run is one block")
+        if _confirm(
+            f"  keep {n_steps} as the checkpoint interval when this run is resumed "
+            f"(diagnostics and a snapshot every {n_steps} steps)?"
+        ):
+            saved_block_size = n_steps
         block_size = n_steps
+
+    # restart snapshot every k blocks (and after the last): --snapshot-every > run.snapshot_every
+    snapshot_every = int(
+        getattr(args, "snapshot_every", 0) or getattr(cfg.run, "snapshot_every", 0) or 1
+    )
+    archived = bool(getattr(cfg.run, "save_dumps", False))
+    save_dumps = archived if args.save_dumps is None else bool(args.save_dumps)
+    # the rolling restart file this run continues from goes once a newer one exists
+    keep = archived or save_dumps or not rolling or not _in_dir(cast(str, snapshot), output_dir)
+    previous_snapshot = None if keep else snapshot
 
     return {
         "df": df,
@@ -433,11 +508,17 @@ def _setup_run(config_path: str, args: argparse.Namespace, run_dir: str | None =
         "output_dir": output_dir,
         "n_steps": n_steps,
         "block_size": block_size,
+        "snapshot_every": snapshot_every,
+        "save_dumps": save_dumps,
+        "previous_snapshot": previous_snapshot,
+        "stale": stale,
         "name": name,
         "data_dir": data_dir,
         "mesh": mesh,
         "config_path": config_path,
-        "effective_config": _effective_config(cfg, params, start_step + n_steps, block_size, args),
+        "effective_config": _effective_config(
+            cfg, params, start_step + n_steps, saved_block_size, snapshot_every, save_dumps
+        ),
         "resumed_from": snapshot or k_path,
         "start_step": start_step,
         "telemetry": _debug_flag(cfg, args, "telemetry"),
@@ -451,7 +532,12 @@ def _debug_flag(cfg: Any, args: argparse.Namespace, name: str) -> bool:
 
 
 def _effective_config(
-    cfg: Any, params: Any, target_step: int, block_size: int, args: argparse.Namespace
+    cfg: Any,
+    params: Any,
+    target_step: int,
+    block_size: int,
+    snapshot_every: int,
+    save_dumps: bool,
 ) -> Any:
     """The config with the command-line choices folded in, so the run directory reproduces it."""
     eff = OmegaConf.create(OmegaConf.to_container(cfg, resolve=True))
@@ -462,8 +548,8 @@ def _effective_config(
         ("solver.dt", float(params.dt)),
         ("solver.n_steps", int(target_step)),
         ("run.block_size", int(block_size)),
-        ("debug.telemetry", _debug_flag(cfg, args, "telemetry")),
-        ("debug.profile", _debug_flag(cfg, args, "profile")),
+        ("run.snapshot_every", int(snapshot_every)),
+        ("run.save_dumps", bool(save_dumps)),
     ):
         OmegaConf.update(eff, key, value, force_add=True)
     mesh = (params.n_gpus_sp, params.n_gpus_vp, params.n_gpus_mu)
@@ -506,7 +592,7 @@ def _bracket_name(params: Any) -> str | None:
     _cuda._register_ffi()
     if os.environ.get("GYARADAX_BRACKET", "auto") == "v5" or not _cuda._has_bracket_v6:
         return "v5"
-    return "v6"
+    return "v6, v5 for plane sizes without a v6 kernel"
 
 
 def _describe(setup: RunSetup, config_path: str) -> None:
@@ -541,7 +627,11 @@ def _describe(setup: RunSetup, config_path: str) -> None:
         )
     else:
         print(f"  sharding: none (single device {jax.devices()[0]})")
-    print(f"  n_steps={setup['n_steps']}, checkpoint_interval={setup['block_size']}")
+    every = setup["snapshot_every"]
+    print(
+        f"  n_steps={setup['n_steps']}, checkpoint_interval={setup['block_size']}, "
+        f"snapshot every {every} block{'s' if every > 1 else ''}"
+    )
     print(f"  output: {setup['output_dir']}")
     debug = [n for n in ("telemetry", "profile") if setup[n]]
     if debug:
@@ -575,54 +665,85 @@ def _cmd_run(args: argparse.Namespace) -> int:
     _configure_env(args, facts)
 
     if len(args.configs) > 1:
-        return _run_batched(args)
+        return _run_batched(args, run_dirs)
+    return _run_single(args, args.configs[0], run_dirs[0])
 
+
+def _run_telemetry(setup: RunSetup) -> Any:
+    if not setup["telemetry"]:
+        return None
+    import jax
+
+    from gyaradax.telemetry import RunTelemetry
+
+    params = setup["params"]
+    mesh = setup["mesh"]
+    devices = list(mesh.devices.flat) if mesh is not None else [jax.devices()[0]]
+    return RunTelemetry(
+        setup["output_dir"],
+        {
+            "config": os.path.abspath(setup["config_path"]),
+            "resumed_from": setup["resumed_from"],
+            "grid": list(setup["df"].shape),
+            "backend": params.backend,
+            "bracket": _bracket_name(params),
+            "mixed_precision": bool(params.mixed_precision),
+            "mesh": [params.n_gpus_sp, params.n_gpus_vp, params.n_gpus_mu],
+            "start_step": setup["start_step"],
+            "n_steps": setup["n_steps"],
+            "block_size": setup["block_size"],
+            "snapshot_every": setup["snapshot_every"],
+        },
+        devices,
+    )
+
+
+def _start_run(setup: RunSetup) -> Any:
+    for path in setup["stale"]:
+        if os.path.isdir(path):
+            shutil.rmtree(path)
+        else:
+            os.remove(path)
+    _write_run_record(setup)
+    marker = os.path.join(setup["output_dir"], "DIVERGED")
+    if os.path.exists(marker):
+        os.remove(marker)
+    return _run_telemetry(setup)
+
+
+def _finish_run(setup: RunSetup) -> int:
+    """Reference report; exit code 2 when the run diverged."""
+    print(f"output: {setup['output_dir']}")
+    if setup["data_dir"]:
+        _report(setup["output_dir"], setup["data_dir"], setup["name"], not setup["params"].adiabatic_electrons)
+    if os.path.exists(os.path.join(setup["output_dir"], "DIVERGED")):
+        print("exit 2: run diverged (see DIVERGED marker)")
+        return 2
+    return 0
+
+
+def _nothing_to_run(setup: RunSetup) -> None:
+    print(
+        f"\nnothing to run ({setup['name']}): step {setup['start_step']} already reaches "
+        "solver.n_steps; pass --n-steps N to continue N more steps."
+    )
+
+
+def _run_single(args: argparse.Namespace, config_path: str, run_dir: str | None) -> int:
     import jax
 
     from gyaradax.simulate import gksimulate
 
-    setup = _setup_run(args.configs[0], args, run_dir=run_dirs[0])
-    _describe(setup, args.configs[0])
+    setup = _setup_run(config_path, args, run_dir=run_dir)
+    _describe(setup, config_path)
     if args.dry_run:
         print("\ndry run: setup complete, not stepping.")
         return 0
     if setup["n_steps"] <= 0:
-        print(
-            f"\nnothing to run: step {setup['start_step']} already reaches solver.n_steps; "
-            "pass --n-steps N to continue N more steps."
-        )
+        _nothing_to_run(setup)
         return 0
 
-    _write_run_record(setup)
-    telemetry = None
-    if setup["telemetry"]:
-        from gyaradax.telemetry import RunTelemetry
-
-        params = setup["params"]
-        mesh = setup["mesh"]
-        devices = list(mesh.devices.flat) if mesh is not None else [jax.devices()[0]]
-        telemetry = RunTelemetry(
-            setup["output_dir"],
-            {
-                "config": os.path.abspath(setup["config_path"]),
-                "resumed_from": setup["resumed_from"],
-                "grid": list(setup["df"].shape),
-                "backend": params.backend,
-                "bracket": _bracket_name(params),
-                "mixed_precision": bool(params.mixed_precision),
-                "mesh": [params.n_gpus_sp, params.n_gpus_vp, params.n_gpus_mu],
-                "start_step": setup["start_step"],
-                "n_steps": setup["n_steps"],
-                "block_size": setup["block_size"],
-            },
-            devices,
-        )
-
-    # drop a marker from an earlier attempt, else a good re-run reports failure
-    stale = os.path.join(setup["output_dir"], "DIVERGED")
-    if os.path.exists(stale):
-        os.remove(stale)
-
+    telemetry = _start_run(setup)
     t0 = time.time()
     gksimulate(
         setup["df"],
@@ -633,54 +754,92 @@ def _cmd_run(args: argparse.Namespace) -> int:
         pre=setup["pre"],
         output_dir=setup["output_dir"],
         checkpoint_interval=setup["block_size"],
-        save_snapshots=args.save_dumps,
+        save_snapshots=setup["save_dumps"],
         stop_on_nan=args.stop_on_nan,
         snapshot_f32=(args.snapshot_dtype == "c64"),
         keep_latest_snapshot=True,
+        snapshot_every=setup["snapshot_every"],
+        previous_snapshot=setup["previous_snapshot"],
         telemetry=telemetry,
         profile=setup["profile"],
     )
     jax.effects_barrier()
     runtime = time.time() - t0
     print(f"\ncompleted in {runtime:.1f}s ({setup['n_steps'] / runtime:.1f} steps/s)")
-    print(f"output: {setup['output_dir']}")
-
-    if setup["data_dir"]:
-        _report(setup["output_dir"], setup["data_dir"], setup["name"], not setup["params"].adiabatic_electrons)
-
-    # non-zero exit so a SLURM array task registers the failure
-    if os.path.exists(os.path.join(setup["output_dir"], "DIVERGED")):
-        print("exit 2: run diverged (see DIVERGED marker)")
-        return 2
-    return 0
+    return _finish_run(setup)
 
 
-def _run_batched(args: argparse.Namespace) -> int:
-    """vmap several same-grid configs over a batch axis."""
+def _batch_mismatch(setups: list[RunSetup]) -> str | None:
+    """Why the configs cannot share one vmapped solve, or None."""
     import jax
-    import jax.numpy as jnp
     import numpy as np
 
-    from gyaradax.simulate import gk_run_batched
+    if any(s["mesh"] is not None for s in setups):
+        return "sharded runs are not batched"
 
-    setups = [_setup_run(p, args) for p in args.configs]
-    if len({s["df"].shape for s in setups}) > 1:
-        print("grid shapes differ, falling back to sequential execution")
-        for path in args.configs:
-            single = argparse.Namespace(**{**vars(args), "configs": [path]})
-            _cmd_run(single)
-        return 0
+    def layout(tree: Any) -> Any:
+        leaves, treedef = jax.tree_util.tree_flatten(tree)
+        return treedef, [np.shape(x) for x in leaves]
+
+    for key, what in (
+        ("start_step", "start steps"),
+        ("n_steps", "step counts"),
+        ("block_size", "block sizes"),
+        ("snapshot_every", "snapshot cadences"),
+        ("save_dumps", "snapshot archiving"),
+    ):
+        if len({s[key] for s in setups}) > 1:
+            return f"{what} differ"
+    for key, what in (
+        ("df", "grid shapes"),
+        ("params", "static parameters"),
+        ("geometry", "geometries"),
+        ("pre", "precomputed coefficients"),
+    ):
+        first = layout(setups[0][key])
+        if any(layout(s[key]) != first for s in setups[1:]):
+            return f"{what} differ"
+    return None
+
+
+def _run_batched(args: argparse.Namespace, run_dirs: list[str | None]) -> int:
+    """vmap several same-grid configs over a batch axis; each writes its own run directory."""
+    import jax
+    import jax.numpy as jnp
+
+    from gyaradax.simulate import gksimulate_batched
+
+    def member_args(path: str) -> argparse.Namespace:
+        # --output-dir names the parent of the members' run directories
+        if not args.output_dir:
+            return args
+        name = OmegaConf.load(path).run.name
+        return argparse.Namespace(**{**vars(args), "output_dir": os.path.join(args.output_dir, name)})
+
+    setups = [_setup_run(p, member_args(p), run_dir=d) for p, d in zip(args.configs, run_dirs)]
+    outs = [os.path.abspath(s["output_dir"]) for s in setups]
+    if len(set(outs)) < len(outs):
+        raise SystemExit("error: batched configs would share an output directory; give them distinct run.name")
+
+    reason = _batch_mismatch(setups)
+    if reason is not None:
+        print(f"{reason}, running the configs one after another")
+        del setups
+        return max(_run_single(member_args(p), p, d) for p, d in zip(args.configs, run_dirs))
 
     names = [s["name"] for s in setups]
-    n_steps = max(s["n_steps"] for s in setups)
-    block_size = setups[0]["block_size"]
-
     print("=" * 88)
     print(f"batched: {len(setups)} configs ({', '.join(names)})")
     print("=" * 88)
     _describe(setups[0], args.configs[0])
+    for s in setups[1:]:
+        print(f"  output: {s['output_dir']} ({s['name']})")
     if args.dry_run:
         print("\ndry run: setup complete, not stepping.")
+        return 0
+    if setups[0]["n_steps"] <= 0:
+        for s in setups:
+            _nothing_to_run(s)
         return 0
 
     def _stack(trees: list[Any]) -> Any:
@@ -689,77 +848,32 @@ def _run_batched(args: argparse.Namespace) -> int:
             jax.tree_util.tree_structure(trees[0]), [jnp.stack(g) for g in zip(*leaves)]
         )
 
-    df_b = jnp.stack([s["df"] for s in setups])
-    geom_b = _stack([s["geometry"] for s in setups])
-    params_b = _stack([s["params"] for s in setups])
-    state_b = _stack([s["state"] for s in setups])
-    pre_b = _stack([s["pre"] for s in setups])
-
-    accum: dict[str, dict[str, list[Any]]] = {
-        s["name"]: {"fluxes": [], "growth": [], "times": []} for s in setups
-    }
-    for out_dir in {s["output_dir"] for s in setups}:
-        os.makedirs(out_dir, exist_ok=True)
-
-    print("warmup (compilation)...")
-    w0 = time.time()
-    warm = gk_run_batched(df_b, geom_b, params_b, state_b, min(block_size, n_steps), pre_b)
-    jax.block_until_ready(warm[0])
-    print(f"compilation: {time.time() - w0:.2f}s")
-
+    telemetries = [_start_run(s) for s in setups]
     t0 = time.time()
-    while int(state_b.step[0]) < n_steps:
-        block = min(block_size, n_steps - int(state_b.step[0]))
-        if block <= 0:
-            break
-        bt = time.time()
-        df_b, _, fluxes_b, state_b = gk_run_batched(
-            df_b, geom_b, params_b, state_b, block, pre_b
-        )
-        jax.block_until_ready(df_b)
-        wall = time.time() - bt
-
-        t_sim = float(state_b.time[0])
-        heat = np.asarray(fluxes_b[1])
-        growth = np.asarray(state_b.last_growth_rate)
-        logs = [
-            f"{n} [flx {float(np.mean(heat[i])):.4f}, gr {float(np.mean(growth[i])):.4f}]"
-            for i, n in enumerate(names)
-        ]
-        print(
-            f"[{int(state_b.step[0]):>8d}] t {t_sim:>8.2f} | {' | '.join(logs)} | "
-            f"{block / wall:.2f} steps/s  x{len(setups)}"
-        )
-
-        for i, s in enumerate(setups):
-            flx = np.asarray(jax.tree.map(lambda x: x[i], fluxes_b))
-            if flx.ndim == 0 or (flx.ndim == 1 and flx.shape[0] != 3):
-                flx = np.array([float(fluxes_b[j][i]) for j in range(3)])
-            accum[s["name"]]["fluxes"].append(flx)
-            accum[s["name"]]["growth"].append(np.asarray(state_b.last_growth_rate[i]))
-            accum[s["name"]]["times"].append(t_sim)
-
-    for s in setups:
-        a = accum[s["name"]]
-        times = np.array(a["times"])
-        steps = np.arange(len(a["times"])) * block_size
-        np.savez(
-            os.path.join(s["output_dir"], "fluxes.npz"),
-            fluxes=np.stack(a["fluxes"]), time=times, step=steps,
-        )
-        np.savez(
-            os.path.join(s["output_dir"], "growth.npz"),
-            growth=np.stack(a["growth"]), time=times, step=steps,
-        )
-
-    print(f"\ncompleted {len(setups)} configs in {time.time() - t0:.1f}s")
-    for s in setups:
-        if s["data_dir"]:
-            _report(
-                s["output_dir"], s["data_dir"], s["name"],
-                not s["params"].adiabatic_electrons,
-            )
-    return 0
+    gksimulate_batched(
+        jnp.stack([s["df"] for s in setups]),
+        _stack([s["geometry"] for s in setups]),
+        _stack([s["params"] for s in setups]),
+        _stack([s["state"] for s in setups]),
+        setups[0]["n_steps"],
+        pre_batch=_stack([s["pre"] for s in setups]),
+        output_dirs=[s["output_dir"] for s in setups],
+        labels=names,
+        previous_snapshots=[s["previous_snapshot"] for s in setups],
+        telemetries=telemetries,
+        checkpoint_interval=setups[0]["block_size"],
+        save_snapshots=setups[0]["save_dumps"],
+        stop_on_nan=args.stop_on_nan,
+        snapshot_f32=(args.snapshot_dtype == "c64"),
+        keep_latest_snapshot=True,
+        snapshot_every=setups[0]["snapshot_every"],
+        profile=any(s["profile"] for s in setups),
+    )
+    jax.effects_barrier()
+    runtime = time.time() - t0
+    n_steps = setups[0]["n_steps"]
+    print(f"\ncompleted {len(setups)} configs in {runtime:.1f}s ({n_steps / runtime:.1f} steps/s)")
+    return max(_finish_run(s) for s in setups)
 
 
 def _cmd_bench(args: argparse.Namespace) -> int:
@@ -772,6 +886,7 @@ def _cmd_bench(args: argparse.Namespace) -> int:
     import numpy as np
 
     from gyaradax.solver import gksolve
+    from gyaradax.telemetry import device_memory, profile_block
 
     args.from_scratch = True
     setup = _setup_run(args.configs[0], args)
@@ -788,43 +903,30 @@ def _cmd_bench(args: argparse.Namespace) -> int:
 
     mesh = setup["mesh"]
     devices = list(mesh.devices.flat) if mesh is not None else [jax.devices()[0]]
-    times, peaks = [], []
+    times = []
     for i in range(args.blocks):
-        for dev in devices:
-            try:
-                dev.reset_memory_stats()
-            except Exception:
-                pass
         t0 = time.time()
         df, _, state = gksolve(df, geometry, params, state, n_steps=args.steps, pre=pre)
         jax.block_until_ready(df)
         dt = time.time() - t0
         times.append(dt)
-        peak = 0.0
-        for dev in devices:
-            try:
-                peak = max(peak, (dev.memory_stats() or {}).get("peak_bytes_in_use", 0) / 1e6)
-            except Exception:
-                pass
-        peaks.append(peak)
         print(
             f"  block {i + 1}/{args.blocks}: {dt:.3f}s "
-            f"({args.steps / dt:.2f} steps/s, {dt * 1000 / args.steps:.2f} ms/step, {peak:.0f} MB)"
+            f"({args.steps / dt:.2f} steps/s, {dt * 1000 / args.steps:.2f} ms/step)"
         )
 
     # first block carries lazy-init overhead; report the steady-state median
     steady = args.steps / float(np.median(times[1:] if len(times) > 1 else times))
+    peak = max(device_memory(devices)["process_peak_gib"])
     print("\n" + "=" * 60)
     print(f"  steady-state: {steady:.2f} steps/s ({1000 / steady:.2f} ms/step)")
-    print(f"  VRAM/device : {max(peaks):.0f} MB peak (max over {len(devices)} device(s))")
+    print(f"  VRAM/device : {peak:.2f} GiB peak since start (busiest of {len(devices)} device(s))")
     print("=" * 60)
     if args.profile:
         import tempfile
 
-        from gyaradax.telemetry import profile_block
-
         out = args.output_dir or tempfile.mkdtemp(prefix="gyaradax_profile_")
-        with profile_block(out, args.steps):
+        with profile_block(out, args.steps, int(state.step)):
             df, _, state = gksolve(df, geometry, params, state, n_steps=args.steps, pre=pre)
             jax.block_until_ready(df)
     return 0
@@ -872,7 +974,11 @@ def _cmd_info(args: argparse.Namespace) -> int:
     if cuda_ok:
         _cuda._register_ffi()
         forced = os.environ.get("GYARADAX_BRACKET")
-        bracket = "v6 (cuFFTDx)" if _cuda._has_bracket_v6 else "v5 (library built without cuFFTDx)"
+        bracket = (
+            "v6 (cuFFTDx; plane sizes without a v6 kernel run v5)"
+            if _cuda._has_bracket_v6
+            else "v5 (library built without cuFFTDx)"
+        )
         print(f"bracket     : {bracket}{f'; GYARADAX_BRACKET={forced}' if forced else ''}")
     nccl = importlib.util.find_spec("nvidia.nccl") is not None
     missing = "missing — multi-GPU needs nvidia-nccl-cu13 (cuda13 extra)"
@@ -974,16 +1080,32 @@ def build_parser() -> argparse.ArgumentParser:
     _add_common(run_p)
     run_p.add_argument("--block-size", type=int, default=0, help="steps between checkpoints")
     run_p.add_argument("--n-blocks", type=int, default=0, help="run this many checkpoint blocks")
-    run_p.add_argument("--n-steps", type=int, default=0, help="total steps (overrides config)")
-    run_p.add_argument("--from-scratch", action="store_true", help="ignore K-files, cold start")
+    run_p.add_argument(
+        "--snapshot-every", type=int, default=0,
+        help="write the restart snapshot every K blocks and after the last one (default: 1)",
+    )
+    run_p.add_argument(
+        "--n-steps", type=int, default=0,
+        help="run N more steps (default: up to the config's solver.n_steps)",
+    )
+    run_p.add_argument(
+        "--from-scratch", action="store_true",
+        help="cold start: ignore K-files and the run directory's snapshots",
+    )
     run_p.add_argument(
         "--resume-from", type=str, default=None,
         help="resume from a GKW K-file in data_dir (e.g. K03) or a step_*.npz snapshot",
     )
     run_p.add_argument("--output-dir", type=str, default=None, help="override output directory")
     run_p.add_argument(
-        "--save-dumps", action="store_true",
-        help="keep a df snapshot every block (default: only the latest, for restarts)",
+        "--save-dumps", action=argparse.BooleanOptionalAction, default=None,
+        help="keep every restart snapshot instead of only the latest; stored in the run's "
+             "config.yaml (--no-save-dumps switches it off)",
+    )
+    run_p.add_argument(
+        "--overwrite", action="store_true",
+        help="replace what the output directory holds of another run (or snapshots past "
+             "the resumed step) instead of refusing to start",
     )
     run_p.add_argument(
         "--snapshot-dtype", choices=["c128", "c64"], default="c128",

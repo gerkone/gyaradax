@@ -323,7 +323,7 @@ void linear_rhs_fused_kernel(const LinearRhsArgs a) {
     linear_rhs_fused_body<NS, NKY, false, false, DPC, HALO>(a);
 }
 
-// the EM variants are capped at 64 registers so that 1024 threads stay resident per SM
+// EM variants: at most 64 registers per thread, 1024 resident threads per SM
 template <int NS, int NKY, int MAX_THREADS, bool APAR, bool BPAR, bool DPC, bool HALO = false>
 __global__ __launch_bounds__(MAX_THREADS, 1024 / MAX_THREADS)
 void linear_rhs_fused_em_kernel(const LinearRhsArgs a) {

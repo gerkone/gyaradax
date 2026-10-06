@@ -52,8 +52,9 @@ def test_resume_from_run_directory_is_bitwise(tmp_path, tiny_config):
         np.testing.assert_array_equal(fb["step"], fa["step"])
         np.testing.assert_array_equal(fb["fluxes"], fa["fluxes"])
 
-    # only the latest restart snapshot is kept; the config records the resolved run
-    assert sorted(f for f in os.listdir(a) if f.startswith("step_")) == ["step_000004.npz"]
+    # only the latest snapshot is kept, the resumed one included
+    for run_dir in (a, b):
+        assert sorted(f for f in os.listdir(run_dir) if f.startswith("step_")) == ["step_000004.npz"]
     eff = OmegaConf.load(os.path.join(b, "config.yaml"))
     assert eff.solver.n_steps == 4 and eff.run.block_size == 2 and eff.solver.backend == "jax"
     assert os.path.exists(os.path.join(b, "geometry.pkl"))
@@ -85,3 +86,56 @@ def test_debug_writes_telemetry_and_profile(tmp_path, tiny_config):
     with open(os.path.join(out, "profile_summary.json")) as fh:
         assert json.load(fh)["kernels"]
     assert os.path.isdir(os.path.join(out, "profile"))
+
+
+def _snapshots(run_dir):
+    return sorted(f for f in os.listdir(run_dir) if f.startswith("step_"))
+
+
+def test_snapshot_cadence(tmp_path, tiny_config):
+    common = ["--from-scratch", "--block-size", "1", "--n-steps", "5", "--snapshot-every", "2"]
+    every, rolling = str(tmp_path / "every"), str(tmp_path / "rolling")
+    _run(tiny_config, *common, "--save-dumps", "--output-dir", every)
+    _run(tiny_config, *common, "--output-dir", rolling)
+
+    # every second block and the last one; diagnostics still every block
+    assert _snapshots(every) == [f"step_{k:06d}.npz" for k in (0, 2, 4, 5)]
+    assert _snapshots(rolling) == ["step_000005.npz"]
+    with np.load(os.path.join(rolling, "fluxes.npz")) as fh:
+        assert fh["step"].tolist() == [0, 1, 2, 3, 4, 5]
+    assert OmegaConf.load(os.path.join(rolling, "config.yaml")).run.snapshot_every == 2
+
+
+def test_batched_run_matches_single_runs(tmp_path, tiny_config):
+    cfg = OmegaConf.load(tiny_config)
+    paths = []
+    for name, rlt in (("ma", 9.0), ("mb", 6.0)):
+        cfg.run.name = name
+        cfg.physics.rlt = [rlt, rlt]
+        path = str(tmp_path / f"{name}.yaml")
+        OmegaConf.save(cfg, path)
+        paths.append(path)
+    batch = str(tmp_path / "batch")
+    common = ["--from-scratch", "--block-size", "2", "--backend", "jax"]
+    _run(*paths, *common, "--n-steps", "4", "--output-dir", batch)
+    _run(os.path.join(batch, "ma"), os.path.join(batch, "mb"), "--n-steps", "2")
+
+    for name, path in zip(("ma", "mb"), paths):
+        single = str(tmp_path / f"single_{name}")
+        _run(path, *common, "--n-steps", "6", "--output-dir", single)
+        member = os.path.join(batch, name)
+        assert _snapshots(member) == ["step_000006.npz"]
+        with (
+            np.load(os.path.join(member, "step_000006.npz")) as cb,
+            np.load(os.path.join(single, "step_000006.npz")) as cs,
+        ):
+            for key in STATE_KEYS:
+                np.testing.assert_array_equal(cb[key], cs[key])
+        with (
+            np.load(os.path.join(member, "fluxes.npz")) as fb,
+            np.load(os.path.join(single, "fluxes.npz")) as fs,
+        ):
+            np.testing.assert_array_equal(fb["step"], fs["step"])
+            np.testing.assert_array_equal(fb["fluxes"], fs["fluxes"])
+        with open(os.path.join(member, "run_info.jsonl")) as fh:
+            assert [json.loads(line)["start_step"] for line in fh] == [0, 4]

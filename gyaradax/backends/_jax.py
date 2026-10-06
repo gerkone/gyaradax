@@ -15,7 +15,7 @@ from jax.sharding import PartitionSpec
 import gyaradax.sharding as sharding
 import gyaradax.stencils as stencils
 from gyaradax.backends.ops import SolverOps, em_chi_correction
-from gyaradax.collisions import collision_rhs, conservation_correction
+from gyaradax.collisions import CONSERVATION_KEYS, collision_term, collisions_on
 from gyaradax.params import GKParams
 from gyaradax.state import GKPre
 from gyaradax.utils import pack_half_spectrum, unpack_half_spectrum
@@ -95,7 +95,7 @@ class JAXOps(SolverOps):
         n_vp = self.mesh.shape["vp"]
 
         def local(f):
-            ext = sharding.vpar_halo(f, v_axis, n_vp)
+            ext = sharding.halo(f, v_axis, "vp", n_vp)
             n = f.shape[v_axis]
             out_d1 = jnp.zeros_like(f)
             out_d4 = jnp.zeros_like(f)
@@ -366,6 +366,7 @@ class JAXOps(SolverOps):
         apar: jnp.ndarray | None = None,
         bpar: jnp.ndarray | None = None,
         vpar_d: Tuple[jnp.ndarray, jnp.ndarray] | None = None,
+        coll_term: jnp.ndarray | None = None,
     ) -> dict[str, jnp.ndarray]:
         """Return each linear-RHS term as a dict entry.
 
@@ -456,18 +457,10 @@ class JAXOps(SolverOps):
             )
 
         term_collisions = jnp.zeros_like(df)
-        if params.collisions and "coll_stencil" in pre:
-            term_collisions = collision_rhs(df, pre["coll_stencil"])
-            if (
-                params.coll_mom_conservation or params.coll_ene_conservation
-            ) and "coll_mom_factor" in pre:
-                term_collisions = term_collisions + conservation_correction(
-                    term_collisions,
-                    pre["coll_mom_factor"],
-                    pre["coll_ene_factor"],
-                    pre["coll_vpar_weight"],
-                    pre["coll_vsq_weight"],
-                )
+        if coll_term is not None:
+            term_collisions = coll_term
+        elif collisions_on(params, pre):
+            term_collisions = collision_term(df, params, pre)
 
         return {
             "I_par_streaming_plus_diss": term_I_par,
@@ -493,13 +486,16 @@ class JAXOps(SolverOps):
         apar: jnp.ndarray | None = None,
         bpar: jnp.ndarray | None = None,
         vpar_d: Tuple[jnp.ndarray, jnp.ndarray] | None = None,
+        coll_term: jnp.ndarray | None = None,
     ) -> jnp.ndarray:
         """Total linear RHS = sum of all linear terms.
 
         Convenience wrapper around _linear_rhs_terms; numerically identical to
         the fused expression. JAX/XLA will fuse term computations under JIT.
         """
-        terms = self._linear_rhs_terms(df, phi, params, pre, apar=apar, bpar=bpar, vpar_d=vpar_d)
+        terms = self._linear_rhs_terms(
+            df, phi, params, pre, apar=apar, bpar=bpar, vpar_d=vpar_d, coll_term=coll_term
+        )
         total = terms["I_par_streaming_plus_diss"]
         for k, v in terms.items():
             if k == "I_par_streaming_plus_diss":
@@ -523,11 +519,14 @@ class JAXOps(SolverOps):
         Dispatches on df.ndim: 5D direct, 6D via vmap over species.
         When apar/bpar are provided, includes EM coupling terms.
         """
-        vpar_d = None
+        # stencils coupling velocity points run on the shards with halos (sharded runs only)
+        extra: dict[str, Any] = {}
         if self.mesh is not None and self.mesh.shape["vp"] > 1:
-            vpar_d = self._vpar_dual_sharded(df)
+            extra["vpar_d"] = self._vpar_dual_sharded(df)
+        if sharding.splits_velocity(self.mesh) and collisions_on(params, pre):
+            extra["coll_term"] = collision_term(df, params, pre, self.mesh)
         if df.ndim == 5:
-            return self._linear_rhs_core(df, phi, params, pre, apar=apar, bpar=bpar, vpar_d=vpar_d)
+            return self._linear_rhs_core(df, phi, params, pre, apar=apar, bpar=bpar, **extra)
         elif df.ndim == 6:
             sp_arrays = {
                 "bessel": pre["bessel"],
@@ -552,13 +551,10 @@ class JAXOps(SolverOps):
             if bpar is not None and "bpar_chi_factor" in pre:
                 sp_arrays["bpar_chi_factor"] = pre["bpar_chi_factor"]
             # per-species collision stencil shape (nsp, 9, nv, nmu, ns); axis 0 mapped
-            if params.collisions and "coll_stencil" in pre:
-                sp_arrays["coll_stencil"] = pre["coll_stencil"]
-                if "coll_mom_factor" in pre:
-                    sp_arrays["coll_mom_factor"] = pre["coll_mom_factor"]
-                    sp_arrays["coll_ene_factor"] = pre["coll_ene_factor"]
-                    sp_arrays["coll_vpar_weight"] = pre["coll_vpar_weight"]
-                    sp_arrays["coll_vsq_weight"] = pre["coll_vsq_weight"]
+            if collisions_on(params, pre):
+                for key in ("coll_stencil", *CONSERVATION_KEYS):
+                    if key in pre:
+                        sp_arrays[key] = pre[key]
             sp_in_axes = {k: 0 for k in sp_arrays}
 
             shared = {
@@ -569,14 +565,14 @@ class JAXOps(SolverOps):
                 "dvp": pre["dvp"],
             }
 
-            def _per_species(df_sp, sp, vd_sp=None):
+            def _per_species(df_sp, sp, ex=None):
                 sp_pre = {**sp, **shared}
                 return self._linear_rhs_core(
-                    df_sp, phi, params, sp_pre, apar=apar, bpar=bpar, vpar_d=vd_sp
+                    df_sp, phi, params, sp_pre, apar=apar, bpar=bpar, **(ex or {})
                 )
 
-            if vpar_d is not None:
-                return jax.vmap(_per_species, in_axes=(0, sp_in_axes, 0))(df, sp_arrays, vpar_d)
+            if extra:
+                return jax.vmap(_per_species, in_axes=(0, sp_in_axes, 0))(df, sp_arrays, extra)
             return jax.vmap(_per_species, in_axes=(0, sp_in_axes))(df, sp_arrays)
         else:
             raise ValueError(f"linear_rhs: expected df with ndim 5 or 6, got {df.ndim}")

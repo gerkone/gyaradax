@@ -1492,8 +1492,9 @@ freed before the next stage. The JAX bracket loops over species, then over vpar 
 full-batch real-space intermediate would exceed `_NL_CHUNK_BYTES` (1 GiB); cuFFT results do not
 depend on the batch size, so the looped and batched paths agree bitwise (checked on 20-step
 trajectories). The bracket workspaces of the CUDA backend (v6: ~13 GiB on the grid below) are
-allocated outside XLA's pool. On production grids the table gathers and barriers cost the JAX path
-1-3 % per step against master (min of interleaved runs on H100).
+allocated outside XLA's pool. Against master the JAX path takes 0-3.4 % longer per step on the
+production grids of §13.2 (6.7 % on the small waltz A_par + B_par grid), from the table gathers and
+barriers, and is faster on the linear and medium-size runs (min of interleaved runs on H100).
 
 Peak device memory of one compiled `gksolve` (XLA memory analysis, 2 x 64 x 16 x 32 x 85 x 64,
 mixed precision, A_par; one df is 5.3 GiB):
@@ -1522,23 +1523,44 @@ every CUDA kernel operand (~5 df per step), and on the JAX path the bracket's FF
 and the bracket (both backends), the CUDA linear and field-moment kernels and the JAX vpar stencil
 run on the local (sp, vp, mu) blocks through `sharding.velocity_map` (`shard_map`); only the field
 moments are all-reduced (a few MiB per step). Sharding vpar exchanges the two vpar planes next to
-each shard edge per stage (`sharding.vpar_halo_planes`): df, plus F_M and the g2f factor for the
+each shard edge per stage (`sharding.halo_planes`): df, plus F_M and the g2f factor for the
 in-kernel g -> f. The CUDA kernel reads them from separate halo buffers, the JAX stencil from a
 halo-extended block; planes past the grid ends are zero, so interior points are computed exactly
 as on one device. The sharded precompute keeps scalar entries (`dvp`, `sgr_dist`) concrete, which
 the CUDA kernels need. Multi-GPU runs need NCCL (`nvidia-nccl-cu13`, in the `cuda13` extra).
 
-- **Which axis.** Species and mu shards need nothing from their neighbours; vpar shards receive
-  4 nmu ns nkx nky complex values per device and stage (178 MB on the large grid, ~0.1 ms over
-  NVLink against a ~290 ms step). Measured: mu and species sharding 292 and 298 ms on the large grid
+- **Which axis.** Without collisions, species and mu shards need nothing from their neighbours;
+  vpar shards receive 4 nmu ns nkx nky complex values per device and stage (178 MB on the large
+  grid, ~0.1 ms over NVLink against a ~290 ms step). Measured: mu and species sharding 292 and 298 ms on the large grid
   (two quiet B300); vpar 356 ms with the first, copying halo, and on par with mu after the halo
   buffers (medium grid, two loaded B300: 207-272 against 261-270 ms for CUDA, 765-768 against
   729-764 ms for JAX, with equal or lower memory per device). In practice the axes are equivalent;
-  `--n-gpus N` fills species, then mu, then vpar, which need no halo and balance exactly, and keeps
-  vpar as the reserve that allows up to nsp nmu nvpar / 2 GPUs.
+  `--n-gpus N` fills species, then mu, then vpar, and keeps vpar as the reserve that allows up to
+  nsp nmu nvpar / 2 GPUs.
+- **Collisions.** The 9-point (vpar, mu) collision stencil runs on the local blocks
+  (`collisions.collision_term`) with a one-plane halo in each sharded velocity direction;
+  the corner points come with the second exchange, which sends the already-extended planes. The
+  momentum and energy corrections all-reduce their two velocity moments. Before, the sharded
+  precompute failed on a traced `float()` and collisional runs could not be sharded at all.
+  The mu halo carries more data than the vpar one (a mu plane holds nvpar values per (s, kx, ky),
+  a vpar plane nmu), but over NVLink the step time does not show it: two H100 NVL, mixed
+  precision, ms per step:
+
+  | case | backend | one GPU | vp = 2 | mu = 2 |
+  |---|---|---|---|---|
+  | ES adiabatic, 32 x 8 x 16 x 85 x 32 | CUDA | 10.7 | 6.1 | 5.5 |
+  | + collisions | CUDA | 11.6 | 7.0 | 7.0 |
+  | ES adiabatic, 64 x 16 x 16 x 85 x 32 | CUDA | 45.5 | 24.0 | 22.7 |
+  | + collisions | CUDA | 50.6 | 27.9 | 27.3 |
+  | ES adiabatic, 32 x 8 x 16 x 85 x 32 | JAX | 33.9 | 20.8 | 19.7 |
+  | + collisions | JAX | 42.6 | 20.7 | 20.0 |
+  | ES adiabatic, 64 x 16 x 16 x 85 x 32 | JAX | 125.7 | 66.6 | 66.7 |
+  | + collisions | JAX | 141.5 | 68.3 | 69.0 |
+
 - **Correctness.** Sharded runs match single-device runs at round-off, not bitwise: the field
   moments are summed per shard and then across shards. FP64: 2e-16 in df over 100 adiabatic steps
-  (vpar), 1e-15 to 1e-14 over 3 EM steps (every axis); mixed precision: ~1e-9 in df after 40-100
+  (vpar), 1e-15 to 1e-14 over 3 EM steps (every axis), 3e-16 over 3 collisional steps (vpar or
+  mu, with and without the conservation corrections); mixed precision: ~1e-9 in df after 40-100
   steps (FP32 bracket round-off amplified by the nonlinear dynamics).
 
 On the 2 x 32 x 8 x 16 x 55 x 8 waltz A_par + B_par case on two B300 the step went from 19.1 to

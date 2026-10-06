@@ -22,7 +22,7 @@ gyaradax/
   params.py      — GKParams dataclass (JAX pytree), YAML/input.dat loading
   state.py       — GKPre (precomputed coeffs pytree), GKState (diagnostic state)
   stencils.py    — 4th-order FD stencil coefficients (parallel + velocity)
-  simulate.py    — high-level entry points (gksimulate, gk_run, gk_run_batched)
+  simulate.py    — high-level entry points (gksimulate, gksimulate_batched, gk_run, gk_run_batched)
   sharding.py    — device mesh, sharded precompute / init, shard_map helpers for the kernels
   eigenvalue.py  — linear eigenvalue solver (GKW eiv_integration)
   quasilinear/   — quasilinear transport: linear harvest, saturation rules, calibration
@@ -150,9 +150,10 @@ SolverOps interface: `linear_rhs()`, `linear_rhs_from_g()`, `nonlinear_term_iii(
   For kinetic electrons, the field CFL (electron Alfven frequency) dominates.
   With finite beta, the Alfven CFL is tighter: includes beta in field period.
 - **Grid**: 5D `(vpar, mu, s, kx, ky)` for adiabatic; 6D `(species, ...)` for kinetic.
-- **Backends**: JAX (default, differentiable, R2C/Z2Z), CUDA (fused kernels, Z2Z only; 2.8-4.4x faster
-  steps than JAX on H100, ES and EM incl. A_par/B_par, conservative parallel dissipation and
-  collisions — operators in docs/NOTES.md §10.14, performance in §13).
+- **Backends**: JAX (default, differentiable, R2C/Z2Z), CUDA (fused kernels, Z2Z only; ES and EM
+  incl. A_par/B_par, conservative parallel dissipation and collisions; 2.6-3.0x (ES) and 2.9-4.2x
+  (EM) faster nonlinear steps than JAX on H100 production grids — operators in docs/NOTES.md
+  §10.14, performance in §13).
 
 ## Running tests
 
@@ -189,11 +190,13 @@ gyaradax info
 ```
 
 A run directory holds the effective `config.yaml`, `geometry.pkl`, the
-diagnostics, a rolling restart snapshot `step_*.npz` and `run_info.jsonl`;
+diagnostics, a rolling restart snapshot `step_*.npz` (every `--snapshot-every`
+blocks) and `run_info.jsonl`; several configs run batched, one run directory each;
 `--telemetry` / `--profile` / `--debug` (off by default) add `telemetry.jsonl`
 and a profiler trace with `profile_summary.json`. `python -m gyaradax` is the
 same CLI.
-Add `--from-scratch` to cold-start instead of resuming from K-files or snapshots.
+Add `--from-scratch` to cold-start instead of resuming from K-files or snapshots
+(`--overwrite` when the output directory already holds another run).
 Add `--block-size=300` for faster checkpoint cadence.
 Add `--backend=cuda` to force CUDA backend.
 `scripts/run.py` is a back-compat shim that forwards to `gyaradax run`.
@@ -292,7 +295,9 @@ the FFI kernels or the bracket's FFTs (it all-gathers their operands), so the
 bracket (both backends), the CUDA linear / field-moment kernels and the JAX
 vpar stencil run on the local (sp, vp, mu) blocks via `sharding.velocity_map`
 (`shard_map`). Sharding vpar exchanges the two vpar planes next to each shard
-edge per RK stage (`sharding.vpar_halo_planes`); species and mu need no halo.
+edge per RK stage (`sharding.halo_planes`); species and mu need no halo,
+except for collisions, whose 9-point stencil exchanges one plane per sharded
+velocity axis (`collisions.collision_term`).
 All three axes run at about the same speed. Multi-GPU needs NCCL
 (`nvidia-nccl-cu13`, in the `cuda13` extra). See docs/NOTES.md §13.4.
 

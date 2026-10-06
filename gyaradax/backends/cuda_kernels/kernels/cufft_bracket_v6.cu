@@ -410,7 +410,7 @@ xla_ffi::Error BracketV6Impl(
         long long n_ll[1] = {mrad};
         long long emb[1] = {mrad};
         size_t ws = 0;
-        // FP32: explicit pack/unpack kernels and plain plans (faster); FP64: cuFFT callbacks
+        // FP32: explicit pack/unpack kernels and plain plans; FP64: cuFFT callbacks
         s->explicit_pack = s->explicit_unpack = !fp64;
         const long long col_stride = (long long)n_planes * n_cols;
         V6_CHECK_CUFFT(cufftCreate(&s->plan_col));

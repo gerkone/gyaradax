@@ -404,7 +404,7 @@ def gkstep_single(
             )
         return rhs, phi_local, apar_local
 
-    # rk4 as a running sum in the closed form's association; barriers let each k die early
+    # rk4 as a running sum in the closed form's association
     dt6 = dt / 6.0
     dt3 = dt / 3.0
     k1, phi1, apar1 = _rhs(prev_df)

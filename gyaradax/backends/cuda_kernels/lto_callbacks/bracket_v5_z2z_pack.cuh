@@ -60,7 +60,6 @@ __device__ __forceinline__ static double2 v5_z2z_pack_at(
 // ── True FP32 Z2Z Load Callback (Early Cast Optimization) ───────────────────
 // Casts input double2 and kx/ky to float2/float IMMEDIATELY, then performs
 // all arithmetic (Hermitian symmetry, derivative packing) in FP32.
-// This reduces register pressure by ~50% and eliminates FP64 ALU usage.
 
 __device__ __forceinline__ static float2 v5_z2z_true_fp32_pack_at(
     int gb, int i, int j, const V5Z2zInfo* ci)
