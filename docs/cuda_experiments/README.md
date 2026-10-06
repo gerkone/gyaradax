@@ -20,6 +20,7 @@ prototypes are in git history before `7b49a2e`). Times are per evaluation on an 
 | `cufft_bracket_v6.cu` (new) | - | 2.8 ms ES, 3.0 ms A_par, 3.32 ms FP64 | 1D column passes on the retained ky columns only, cuFFTDx row kernels fusing inverse FFT, bracket and forward FFT; needs `nvidia-mathdx`, falls back to v5 |
 | `field_moments.cu` (new) | JAX field solve, 1.03 ms | 0.50 ms | up to two velocity moments per pass, g -> f in-kernel, deterministic chunked sums |
 | `linear_rhs_vtiled.cu` | unreachable, incorrect | removed | - |
+| `apply_parallel*.cu`, `apply_vpar*_stencil.cu` | standalone parallel (9-point) and vpar (5-point) stencil kernels, single and dual; no solver path called them since the fused linear kernel | not built, kept in `legacy/` | superseded by `linear_rhs_fused.cu` |
 
 Around the kernels, the backend now runs them on the local blocks of a sharded df
 (`sharding.velocity_map`) instead of letting GSPMD all-gather their operands.
@@ -35,6 +36,16 @@ Lessons worth keeping for new experiments:
   ~250 ps on B300.
 - **Time with CUPTI and minima.** On shared GPUs, take the minimum over interleaved repeats;
   compare outputs bitwise against a frozen copy of the previous library.
+
+## Legacy kernels
+
+`legacy/` keeps the retired standalone stencil kernels (`apply_parallel.cu`,
+`apply_parallel_dual.cu`, `apply_vpar_stencil.cu`, `apply_vpar_dual_stencil.cu`)
+and their JAX FFI bindings (`legacy/bindings.py`, the former `CUDAOps` methods).
+They are deprecated and not compiled, neither by the production build nor by the
+`kernels/*.cu` glob here; the JAX backend keeps its own `_apply_parallel` /
+`_apply_vpar` stencils. To revive one, copy it into `kernels/` and follow the
+docstring in `legacy/bindings.py`.
 
 ## Contract
 
@@ -89,4 +100,8 @@ docs/cuda_experiments/
   kernels/
     README.md
     example_kernel.cu
+  legacy/
+    apply_parallel.cu, apply_parallel_dual.cu
+    apply_vpar_stencil.cu, apply_vpar_dual_stencil.cu
+    bindings.py
 ```

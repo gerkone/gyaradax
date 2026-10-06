@@ -1440,7 +1440,9 @@ Per evaluation, H100, 2 x 32 x 8 x 16 x 85 x 32, mixed precision (master = befor
   Register use decides occupancy: the EM variants are capped at 64 registers, and the
   compile-time-sized ES variant must stay at 64 (a 76-register build halves occupancy, 2.08 against
   1.27 ms). ns * nky > 1024 runs a ky-tiled instantiation; vpar shards use HALO instantiations of
-  the same sized kernels (§13.4).
+  the same sized kernels (§13.4). The standalone stencil kernels the fused kernel superseded
+  (`apply_parallel*`, `apply_vpar*`) are deprecated and no longer built; they are kept with their
+  bindings in `docs/cuda_experiments/legacy/`.
 - **Field moments.** Up to two velocity moments per pass over g, with g -> f in-kernel and
   chunked (deterministic) partial sums.
 - **Bracket v5.** The EM potential is separable in vpar, so only the potentials A and B are

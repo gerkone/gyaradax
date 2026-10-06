@@ -95,10 +95,6 @@ add_library(gyaradax_cuda SHARED
     kernels/cufft_graph_bracket_fp64.cu
     kernels/cufft_graph_bracket_true_fp32.cu
     lto_callbacks/bracket_v5_lto_fatbins.cu
-    kernels/apply_parallel.cu
-    kernels/apply_parallel_dual.cu
-    kernels/apply_vpar_stencil.cu
-    kernels/apply_vpar_dual_stencil.cu
     kernels/linear_rhs_fused.cu
     kernels/field_moments.cu
     ${LTO_HEADERS})

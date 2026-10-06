@@ -75,4 +75,3 @@ Set `GYARADAX_BRACKET=v5` to force the v5 pipeline (bitwise reproduction of earl
 - `kernels/cufft_bracket_v6.cu`: v6 Poisson bracket (needs cuFFTDx, see above).
 - `kernels/bracket_v5_pack_select.cuh`: explicit pack kernel and the plan-time C2C path selection of the v5 bracket.
 - `lto_callbacks/`: cuFFT LTO load/store callbacks and the shared pack routines.
-- `kernels/apply_*.cu`: standalone stencil kernels (benchmarks).

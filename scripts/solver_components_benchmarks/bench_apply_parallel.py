@@ -52,7 +52,8 @@ def run(config="configs/iteration_13.yaml", mixed_precision=False):
 
     results = {}
     backends = []
-    for b in ["jax", "cuda"]:
+    # cuda runs these stencils inside linear_rhs_fused (bench_linear_rhs.py)
+    for b in ["jax"]:
         try:
             ops = create_ops(pre_gk, backend=b, mixed_precision=mixed_precision)
             backends.append((b, ops))
