@@ -8,7 +8,7 @@
 
 This was made possible with significant usage of agentic workflows. [PROMPT.md](docs/PROMPT.md) contains the prompt used to obtain the initial working version of `gyaradax`
 
-Check out [our whitepaper](https://arxiv.org/abs/2604.06085), or see [agent notes](docs/NOTES.md) for a detailed walkthrough of GKW and this reimplementation.
+Check out [our whitepaper](https://arxiv.org/abs/2604.06085), or see [agent notes](docs/NOTES.md) for a detailed walkthrough of GKW and this reimplementation (§13 there covers performance, memory and multi-GPU sharding).
 
 <p align="center">
   <img src="docs/figs/torus.gif" width="700" alt="Nonlinear ITG turbulence on a torus">
@@ -33,17 +33,24 @@ The optional CUDA backend provides fused kernels for the linear RHS (electrostat
 pip install -e ".[cuda13,dev]"
 ```
 
+This also installs the `gyaradax` command (re-run it after pulling if the command is missing).
+
 From `gyaradax/backends/cuda_kernels/`:
 ```bash
 mkdir -p _build && cd _build && cmake .. -DCMAKE_BUILD_TYPE=Release && cmake --build . -j$(nproc) && cmake --install . && cd ..
 ```
 
-To target specific GPU architectures (e.g. H100 and B300 in one library):
+**GPU architectures.** By default (`GPU_ARCHITECTURES=native`) CMake compiles for the GPU of the
+machine it runs on, so the same commands work on an H100 node (sm_90) and on a B300 node (sm_103) —
+but that library then runs only on that GPU type. For a checkout shared by different node types, or
+on a build node without a GPU, list the architectures explicitly:
 ```bash
-cmake .. -DCMAKE_BUILD_TYPE=Release -DGPU_ARCHITECTURES="90;103"
+cmake .. -DCMAKE_BUILD_TYPE=Release -DGPU_ARCHITECTURES="90;103"   # H100 + B300 in one library
 ```
-
-CMake prints the detected compute capability, jaxlib version, and cudatoolkit. Ensure these are correct before proceeding.
+The cuFFT LTO callbacks are built for compute 80/90/100 (`LTO_ARCHITECTURES`), which covers A100,
+H100 and Blackwell, and the cuFFTDx bracket is instantiated for every kernel architecture. CMake
+prints the target architectures, jaxlib and CUDA toolkit versions, and whether cuFFTDx was found;
+`gyaradax info` shows what the installed library provides (CUDA kernels, v6 bracket, NCCL).
 
 ## Structure
 
@@ -80,7 +87,7 @@ Electromagnetic and multi-GPU runs need no extra flags — a config carrying
 ```bash
 gyaradax run configs/nl_em_apar.yaml            # electromagnetic, kinetic electrons
 gyaradax run configs/my_big_case.yaml           # sharded if the config says so
-gyaradax run configs/my_case.yaml --n-gpus-vp 4 # or override the mesh
+gyaradax run configs/my_case.yaml --n-gpus 4    # shard over 4 GPUs, layout from the grid
 ```
 
 When several YAML configs share the same grid and static parameters they are
@@ -90,10 +97,27 @@ batched automatically under one `jax.vmap`:
 gyaradax run configs/adiabatic_a.yaml configs/adiabatic_b.yaml --device 0
 ```
 
+Every run writes into its output directory: the effective `config.yaml` (the
+input config with the command-line choices folded in), `geometry.pkl`, the
+diagnostics (`fluxes.npz`, spectra, `dt_history.npz`), a restart snapshot
+`step_*.npz` refreshed every block, and `run_info.jsonl` (one line per
+invocation). Point `gyaradax run` at that directory to resume or extend it:
+
+```bash
+gyaradax run outputs_kinetic_my_case                  # continue up to solver.n_steps
+gyaradax run outputs_kinetic_my_case --n-steps 2000   # or run 2000 more steps
+```
+
+Debug output is off by default: `--telemetry` writes per-block timings, dt and
+device memory to `telemetry.jsonl`, `--profile` traces one block into
+`profile/` with a GPU kernel summary in `profile_summary.json`, and `--debug`
+turns on both.
+
 **See [docs/CLI.md](docs/CLI.md) for the full command reference**, including
 the auto-detection table, multi-GPU guidance and every flag.
 
-`python scripts/run.py CONFIG ...` still works as a thin shim over
+`python -m gyaradax ...` is the same command where the console script is not on
+`PATH`, and `python scripts/run.py CONFIG ...` still works as a thin shim over
 `gyaradax run`.
 
 ### Usage
@@ -122,7 +146,7 @@ df, phi, fluxes, state = gksimulate(df, geometry, params, state, 120, pre=pre)
 #### Configuration from GKW
 If you have an existing GKW run, you can extract its parameters and geometry into yaml:
 ```bash
-python -m scripts.gkw_to_yaml /path/to/gkw_run configs/my_sim.yaml
+gyaradax convert /path/to/gkw_run configs/my_sim.yaml
 ```
 
 ### CUDA backend

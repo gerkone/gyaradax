@@ -1096,8 +1096,7 @@ on chi = psi - 2 v_R v_par J0 A_par. The fused parallel stencils are read from p
 [mu,] s) tables indexed by the stencil class `clip(pos_par_grid_class + 2, 0, 4)` and the shift
 (`s_upar_tab`, `s_t7_tab`, `s_disp_par_tab`), so the kernel neither streams a 9 x 6D coefficient
 array nor divides by `sgr_dist`. The EM variants are capped at 64 registers to keep 1024 threads
-resident per SM. On B300 the kernel is FP64-throughput bound (~250 ps per grid point against
-~60 ps on H100), so H100 is the reference platform for its timings.
+resident per SM; vpar shards read their edge neighbours from halo buffers (§13.4).
 
 **Field solve** (`field_moments.cu`, kinetic EM only). A_par, phi and B_par numerators are
 velocity moments sum_{sp,v,mu} w f; the kernel computes up to two per pass over g, with
@@ -1122,109 +1121,8 @@ potential planes are transformed and chi is formed in real space.
   mphi in {16, 32, 36, 40, 64, 96, 128, 144, 192}; other grids, odd plane counts or a build
   without cuFFTDx run v5. `GYARADAX_BRACKET=v5` forces v5.
 
-**Memory** (both backends). The fused parallel stencils are kept only as the per-class tables
-above (the 9 x 6D `s_total_*` arrays were 5.6 df of device memory, and the JAX species vmap
-materialised a transposed copy of the 4.5 df `s_total_t7` on top). `gkstep_single` forms the RK4
-update as a running sum in the association of the closed form (prev + dt/6 k1 + dt/3 k2 + dt/3 k3
-+ dt/6 k4), behind `optimization_barrier`s, so each stage's k (linear and bracket outputs) is
-freed before the next stage. The JAX bracket loops over species, then over vpar chunks, once one
-full-batch real-space intermediate would exceed `_NL_CHUNK_BYTES` (1 GiB); cuFFT results do not
-depend on the batch size, so the looped and batched paths agree bitwise (checked on 20-step
-trajectories). The bracket workspaces of the CUDA backend (v6: ~13 GiB on the grid below) are
-allocated outside XLA's pool. On production grids the table gathers and barriers cost the JAX path
-1-3 % per step against HEAD (min of interleaved runs on H100).
-
-Peak device memory of one compiled `gksolve` (XLA memory analysis, 2 x 64 x 16 x 32 x 85 x 64,
-mixed precision, A_par; one df is 5.3 GiB):
-
-| | precompute | temporaries | peak |
-|---|---|---|---|
-| JAX, HEAD | 36.2 GiB | 121.3 GiB | 168.0 GiB |
-| JAX, now | 10.8 GiB | 41.3 GiB | 62.7 GiB |
-| CUDA, before these changes | 36.2 GiB (22.8 unused) | 47.8 GiB | 89.3 GiB |
-| CUDA, now | 10.8 GiB | 21.3 GiB | 40.0 GiB (+ ~13 GiB bracket workspace) |
-
-**Behaviour.** The JAX backend is bitwise identical to HEAD: df, phi, dt, state and the flux
-diagnostics over 20-step trajectories (fixed and adaptive dt, FP64 and mixed precision; ES, A_par,
-B_par, conservative dissipation, collisions). Across separate processes the flux diagnostic can
-differ in the last bit for HEAD itself (XLA autotuning picks reduction configurations from
-timings). With `GYARADAX_BRACKET=v5` the CUDA ES results are bit-identical to the original CUDA
-backend; v6 changes the bracket at round-off level (mixed precision ~1e-7, FP64 ~1e-16 per
-evaluation), the same level at which the JAX and CUDA backends differ.
-
-CUDA vs JAX parity per evaluation (rel. L2, H100; the same on B300). Grids are the configs'
-production grids; kinetic rows give the worse species.
-
-| case | linear (FP64) | bracket FP64 | bracket mixed |
-|---|---|---|---|
-| ES adiabatic (iteration_13) | 1.5e-16 | 1.1e-15 | 6.2e-7 |
-| ES kinetic | 1.5e-16 | 1.6e-15 | 8.4e-7 |
-| kinetic A_par | 1.5e-16 | 1.6e-15 | 8.5e-7 |
-| kinetic A_par + B_par | 2.0e-16 | 1.6e-15 | 8.2e-7 |
-| kinetic B_par only | 1.9e-16 | 1.6e-15 | 8.0e-7 |
-| waltz beta = 0.01 (A_par) | 3.0e-16 | 2.2e-15 | 1.3e-6 |
-| waltz A_par + B_par | 4.0e-16 | 2.1e-15 | 1.2e-6 |
-| CBC A_par (small) | 3.2e-16 | 1.7e-15 | 9.1e-7 |
-| adiabatic + A_par | 1.5e-16 | 1.1e-15 | 6.2e-7 |
-| waltz, conservative dissipation | 3.0e-16 | 2.2e-15 | 1.3e-6 |
-| ES adiabatic, conservative dissipation | 1.5e-16 | 1.1e-15 | 6.2e-7 |
-
-Wall time per `gksolve` step on H100 NVL (mixed precision unless noted; JAX on its default R2C
-path; HEAD CUDA had no EM support). Medium is 2 x 64 x 16 x 16 x 85 x 32, large
-2 x 64 x 16 x 32 x 85 x 64; entries marked * needed the platform allocator or a 0.95 memory
-fraction to avoid BFC fragmentation, and HEAD JAX does not fit the large grid on H100. The large
-A_par + B_par case does not fit one 94 GB H100 for either backend: the eager setup (init +
-`linear_precompute`, ~38 GiB peak) leaves XLA's pool fragmented, and with preallocation the CUDA
-bracket workspaces no longer fit outside the pool; it runs sharded or on B300 (rows below, where
-the FP64-bound linear kernel narrows the CUDA lead).
-
-| case | grid | HEAD JAX | HEAD CUDA | JAX | CUDA | CUDA / JAX |
-|---|---|---|---|---|---|---|
-| ES adiabatic | 32 x 8 x 16 x 85 x 32 | 33.0 ms | 19.4 ms | 33.9 ms | 11.3 ms | 3.0x |
-| ES kinetic | 2 x 32 x 8 x 16 x 85 x 32 | 64.4 ms | 39.9 ms | 66.2 ms | 24.4 ms | 2.7x |
-| kinetic A_par | 2 x 32 x 8 x 16 x 85 x 32 | 101.0 ms | - | 103.9 ms | 31.2 ms | 3.3x |
-| kinetic A_par + B_par | 2 x 32 x 8 x 16 x 85 x 32 | 104.8 ms | - | 105.6 ms | 31.6 ms | 3.3x |
-| adiabatic + A_par | 32 x 8 x 16 x 85 x 32 | 49.4 ms | - | 51.1 ms | 13.5 ms | 3.8x |
-| waltz beta = 0.01 | 2 x 32 x 8 x 16 x 55 x 8 | 24.0 ms | - | 24.1 ms | 8.4 ms | 2.9x |
-| waltz beta = 0.01, FP64 | 2 x 32 x 8 x 16 x 55 x 8 | 31.8 ms | - | 31.7 ms | 8.6 ms | 3.7x |
-| waltz A_par + B_par | 2 x 32 x 8 x 16 x 55 x 8 | 24.0 ms | - | 25.6 ms | 8.6 ms | 3.0x |
-| CBC A_par (small) | nl_em_apar | 3.5 ms | - | 3.5 ms | 1.8 ms | 2.0x |
-| waltz, linear | 2 x 32 x 8 x 16 x 55 x 8 | 4.4 ms | - | 3.6 ms | 2.0 ms | 1.8x |
-| ES kinetic | medium | 271.7 ms* | - | 239.8 ms | 93.7 ms | 2.6x |
-| waltz beta = 0.01 | medium | 448.9 ms* | - | 428.1 ms* | 103.1 ms | 4.2x |
-| waltz beta = 0.01 | large | - | - | 1613.3 ms* | 416.1 ms | 3.9x |
-| waltz beta = 0.01 | large, B300 | 1737 ms* | - | 1737 ms | 579 ms | 3.0x |
-| waltz A_par + B_par | large, B300 | out of memory | - | 1832 ms | 593 ms | 3.1x |
-
-**Sharding** (`n_gpus_sp/vp/mu`). GSPMD cannot partition the opaque FFI kernels, nor the
-bracket's FFT pipeline: it all-gathered every CUDA kernel operand (~5 df per step), and on the
-JAX path the bracket's FFT intermediates (~3.4 GiB per step for a 55 MiB df, HEAD included).
-`gksolve` now passes the mesh to `create_ops`, and the bracket (both backends), the CUDA linear
-and field-moment kernels and the JAX vpar stencil run on the local (sp, vp, mu) blocks through
-`sharding.velocity_map` (`shard_map`); the field moments are all-reduced (a few MiB per step).
-Sharding vpar exchanges the two vpar planes next to each shard edge per stage
-(`sharding.vpar_halo_planes`): df, plus F_M and the g2f factor for the in-kernel g -> f. The CUDA
-kernel reads them from separate halo buffers at the shard edges (HALO instantiations of the same
-compile-time-sized kernels), the JAX stencil from a halo-extended block; planes past the grid ends
-are zero, so the stencils match the single-device ones. Multi-GPU runs need NCCL
-(`nvidia-nccl-cu13`, in the `cuda13` extra). Sharded runs match single-device runs at round-off
-(reduction order of the field moments): 1e-15 to 1e-14 in FP64 over 3 EM steps, 2e-16 in df over
-100 adiabatic steps with vpar sharding. On the 2 x 32 x 8 x 16 x 55 x 8 waltz A_par + B_par case on two
-B300, the step went from 19.1 to 11.6 ms (CUDA, mu = 2) and from 55.5 to 31.9 ms (JAX, mu = 2).
-
-Large grid (2 x 64 x 16 x 32 x 85 x 64, A_par + B_par, mixed precision) on two B300:
-
-| backend | mesh | step | peak per device |
-|---|---|---|---|
-| CUDA | one device | 593 ms | - |
-| CUDA | mu = 2 | 292 ms | 25.6 GiB |
-| CUDA | sp = 2 | 298 ms | 25.6 GiB |
-| JAX | one device | 1832 ms | - |
-| JAX | mu = 2 | 1298 ms | 52.7 GiB |
-
-vpar sharding runs as fast as mu sharding and with the same memory per device: on the medium grid
-(2 x 64 x 16 x 16 x 85 x 32) on two loaded B300, 207-272 vs 261-270 ms per step (CUDA) and
-765-768 vs 729-764 ms (JAX).
+Performance, memory use, multi-GPU sharding and the CUDA vs JAX parity checks are collected
+in §13.
 
 ## 11. linearized Fokker-Planck collision operator
 
@@ -1502,3 +1400,201 @@ requested gaps (updated 2026-06-11 — collisions, Coriolis rotation and
 Miller geometry are now implemented): centrifugal rotation terms,
 neoclassical corrections, global/radial-varying profiles, implicit
 time stepping.
+
+## 13. performance and HPC
+
+Performance work on the solver step (2026-10): the CUDA backend covers the electromagnetic
+operators, both backends need about a third of the memory on large grids, and multi-GPU runs keep
+df distributed. This section collects the design choices, measurements and the verification
+method; §10.14 describes the CUDA operators. Timings are wall time per `gksolve` step unless noted
+(H100 NVL on cayman, B300 on scorpion); kernel times are CUPTI times from `jax.profiler`.
+`gyaradax bench` reproduces step timings.
+
+### 13.1 where the step time goes
+
+An RK4 step evaluates four times: the field solve (velocity moments of g giving phi, A_par,
+B_par), the linear RHS (parallel and vpar stencils, drifts, drives, dissipation) and the Poisson
+bracket (pseudospectral, FP32 FFTs in mixed precision). On a production grid (H100, CUDA,
+2 x 32 x 8 x 16 x 85 x 32, mixed precision) one evaluation costs ~1.3 ms for the linear RHS,
+~2.8-3.0 ms for the bracket and ~0.5 ms for the EM field moments; the rest is XLA elementwise
+work (RK combinations, CFL). The linear kernel is FP64 instruction bound: ~60 ps per grid point on
+H100 and ~250 ps on B300, whose FP64 rate is much lower, so the CUDA lead over JAX shrinks on B300
+(3.0x against 3.9x on the large grid) and H100 is the reference platform for kernel timings.
+
+### 13.2 single-GPU kernels
+
+Per evaluation, H100, 2 x 32 x 8 x 16 x 85 x 32, mixed precision (master = before this work):
+
+| component | JAX | CUDA, master | CUDA, now | change |
+|---|---|---|---|---|
+| linear RHS, ES | 5.34 ms | 1.78 ms | 1.27 ms | per-class stencil tables, species in one launch |
+| linear RHS, A_par | - | not supported | 1.36 ms | f = g + g2f A_par formed in-kernel |
+| bracket, ES | 10.2 ms | 5.0 ms | 2.8 ms | tuned v5 (4.46 ms), then v6 |
+| bracket, A_par | - | not supported | 3.0 ms | separable chi, two potential planes per (sp, mu, s) |
+| bracket, FP64 | - | - | 3.32 ms | v6 (v5: 5.96 ms) |
+| EM field solve | 1.03 ms | - | 0.50 ms | fused `field_moments` kernel |
+
+- **Linear RHS.** The parallel stencils come from small per-class tables instead of a streamed
+  9 x 6D coefficient array (no `sgr_dist` division either); all species run in one launch (master
+  looped over species); EM variants form f from g in-kernel, removing the solver's g -> f pass.
+  Register use decides occupancy: the EM variants are capped at 64 registers, and the
+  compile-time-sized ES variant must stay at 64 (a 76-register build halves occupancy, 2.08 against
+  1.27 ms). ns * nky > 1024 runs a ky-tiled instantiation; vpar shards use HALO instantiations of
+  the same sized kernels (§13.4).
+- **Field moments.** Up to two velocity moments per pass over g, with g -> f in-kernel and
+  chunked (deterministic) partial sums.
+- **Bracket v5.** The EM potential is separable in vpar, so only the potentials A and B are
+  transformed. On power-of-two dealiased planes with large batches cuFFT silently skips the FP32
+  load callback (master returned an all-zero bracket on e.g. 9 x 5 mode boxes); a plan-time NaN
+  probe detects it and switches to an explicit pack kernel, which is also kept when >= 10 % faster.
+- **Bracket v6.** The 2D transforms become 1D passes: cuFFT along kx on the 2 nky - 1 retained ky
+  columns only, cuFFTDx row kernels fusing the inverse row FFT, the bracket and the forward row FFT,
+  and a final column pass on the nky kept columns. This removes the zero ky band from the column
+  FFTs and the real-space round trips between passes.
+- **Tried, not kept.** A vpar-fastest block order (more stack spills, EM linear 1.43 -> 1.98 ms);
+  staged v6 row kernels (slower); hand-written FFTs (cuFFT / cuFFTDx are used instead).
+
+Wall time per `gksolve` step on H100 NVL (mixed precision unless noted; JAX on its default R2C
+path; master CUDA had no EM support). Medium is 2 x 64 x 16 x 16 x 85 x 32, large
+2 x 64 x 16 x 32 x 85 x 64; entries marked * needed the platform allocator or a 0.95 memory
+fraction to avoid BFC fragmentation, and master JAX does not fit the large grid on H100. The large
+A_par + B_par case does not fit one 94 GB H100 for either backend: the eager setup (init +
+`linear_precompute`, ~38 GiB peak) leaves XLA's pool fragmented, and with preallocation the CUDA
+bracket workspaces no longer fit outside the pool; it runs sharded or on B300 (rows below, where
+the FP64-bound linear kernel narrows the CUDA lead).
+
+| case | grid | master JAX | master CUDA | JAX | CUDA | CUDA / JAX |
+|---|---|---|---|---|---|---|
+| ES adiabatic | 32 x 8 x 16 x 85 x 32 | 33.0 ms | 19.4 ms | 33.9 ms | 11.3 ms | 3.0x |
+| ES kinetic | 2 x 32 x 8 x 16 x 85 x 32 | 64.4 ms | 39.9 ms | 66.2 ms | 24.4 ms | 2.7x |
+| kinetic A_par | 2 x 32 x 8 x 16 x 85 x 32 | 101.0 ms | - | 103.9 ms | 31.2 ms | 3.3x |
+| kinetic A_par + B_par | 2 x 32 x 8 x 16 x 85 x 32 | 104.8 ms | - | 105.6 ms | 31.6 ms | 3.3x |
+| adiabatic + A_par | 32 x 8 x 16 x 85 x 32 | 49.4 ms | - | 51.1 ms | 13.5 ms | 3.8x |
+| waltz beta = 0.01 | 2 x 32 x 8 x 16 x 55 x 8 | 24.0 ms | - | 24.1 ms | 8.4 ms | 2.9x |
+| waltz beta = 0.01, FP64 | 2 x 32 x 8 x 16 x 55 x 8 | 31.8 ms | - | 31.7 ms | 8.6 ms | 3.7x |
+| waltz A_par + B_par | 2 x 32 x 8 x 16 x 55 x 8 | 24.0 ms | - | 25.6 ms | 8.6 ms | 3.0x |
+| CBC A_par (small) | nl_em_apar | 3.5 ms | - | 3.5 ms | 1.8 ms | 2.0x |
+| waltz, linear | 2 x 32 x 8 x 16 x 55 x 8 | 4.4 ms | - | 3.6 ms | 2.0 ms | 1.8x |
+| ES kinetic | medium | 271.7 ms* | - | 239.8 ms | 93.7 ms | 2.6x |
+| waltz beta = 0.01 | medium | 448.9 ms* | - | 428.1 ms* | 103.1 ms | 4.2x |
+| waltz beta = 0.01 | large | - | - | 1613.3 ms* | 416.1 ms | 3.9x |
+| waltz beta = 0.01 | large, B300 | 1737 ms* | - | 1737 ms | 579 ms | 3.0x |
+| waltz A_par + B_par | large, B300 | out of memory | - | 1832 ms | 593 ms | 3.1x |
+
+### 13.3 memory
+
+The fused parallel stencils are kept only as the per-class tables of
+§10.14 (the 9 x 6D `s_total_*` arrays were 5.6 df of device memory, and the JAX species vmap
+materialised a transposed copy of the 4.5 df `s_total_t7` on top). `gkstep_single` forms the RK4
+update as a running sum in the association of the closed form (prev + dt/6 k1 + dt/3 k2 + dt/3 k3
++ dt/6 k4), behind `optimization_barrier`s, so each stage's k (linear and bracket outputs) is
+freed before the next stage. The JAX bracket loops over species, then over vpar chunks, once one
+full-batch real-space intermediate would exceed `_NL_CHUNK_BYTES` (1 GiB); cuFFT results do not
+depend on the batch size, so the looped and batched paths agree bitwise (checked on 20-step
+trajectories). The bracket workspaces of the CUDA backend (v6: ~13 GiB on the grid below) are
+allocated outside XLA's pool. On production grids the table gathers and barriers cost the JAX path
+1-3 % per step against master (min of interleaved runs on H100).
+
+Peak device memory of one compiled `gksolve` (XLA memory analysis, 2 x 64 x 16 x 32 x 85 x 64,
+mixed precision, A_par; one df is 5.3 GiB):
+
+| | precompute | temporaries | peak |
+|---|---|---|---|
+| JAX, master | 36.2 GiB | 121.3 GiB | 168.0 GiB |
+| JAX, now | 10.8 GiB | 41.3 GiB | 62.7 GiB |
+| CUDA, before these changes | 36.2 GiB (22.8 unused) | 47.8 GiB | 89.3 GiB |
+| CUDA, now | 10.8 GiB | 21.3 GiB | 40.0 GiB (+ ~13 GiB bracket workspace) |
+
+- **Allocator.** The CLI runs with `XLA_PYTHON_CLIENT_PREALLOCATE=false`; the pool then grows in
+  separate regions, and the eager setup (init + `linear_precompute`, up to ~38 GiB on the large
+  grid) can leave it fragmented, so a 26-41 GiB temporary allocation fails although the compiled
+  peak fits. `--mem-fraction 0.95` or `XLA_PYTHON_CLIENT_ALLOCATOR=platform` avoid it, and so does
+  sharding.
+- **Bracket workspaces.** The CUDA bracket allocates its buffers outside XLA's pool (v6 on the
+  large grid: 8.6 GiB + 4.2 GiB plus cuFFT work areas); with preallocation they must fit in the
+  remaining 25 %.
+
+### 13.4 multi-GPU sharding
+
+GSPMD cannot partition the opaque FFI kernels, nor the bracket's FFT pipeline: it all-gathered
+every CUDA kernel operand (~5 df per step), and on the JAX path the bracket's FFT intermediates
+(~3.4 GiB per step for a 55 MiB df, master included). `gksolve` passes the mesh to `create_ops`,
+and the bracket (both backends), the CUDA linear and field-moment kernels and the JAX vpar stencil
+run on the local (sp, vp, mu) blocks through `sharding.velocity_map` (`shard_map`); only the field
+moments are all-reduced (a few MiB per step). Sharding vpar exchanges the two vpar planes next to
+each shard edge per stage (`sharding.vpar_halo_planes`): df, plus F_M and the g2f factor for the
+in-kernel g -> f. The CUDA kernel reads them from separate halo buffers, the JAX stencil from a
+halo-extended block; planes past the grid ends are zero, so interior points are computed exactly
+as on one device. The sharded precompute keeps scalar entries (`dvp`, `sgr_dist`) concrete, which
+the CUDA kernels need. Multi-GPU runs need NCCL (`nvidia-nccl-cu13`, in the `cuda13` extra).
+
+- **Which axis.** Species and mu shards need nothing from their neighbours; vpar shards receive
+  4 nmu ns nkx nky complex values per device and stage (178 MB on the large grid, ~0.1 ms over
+  NVLink against a ~290 ms step). Measured: mu and species sharding 292 and 298 ms on the large grid
+  (two quiet B300); vpar 356 ms with the first, copying halo, and on par with mu after the halo
+  buffers (medium grid, two loaded B300: 207-272 against 261-270 ms for CUDA, 765-768 against
+  729-764 ms for JAX, with equal or lower memory per device). In practice the axes are equivalent;
+  `--n-gpus N` fills species, then mu, then vpar, which need no halo and balance exactly, and keeps
+  vpar as the reserve that allows up to nsp nmu nvpar / 2 GPUs.
+- **Correctness.** Sharded runs match single-device runs at round-off, not bitwise: the field
+  moments are summed per shard and then across shards. FP64: 2e-16 in df over 100 adiabatic steps
+  (vpar), 1e-15 to 1e-14 over 3 EM steps (every axis); mixed precision: ~1e-9 in df after 40-100
+  steps (FP32 bracket round-off amplified by the nonlinear dynamics).
+
+On the 2 x 32 x 8 x 16 x 55 x 8 waltz A_par + B_par case on two B300 the step went from 19.1 to
+11.6 ms (CUDA, mu = 2) and from 55.5 to 31.9 ms (JAX, mu = 2).
+
+Large grid (2 x 64 x 16 x 32 x 85 x 64, A_par + B_par, mixed precision) on two B300:
+
+| backend | mesh | step | peak per device |
+|---|---|---|---|
+| CUDA | one device | 593 ms | - |
+| CUDA | mu = 2 | 292 ms | 25.6 GiB |
+| CUDA | sp = 2 | 298 ms | 25.6 GiB |
+| JAX | one device | 1832 ms | - |
+| JAX | mu = 2 | 1298 ms | 52.7 GiB |
+
+### 13.5 behaviour and verification
+
+The JAX backend is bitwise identical to master: df, phi, dt, state and the flux
+diagnostics over 20-step trajectories (fixed and adaptive dt, FP64 and mixed precision; ES, A_par,
+B_par, conservative dissipation, collisions). Across separate processes the flux diagnostic can
+differ in the last bit for master itself (XLA autotuning picks reduction configurations from
+timings). With `GYARADAX_BRACKET=v5` the CUDA ES results are bit-identical to the original CUDA
+backend; v6 changes the bracket at round-off level (mixed precision ~1e-7, FP64 ~1e-16 per
+evaluation), the same level at which the JAX and CUDA backends differ.
+
+CUDA vs JAX parity per evaluation (rel. L2, H100; the same on B300). Grids are the configs'
+production grids; kinetic rows give the worse species.
+
+| case | linear (FP64) | bracket FP64 | bracket mixed |
+|---|---|---|---|
+| ES adiabatic (iteration_13) | 1.5e-16 | 1.1e-15 | 6.2e-7 |
+| ES kinetic | 1.5e-16 | 1.6e-15 | 8.4e-7 |
+| kinetic A_par | 1.5e-16 | 1.6e-15 | 8.5e-7 |
+| kinetic A_par + B_par | 2.0e-16 | 1.6e-15 | 8.2e-7 |
+| kinetic B_par only | 1.9e-16 | 1.6e-15 | 8.0e-7 |
+| waltz beta = 0.01 (A_par) | 3.0e-16 | 2.2e-15 | 1.3e-6 |
+| waltz A_par + B_par | 4.0e-16 | 2.1e-15 | 1.2e-6 |
+| CBC A_par (small) | 3.2e-16 | 1.7e-15 | 9.1e-7 |
+| adiabatic + A_par | 1.5e-16 | 1.1e-15 | 6.2e-7 |
+| waltz, conservative dissipation | 3.0e-16 | 2.2e-15 | 1.3e-6 |
+| ES adiabatic, conservative dissipation | 1.5e-16 | 1.1e-15 | 6.2e-7 |
+
+Method: 20-step `gksolve` trajectories (fixed and adaptive dt, FP64 and mixed precision) of nine
+configurations per backend, compared bitwise against a frozen copy of the previous code, with XLA
+autotuning off (`--xla_gpu_autotune_level=0`) for the flux diagnostics; per-kernel register and
+stack use (`cuobjdump --dump-resource-usage`) compared across builds; CUDA vs JAX parity per term;
+timings as the minimum over interleaved repeats when the GPU is shared.
+
+### 13.6 recommendations
+
+- Production runs: CUDA backend (`--backend cuda`), mixed precision, H100-class GPUs for the
+  FP64-heavy linear kernel.
+- Gradients and bitwise references: JAX backend.
+- Large grids: shard (`--n-gpus N`); close to the memory limit on one GPU, `--mem-fraction 0.95`.
+- `GYARADAX_BRACKET=v5` reproduces the v5 bracket bitwise (and the master CUDA ES results).
+- `gyaradax info` reports whether the CUDA library, the v6 bracket and NCCL are available.
+- `gyaradax run ... --telemetry` records per-block timings, dt and device memory in the run
+  directory (`telemetry.jsonl`); `--profile` adds a profiler trace of one block and its GPU kernel
+  breakdown (`profile_summary.json`). Both are off by default (docs/CLI.md).

@@ -1,11 +1,13 @@
 """Simulation runtime."""
 
+import contextlib
 import os
 import time
-from typing import Any, Dict, Literal, Optional, Tuple, overload
+from typing import Any, Dict, Literal, Optional, Tuple, cast, overload
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 from gyaradax.jax_config import enable_x64
 
@@ -27,6 +29,8 @@ from gyaradax.solver import (
     default_state,
     mode_amplitude,
 )
+import gyaradax.telemetry as telemetry_mod
+from gyaradax.fields import _compute_fields, g_to_f
 from gyaradax.utils import save_dumps as save_dumps_fn
 
 
@@ -241,6 +245,29 @@ def gk_run_batched(
     return jax.vmap(_single)(df_batch, geometry_batch, params_batch, state_batch, pre_batch)
 
 
+def _has_diagnostics_at(output_dir: str, step: int) -> bool:
+    path = os.path.join(output_dir, "fluxes.npz")
+    if not os.path.exists(path):
+        return False
+    with np.load(path) as data:
+        return "step" in data.files and bool(np.any(data["step"] == step))
+
+
+def _diagnostics(df, geometry, params, pre):
+    # fields and fluxes of the physical f (g -> f in EM runs), as gksolve reports them
+    if not params.nlapar:
+        return get_integrals(
+            df, geometry, params=params, adiabatic_electrons=params.adiabatic_electrons
+        )
+    _, apar, _ = _compute_fields(df, geometry, params, pre)
+    return get_integrals(
+        g_to_f(df, apar, params, pre),
+        geometry,
+        params=params,
+        adiabatic_electrons=params.adiabatic_electrons,
+    )
+
+
 def gksimulate(
     df: jnp.ndarray,
     geometry: Dict[str, jnp.ndarray],
@@ -255,11 +282,18 @@ def gksimulate(
     save_final: bool = True,
     snapshot_f32: bool = False,
     stop_on_nan: bool = True,
+    keep_latest_snapshot: bool = False,
+    telemetry: Any = None,
+    profile: bool = False,
 ) -> Tuple[jnp.ndarray, jnp.ndarray, Any, GKState]:
     """Run n_steps with optional IO checkpointing and logging.
 
     ``stop_on_nan`` halts at the first block with a non-finite ``df``, writing a
     ``DIVERGED`` marker into ``output_dir``; the corrupted block is not archived.
+    ``keep_latest_snapshot`` writes a restart snapshot every block and removes the
+    previous one this call wrote. ``telemetry`` (a ``telemetry.RunTelemetry``)
+    records compile time and per-block timings; ``profile`` traces the first
+    compiled block into ``output_dir/profile``.
 
     Returns:
         (df, phi, fluxes, state)
@@ -269,14 +303,10 @@ def gksimulate(
 
     interval = checkpoint_interval if checkpoint_interval else n_steps
 
-    if output_dir is not None:
+    # a resumed run keeps the history entry already written for its first step
+    if output_dir is not None and not _has_diagnostics_at(output_dir, int(state.step)):
         os.makedirs(output_dir, exist_ok=True)
-        phi_init, fluxes_init = get_integrals(
-            df,
-            geometry,
-            params=params,
-            adiabatic_electrons=params.adiabatic_electrons,
-        )
+        phi_init, fluxes_init = _diagnostics(df, geometry, params, pre)
         save_dumps_fn(
             output_dir,
             df,
@@ -298,6 +328,9 @@ def gksimulate(
     current_phi: Any = None
     current_fluxes: Any = None
 
+    previous_snapshot = None
+    profile_next = profile and output_dir is not None
+
     # warmup compile with the same return_dt_info as the body loop, otherwise
     # the first block hits a second cache miss for a different specialization
     if n_steps > 0:
@@ -314,6 +347,10 @@ def gksimulate(
         )
         jax.block_until_ready(_[0])
         print(f"compilation: {time.time() - w_t0:.2f}s")
+        if telemetry is not None:
+            telemetry.compiled(time.time() - w_t0)
+
+    run_t0 = time.time()
 
     while int(current_state.step) < target_step:
         steps_remaining = target_step - int(current_state.step)
@@ -323,18 +360,26 @@ def gksimulate(
 
         block_start_step = int(current_state.step)
         block_start_time = float(current_state.time)
-        t0 = time.time()
-        run_result: Any = gk_run(
-            current_df,
-            geometry,
-            params,
-            current_state,
-            block_steps,
-            pre=pre,
-            return_dt_info=True,
+        profiled = profile_next
+        profiler = (
+            telemetry_mod.profile_block(cast(str, output_dir), block_steps)
+            if profiled
+            else contextlib.nullcontext()
         )
-        current_df, current_phi, current_fluxes, current_state, dt_info = run_result
-        jax.block_until_ready(current_df)
+        profile_next = False
+        t0 = time.time()
+        with profiler:
+            run_result: Any = gk_run(
+                current_df,
+                geometry,
+                params,
+                current_state,
+                block_steps,
+                pre=pre,
+                return_dt_info=True,
+            )
+            current_df, current_phi, current_fluxes, current_state, dt_info = run_result
+            jax.block_until_ready(current_df)
         wall_time = time.time() - t0
 
         # every step after the first NaN is wasted; keep the last good snapshot
@@ -353,6 +398,7 @@ def gksimulate(
 
         if output_dir is not None:
             is_final = int(current_state.step) >= target_step
+            snapshot = save_snapshots or (save_final and is_final) or keep_latest_snapshot
             save_dumps_fn(
                 output_dir,
                 current_df,
@@ -360,7 +406,7 @@ def gksimulate(
                 current_fluxes,
                 current_state,
                 geometry,
-                save_dumps=save_snapshots or (save_final and is_final),
+                save_dumps=snapshot,
                 params=params,
                 pre=pre,
                 dt_info=dt_info,
@@ -369,15 +415,33 @@ def gksimulate(
                 snapshot_f32=snapshot_f32,
             )
 
+            if snapshot and keep_latest_snapshot and not save_snapshots:
+                latest = os.path.join(output_dir, f"step_{int(current_state.step):06d}.npz")
+                if previous_snapshot and previous_snapshot != latest:
+                    with contextlib.suppress(OSError):
+                        os.remove(previous_snapshot)
+                previous_snapshot = latest
+
         log_step(current_fluxes, current_state, wall_time, n_steps=block_steps)
+        if telemetry is not None:
+            telemetry.block(
+                int(current_state.step),
+                float(current_state.time),
+                block_steps,
+                wall_time,
+                dt_info,
+                profiled=profiled,
+            )
+
+    if telemetry is not None and n_steps > 0:
+        telemetry.close(
+            time.time() - run_t0,
+            int(current_state.step) - start_step,
+            "diverged" if diverged else "completed",
+        )
 
     if current_phi is None:
-        current_phi, current_fluxes = get_integrals(
-            df,
-            geometry,
-            params=params,
-            adiabatic_electrons=params.adiabatic_electrons,
-        )
+        current_phi, current_fluxes = _diagnostics(df, geometry, params, pre)
 
     return current_df, current_phi, current_fluxes, current_state
 

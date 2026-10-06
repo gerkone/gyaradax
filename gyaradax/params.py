@@ -526,6 +526,7 @@ def gkparams_from_config(config: Any, **overrides: Any) -> GKParams:
         "nlapar": bool(getattr(solver_cfg, "nlapar", False)),
         "nlbpar": bool(getattr(solver_cfg, "nlbpar", False)),
         "mixed_precision": bool(getattr(solver_cfg, "mixed_precision", True)),
+        "use_z2z": bool(getattr(solver_cfg, "use_z2z", False)),
         "disable_per_ky_norm": bool(getattr(solver_cfg, "disable_per_ky_norm", False)),
         "beta": float(getattr(physics_cfg, "beta", 0.0)),
         "betaprime": float(getattr(physics_cfg, "betaprime", 0.0)),

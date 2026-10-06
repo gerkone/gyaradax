@@ -44,7 +44,7 @@ gyaradax/
 scripts/
   run.py          — main entry for running simulations (adiabatic + kinetic)
   animate_sim.py  — torus visualization (mp4/gif/html)
-  gkw_to_yaml.py  — convert GKW run directories to YAML configs
+  gkw_to_yaml.py  — shim for `gyaradax convert` (GKW run directory -> YAML config)
   solver_benchmark.py — performance benchmarking
 
 tests/
@@ -152,7 +152,7 @@ SolverOps interface: `linear_rhs()`, `linear_rhs_from_g()`, `nonlinear_term_iii(
 - **Grid**: 5D `(vpar, mu, s, kx, ky)` for adiabatic; 6D `(species, ...)` for kinetic.
 - **Backends**: JAX (default, differentiable, R2C/Z2Z), CUDA (fused kernels, Z2Z only; 2.8-4.4x faster
   steps than JAX on H100, ES and EM incl. A_par/B_par, conservative parallel dissipation and
-  collisions — see docs/NOTES.md §10.14).
+  collisions — operators in docs/NOTES.md §10.14, performance in §13).
 
 ## Running tests
 
@@ -181,12 +181,19 @@ the config — there is no `--kinetic` flag any more.
 ```bash
 gyaradax run configs/iteration_13.yaml --device=N     # adiabatic
 gyaradax run configs/kinetic.yaml --device=N          # kinetic (auto-detected)
-gyaradax run configs/nl_em_apar.yaml --n-gpus-mu=4    # EM, sharded over 4 GPUs
+gyaradax run configs/nl_em_apar.yaml --n-gpus 4      # EM, sharded over 4 GPUs (layout from the grid)
+gyaradax run outputs_kinetic_my_case                 # resume / extend a previous run directory
 gyaradax bench configs/adiabatic_a.yaml --backend=cuda
+gyaradax convert /path/to/gkw_run configs/my_case.yaml
 gyaradax info
 ```
 
-Add `--from-scratch` to cold-start instead of resuming from K-files.
+A run directory holds the effective `config.yaml`, `geometry.pkl`, the
+diagnostics, a rolling restart snapshot `step_*.npz` and `run_info.jsonl`;
+`--telemetry` / `--profile` / `--debug` (off by default) add `telemetry.jsonl`
+and a profiler trace with `profile_summary.json`. `python -m gyaradax` is the
+same CLI.
+Add `--from-scratch` to cold-start instead of resuming from K-files or snapshots.
 Add `--block-size=300` for faster checkpoint cadence.
 Add `--backend=cuda` to force CUDA backend.
 `scripts/run.py` is a back-compat shim that forwards to `gyaradax run`.
@@ -207,8 +214,8 @@ cmake --install .
 ```
 
 Requires CUDA Toolkit >= 13.1, compute capability >= 80.
-One library can serve several GPU generations, e.g. `-DGPU_ARCHITECTURES="90;103"`
-(H100 + B300).
+`GPU_ARCHITECTURES` defaults to `native` (the build machine's GPU only); a
+checkout shared between H100 and B300 nodes needs `-DGPU_ARCHITECTURES="90;103"`.
 
 On older toolkits, override the two architecture lists — `GPU_ARCHITECTURES`
 (the kernels) and `LTO_ARCHITECTURES` (the cuFFT LTO callbacks). `compute_100`
@@ -216,8 +223,6 @@ needs CUDA >= 12.8, so e.g. on a CUDA 12.6 / GH200 system:
 ```bash
 cmake .. -DCMAKE_BUILD_TYPE=Release -DGPU_ARCHITECTURES=90 -DLTO_ARCHITECTURES="80;90"
 ```
-`scripts/make_cuda_root.sh` builds a merged toolkit root when nvcc and cuFFT
-live in separate trees (e.g. the NVIDIA HPC SDK).
 Pip-installed cuFFT/nvJitLink (`nvidia-cufft-cu12`, `nvidia-nvjitlink-cu12`)
 are auto-detected by CMake — look for `CUDA::cufft from pip:` in configure output.
 
@@ -253,7 +258,7 @@ params = GKParams(
 )
 ```
 
-Or via YAML config:
+Or via YAML config (`n_gpus: N` alone lets the CLI choose the layout):
 
 ```yaml
 sharding:
@@ -261,6 +266,10 @@ sharding:
   n_gpus_vp: 2
   n_gpus_mu: 1
 ```
+
+From the CLI, `--n-gpus N` (or a multi-GPU `--device-list`) picks the layout from
+the grid: species first, then mu, then vpar (`cli._auto_mesh`), and checks it
+before JAX starts. See docs/CLI.md.
 
 When `n_gpus_sp * n_gpus_vp * n_gpus_mu > 1`, the following automatically use
 sharding:
@@ -285,7 +294,7 @@ vpar stencil run on the local (sp, vp, mu) blocks via `sharding.velocity_map`
 (`shard_map`). Sharding vpar exchanges the two vpar planes next to each shard
 edge per RK stage (`sharding.vpar_halo_planes`); species and mu need no halo.
 All three axes run at about the same speed. Multi-GPU needs NCCL
-(`nvidia-nccl-cu13`, in the `cuda13` extra). See docs/NOTES.md §10.14.
+(`nvidia-nccl-cu13`, in the `cuda13` extra). See docs/NOTES.md §13.4.
 
 ## Skills
 

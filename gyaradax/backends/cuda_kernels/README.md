@@ -33,11 +33,15 @@ mkdir -p _build && cd _build && cmake .. -DCMAKE_BUILD_TYPE=Release && cmake --b
    ```bash
    cmake .. -DCMAKE_BUILD_TYPE=Release
    ```
-   To use other GPU architectures, use the -DGPU_ARCHITECTURES="<arch>" flag; one library can serve
-   several, e.g. H100 and B300:
+   By default (`GPU_ARCHITECTURES=native`) the kernels are compiled for the GPU of the build
+   machine only: building on an H100 node gives sm_90, on a B300 node sm_103, with no flags. For a
+   library that runs on several GPU types (a checkout shared by H100 and B300 nodes), or when the
+   build node has no GPU, list the architectures:
    ```bash
    cmake .. -DCMAKE_BUILD_TYPE=Release -DGPU_ARCHITECTURES="90;103"
    ```
+   The cuFFT LTO callbacks use `LTO_ARCHITECTURES` (default `80;90;100`, enough for A100, H100 and
+   Blackwell); the cuFFTDx row kernels follow `GPU_ARCHITECTURES`.
    Need compute capability >= 80.
    cmake prints the detected compute capability, jaxlib version, and cudatoolkit. Check that these are correct before proceeding.
    Kernels were tuned on sm_90 (H100) and sm_103 (B300).
