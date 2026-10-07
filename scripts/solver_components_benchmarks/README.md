@@ -7,8 +7,8 @@ from `iteration_13.yaml`, runs JIT-compiled, and validates output against saved 
 
 | File | Description |
 |------|-------------|
-| `bench_apply_parallel.py` | 9-point parallel streaming stencil (`_apply_parallel`) |
-| `bench_apply_vpar.py` | 5-point velocity-space stencil (`_apply_vpar`) |
+| `bench_apply_parallel.py` | 9-point parallel streaming stencil (`_apply_parallel`, JAX; CUDA fuses it into the linear RHS) |
+| `bench_apply_vpar.py` | 5-point velocity-space stencil (`_apply_vpar`, JAX; CUDA fuses it into the linear RHS) |
 | `bench_linear_rhs.py` | Full linear RHS operator (Terms I, II, IV, V, VII, VIII) |
 | `bench_nonlinear.py` | Nonlinear ExB advection (Term III) via pseudospectral FFT |
 | `bench_phi_solve.py` | Field solve: quasineutrality (adiabatic) / Poisson (kinetic) |

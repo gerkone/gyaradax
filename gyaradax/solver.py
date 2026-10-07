@@ -38,6 +38,7 @@ from gyaradax.backends import create_ops
 from gyaradax.params import GKParams
 from gyaradax.state import GKPre, GKState, Precompute
 from gyaradax.backends.ops import SolverOps
+from gyaradax.sharding import build_mesh
 from gyaradax.cfl import (  # noqa: F401
     estimate_linear_timestep,
     estimate_nl_timestep,
@@ -46,7 +47,6 @@ from gyaradax.cfl import (  # noqa: F401
 from gyaradax.fields import _compute_fields, _compute_phi, f_to_g, g_to_f  # noqa: F401
 from gyaradax.precompute import (  # noqa: F401
     _compute_species_coeffs,
-    _fuse_stencils,
     _linear_precompute_core,
     _precompute_shared,
     build_jind,
@@ -386,41 +386,35 @@ def gkstep_single(
             backend=params.backend,
             use_z2z=params.use_z2z,
             mixed_precision=params.mixed_precision,
+            mesh=build_mesh(params),
         )
 
     dt = dt_override if dt_override is not None else jnp.array(params.dt, dtype=jnp.float64)
 
     def _rhs(dg):
-        phi_local, apar_local, bpar_local = _compute_fields(dg, geometry, params, pre)
+        phi_local, apar_local, bpar_local = ops.compute_fields(dg, geometry, params, pre)
         # linear terms act on f, not g (GKW exp_integration.F90:802-814 fdis_tmp = f)
-        df_for_rhs = g_to_f(dg, apar_local, params, pre) if apar_local is not None else dg
-        rhs = ops.linear_rhs(
-            df_for_rhs, phi_local, geometry, params, pre, apar=apar_local, bpar=bpar_local
+        rhs = ops.linear_rhs_from_g(
+            dg, phi_local, geometry, params, pre, apar=apar_local, bpar=bpar_local
         )
         if params.non_linear:
-            chi_corr = None
-            if apar_local is not None and "apar_chi_factor" in pre:
-                apar_b = apar_local[jnp.newaxis, jnp.newaxis, :, :, :]
-                if dg.ndim == 6:
-                    apar_b = apar_b[jnp.newaxis]
-                chi_corr = pre["apar_chi_factor"] * apar_b
-            if bpar_local is not None and "bpar_chi_factor" in pre:
-                bpar_b = bpar_local[jnp.newaxis, jnp.newaxis, :, :, :]
-                if dg.ndim == 6:
-                    bpar_b = bpar_b[jnp.newaxis]
-                bpar_chi = pre["bpar_chi_factor"] * bpar_b
-                chi_corr = bpar_chi if chi_corr is None else chi_corr + bpar_chi
-            rhs = rhs + ops.nonlinear_term_iii(dg, phi_local, geometry, chi_correction=chi_corr)
+            # the bracket advects g with chi = J0*phi - 2*vR*vpar*J0*apar + bpar term
+            rhs = rhs + ops.nonlinear_term_iii(
+                dg, phi_local, geometry, apar=apar_local, bpar=bpar_local
+            )
         return rhs, phi_local, apar_local
 
-    # RK4 with inline CFL tracking across substages
-    k1, phi1, apar1 = _rhs(prev_df)
-    k2, phi2, apar2 = _rhs(prev_df + 0.5 * dt * k1)
-    k3, phi3, apar3 = _rhs(prev_df + 0.5 * dt * k2)
-    k4, phi4, apar4 = _rhs(prev_df + dt * k3)
+    # rk4 as a running sum in the closed form's association
     dt6 = dt / 6.0
     dt3 = dt / 3.0
-    next_df_raw = prev_df + dt6 * k1 + dt3 * k2 + dt3 * k3 + dt6 * k4
+    k1, phi1, apar1 = _rhs(prev_df)
+    acc, stage = jax.lax.optimization_barrier((prev_df + dt6 * k1, prev_df + 0.5 * dt * k1))
+    k2, phi2, apar2 = _rhs(stage)
+    acc, stage = jax.lax.optimization_barrier((acc + dt3 * k2, prev_df + 0.5 * dt * k2))
+    k3, phi3, apar3 = _rhs(stage)
+    acc, stage = jax.lax.optimization_barrier((acc + dt3 * k3, prev_df + dt * k3))
+    k4, phi4, apar4 = _rhs(stage)
+    next_df_raw = acc + dt6 * k4
 
     # inline NL CFL: max grad across all RK4 substages (GKW non_linear_terms.F90:1538)
     if params.non_linear:
@@ -489,7 +483,7 @@ def gkstep_single(
         # nonlinear path keeps df at its natural amplitude (controlled by
         # turbulent saturation). disable_per_ky_norm uses the same skip path
         # for linear runs that need un-renormalized cross-ky phi amplitudes.
-        phi, _, _ = _compute_fields(next_df_raw, geometry, params, pre)
+        phi, _, _ = ops.compute_fields(next_df_raw, geometry, params, pre)
         current_amp = mode_amplitude(phi, geometry, params.norm_eps)
         next_df = next_df_raw
         norm_factor = jnp.ones_like(state.accumulated_norm_factor)
@@ -499,14 +493,14 @@ def gkstep_single(
             return normalize_per_ky(next_df_raw, geometry, params, pre=pre)
 
         def _skip_norm(_):
-            phi_curr, _, _ = _compute_fields(next_df_raw, geometry, params, pre)
+            phi_curr, _, _ = ops.compute_fields(next_df_raw, geometry, params, pre)
             amp_curr = mode_amplitude(phi_curr, geometry, params.norm_eps)
             return (next_df_raw, jnp.ones_like(state.accumulated_norm_factor), amp_curr)
 
         next_df, norm_factor, current_amp = jax.lax.cond(
             is_window_end, _apply_norm, _skip_norm, operand=None
         )
-        phi, _, _ = _compute_fields(next_df, geometry, params, pre)
+        phi, _, _ = ops.compute_fields(next_df, geometry, params, pre)
 
     z = jnp.array(0.0, dtype=jnp.float64)
     next_state = advance_state(state, params, is_window_end, current_amp, norm_factor, dt_used=dt)
@@ -549,7 +543,11 @@ def gksolve(
                 geometry[k] = jnp.atleast_1d(jnp.asarray(v, dtype=jnp.float64))
 
     ops = create_ops(
-        pre, backend=params.backend, use_z2z=params.use_z2z, mixed_precision=params.mixed_precision
+        pre,
+        backend=params.backend,
+        use_z2z=params.use_z2z,
+        mixed_precision=params.mixed_precision,
+        mesh=build_mesh(params),
     )
 
     dt_input_scalar = jnp.array(params.dt, dtype=jnp.float64)
@@ -578,7 +576,7 @@ def gksolve(
         # init_dt must reflect the CURRENT NL amplitude, not just params.dt,
         # to avoid resetting dt at every block boundary when gksolve is called
         # in a block loop with growing NL fields (blow-up observed at β=0.01).
-        phi_init, apar_init, _ = _compute_fields(df, geometry, params, pre)
+        phi_init, apar_init, _ = ops.compute_fields(df, geometry, params, pre)
         dt_nl_init = estimate_nl_timestep(
             phi_init, pre, pre["bessel"], dt_input, cfl_safety, apar=apar_init
         )

@@ -1,6 +1,6 @@
 # Gyradax CUDA Backend Kernels
 
-This directory the CUDA kernels for stencils and Poisson brackets, used via JAX FFI.
+This directory holds the CUDA kernels of the linear RHS, the EM field moments and the Poisson bracket, used via JAX FFI.
 
 ## Prerequisites
 - **CUDA Toolkit**: NVCC and cuFFT. Tested for cudatoolkit >=13.1
@@ -33,13 +33,18 @@ mkdir -p _build && cd _build && cmake .. -DCMAKE_BUILD_TYPE=Release && cmake --b
    ```bash
    cmake .. -DCMAKE_BUILD_TYPE=Release
    ```
-   To use a different GPU architecture, use the -DGPU_ARCHITECTURES="<arch>" flag. For example, to use Ampere (80), 
+   By default (`GPU_ARCHITECTURES=native`) the kernels are compiled for the GPU of the build
+   machine only: building on an H100 node gives sm_90, on a B300 node sm_103, with no flags. For a
+   library that runs on several GPU types (a checkout shared by H100 and B300 nodes), or when the
+   build node has no GPU, list the architectures:
    ```bash
-   cmake .. -DCMAKE_BUILD_TYPE=Release -DGPU_ARCHITECTURES="80"
+   cmake .. -DCMAKE_BUILD_TYPE=Release -DGPU_ARCHITECTURES="90;103"
    ```
+   The cuFFT LTO callbacks use `LTO_ARCHITECTURES` (default `80;90;100`, enough for A100, H100 and
+   Blackwell); the cuFFTDx row kernels follow `GPU_ARCHITECTURES`.
    Need compute capability >= 80.
    cmake prints the detected compute capability, jaxlib version, and cudatoolkit. Check that these are correct before proceeding.
-   Kernels were tuned for sm_103. 
+   Kernels were tuned on sm_90 (H100) and sm_103 (B300).
    
 
 3. **Build**:
@@ -53,8 +58,20 @@ mkdir -p _build && cd _build && cmake .. -DCMAKE_BUILD_TYPE=Release && cmake --b
    cmake --install .
    ```
 
+## Optional: cuFFTDx (v6 Poisson bracket)
+With the header-only `nvidia-mathdx` package installed (`pip install nvidia-mathdx`), CMake
+also builds the v6 Poisson bracket (`kernels/cufft_bracket_v6.cu`): cuFFT column passes on the
+retained ky columns plus cuFFTDx row kernels that fuse the inverse row FFT, the bracket and the
+forward row FFT. CMake prints `cuFFTDx: ... (v6 bracket for SM ...)`; point it at the headers with
+`-DCUFFTDX_INCLUDE_DIR=<.../nvidia/mathdx/include>` if Python cannot import `nvidia.mathdx`.
+Without it, or for dealiased grids the row kernels are not instantiated for, the v5 pipeline runs.
+Set `GYARADAX_BRACKET=v5` to force the v5 pipeline (bitwise reproduction of earlier runs).
+
 ## Files
 - `CMakeLists.txt`: Build system configuration.
-- `kernels/cufft_graph_bracket_true_fp32.cu`: production mixed-precision cuFFT Poisson bracket FFI target.
-- `kernels/cufft_graph_bracket_fp64.cu`: production FP64 cuFFT Poisson bracket FFI target.
-- `kernels/*.cu`: Stencil and linear RHS fused kernels.
+- `kernels/linear_rhs_fused.cu`: fused linear RHS (ES and EM: A_par, B_par, conservative parallel dissipation), all species in one launch; ky tiles for ns * nky > 1024 and HALO variants that read the vpar neighbours of a vpar shard from halo buffers.
+- `kernels/field_moments.cu`: velocity moments of the kinetic EM field solve (A_par, phi, B_par).
+- `kernels/cufft_graph_bracket_true_fp32.cu`, `kernels/cufft_graph_bracket_fp64.cu`: v5 cuFFT Poisson bracket (mixed precision / FP64).
+- `kernels/cufft_bracket_v6.cu`: v6 Poisson bracket (needs cuFFTDx, see above).
+- `kernels/bracket_v5_pack_select.cuh`: explicit pack kernel and the plan-time C2C path selection of the v5 bracket.
+- `lto_callbacks/`: cuFFT LTO load/store callbacks and the shared pack routines.

@@ -34,7 +34,7 @@ enable_x64()
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parent))
-from common import load_setup, BASELINES_DIR
+from common import full_stencil, load_setup, BASELINES_DIR
 
 BASELINES_DIR.mkdir(exist_ok=True)
 
@@ -77,8 +77,9 @@ def main():
     def _apply_parallel(field, coeffs):
         return ops._apply_parallel(field, coeffs)
 
-    out_c1 = _apply_parallel(field5d, pre["s_total_upar"])
-    save("apply_parallel", field=field5d, coeffs=pre["s_total_upar"], output=out_c1)
+    s_upar = full_stencil(pre, "s_upar_tab")
+    out_c1 = _apply_parallel(field5d, s_upar)
+    save("apply_parallel", field=field5d, coeffs=s_upar, output=out_c1)
 
     # ── C2: _apply_vpar ───────────────────────────────────────────────────
     print("\nC2: _apply_vpar")

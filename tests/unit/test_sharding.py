@@ -7,11 +7,14 @@ sharded runs match single-device outputs within FP64 round-off.
 """
 
 import os
+from dataclasses import replace
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+
+from conftest import HAS_CUDA, noisy_case, rel_l2  # type: ignore[import-not-found]
 
 from gyaradax import sharding
 from gyaradax.geometry import compute_geometry
@@ -28,7 +31,7 @@ CONFIG_ADIABATIC = os.path.join(
 
 def _build(params_overrides=None):
     cfg = load_config(CONFIG_ADIABATIC)
-    overrides = {"non_linear": True, "adaptive_dt": False, "dt": 0.005}
+    overrides = {"non_linear": True, "adaptive_dt": False, "dt": 0.005, "mixed_precision": False}
     if params_overrides:
         overrides.update(params_overrides)
     params = gkparams_from_config(cfg, **overrides)
@@ -130,13 +133,11 @@ def test_equivalence_2gpu_vp():
     phi_ref_np = np.asarray(phi_ref)
     phi_sh_np = np.asarray(phi_sh)
 
-    def rel_l2(a, b):
-        return float(np.linalg.norm(a - b) / max(np.linalg.norm(a), 1e-30))
 
     # threshold: ~1e-8 accounts for FP64 reduction-order differences
     # accumulating over 100 RK4 steps on ndim=5 arrays.
-    assert rel_l2(df_ref_np, df_sh_np) < 1e-8, f"df rel L2 = {rel_l2(df_ref_np, df_sh_np):.3e}"
-    assert rel_l2(phi_ref_np, phi_sh_np) < 1e-8
+    assert rel_l2(df_sh_np, df_ref_np) < 1e-8, f"df rel L2 = {rel_l2(df_sh_np, df_ref_np):.3e}"
+    assert rel_l2(phi_sh_np, phi_ref_np) < 1e-8
     # fluxes: allow abs-or-rel ≤ 1e-8 (pflux is ~1e-20 noise at t=0 adiabatic)
     for i, name in enumerate(("pflux", "eflux", "vflux")):
         a, b = float(flx_ref[i]), float(flx_sh[i])
@@ -157,40 +158,23 @@ def test_equivalence_4gpu_vpmu():
     pre1 = sharding.shard_pre(pre1, mesh, grid)
     df_sh, phi_sh, flx_sh, _ = gk_run(df1, geom1, p1, st1, n_steps=100, pre=pre1)
 
-    def rel_l2(a, b):
-        return float(np.linalg.norm(a - b) / max(np.linalg.norm(a), 1e-30))
 
-    assert rel_l2(np.asarray(df_ref), np.asarray(df_sh)) < 1e-8
-    assert rel_l2(np.asarray(phi_ref), np.asarray(phi_sh)) < 1e-8
+    assert rel_l2(df_sh, df_ref) < 1e-8
+    assert rel_l2(phi_sh, phi_ref) < 1e-8
 
 
 CONFIG_KINETIC = os.path.join(os.path.dirname(__file__), "..", "..", "configs", "nl_em_apar.yaml")
 
 
 def _build_kinetic(params_overrides=None):
+    from gyaradax.geometry import compute_geometry_from_config
+
     cfg = load_config(CONFIG_KINETIC)
-    overrides = {"non_linear": True, "adaptive_dt": False, "dt": 0.002}
+    overrides = {"non_linear": True, "adaptive_dt": False, "dt": 0.002, "mixed_precision": False}
     if params_overrides:
         overrides.update(params_overrides)
     params = gkparams_from_config(cfg, **overrides)
-    grid = cfg.grid
-    geometry = compute_geometry(
-        q=params.q,
-        shat=params.shat,
-        eps=params.eps,
-        ns=grid.ns,
-        nkx=grid.nkx,
-        nky=grid.nky,
-        nvpar=grid.nvpar,
-        nmu=grid.nmu,
-        vpar_max=grid.vpar_max,
-        nperiod=grid.nperiod,
-        krhomax=grid.krhomax,
-        ikxspace=grid.ikxspace,
-        adiabatic_electrons=False,
-        geom_type=getattr(cfg.geometry, "geometry_model", "circ"),
-        signB=params.signB,
-    )
+    geometry = compute_geometry_from_config(cfg)
     for k in ("mas", "signz", "tmp", "de", "vthrat"):
         geometry[k] = jnp.atleast_1d(jnp.asarray(getattr(params, k), dtype=jnp.float64))
     pre = linear_precompute(geometry, params)
@@ -212,10 +196,105 @@ def test_equivalence_2gpu_sp_kinetic():
     pre1 = sharding.shard_pre(pre1, mesh, grid)
     df_sh, phi_sh, flx_sh, _ = gk_run(df1, geom1, p1, st1, n_steps=50, pre=pre1)
 
-    def rel_l2(a, b):
-        return float(np.linalg.norm(a - b) / max(np.linalg.norm(a), 1e-30))
 
-    assert rel_l2(np.asarray(df_ref), np.asarray(df_sh)) < 1e-8, (
-        f"df rel L2 = {rel_l2(np.asarray(df_ref), np.asarray(df_sh)):.3e}"
+    assert rel_l2(df_sh, df_ref) < 1e-8, (
+        f"df rel L2 = {rel_l2(df_sh, df_ref):.3e}"
     )
-    assert rel_l2(np.asarray(phi_ref), np.asarray(phi_sh)) < 1e-8
+    assert rel_l2(phi_sh, phi_ref) < 1e-8
+
+
+def _em_case(backend, mesh_axes=None):
+    grid = dict(nvpar=16, nmu=4, ns=16, nkx=21, nky=5)
+    overrides = dict(nlbpar=True, adaptive_dt=False, **(mesh_axes or {}))
+    return noisy_case(
+        "nl_em_waltz_b01.yaml", grid, overrides, seed=7, backend=backend, mixed_precision=False
+    )
+
+
+def _all_gather_bytes(compiled_text):
+    import re
+
+    nbytes = {"c128": 16, "c64": 8, "f64": 8, "f32": 4}
+    total = 0
+    for line in compiled_text.splitlines():
+        m = re.search(r"= (.*?) all-gather(-start)?\(", line)
+        if m:
+            dt, shp = re.findall(r"([a-z]+[0-9]*)\[([0-9,]*)\]", m.group(1))[-1]
+            total += int(np.prod([int(x) for x in shp.split(",") if x])) * nbytes.get(dt, 8)
+    return total
+
+
+@pytest.mark.skipif(len(jax.devices()) < 2, reason="requires ≥2 GPUs")
+def test_vpar_halo_matches_unsharded_stencil():
+    from jax.sharding import NamedSharding, PartitionSpec
+
+    mesh = sharding.build_mesh(GKParams(n_gpus_vp=2))
+    x = jax.random.normal(jax.random.PRNGKey(0), (2, 16, 4, 3, 5))
+    coef = jnp.array([1.0, -8.0, 0.5, 8.0, -1.0])
+
+    def stencil(f, v_axis):
+        pad = [(0, 0)] * f.ndim
+        pad[v_axis] = (2, 2)
+        fp = jnp.pad(f, pad)
+        n = f.shape[v_axis]
+        return sum(c * jax.lax.slice_in_dim(fp, k, k + n, axis=v_axis) for k, c in enumerate(coef))
+
+    ref = stencil(x, 1)
+
+    def local(f):
+        ext = sharding.halo(f, 1, "vp", 2)
+        out = sum(
+            c * jax.lax.slice_in_dim(ext, k, k + f.shape[1], axis=1) for k, c in enumerate(coef)
+        )
+        return out
+
+    xs = jax.device_put(x, NamedSharding(mesh, PartitionSpec(None, "vp")))
+    out = jax.jit(
+        lambda f: sharding.velocity_map(
+            local, mesh, (f,), ((None, "vp"),), PartitionSpec(None, "vp")
+        )
+    )(xs)
+    np.testing.assert_array_equal(np.asarray(out), np.asarray(ref))
+
+
+def _assert_sharded_matches_single(df, geometry, params, state, sharded_params):
+    """3 steps on the 2-device mesh of ``sharded_params`` match one device and never gather df."""
+    from gyaradax.solver import gksolve
+
+    if params.backend == "cuda" and not HAS_CUDA:
+        pytest.skip("CUDA not available")
+    ref = gksolve(df, geometry, params, state, n_steps=3, pre=linear_precompute(geometry, params))
+    mesh = sharding.build_mesh(sharded_params)
+    grid = sharding.grid_shape_from(sharded_params, geometry)
+    pre = sharding.precompute_sharded(geometry, sharded_params, mesh, grid)
+    df_sharded = sharding.shard_df(df, mesh, grid)
+    run = jax.jit(lambda d, s, p: gksolve(d, geometry, sharded_params, s, n_steps=3, pre=p))
+    out = run(df_sharded, state, pre)
+    compiled = run.lower(df_sharded, state, pre).compile().as_text()
+    assert _all_gather_bytes(compiled) < df.nbytes / 100
+    assert rel_l2(out[0], ref[0]) < 1e-12
+    assert rel_l2(out[1][0], ref[1][0]) < 1e-12
+
+
+@pytest.mark.skipif(len(jax.devices()) < 2, reason="requires ≥2 GPUs")
+@pytest.mark.parametrize("backend", ["cuda", "jax"])
+@pytest.mark.parametrize("axis", ["n_gpus_sp", "n_gpus_vp", "n_gpus_mu"])
+def test_em_sharded_matches_single_device(backend, axis):
+    df, geometry, params, state = _em_case(backend)
+    _assert_sharded_matches_single(df, geometry, params, state, replace(params, **{axis: 2}))
+
+
+@pytest.mark.skipif(len(jax.devices()) < 2, reason="requires ≥2 GPUs")
+@pytest.mark.parametrize("backend", ["cuda", "jax"])
+@pytest.mark.parametrize("axis", ["n_gpus_vp", "n_gpus_mu"])
+@pytest.mark.parametrize("conserve", [False, True])
+def test_collisions_sharded_matches_single_device(backend, axis, conserve):
+    coll = {
+        "backend": backend,
+        "collisions": True,
+        "coll_freq": 0.05,
+        "coll_mom_conservation": conserve,
+        "coll_ene_conservation": conserve,
+    }
+    df, geometry, params, state, _ = _build(coll)
+    _assert_sharded_matches_single(df, geometry, params, state, replace(params, **{axis: 2}))

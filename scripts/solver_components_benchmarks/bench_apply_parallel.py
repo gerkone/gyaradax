@@ -26,6 +26,7 @@ LIB_PATH = Path(__file__).parent.parent / "cuda_augmentations" / "liblto_bracket
 from common import (
     load_setup,
     check_accuracy,
+    full_stencil,
     BASELINES_DIR,
     analyze_cost,
     BenchTimer,
@@ -51,14 +52,15 @@ def run(config="configs/iteration_13.yaml", mixed_precision=False):
 
     results = {}
     backends = []
-    for b in ["jax", "cuda"]:
+    # cuda runs these stencils inside linear_rhs_fused (bench_linear_rhs.py)
+    for b in ["jax"]:
         try:
             ops = create_ops(pre_gk, backend=b, mixed_precision=mixed_precision)
             backends.append((b, ops))
         except Exception as e:
             print(f"  [SKIP] {b} backend not available: {e}")
 
-    coeffs_raw = pre["s_total_upar"]  # (9, nv, 1, ns, nkx, nky)
+    coeffs_raw = full_stencil(pre, "s_upar_tab")  # (9, nv, 1, ns, nkx, nky)
     target_coeffs_shape = (9, *field.shape)
     coeffs_broadcasted = jnp.broadcast_to(coeffs_raw, target_coeffs_shape)
 
@@ -101,8 +103,8 @@ def run(config="configs/iteration_13.yaml", mixed_precision=False):
     # Setup inputs for dual stencil
     key = jax.random.PRNGKey(42)
     gyro_phi = jax.random.normal(key, df.shape).astype(df.dtype)
-    coeffs1 = pre["s_total_upar"]
-    coeffs2 = pre["s_total_t7"]
+    coeffs1 = full_stencil(pre, "s_upar_tab")
+    coeffs2 = full_stencil(pre, "s_t7_tab")
 
     dual_times = {}
     for bname, ops in backends:

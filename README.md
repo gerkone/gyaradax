@@ -4,11 +4,11 @@
   <img src="docs/figs/gyaradax_small.png" width="500" alt="gyaradax Logo">
 </p>
 
-`gyaradax` is a JAX code for local flux-tube gyrokinetic simulations. It is based on [GKW](https://bitbucket.org/gkw/gkw). At the current stage, it provides a differentiable solver for the electrostatic, collisionless Vlasov-Poisson system.
+`gyaradax` is a JAX code for local flux-tube gyrokinetic simulations. It is based on [GKW](https://bitbucket.org/gkw/gkw). It provides a differentiable solver for electrostatic and electromagnetic (A∥, B∥) turbulence with adiabatic or kinetic electrons and a linearized Fokker-Planck collision operator, with an optional CUDA backend and multi-GPU velocity-space sharding.
 
 This was made possible with significant usage of agentic workflows. [PROMPT.md](docs/PROMPT.md) contains the prompt used to obtain the initial working version of `gyaradax`
 
-Check out [our whitepaper](https://arxiv.org/abs/2604.06085), or see [agent notes](docs/NOTES.md) for a detailed walkthrough of GKW and this reimplementation.
+Check out [our whitepaper](https://arxiv.org/abs/2604.06085), or see [agent notes](docs/NOTES.md) for a detailed walkthrough of GKW and this reimplementation (§13 there covers performance, memory and multi-GPU sharding).
 
 <p align="center">
   <img src="docs/figs/torus.gif" width="700" alt="Nonlinear ITG turbulence on a torus">
@@ -27,35 +27,45 @@ pip install -e ".[dev]"
 This installs `gyaradax` in editable mode with the base JAX dependency, numpy, and dev tools (pytest, ruff, black). The conda environment provides common build tools and, when CUDA work is needed, the CUDA toolkit (>= 13.1), cuDNN, cmake, and a C++ compiler.
 
 ### CUDA Backend
-The optional CUDA backend provides fused kernels for the linear RHS stencils and the nonlinear Poisson bracket (cuFFT graph-captured pipeline). It requires a GPU with compute capability >= 80. Install the CUDA JAX extra before building or using CUDA kernels:
+The optional CUDA backend provides fused kernels for the linear RHS (electrostatic and electromagnetic), the electromagnetic field moments and the nonlinear Poisson bracket (cuFFT, plus cuFFTDx row kernels from `nvidia-mathdx`). On an H100 it runs 1.6-1.7x faster than the previous CUDA backend for electrostatic cases, and 2.6-3.0x (electrostatic) to 2.9-4.2x (electromagnetic) faster than JAX on nonlinear runs at production grid sizes. It requires a GPU with compute capability >= 80. Install the CUDA JAX extra (which also brings `nvidia-mathdx` and NCCL) before building or using CUDA kernels:
 
 ```bash
 pip install -e ".[cuda13,dev]"
 ```
+
+This also installs the `gyaradax` command (re-run it after pulling if the command is missing).
 
 From `gyaradax/backends/cuda_kernels/`:
 ```bash
 mkdir -p _build && cd _build && cmake .. -DCMAKE_BUILD_TYPE=Release && cmake --build . -j$(nproc) && cmake --install . && cd ..
 ```
 
-To target a specific GPU architecture (e.g., Ampere sm_80):
+**GPU architectures.** By default (`GPU_ARCHITECTURES=native`) CMake compiles for the GPU of the
+machine it runs on, so the same commands work on an H100 node (sm_90) and on a B300 node (sm_103) —
+but that library then runs only on that GPU type. For a checkout shared by different node types, or
+on a build node without a GPU, list the architectures explicitly:
 ```bash
-cmake .. -DCMAKE_BUILD_TYPE=Release -DGPU_ARCHITECTURES="80"
+cmake .. -DCMAKE_BUILD_TYPE=Release -DGPU_ARCHITECTURES="90;103"   # H100 + B300 in one library
 ```
-
-CMake prints the detected compute capability, jaxlib version, and cudatoolkit. Ensure these are correct before proceeding.
+The cuFFT LTO callbacks are built for compute 80/90/100 (`LTO_ARCHITECTURES`), which covers A100,
+H100 and Blackwell, and the cuFFTDx bracket is instantiated for every kernel architecture. CMake
+prints the target architectures, jaxlib and CUDA toolkit versions, and whether cuFFTDx was found;
+`gyaradax info` shows what the installed library provides (CUDA kernels, v6 bracket, NCCL).
 
 ## Structure
 
-- **`solver.py`**: Linear and nonlinear Terms (I-VIII), RK4 integrator.
-- **`simulate.py`**: Interface for trajectory generation.
-- **`integrals.py`**: Field solvers and flux integrals.
-- **`geometry.py`**: Parsers for GKW geometry files and metric tensor coefficients.
-- **`params.py`**: Configuration pytrees.
-- **`stencils.py`**: Finite difference stencil definitions.
-- **`diag.py`**: Diagnostics (growth rate, frequency, spectral).
-- **`backends/`**: Backend dispatch (JAX, CUDA). See [CUDA build instructions](#cuda-backend).
-- **`plot_utils.py`**: Visualization.
+- **`solver.py`**: RK4 integrator and the multi-step driver `gksolve`.
+- **`backends/`**: Linear RHS (Terms I-XI) and nonlinear bracket, JAX and CUDA. See [CUDA build instructions](#cuda-backend).
+- **`fields.py`, `integrals.py`**: Field solves (phi, A∥, B∥) and flux integrals.
+- **`precompute.py`**: Static coefficients (stencils, species terms, EM factors).
+- **`cfl.py`**: Adaptive timestep.
+- **`collisions.py`**: Linearized Fokker-Planck collision operator.
+- **`geometry/`**: Geometry models (circular, s-alpha, Miller, GKW geom.dat) and metric tensors.
+- **`sharding.py`**: Multi-GPU velocity-space sharding.
+- **`simulate.py`, `cli.py`**: Simulation runtime and the `gyaradax` command.
+- **`eigenvalue.py`, `quasilinear/`**: Linear eigenvalue solver and quasilinear transport.
+- **`params.py`, `state.py`**: Configuration and state pytrees.
+- **`diag.py`, `plot_utils.py`**: Diagnostics and visualization.
 
 ## Running Simulations
 
@@ -77,20 +87,38 @@ Electromagnetic and multi-GPU runs need no extra flags — a config carrying
 ```bash
 gyaradax run configs/nl_em_apar.yaml            # electromagnetic, kinetic electrons
 gyaradax run configs/my_big_case.yaml           # sharded if the config says so
-gyaradax run configs/my_case.yaml --n-gpus-vp 4 # or override the mesh
+gyaradax run configs/my_case.yaml --n-gpus 4    # shard over 4 GPUs, layout from the grid
 ```
 
 When several YAML configs share the same grid and static parameters they are
-batched automatically under one `jax.vmap`:
+batched automatically under one `jax.vmap`, each member writing its own run
+directory as a single run would:
 
 ```bash
 gyaradax run configs/adiabatic_a.yaml configs/adiabatic_b.yaml --device 0
 ```
 
+Every run writes into its output directory: the effective `config.yaml` (the
+input config with the command-line choices folded in), `geometry.pkl`, the
+diagnostics (`fluxes.npz`, spectra, `dt_history.npz`), a restart snapshot
+`step_*.npz` refreshed every `--snapshot-every` blocks (default 1), and `run_info.jsonl` (one line per
+invocation). Point `gyaradax run` at that directory to resume or extend it:
+
+```bash
+gyaradax run outputs_kinetic_my_case                  # continue up to solver.n_steps
+gyaradax run outputs_kinetic_my_case --n-steps 2000   # or run 2000 more steps
+```
+
+Debug output is off by default: `--telemetry` writes per-block timings, dt and
+device memory to `telemetry.jsonl`, `--profile` traces one block into
+`profile/` with a GPU kernel summary in `profile_summary.json`, and `--debug`
+turns on both.
+
 **See [docs/CLI.md](docs/CLI.md) for the full command reference**, including
 the auto-detection table, multi-GPU guidance and every flag.
 
-`python scripts/run.py CONFIG ...` still works as a thin shim over
+`python -m gyaradax ...` is the same command where the console script is not on
+`PATH`, and `python scripts/run.py CONFIG ...` still works as a thin shim over
 `gyaradax run`.
 
 ### Usage
@@ -119,7 +147,7 @@ df, phi, fluxes, state = gksimulate(df, geometry, params, state, 120, pre=pre)
 #### Configuration from GKW
 If you have an existing GKW run, you can extract its parameters and geometry into yaml:
 ```bash
-python -m scripts.gkw_to_yaml /path/to/gkw_run configs/my_sim.yaml
+gyaradax convert /path/to/gkw_run configs/my_sim.yaml
 ```
 
 ### CUDA backend
@@ -159,12 +187,13 @@ Most tests require GKW reference data. Set the `GKW_DATA_ROOT` environment varia
 - [x] Linear solver.
 - [x] Adiabatic electrons corrections and cases (ion only, single species).
 - [x] Kinetic electrons (multi-species).
-- [ ] Electromagnetic effects.
-- [ ] Collisionality.
+- [x] Electromagnetic effects (A∥, B∥).
+- [x] Collisionality (linearized Fokker-Planck).
 
 **Optimization**:
 - [x] JAX-based improvements.
-- [x] CUDA LTO backend (fused linear stencil and nonlinear solve).
+- [x] CUDA backend (fused linear RHS, field moments and nonlinear bracket; electrostatic and electromagnetic).
+- [x] Multi-GPU velocity-space sharding (species, vpar, mu).
 - [ ] Fully spectral solver.
 - [ ] Implicit/explicit integration (IMEX).
 

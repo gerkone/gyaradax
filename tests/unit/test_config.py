@@ -1,6 +1,6 @@
 import os
 from gyaradax import load_config, gkparams_from_config, GKParams
-from scripts.gkw_to_yaml import gkw_to_yaml
+from gyaradax.utils import gkw_to_yaml
 
 
 def test_gkw_to_yaml_conversion(nonlin_dir, tmp_path):

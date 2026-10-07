@@ -386,7 +386,7 @@ def precompute_collisions(geometry: Dict, params: GKParams) -> Dict[str, jnp.nda
     bn = jnp.asarray(geometry["bn"], dtype=jnp.float64)
     dvp = float(geometry.get("dvp", params.dvp))
     vperp_grid = jnp.sqrt(jnp.maximum(2.0 * mugr, 0.0))
-    dvperp = float(vperp_grid[0] * 2.0)
+    dvperp = vperp_grid[0] * 2.0
 
     flags = (
         params.coll_pitch_angle,
@@ -520,32 +520,96 @@ def _precompute_conservation(geometry, params, vpgr, mugr, bn):
         }
 
 
-def conservation_correction(coll_rhs, mom_factor, ene_factor, vpar_w, vsq_w):
+def conservation_correction(coll_rhs, mom_factor, ene_factor, vpar_w, vsq_w, reduce=None):
     """Add the Xu scalar conservation correction on top of the base collision RHS.
 
     coll_rhs: (nv, nmu, ns, nkx, nky). *_factor, *_weight: (nv, nmu, ns).
+    ``reduce`` completes the velocity moments of a sharded block (a ``psum``).
     Returns an additive correction of the same shape as coll_rhs.
     """
     dp = jnp.sum(vpar_w[:, :, :, None, None] * coll_rhs, axis=(0, 1))
     de = jnp.sum(vsq_w[:, :, :, None, None] * coll_rhs, axis=(0, 1))
+    if reduce is not None:
+        dp, de = reduce(dp), reduce(de)
     return -(
         dp[None, None, :, :, :] * mom_factor[:, :, :, None, None]
         + de[None, None, :, :, :] * ene_factor[:, :, :, None, None]
     )
 
 
-def collision_rhs(df: jnp.ndarray, stencil: jnp.ndarray) -> jnp.ndarray:
+_SHIFTS = ((0, 0), (1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (-1, 1), (1, -1), (-1, -1))
+CONSERVATION_KEYS = ("coll_mom_factor", "coll_ene_factor", "coll_vpar_weight", "coll_vsq_weight")
+
+
+def collisions_on(params, pre) -> bool:
+    return bool(params.collisions) and "coll_stencil" in pre
+
+
+def collision_term(df: jnp.ndarray, params, pre, mesh=None) -> jnp.ndarray:
+    """Collision RHS of a 5D or 6D (species-leading) df, conservation correction included.
+
+    With a mesh that splits vpar or mu it runs on each device's block.
+    """
+    from gyaradax import sharding
+
+    conserve = (
+        params.coll_mom_conservation or params.coll_ene_conservation
+    ) and "coll_mom_factor" in pre
+    weights = tuple(pre[k] for k in CONSERVATION_KEYS) if conserve else ()
+    args = (df, pre["coll_stencil"]) + weights
+
+    def one(f, stencil, *w, halo=None, reduce=None):
+        term = collision_rhs(f, stencil, halo)
+        if conserve:
+            term = term + conservation_correction(term, *w, reduce=reduce)
+        return term
+
+    if not sharding.splits_velocity(mesh):
+        return one(*args) if df.ndim == 5 else jax.vmap(one)(*args)
+
+    from jax.sharding import PartitionSpec
+
+    lead = ("sp",) if df.ndim == 6 else ()
+    vel = lead + ("vp", "mu")
+    axes = (vel, lead + (None, "vp", "mu")) + (vel,) * len(weights)
+
+    def halo(f):
+        # one plane per side in vpar then mu; the second exchange carries the corners
+        for axis, name in ((0, "vp"), (1, "mu")):
+            if mesh.shape[name] > 1:
+                f = sharding.halo(f, axis, name, mesh.shape[name], width=1)
+            else:
+                f = jnp.pad(f, [(1, 1) if a == axis else (0, 0) for a in range(f.ndim)])
+        return f
+
+    def local(*xs):
+        def block(f, stencil, *w):
+            return one(f, stencil, *w, halo=halo, reduce=lambda x: jax.lax.psum(x, ("vp", "mu")))
+
+        return jax.vmap(block)(*xs) if df.ndim == 6 else block(*xs)
+
+    return sharding.velocity_map(local, mesh, args, axes, PartitionSpec(*vel))
+
+
+def collision_rhs(df: jnp.ndarray, stencil: jnp.ndarray, halo=None) -> jnp.ndarray:
     """Apply the 9-point collision stencil to a 5D df.
 
     df shape: (nv, nmu, ns, nkx, nky).
     stencil shape: (9, nv, nmu, ns). Out-of-grid neighbors contribute zero.
+    ``halo`` (inside ``shard_map``) extends a local block by one neighbour plane per side
+    in vpar and mu, taking the place of the zero padding at the block edges.
     """
     nv, nmu = df.shape[0], df.shape[1]
+    out = jnp.zeros_like(df)
+    if halo is not None:
+        ext = halo(df)
+        for k, (di, dj) in enumerate(_SHIFTS):
+            shifted = ext[1 + di : 1 + di + nv, 1 + dj : 1 + dj + nmu]
+            out = out + stencil[k][:, :, :, None, None] * shifted
+        return out
     iv = jnp.arange(nv)
     imu = jnp.arange(nmu)
-    shifts = ((0, 0), (1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (-1, 1), (1, -1), (-1, -1))
-    out = jnp.zeros_like(df)
-    for k, (di, dj) in enumerate(shifts):
+    for k, (di, dj) in enumerate(_SHIFTS):
         v_idx = jnp.clip(iv + di, 0, nv - 1)
         mu_idx = jnp.clip(imu + dj, 0, nmu - 1)
         v_valid = (iv + di >= 0) & (iv + di < nv)
