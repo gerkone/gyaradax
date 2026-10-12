@@ -1,6 +1,6 @@
 """Preprocessed dataset output: quantized real-space frames and metadata in the neugk kvikio layout.
 
-A trajectory lives in ``<root>/preprocessed_kvikio/<name>_ifft_realpotens/``::
+A trajectory lives in ``<root>/<name>_ifft_realpotens/``::
 
     data/timestep_NNNNN.<bits>.bin   df in real space, (re/im, species, vpar, mu, s, x, y);
                                      adiabatic runs have no species axis
@@ -8,6 +8,7 @@ A trajectory lives in ``<root>/preprocessed_kvikio/<name>_ifft_realpotens/``::
     metadata.pkl                     everything below, including the statistics
     metadata_light.pkl               the same without the per-element df / phi moments
     config.yaml                      the run's effective config
+    .gyaradax_run                    the run directory that writes the trajectory
 
 ``bits`` is ``zstd16`` (bfloat16 values byte-shuffled and zstd-compressed in 4 MiB chunks behind
 a 4 KiB header, ``neugk_jax.dataset.zframe`` v1) or ``bf16`` (the raw values); either way the
@@ -33,13 +34,30 @@ import numpy as np
 GEOMETRY_KEYS = ("kxrh", "krho", "intvp", "vpgr", "intmu", "mugr", "ints", "bn", "bt_frac", "rfun", "efun",
                  "little_g", "mas", "tmp", "de", "signz", "vthrat", "d2X", "signB", "parseval")
 
+OWNER_FILE = ".gyaradax_run"
+
 # zstd16 shard layout (neugk_jax.dataset.zframe v1)
 MAGIC, VERSION, ALIGN, CHUNK_BYTES = b"NGKZ", 1, 4096, 4 << 20
 _FIXED = struct.Struct("<4sIIQQQ")
 
 
 def trajectory_path(root: str, name: str) -> str:
-    return os.path.join(root, "preprocessed_kvikio", f"{name}_ifft_realpotens")
+    return os.path.join(root, f"{name}_ifft_realpotens")
+
+
+def _claim(traj: str, run_dir: str) -> None:
+    """Make ``traj`` the trajectory of ``run_dir``, refusing one another run or tool wrote."""
+    owner_path = os.path.join(traj, OWNER_FILE)
+    if os.path.islink(traj):
+        raise FileExistsError(f"{traj} is a symlink to an existing trajectory; choose another dataset name")
+    owner = open(owner_path).read().strip() if os.path.exists(owner_path) else None
+    if owner is None and os.path.isdir(traj) and os.listdir(traj):
+        raise FileExistsError(f"{traj} exists and was not written by a gyaradax run; choose another dataset name")
+    if owner is not None and owner != run_dir:
+        raise FileExistsError(f"{traj} belongs to the run in {owner}; choose another dataset name")
+    os.makedirs(os.path.join(traj, "data"), exist_ok=True)
+    if owner is None:
+        _atomic_write(owner_path, (run_dir + "\n").encode())
 
 
 def frame_path(traj: str, kind: str, index: int, bits: str) -> str:
@@ -239,7 +257,8 @@ class DatasetWriter:
     ``start_step`` is the solver step the run starts from: frames of a previous leg past that
     step (a resume from an older snapshot) are dropped, earlier ones are kept and the new
     frames continue their numbering. ``finalize`` computes the statistics of the frames from
-    time ``stats_from`` on.
+    time ``stats_from`` on. The trajectory belongs to the run directory holding ``config_path``:
+    an existing trajectory of another run, or one not written by a run, is refused.
     """
 
     def __init__(self, root: str, name: str, geometry: dict, params: Any, config_path: str,
@@ -249,7 +268,7 @@ class DatasetWriter:
         self.path = trajectory_path(root, name)
         self.bits = bits
         self.stats_from = float(stats_from)
-        os.makedirs(os.path.join(self.path, "data"), exist_ok=True)
+        _claim(self.path, os.path.dirname(os.path.abspath(config_path)))
         shutil.copyfile(config_path, os.path.join(self.path, "config.yaml"))
         self.static = _static_metadata(geometry, params, os.path.join(self.path, "config.yaml"))
         self.series: dict[str, list] = {

@@ -98,12 +98,19 @@ the last snapshot and rewrites the diagnostics after it.
 
 ## Preprocessed dataset output
 
-`--dataset DIR` also writes the run as a training-ready trajectory, in the layout the neugk
-loaders read (`preprocessed_kvikio`), so no intermediate dumps or separate conversion are needed:
+`--dataset DIR` also writes the run as a training-ready trajectory `DIR/<name>_ifft_realpotens/`,
+in the layout the neugk loaders read (`preprocessed_kvikio`), so no intermediate dumps or separate
+conversion are needed. The shared kinetic dataset is
+`/restricteddata/ukaea/gyrokinetics/preprocessed/kinetic`:
 
 ```bash
-gyaradax run configs/kinetic_603.yaml --dataset /data/kinetic --dataset-name iteration_603
+gyaradax run configs/kinetic_603.yaml --dataset /restricteddata/ukaea/gyrokinetics/preprocessed/kinetic \
+    --dataset-name iteration_603_dp4
 ```
+
+- The trajectory belongs to the run directory that created it (`.gyaradax_run`). An existing
+  trajectory of another run, or one not written by a run (including symlinks to the stored
+  dataset), is refused: a rerun needs a new `--dataset-name`.
 
 - One frame per checkpoint block: `data/timestep_NNNNN.zstd16.bin` holds df in real space,
   (re/im, species, vpar, mu, s, x, y); adiabatic runs have no species axis.
@@ -122,7 +129,7 @@ gyaradax run configs/kinetic_603.yaml --dataset /data/kinetic --dataset-name ite
   recompute them with:
 
   ```bash
-  gyaradax dataset-stats /data/kinetic/preprocessed_kvikio/iteration_603_ifft_realpotens --from-time 40
+  gyaradax dataset-stats /restricteddata/ukaea/gyrokinetics/preprocessed/kinetic/iteration_603_dp4_ifft_realpotens --from-time 40
   ```
 
 - The settings are stored in the run's `config.yaml` (`dataset:` section): resuming the run
@@ -335,7 +342,7 @@ the scheduler sets `CUDA_VISIBLE_DEVICES` and `XLA_PYTHON_CLIENT_PREALLOCATE=fal
 
 ```yaml
 workdir: /system/user/galletti/git/gyaradax-dataset
-defaults: {args: --backend cuda --dataset /data/kinetic}
+defaults: {args: --backend cuda --dataset /restricteddata/ukaea/gyrokinetics/preprocessed/kinetic}
 jobs:
   - {name: k603, config: configs/kinetic_603.yaml, output_dir: /data/runs/k603, cost: 40}
   - {name: k604_more, run_dir: /data/runs/k604, args: --n-steps 2000, cost: 10}

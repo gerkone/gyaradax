@@ -1164,7 +1164,7 @@ def build_parser() -> argparse.ArgumentParser:
     run_p.add_argument(
         "--dataset", type=str, default=None, metavar="DIR",
         help="also write the run as a preprocessed dataset trajectory under "
-             "DIR/preprocessed_kvikio/ (quantized real-space frames every block + metadata)",
+             "DIR/<name>_ifft_realpotens/ (quantized real-space frames every block + metadata)",
     )
     run_p.add_argument(
         "--dataset-bits", choices=["zstd16", "bf16"], default=None,

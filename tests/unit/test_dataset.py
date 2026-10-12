@@ -73,3 +73,22 @@ def test_run_writes_preprocessed_trajectory(tmp_path, kind):
     phis = [ds.read_frame(ds.frame_path(traj, "poten", i, "zstd16"), meta["phi_shape"]) for i in (1, 2)]
     np.testing.assert_allclose(meta["phi_mean"], np.mean(phis, axis=0), rtol=1e-3, atol=1e-6)
     assert meta["phi_mean"].dtype == np.float32
+
+
+def test_writer_refuses_trajectories_of_other_runs(tmp_path):
+    root, mine, other = tmp_path / "data", str(tmp_path / "run_a"), str(tmp_path / "run_b")
+    traj = ds.trajectory_path(str(root), "case")
+    ds._claim(traj, mine)
+    ds._claim(traj, mine)
+    with pytest.raises(FileExistsError, match="belongs to the run"):
+        ds._claim(traj, other)
+    # a stored trajectory without an owner, and a symlink to one
+    stored = ds.trajectory_path(str(root), "stored")
+    os.makedirs(os.path.join(stored, "data"))
+    open(os.path.join(stored, "metadata.pkl"), "wb").close()
+    with pytest.raises(FileExistsError, match="not written by a gyaradax run"):
+        ds._claim(stored, mine)
+    os.symlink(stored, ds.trajectory_path(str(root), "linked"))
+    with pytest.raises(FileExistsError, match="symlink"):
+        ds._claim(ds.trajectory_path(str(root), "linked"), mine)
+    assert sorted(os.listdir(stored)) == ["data", "metadata.pkl"]
