@@ -453,7 +453,8 @@ def load_scalars(directory: str) -> Dict[str, Any]:
         "kthnorm": _scalar("kthnorm", 1.0),
         "Rref": abs(_scalar("Rref", 1.0)),
         "d2X": 1.0,
-        "signB": 1.0,
+        "signB": float(input_data.get("geom", {}).get("signb", 1.0)),
+        "signJ": float(input_data.get("geom", {}).get("signj", 1.0)),
     }
 
     num_sp = as_int(input_data.get("gridsize", {}).get("number_of_species", 1), 1)
@@ -593,6 +594,7 @@ def gkw_to_yaml(gkw_dir, output_yaml):
             "Rref": scalars.get("Rref", 1.0),
             "d2X": scalars.get("d2X", 1.0),
             "signB": scalars.get("signB", 1.0),
+            "signJ": scalars.get("signJ", 1.0),
             "dvp": scalars.get("dvp", 1.0),
             "sgr_dist": scalars.get("sgr_dist", 1.0),
             "kxmax": scalars.get("kxmax", 1.0),
@@ -607,6 +609,18 @@ def gkw_to_yaml(gkw_dir, output_yaml):
             "adiabatic_electrons": scalars.get("adiabatic_electrons", True),
         },
     }
+
+    # the analytic geometry of the run, so the config does not depend on the gkw files
+    from gyaradax.geometry.geom import geometry_spec_from_input_dat
+
+    spec = geometry_spec_from_input_dat(input_dat_path)
+    config["geometry"].update(
+        {"geometry_model": spec.model, "kxmax": spec.kxmax, "signB": spec.signB, "signJ": spec.signJ,
+         **{k: float(v) for k, v in spec.model_params.items()}}
+    )
+    config["grid"].update(
+        {"krhomax": spec.krhomax, "ikxspace": spec.ikxspace, "nperiod": spec.nperiod, "vpar_max": spec.vpar_max}
+    )
 
     conf = OmegaConf.create(config)
     OmegaConf.save(conf, output_yaml)

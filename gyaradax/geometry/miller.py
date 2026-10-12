@@ -395,5 +395,6 @@ def _miller_geometry(
         "finite_epsilon": True,
         "R0": R_[itheta0],
         "dR0dpsi": s["dRdpsi"][itheta0],
-        "g_zz_mid": metric[len(sgrid) // 2, 1, 1],
+        # gkw takes kthnorm at theta = 0 on the fine theta grid (geom.f90 ithetazero)
+        "g_zz_mid": m22[itheta0],
     }

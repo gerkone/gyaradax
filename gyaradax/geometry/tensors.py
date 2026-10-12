@@ -39,14 +39,15 @@ def _calc_geom_tensors(cg: dict[str, Any], signJ: float = 1.0, signB: float = 1.
     hfun = -signB * (metric[:, :, 0] * dZdpsi[:, None] + metric[:, :, 2] * dZds[:, None])
     if finite_epsilon:
         hfun = hfun.at[:, 2].add(signB * bups**2 * dZds / bn**2)
-    hfun = hfun / bn[:, None]
+        hfun = hfun / bn[:, None]
 
-    ifun = 2 * R[:, None] * (e0 * dRdpsi[:, None] + e2 * dRds[:, None])
-
-    # centrifugal tensors J, K (geom.f90:3599-3625)
+    # centrifugal tensors J, K (geom.f90:3599-3625); without finite epsilon gkw sets R = 1 after J
     R0 = cg.get("R0", R[len(R) // 2])
     dR0dpsi = cg.get("dR0dpsi", dRdpsi[len(R) // 2])
     lfun = 2.0 * R0 * dR0dpsi
-    jfun = R**2 - R0**2
+    jfun = R**2 - R0**2 if finite_epsilon else 2.0 * (R - R0)
+    R = R if finite_epsilon else jnp.ones_like(R)
+
+    ifun = 2 * R[:, None] * (e0 * dRdpsi[:, None] + e2 * dRds[:, None])
     kfun = 2.0 * R * dRdpsi - lfun
     return efun, dfun, hfun, ifun, jfun, kfun

@@ -59,7 +59,7 @@ def assemble_geometry_dict(
     Rref = spec.Rref
 
     bn, R = cg["bn"], cg["R"]
-    little_g = jnp.stack([cg["metric"][:, 1, 1], cg["dzetadeps"], jnp.ones(ns)], axis=-1)
+    little_g = jnp.stack([cg["metric"][:, 1, 1], cg["dzetadeps"], cg["metric"][:, 0, 0]], axis=-1)
 
     return {
         "kthnorm": _f64(kthnorm),
@@ -87,7 +87,8 @@ def assemble_geometry_dict(
         "ffun": _f64(cg["ffun"]),
         "gfun": _f64(cg["gfun"]),
         "bt_frac": _f64(cg["bt_frac"]),
-        "rfun": _f64(R),
+        # gkw sets R = 1 without finite epsilon (s-alpha)
+        "rfun": _f64(R if cg.get("finite_epsilon", True) else jnp.ones_like(R)),
         "little_g": _f64(little_g),
         "dfun": _f64(dfun),
         "hfun": _f64(hfun),

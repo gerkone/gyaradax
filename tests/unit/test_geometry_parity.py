@@ -61,6 +61,10 @@ _PARITY_CONFIGS = [
 ]
 
 
+# s-alpha keys that now follow gkw's finite_epsilon = .false. branch (numerical G, H without
+# 1 / B, R = 1); checked against gkw in tests/unit/test_gkw_geometry_parity.py
+_SALPHA_GKW_KEYS = frozenset({"gfun", "hfun", "ifun", "rfun", "jfun", "kfun"})
+
 # deliberately diverged from the snapshot; see test_parity_with_pre_refactor
 _CONNECTIVITY_KEYS = frozenset(
     {"mode_label", "ixplus", "ixminus", "pos_par_grid_class",
@@ -91,7 +95,7 @@ def test_parity_with_pre_refactor(geom_type, q, shat, eps, ns, nkx, nky, ikxspac
     # (New keys may be added; we don't check those.)
     for k in old:
         assert k in new, f"key {k!r} present in OLD but missing in NEW"
-        if k in _CONNECTIVITY_KEYS:
+        if k in _CONNECTIVITY_KEYS or (geom_type == "s-alpha" and k in _SALPHA_GKW_KEYS):
             continue
         a = np.asarray(old[k]); b = np.asarray(new[k])
         if np.issubdtype(a.dtype, np.floating):
