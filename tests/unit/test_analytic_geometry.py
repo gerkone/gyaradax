@@ -8,7 +8,7 @@ import pytest
 import jax
 import jax.numpy as jnp
 
-from gyaradax.io.gkw import load_geometry
+from gyaradax.io.gkw import load_geometry, parse_input_dat
 from gyaradax.geometry import compute_geometry, compute_geometry_from_input
 
 GKW_DATA_ROOT = os.environ.get(
@@ -142,16 +142,25 @@ def test_mode_connectivity_scalars(gkw_dir):
 
 
 def test_mode_connectivity_structure(gkw_dir):
-    """ixplus/ixminus have correct chain structure (spacing = ikxspace)."""
+    """ixplus/ixminus equal GKW's kx_connect.dat; finite ky step ikxspace * iy towards higher kx."""
     comp = compute_geometry_from_input(os.path.join(gkw_dir, "input.dat"))
-    ixplus = np.asarray(comp["ixplus"])
+    ixplus, ixminus = np.asarray(comp["ixplus"]), np.asarray(comp["ixminus"])
     nkx, nky = ixplus.shape
+    inp = parse_input_dat(os.path.join(gkw_dir, "input.dat"))
+    ikxspace = int(inp["mode"].get("ikxspace", 5))
+    nperiod = int(inp["gridsize"].get("nperiod", 1))
 
-    # for ky>0: connected modes should be ikxspace apart
-    for iy in range(1, min(3, nky)):
+    rows = [l.split() for l in open(os.path.join(gkw_dir, "kx_connect.dat")) if l.strip() and l.split()[0].isdigit()]
+    assert len(rows) == nkx * nky
+    for r in rows:
+        imod, ix = int(r[0]) - 1, int(r[2]) - 1
+        assert (ixplus[ix, imod], ixminus[ix, imod]) == (int(r[3]) - 1, int(r[4]) - 1), (imod, ix)
+
+    # gkw mode.f90: one poloidal turn shifts kx by ikxspace * iy grid cells
+    for iy in range(1, nky if nperiod == 1 else 1):
         for ix in range(nkx):
             if ixplus[ix, iy] >= 0:
-                assert ixplus[ix, iy] - ix == 5, f"ixplus spacing wrong at ix={ix}, iy={iy}"
+                assert ixplus[ix, iy] - ix == ikxspace * iy, f"ixplus step wrong at ix={ix}, iy={iy}"
 
 
 # --- hfun / ifun tests (adiabatic + kinetic cases) ---

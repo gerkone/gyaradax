@@ -1348,9 +1348,10 @@ class TestEMGKWValidation:
         expected_tail_ratios = {
             0: ("ion_pflux", 2.1490359744, 0.30),
             1: ("ion_eflux", 2.3029628444, 0.30),
-            2: ("ion_vflux", 1.9777255142e-14, 0.50),
             4: ("elec_eflux", 0.1414037436, 0.10),
         }
+        # gyaradax's ion EM vflux here is round-off (~2e-14 of GKW's), so its shape is noise
+        assert _median_tail_abs_ratio(pred_em[:, 2], ref_em[:, 2]) < 1e-10
         for col, (name, expected_ratio, rtol) in expected_tail_ratios.items():
             corr = _log_abs_correlation(pred_em[:, col], ref_em[:, col])
             assert corr > 0.95, f"{name} EM log-amplitude corr {corr:.4f} <= 0.95"
