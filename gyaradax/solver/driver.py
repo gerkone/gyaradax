@@ -1,6 +1,7 @@
 """Simulation runtime."""
 
 import contextlib
+import functools
 import os
 import shutil
 import time
@@ -567,7 +568,12 @@ def _simulate(
             if run["dataset"] is not None:
                 phi_i = view(current_phi, i)
                 ky_spec, kx_spec = phi_spectra(phi_i, run["geometry"])
-                run["dataset"].add(d, phi_i, view(current_fluxes, i), st, ky_spec, kx_spec)
+                run["dataset"].add(
+                    d, phi_i, view(current_fluxes, i), st, ky_spec, kx_spec,
+                    integrals=functools.partial(
+                        _diagnostics, geometry=run["geometry"], params=run["params"], pre=run["pre"]
+                    ),
+                )
 
             log_step(
                 view(current_fluxes, i), st, wall_time, n_steps=block_steps, label=run["label"]

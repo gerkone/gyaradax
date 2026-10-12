@@ -24,6 +24,13 @@ def test_zstd16_roundtrip_over_several_chunks():
     np.testing.assert_array_equal(ds.zstd16_decode(buf), bits)
 
 
+@pytest.mark.parametrize("nkx", [11, 12])
+def test_real_to_df_inverts_df_to_real(nkx):
+    rng = np.random.default_rng(nkx)
+    df = rng.standard_normal((2, 3, nkx, 5)) + 1j * rng.standard_normal((2, 3, nkx, 5))
+    np.testing.assert_allclose(np.asarray(ds.real_to_df(ds.df_to_real(df))), df, atol=1e-5)
+
+
 @pytest.mark.parametrize("kind", list(CASES))
 def test_run_writes_preprocessed_trajectory(tmp_path, kind):
     src, grid = CASES[kind]
@@ -50,6 +57,12 @@ def test_run_writes_preprocessed_trajectory(tmp_path, kind):
     assert set(meta["geometry"]) == {*ds.GEOMETRY_KEYS, "adiabatic", "beta", "nlapar", "nlbpar"}
     with open(os.path.join(traj, "metadata_light.pkl"), "rb") as fh:
         assert not {"df_mean", "phi_var"} & set(pickle.load(fh))
+    # bf16 loss tracker: phi frame rounding, and phi / heat fluxes recomputed from the stored df
+    assert meta["quant_flux_err"].shape == meta["flux"].shape
+    assert np.all((meta["quant_phi_err"] > 1e-4) & (meta["quant_phi_err"] < 1e-2))
+    assert np.all((meta["quant_phi_df_err"] > 1e-5) & (meta["quant_phi_df_err"] < 1e-1))
+    eflux = [i for i, label in enumerate(meta["flux_labels"]) if label.startswith("eflux")]
+    assert np.all(np.abs(meta["quant_flux_err"][:, eflux]) < 5e-2)
 
     # the last frame is the bf16 real-space transform of the final state
     with np.load(os.path.join(run, "step_000004.npz")) as ck:

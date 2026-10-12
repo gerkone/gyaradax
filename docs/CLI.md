@@ -124,6 +124,11 @@ gyaradax run configs/kinetic_603.yaml --dataset /restricteddata/ukaea/gyrokineti
   `preprocess_gyaradax_kinetic`. As in the dump streams that dataset was built from, df is
   rounded to bf16 in spectral space before the transform: on stored trajectories the frames
   match bitwise up to FFT round-off (phi exactly; df in all but ~0.04% of values).
+- The bf16 loss is tracked per frame: `quant_phi_err` is the relative L2 error of the stored phi
+  frame, `quant_phi_df_err` that of phi solved from the stored df frame, and `quant_flux_err` the
+  relative error of each flux (`flux_labels`) recomputed from the stored df. The reference is the
+  same field solve and flux integral on the unrounded df, so the numbers hold the quantization
+  alone; channels zero to round-off are nan. The run prints their medians when it ends.
 - The df and phi normalisation statistics are computed from the stored frames when the run ends.
   `--dataset-stats-from T` limits them to frames from time T on. Once the transient is known,
   recompute them with:

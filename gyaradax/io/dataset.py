@@ -26,7 +26,8 @@ import pickle
 import re
 import shutil
 import struct
-from typing import Any, Optional
+import warnings
+from typing import Any, Callable, Optional
 
 import numpy as np
 
@@ -129,14 +130,54 @@ def df_to_real(df):
     return jnp.stack([phys.real, phys.imag]).astype(jnp.float32)
 
 
-def df_frame_bits(df) -> np.ndarray:
-    """bf16 bits of the stored df frame: the spectrum rounded to bf16, then ``df_to_real``."""
+def real_to_df(frame):
+    """Spectral complex64 df of a real-space ``(re/im, ..., x, y)`` frame (inverse of ``df_to_real``)."""
+    import jax
+    import jax.numpy as jnp
+
+    x = jnp.asarray(frame, jnp.float32)
+    spec = jnp.fft.fftn(jax.lax.complex(x[0], x[1]), axes=(-2, -1), norm="forward")
+    return jnp.fft.ifftshift(spec, axes=-2)
+
+
+def df_frame(df):
+    """The stored df frame as a bf16 array: the spectrum rounded to bf16, then ``df_to_real``."""
     import jax
     import jax.numpy as jnp
 
     df = jnp.asarray(df)
     spec = jax.lax.complex(*(x.astype(jnp.bfloat16).astype(jnp.float32) for x in (df.real, df.imag)))
-    return _to_bf16_bits(df_to_real(spec))
+    return df_to_real(spec).astype(jnp.bfloat16)
+
+
+def df_frame_bits(df) -> np.ndarray:
+    return np.asarray(df_frame(df)).view(np.uint16).ravel()
+
+
+def _rel_err(a, b) -> float:
+    a, b = np.asarray(a), np.asarray(b)
+    return float(np.linalg.norm(a - b) / max(float(np.linalg.norm(b)), 1e-300))
+
+
+def quantization_loss(df, frame, phi_real, phi_frame, integrals: Optional[Callable] = None) -> dict:
+    """Per-frame bf16 loss: stored phi against phi, and phi and fluxes recomputed from the stored df.
+
+    ``integrals`` maps a spectral df to ``(phi, fluxes)``; it runs on ``df`` and on the df of
+    ``frame``, so the errors hold the quantization alone. Without it the df entries are nan.
+    """
+    import jax.numpy as jnp
+
+    out = {"quant_phi_err": _rel_err(np.asarray(phi_frame, np.float32), phi_real)}
+    if integrals is None:
+        return {**out, "quant_phi_df_err": np.nan, "quant_flux_err": np.nan}
+    phi_ref, flux_ref = integrals(df)
+    phi_q, flux_q = integrals(real_to_df(frame).astype(jnp.asarray(df).dtype))
+    ref, q = (np.asarray(f, np.float64).reshape(-1) for f in (flux_ref, flux_q))
+    scale = np.abs(ref)
+    # channels zero to round-off (e.g. the adiabatic particle flux) have no relative error
+    with np.errstate(divide="ignore", invalid="ignore"):
+        flux_err = np.where(scale > 1e-12 * scale.max(initial=0.0), (q - ref) / scale, np.nan)
+    return {**out, "quant_phi_df_err": _rel_err(phi_q, phi_ref), "quant_flux_err": flux_err}
 
 
 def phi_to_real(phi) -> np.ndarray:
@@ -251,6 +292,11 @@ def _static_metadata(geometry: dict, params: Any, config_path: str) -> dict:
     return meta
 
 
+# per-frame metadata; the quant_* entries track the bf16 loss (quantization_loss)
+SERIES_KEYS = ("timesteps", "solver_steps", "flux", "kyspec", "kxspec", "growth",
+               "quant_phi_err", "quant_phi_df_err", "quant_flux_err")
+
+
 class DatasetWriter:
     """Appends one quantized frame per call to a trajectory of the preprocessed layout.
 
@@ -271,9 +317,7 @@ class DatasetWriter:
         _claim(self.path, os.path.dirname(os.path.abspath(config_path)))
         shutil.copyfile(config_path, os.path.join(self.path, "config.yaml"))
         self.static = _static_metadata(geometry, params, os.path.join(self.path, "config.yaml"))
-        self.series: dict[str, list] = {
-            k: [] for k in ("timesteps", "solver_steps", "flux", "kyspec", "kxspec", "growth")
-        }
+        self.series: dict[str, list] = {k: [] for k in SERIES_KEYS}
         old = load_metadata(self.path)
         if old is not None and len(old.get("timesteps", ())):
             keep = int(np.sum(np.asarray(old["solver_steps"]) <= start_step))
@@ -288,10 +332,21 @@ class DatasetWriter:
     def n_frames(self) -> int:
         return len(self.series["timesteps"])
 
-    def add(self, df, phi, fluxes, state, ky_spec, kx_spec) -> None:
+    def add(self, df, phi, fluxes, state, ky_spec, kx_spec, integrals: Optional[Callable] = None) -> None:
+        """Write one frame; ``integrals`` (spectral df -> (phi, fluxes)) enables the df quantization loss."""
+        import jax.numpy as jnp
+
         idx = self.n_frames
-        _write_frame(frame_path(self.path, "timestep", idx, self.bits), df_frame_bits(df), self.bits)
-        _write_frame(frame_path(self.path, "poten", idx, self.bits), _to_bf16_bits(phi_to_real(phi)), self.bits)
+        frame = df_frame(df)
+        _write_frame(frame_path(self.path, "timestep", idx, self.bits), np.asarray(frame).view(np.uint16).ravel(), self.bits)
+        phi_real = phi_to_real(phi)
+        phi_frame = np.asarray(jnp.asarray(phi_real).astype(jnp.bfloat16))
+        _write_frame(frame_path(self.path, "poten", idx, self.bits), phi_frame.view(np.uint16).ravel(), self.bits)
+        loss = quantization_loss(df, frame, phi_real, phi_frame, integrals)
+        n_flux = np.asarray(fluxes).size
+        loss["quant_flux_err"] = np.broadcast_to(np.asarray(loss["quant_flux_err"], np.float64), (n_flux,)).copy()
+        for k, v in loss.items():
+            self.series[k].append(v)
         self.series["timesteps"].append(float(np.ravel(np.asarray(state.time))[0]))
         self.series["solver_steps"].append(int(np.ravel(np.asarray(state.step))[0]))
         self.series["flux"].append(np.asarray(fluxes, np.float64).reshape(-1))
@@ -309,6 +364,20 @@ class DatasetWriter:
     def finalize(self) -> None:
         if self.n_frames and self.series["timesteps"][-1] >= self.stats_from:
             write_statistics(self.path, self.stats_from)
+        if self.n_frames:
+            print(f"  dataset {os.path.basename(self.path)}: {quantization_summary(self.metadata())}")
+
+
+def quantization_summary(meta: dict) -> str:
+    """Median bf16 loss over the frames of a trajectory's metadata."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        med = {k: np.nanmedian(np.abs(np.asarray(meta[k], np.float64)), axis=0)
+               for k in ("quant_phi_err", "quant_phi_df_err", "quant_flux_err")}
+    eflux = ", ".join(f"{label} {err:.1e}" for label, err in zip(meta["flux_labels"], np.ravel(med["quant_flux_err"]))
+                      if label.startswith("eflux"))
+    return (f"bf16 loss (median relative error): phi frame {med['quant_phi_err']:.1e}, "
+            f"phi from df {med['quant_phi_df_err']:.1e}, {eflux}")
 
 
 def write_statistics(traj: str, stats_from: float = 0.0) -> dict:
