@@ -17,6 +17,7 @@ enable_x64()
 import gyaradax.diagnostics.telemetry as telemetry_mod
 from gyaradax.core.params import gkparams_from_config, load_config, GKParams
 from gyaradax.core.state import GKPre, GKState
+from gyaradax.diagnostics.diag import phi_spectra
 from gyaradax.diagnostics.fluxes import get_integrals
 from gyaradax.geometry import compute_geometry_from_config
 from gyaradax.io.gkw import load_geometry
@@ -292,6 +293,7 @@ def gksimulate(
     previous_snapshot: Optional[str] = None,
     telemetry: Any = None,
     profile: bool = False,
+    dataset: Any = None,
 ) -> Tuple[jnp.ndarray, jnp.ndarray, Any, GKState]:
     """Run n_steps with optional IO checkpointing and logging.
 
@@ -303,6 +305,8 @@ def gksimulate(
     snapshot a run resumed from, is removed once a newer one exists).
     ``telemetry`` (a ``telemetry.RunTelemetry``) records compile time and per-block
     timings; ``profile`` traces the first compiled block into ``output_dir/profile``.
+    ``dataset`` (a ``dataset.DatasetWriter``) stores one preprocessed frame per block and
+    computes the dataset statistics once the run ends.
 
     Returns:
         (df, phi, fluxes, state)
@@ -320,6 +324,7 @@ def gksimulate(
         "output_dir": output_dir,
         "previous_snapshot": previous_snapshot,
         "telemetry": telemetry,
+        "dataset": dataset,
         "label": None,
     }
     return _simulate(
@@ -360,6 +365,7 @@ def gksimulate_batched(
     keep_latest_snapshot: bool = False,
     snapshot_every: int = 1,
     profile: bool = False,
+    datasets: Optional[Sequence[Any]] = None,
 ) -> Tuple[jnp.ndarray, jnp.ndarray, Any, GKState]:
     """``gksimulate`` for configs stacked along a leading batch axis (``gk_run_batched``).
 
@@ -382,6 +388,7 @@ def gksimulate_batched(
             "output_dir": output_dirs[i],
             "previous_snapshot": previous_snapshots[i] if previous_snapshots else None,
             "telemetry": telemetries[i] if telemetries else None,
+            "dataset": datasets[i] if datasets else None,
             "label": labels[i] if labels else str(i),
         }
         for i in range(n)
@@ -557,6 +564,11 @@ def _simulate(
                             os.remove(previous[i])
                     previous[i] = latest
 
+            if run["dataset"] is not None:
+                phi_i = view(current_phi, i)
+                ky_spec, kx_spec = phi_spectra(phi_i, run["geometry"])
+                run["dataset"].add(d, phi_i, view(current_fluxes, i), st, ky_spec, kx_spec)
+
             log_step(
                 view(current_fluxes, i), st, wall_time, n_steps=block_steps, label=run["label"]
             )
@@ -578,6 +590,9 @@ def _simulate(
                     time.time() - run_t0,
                 )
                 run["telemetry"].close(wall, steps, "completed" if alive[i] else "diverged")
+    for run in runs:
+        if run["dataset"] is not None:
+            run["dataset"].finalize()
 
     if current_phi is None:
         diags = [

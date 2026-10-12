@@ -96,6 +96,36 @@ written every `--snapshot-every K` blocks (config `run.snapshot_every`, default
 the last snapshot and rewrites the diagnostics after it.
 `--resume-from K03` keeps resuming from GKW K-files in the config's `data_dir`.
 
+## Preprocessed dataset output
+
+`--dataset DIR` also writes the run as a training-ready trajectory, in the layout the neugk
+loaders read (`preprocessed_kvikio`), so no intermediate dumps or separate conversion are needed:
+
+```bash
+gyaradax run configs/kinetic_603.yaml --dataset /data/kinetic --dataset-name iteration_603
+```
+
+- One frame per checkpoint block: `data/timestep_NNNNN.zstd16.bin` holds df in real space,
+  (re/im, species, vpar, mu, s, x, y); adiabatic runs have no species axis.
+  `data/poten_NNNNN.zstd16.bin` holds phi in real space, (x, s, y).
+- `--dataset-bits zstd16` (default) is lossless zstd over bf16; `bf16` stores the raw values.
+- `metadata.pkl` and `metadata_light.pkl` carry the run's parameters, the geometry, and per frame
+  the time, solver step, fluxes per species, ky/kx spectra and growth rate. The trajectory also
+  gets a copy of the run's `config.yaml`. Keys and transforms are those of neugk's
+  `preprocess_gyaradax_kinetic`: the frames are bitwise equal to its output for the same run.
+- The df and phi normalisation statistics are computed from the stored frames when the run ends.
+  `--dataset-stats-from T` limits them to frames from time T on. Once the transient is known,
+  recompute them with:
+
+  ```bash
+  gyaradax dataset-stats /data/kinetic/preprocessed_kvikio/iteration_603_ifft_realpotens --from-time 40
+  ```
+
+- The settings are stored in the run's `config.yaml` (`dataset:` section): resuming the run
+  directory keeps appending frames to the same trajectory. Frames past the snapshot a run
+  resumes from are dropped first.
+- Electromagnetic fields (A_par, B_par) are not written yet.
+
 ## Debugging: telemetry and profiling
 
 Both are off by default and write into the run directory:
