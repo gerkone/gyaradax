@@ -9,11 +9,12 @@ A trajectory lives in ``<root>/preprocessed_kvikio/<name>_ifft_realpotens/``::
     metadata_light.pkl               the same without the per-element df / phi moments
     config.yaml                      the run's effective config
 
-``bits`` is ``bf16`` (raw bfloat16 values) or ``zstd16`` (the same values byte-shuffled and
-zstd-compressed in 4 MiB chunks behind a 4 KiB header, ``neugk_jax.dataset.zframe`` v1). Keys,
-transforms and rounding follow ``neugk_jax.dataset.preprocess.preprocess_gyaradax_kinetic``, so
-the neugk loaders read the output unchanged. The df / phi statistics are computed from the
-stored frames once the run ends (:func:`write_statistics`).
+``bits`` is ``zstd16`` (bfloat16 values byte-shuffled and zstd-compressed in 4 MiB chunks behind
+a 4 KiB header, ``neugk_jax.dataset.zframe`` v1) or ``bf16`` (the raw values); either way the
+metadata records ``quantization: bf16``, the precision of the values. Keys, transforms and
+rounding follow ``neugk_jax.dataset.preprocess.preprocess_gyaradax_kinetic``, so the neugk
+loaders read the output unchanged. The df / phi statistics are computed from the stored frames
+once the run ends (:func:`write_statistics`).
 """
 
 from __future__ import annotations
@@ -27,6 +28,10 @@ import struct
 from typing import Any, Optional
 
 import numpy as np
+
+# geometry entries of the kinetic dataset (neugk_jax.dataset.preprocess.kinetic_geometry)
+GEOMETRY_KEYS = ("kxrh", "krho", "intvp", "vpgr", "intmu", "mugr", "ints", "bn", "bt_frac", "rfun", "efun",
+                 "little_g", "mas", "tmp", "de", "signz", "vthrat", "d2X", "signB", "parseval")
 
 # zstd16 shard layout (neugk_jax.dataset.zframe v1)
 MAGIC, VERSION, ALIGN, CHUNK_BYTES = b"NGKZ", 1, 4096, 4 << 20
@@ -106,6 +111,16 @@ def df_to_real(df):
     return jnp.stack([phys.real, phys.imag]).astype(jnp.float32)
 
 
+def df_frame_bits(df) -> np.ndarray:
+    """bf16 bits of the stored df frame: the spectrum rounded to bf16, then ``df_to_real``."""
+    import jax
+    import jax.numpy as jnp
+
+    df = jnp.asarray(df)
+    spec = jax.lax.complex(*(x.astype(jnp.bfloat16).astype(jnp.float32) for x in (df.real, df.imag)))
+    return _to_bf16_bits(df_to_real(spec))
+
+
 def phi_to_real(phi) -> np.ndarray:
     """Real ``(x, s, y)`` float32 of a spectral phi ``(s, kx, ky)`` (complex64 transform, as neugk)."""
     spec = np.moveaxis(np.asarray(phi), 0, 1).astype(np.complex64)
@@ -162,11 +177,10 @@ def write_metadata(traj: str, metadata: dict) -> None:
     _atomic_write(os.path.join(traj, "metadata_light.pkl"), pickle.dumps(light))
 
 
-def _static_metadata(geometry: dict, params: Any, config_path: str, bits: str) -> dict:
+def _static_metadata(geometry: dict, params: Any, config_path: str) -> dict:
     kinetic = not params.adiabatic_electrons
     resolution = tuple(len(np.asarray(geometry[k])) for k in ("intvp", "intmu", "ints", "kxrh", "krho"))
-    # the floating-point geometry; the integer mode-connectivity maps stay out
-    geom = {k: np.array(v, np.float64) for k, v in geometry.items() if np.asarray(v).dtype.kind == "f"}
+    geom = {k: np.array(geometry[k], np.float64) for k in GEOMETRY_KEYS}
     # the neugk flux kernel weights ints twice, so ky > 0 carries 2 * ns
     geom["parseval"][1:] *= len(geom["ints"])
     geom["adiabatic"] = np.array(0.0 if kinetic else 1.0)
@@ -194,7 +208,7 @@ def _static_metadata(geometry: dict, params: Any, config_path: str, bits: str) -
             else "df: (re/im, vpar, mu, s, x, y); phi: (x, s, y); x, y real space"
         ),
         "channel_layout": "reim_species" if kinetic else "reim",
-        "quantization": bits,
+        "quantization": "bf16",
         "real_space_convention": "ifftn(fftshift(spec, axes=kx), axes=(kx, ky), norm='forward')",
         "n_species": n_species,
         "ion_species_index": ion,
@@ -237,7 +251,7 @@ class DatasetWriter:
         self.stats_from = float(stats_from)
         os.makedirs(os.path.join(self.path, "data"), exist_ok=True)
         shutil.copyfile(config_path, os.path.join(self.path, "config.yaml"))
-        self.static = _static_metadata(geometry, params, os.path.join(self.path, "config.yaml"), bits)
+        self.static = _static_metadata(geometry, params, os.path.join(self.path, "config.yaml"))
         self.series: dict[str, list] = {
             k: [] for k in ("timesteps", "solver_steps", "flux", "kyspec", "kxspec", "growth")
         }
@@ -257,7 +271,7 @@ class DatasetWriter:
 
     def add(self, df, phi, fluxes, state, ky_spec, kx_spec) -> None:
         idx = self.n_frames
-        _write_frame(frame_path(self.path, "timestep", idx, self.bits), _to_bf16_bits(df_to_real(df)), self.bits)
+        _write_frame(frame_path(self.path, "timestep", idx, self.bits), df_frame_bits(df), self.bits)
         _write_frame(frame_path(self.path, "poten", idx, self.bits), _to_bf16_bits(phi_to_real(phi)), self.bits)
         self.series["timesteps"].append(float(np.ravel(np.asarray(state.time))[0]))
         self.series["solver_steps"].append(int(np.ravel(np.asarray(state.step))[0]))
@@ -283,11 +297,11 @@ def write_statistics(traj: str, stats_from: float = 0.0) -> dict:
     meta = load_metadata(traj)
     if meta is None:
         raise FileNotFoundError(f"no metadata in {traj}")
-    bits = meta["quantization"]
     times = np.asarray(meta["timesteps"])
     first = int(np.searchsorted(times, stats_from, side="left"))
     if first >= len(times):
         raise ValueError(f"{traj}: no frame at or after t = {stats_from} (last t = {times[-1]:.3f})")
+    bits = "zstd16" if os.path.exists(frame_path(traj, "timestep", first, "zstd16")) else "bf16"
     axes = tuple(int(a) for a in meta["df_stats_agg_axes"])
     df_stats, phi_stats = RunningStats(), RunningStats()
     for i in range(first, len(times)):
@@ -300,7 +314,5 @@ def write_statistics(traj: str, stats_from: float = 0.0) -> dict:
         phi_stats.push(read_frame(frame_path(traj, "poten", i, bits), meta["phi_shape"]))
     stats = {**df_stats.moments("df"), **phi_stats.moments("phi")}
     meta = {**{k: v for k, v in meta.items() if k not in stats}, **stats}
-    meta["stats_first_frame"] = first
-    meta["stats_from_time"] = float(stats_from)
     write_metadata(traj, meta)
     return meta

@@ -981,7 +981,8 @@ def _cmd_dataset_stats(args: argparse.Namespace) -> int:
 
     for traj in args.trajectories:
         meta = write_statistics(traj, args.from_time)
-        print(f"{traj}: statistics over frames {meta['stats_first_frame']}-{len(meta['timesteps']) - 1}")
+        times = meta["timesteps"]
+        print(f"{traj}: statistics over t = {times[times >= args.from_time][0]:.3f}-{times[-1]:.3f}")
     return 0
 
 

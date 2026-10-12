@@ -46,12 +46,14 @@ def test_run_writes_preprocessed_trajectory(tmp_path, kind):
     assert meta["solver_steps"].tolist() == [2, 4]
     assert meta["n_species"] == (2 if kind == "kinetic" else 1)
     assert meta["df_mean"].ndim == len(meta["df_shape"]) and meta["phi_mean"].shape == meta["phi_shape"]
+    assert meta["quantization"] == "bf16"
+    assert set(meta["geometry"]) == {*ds.GEOMETRY_KEYS, "adiabatic", "beta", "nlapar", "nlbpar"}
     with open(os.path.join(traj, "metadata_light.pkl"), "rb") as fh:
         assert not {"df_mean", "phi_var"} & set(pickle.load(fh))
 
     # the last frame is the bf16 real-space transform of the final state
     with np.load(os.path.join(run, "step_000004.npz")) as ck:
-        want_df, want_phi = ds._to_bf16_bits(ds.df_to_real(ck["df"])), ds._to_bf16_bits(ds.phi_to_real(ck["phi"]))
+        want_df, want_phi = ds.df_frame_bits(ck["df"]), ds._to_bf16_bits(ds.phi_to_real(ck["phi"]))
     got_df = ds.read_frame(ds.frame_path(traj, "timestep", 1, "zstd16"), meta["df_shape"])
     got_phi = ds.read_frame(ds.frame_path(traj, "poten", 1, "zstd16"), meta["phi_shape"])
     np.testing.assert_array_equal(got_df.view(np.uint32).ravel() >> 16, want_df)
@@ -64,7 +66,10 @@ def test_run_writes_preprocessed_trajectory(tmp_path, kind):
     assert meta["solver_steps"].tolist() == [2, 4, 6]
     assert OmegaConf.load(os.path.join(run, "config.yaml")).dataset.name == f"tiny_{kind}"
 
-    # statistics can be recomputed over a later window
+    # statistics can be recomputed over a later window: frames 1 and 2 only
     assert main(["dataset-stats", traj, "--from-time", str(float(meta["timesteps"][1]))]) == 0
     with open(os.path.join(traj, "metadata.pkl"), "rb") as fh:
-        assert pickle.load(fh)["stats_first_frame"] == 1
+        meta = pickle.load(fh)
+    phis = [ds.read_frame(ds.frame_path(traj, "poten", i, "zstd16"), meta["phi_shape"]) for i in (1, 2)]
+    np.testing.assert_allclose(meta["phi_mean"], np.mean(phis, axis=0), rtol=1e-3, atol=1e-6)
+    assert meta["phi_mean"].dtype == np.float32

@@ -108,11 +108,15 @@ gyaradax run configs/kinetic_603.yaml --dataset /data/kinetic --dataset-name ite
 - One frame per checkpoint block: `data/timestep_NNNNN.zstd16.bin` holds df in real space,
   (re/im, species, vpar, mu, s, x, y); adiabatic runs have no species axis.
   `data/poten_NNNNN.zstd16.bin` holds phi in real space, (x, s, y).
-- `--dataset-bits zstd16` (default) is lossless zstd over bf16; `bf16` stores the raw values.
+- `--dataset-bits zstd16` (default) is lossless zstd over bf16, the format of most of the kinetic
+  dataset, read by neugk with `dataset.prefer_dtype: zstd16`; `bf16` stores the raw values, read
+  with any `prefer_dtype`.
 - `metadata.pkl` and `metadata_light.pkl` carry the run's parameters, the geometry, and per frame
   the time, solver step, fluxes per species, ky/kx spectra and growth rate. The trajectory also
   gets a copy of the run's `config.yaml`. Keys and transforms are those of neugk's
-  `preprocess_gyaradax_kinetic`: the frames are bitwise equal to its output for the same run.
+  `preprocess_gyaradax_kinetic`. As in the dump streams that dataset was built from, df is
+  rounded to bf16 in spectral space before the transform: on stored trajectories the frames
+  match bitwise up to FFT round-off (phi exactly; df in all but ~0.04% of values).
 - The df and phi normalisation statistics are computed from the stored frames when the run ends.
   `--dataset-stats-from T` limits them to frames from time T on. Once the transient is known,
   recompute them with:
