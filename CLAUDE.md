@@ -36,6 +36,7 @@ gyaradax/
   io/
     gkw.py            — GKW I/O (K-dumps, geom.dat, input.dat parsing, load_geometry, gkw_to_yaml)
     rundir.py         — run directory output (save_dumps, save_run_metadata, checkpoints)
+    dataset.py        — preprocessed dataset output (`run --dataset`): quantized real-space frames + neugk metadata
   geometry/           — geometry models (circular, s-alpha, Miller, loaded geom.dat), metric and drift tensors
   quasilinear/        — quasilinear transport: linear harvest, saturation rules, calibration
   sharding.py         — device mesh, sharded precompute / init, shard_map helpers for the kernels

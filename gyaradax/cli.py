@@ -201,6 +201,7 @@ class RunSetup(TypedDict):
     block_size: int
     snapshot_every: int
     save_dumps: bool
+    dataset: dict[str, Any] | None
     previous_snapshot: str | None
     stale: list[str]
     name: str
@@ -493,6 +494,7 @@ def _setup_run(config_path: str, args: argparse.Namespace, run_dir: str | None =
     snapshot_every = int(
         getattr(args, "snapshot_every", 0) or getattr(cfg.run, "snapshot_every", 0) or 1
     )
+    dataset = _dataset_settings(cfg, args, name)
     archived = bool(getattr(cfg.run, "save_dumps", False))
     save_dumps = archived if args.save_dumps is None else bool(args.save_dumps)
     # the rolling restart file this run continues from goes once a newer one exists
@@ -510,6 +512,7 @@ def _setup_run(config_path: str, args: argparse.Namespace, run_dir: str | None =
         "block_size": block_size,
         "snapshot_every": snapshot_every,
         "save_dumps": save_dumps,
+        "dataset": dataset,
         "previous_snapshot": previous_snapshot,
         "stale": stale,
         "name": name,
@@ -517,13 +520,48 @@ def _setup_run(config_path: str, args: argparse.Namespace, run_dir: str | None =
         "mesh": mesh,
         "config_path": config_path,
         "effective_config": _effective_config(
-            cfg, params, start_step + n_steps, saved_block_size, snapshot_every, save_dumps
+            cfg, params, start_step + n_steps, saved_block_size, snapshot_every, save_dumps, dataset
         ),
         "resumed_from": snapshot or k_path,
         "start_step": start_step,
         "telemetry": _debug_flag(cfg, args, "telemetry"),
         "profile": _debug_flag(cfg, args, "profile"),
     }
+
+
+def _dataset_settings(cfg: Any, args: argparse.Namespace, name: str) -> dict[str, Any] | None:
+    """Preprocessed-dataset output: command-line flags over the config's ``dataset`` section."""
+    section = cfg.get("dataset") or {}
+    root = getattr(args, "dataset", None) or section.get("dir")
+    if not root:
+        return None
+    stats_from = getattr(args, "dataset_stats_from", None)
+    return {
+        "dir": str(root),
+        "bits": getattr(args, "dataset_bits", None) or str(section.get("bits", "zstd16")),
+        "name": getattr(args, "dataset_name", None) or str(section.get("name", name)),
+        "stats_from": float(section.get("stats_from", 0.0) if stats_from is None else stats_from),
+    }
+
+
+def _dataset_writer(setup: RunSetup) -> Any:
+    if setup["dataset"] is None:
+        return None
+    from gyaradax.io.dataset import DatasetWriter
+
+    ds = setup["dataset"]
+    writer = DatasetWriter(
+        ds["dir"],
+        ds["name"],
+        setup["geometry"],
+        setup["params"],
+        os.path.join(setup["output_dir"], "config.yaml"),
+        bits=ds["bits"],
+        start_step=setup["start_step"],
+        stats_from=ds["stats_from"],
+    )
+    print(f"  dataset: {writer.path} ({ds['bits']}, {writer.n_frames} frames so far)")
+    return writer
 
 
 def _debug_flag(cfg: Any, args: argparse.Namespace, name: str) -> bool:
@@ -538,6 +576,7 @@ def _effective_config(
     block_size: int,
     snapshot_every: int,
     save_dumps: bool,
+    dataset: dict[str, Any] | None = None,
 ) -> Any:
     """The config with the command-line choices folded in, so the run directory reproduces it."""
     eff = OmegaConf.create(OmegaConf.to_container(cfg, resolve=True))
@@ -552,6 +591,8 @@ def _effective_config(
         ("run.save_dumps", bool(save_dumps)),
     ):
         OmegaConf.update(eff, key, value, force_add=True)
+    if dataset is not None:
+        eff.dataset = dict(dataset)
     mesh = (params.n_gpus_sp, params.n_gpus_vp, params.n_gpus_mu)
     if "sharding" in eff or math.prod(mesh) > 1:
         eff.sharding = {"n_gpus_sp": mesh[0], "n_gpus_vp": mesh[1], "n_gpus_mu": mesh[2]}
@@ -762,6 +803,7 @@ def _run_single(args: argparse.Namespace, config_path: str, run_dir: str | None)
         previous_snapshot=setup["previous_snapshot"],
         telemetry=telemetry,
         profile=setup["profile"],
+        dataset=_dataset_writer(setup),
     )
     jax.effects_barrier()
     runtime = time.time() - t0
@@ -868,6 +910,7 @@ def _run_batched(args: argparse.Namespace, run_dirs: list[str | None]) -> int:
         keep_latest_snapshot=True,
         snapshot_every=setups[0]["snapshot_every"],
         profile=any(s["profile"] for s in setups),
+        datasets=[_dataset_writer(s) for s in setups],
     )
     jax.effects_barrier()
     runtime = time.time() - t0
@@ -929,6 +972,17 @@ def _cmd_bench(args: argparse.Namespace) -> int:
         with profile_block(out, args.steps, int(state.step)):
             df, _, state = gksolve(df, geometry, params, state, n_steps=args.steps, pre=pre)
             jax.block_until_ready(df)
+    return 0
+
+
+def _cmd_dataset_stats(args: argparse.Namespace) -> int:
+    """Recompute the df / phi statistics of preprocessed trajectories from a given time on."""
+    from gyaradax.io.dataset import write_statistics
+
+    for traj in args.trajectories:
+        meta = write_statistics(traj, args.from_time)
+        times = meta["timesteps"]
+        print(f"{traj}: statistics over t = {times[times >= args.from_time][0]:.3f}-{times[-1]:.3f}")
     return 0
 
 
@@ -1108,6 +1162,20 @@ def build_parser() -> argparse.ArgumentParser:
              "the resumed step) instead of refusing to start",
     )
     run_p.add_argument(
+        "--dataset", type=str, default=None, metavar="DIR",
+        help="also write the run as a preprocessed dataset trajectory under "
+             "DIR/<name>_ifft_realpotens/ (quantized real-space frames every block + metadata)",
+    )
+    run_p.add_argument(
+        "--dataset-bits", choices=["zstd16", "bf16"], default=None,
+        help="dataset frame format (default zstd16: lossless zstd over bf16)",
+    )
+    run_p.add_argument("--dataset-name", type=str, default=None, help="trajectory name (default run.name)")
+    run_p.add_argument(
+        "--dataset-stats-from", type=float, default=None, metavar="T",
+        help="compute the dataset statistics over the frames from time T on (default 0)",
+    )
+    run_p.add_argument(
         "--snapshot-dtype", choices=["c128", "c64"], default="c128",
         help="archive precision for df/phi in snapshots (solver stays FP64); "
              "c64 halves them (maps to gksimulate's snapshot_f32)",
@@ -1139,6 +1207,11 @@ def build_parser() -> argparse.ArgumentParser:
     bench_p.add_argument("--output-dir", type=str, default=None, help="where --profile writes the trace")
     bench_p.set_defaults(func=_cmd_bench, block_size=0, n_blocks=0, n_steps=0,
                          resume_from=None, save_dumps=False, dry_run=False)
+
+    stats_p = sub.add_parser("dataset-stats", help="recompute the statistics of preprocessed trajectories")
+    stats_p.add_argument("trajectories", nargs="+", metavar="TRAJECTORY", help="trajectory directories")
+    stats_p.add_argument("--from-time", type=float, default=0.0, help="first time included (default 0)")
+    stats_p.set_defaults(func=_cmd_dataset_stats)
 
     convert_p = sub.add_parser("convert", help="write a YAML config for a GKW run directory")
     convert_p.add_argument("gkw_dir", help="GKW run directory (input.dat, geom.dat, ...)")
