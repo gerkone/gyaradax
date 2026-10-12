@@ -2,8 +2,8 @@ from pathlib import Path
 
 from omegaconf import OmegaConf
 
-from gyaradax.params import gkparams_from_config, gkparams_from_runtime
-from gyaradax.utils import load_runtime_params
+from gyaradax.core.params import gkparams_from_config, gkparams_from_runtime
+from gyaradax.io.gkw import load_runtime_params
 
 
 def _write_input(tmp_path: Path, control_body: str) -> Path:

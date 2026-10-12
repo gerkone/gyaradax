@@ -35,7 +35,7 @@ configure_runtime_env(device=_early.device)
 
 import jax  # noqa: E402
 import jax.lax  # noqa: E402
-from gyaradax.jax_config import enable_x64  # noqa: E402
+from gyaradax.core.jax_config import enable_x64  # noqa: E402
 
 enable_x64()
 import jax.numpy as jnp  # noqa: E402
@@ -49,7 +49,7 @@ from common import (  # noqa: E402
     analyze_cost,
     BASELINES_DIR,
 )
-from gyaradax.solver import gkstep_single, default_state  # noqa: E402
+from gyaradax.solver.rk4 import gkstep_single, default_state  # noqa: E402
 from gyaradax.backends import create_ops  # noqa: E402
 
 # ---------------------------------------------------------------------------

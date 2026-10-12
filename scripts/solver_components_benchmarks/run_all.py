@@ -18,7 +18,7 @@ _p.add_argument("--device", type=int, default=1)
 _early, _ = _p.parse_known_args()
 configure_runtime_env(device=_early.device)
 
-from gyaradax.jax_config import enable_x64
+from gyaradax.core.jax_config import enable_x64
 
 enable_x64()
 

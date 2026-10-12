@@ -13,7 +13,7 @@ _early, _ = _p.parse_known_args()
 configure_runtime_env(device=_early.device)
 
 import jax
-from gyaradax.jax_config import enable_x64
+from gyaradax.core.jax_config import enable_x64
 
 enable_x64()
 
@@ -26,7 +26,7 @@ from common import (
     analyze_cost,
     BASELINES_DIR,
 )
-from gyaradax.solver import pack_half_spectrum, unpack_half_spectrum
+from gyaradax.operators.precompute import pack_half_spectrum, unpack_half_spectrum
 
 
 def run(config="configs/iteration_13.yaml", mixed_precision=False):

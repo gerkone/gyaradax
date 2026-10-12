@@ -5,9 +5,9 @@ import numpy as np
 import pytest
 from dataclasses import replace
 
-from gyaradax.collisions import precompute_collisions, collision_rhs
+from gyaradax.operators.collisions import precompute_collisions, collision_rhs
 from gyaradax.geometry import compute_geometry
-from gyaradax.params import GKParams
+from gyaradax.core.params import GKParams
 
 
 def _base_params(geom, **overrides):
@@ -126,7 +126,7 @@ def test_disabled_gives_zero_stencil():
 def test_xu_conservation_zeroes_deltas():
     """With mom/ene conservation enabled, integrated Δp, ΔE go to zero."""
     import jax.numpy as jnp
-    from gyaradax.collisions import conservation_correction
+    from gyaradax.operators.collisions import conservation_correction
 
     geom = _geom(nvpar=32, nmu=8, ns=8)
     p = _base_params(
@@ -164,7 +164,7 @@ def test_xu_conservation_zeroes_deltas():
 def test_coulomb_log_path_runs_and_scales():
     """freq_override=False yields gamma_pref = 6.5e-5 * L_ii for default refs."""
     import jax.numpy as jnp
-    from gyaradax.collisions import _coulomb_log_ii, _gamma_pref_self
+    from gyaradax.operators.collisions import _coulomb_log_ii, _gamma_pref_self
 
     geom = _geom()
     p = _base_params(

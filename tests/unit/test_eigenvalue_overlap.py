@@ -21,8 +21,8 @@ except ImportError:
     _AVAILABLE = False
 
 if _AVAILABLE:
-    from gyaradax.eigenvalue import eigensolve_linear, eigensolve_linear_jax
-    from gyaradax.precompute import linear_precompute
+    from gyaradax.solver.eigenvalue import eigensolve_linear, eigensolve_linear_jax
+    from gyaradax.operators.precompute import linear_precompute
     from test_eigenvalue import _es_adiabatic_case
 
 K, IKY, NSTEPS = 3, 1, 50

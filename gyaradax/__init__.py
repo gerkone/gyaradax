@@ -10,10 +10,12 @@ from __future__ import annotations
 from importlib import import_module
 from typing import Any
 
-from gyaradax.constants import EPS
-from gyaradax.jax_config import enable_x64
+from gyaradax import _compat
+from gyaradax.core.constants import EPS
+from gyaradax.core.jax_config import enable_x64
 
 enable_x64()
+_compat.install()
 
 # Compatibility alias used by older internal and external imports.
 _EPS = EPS
@@ -44,34 +46,34 @@ __all__ = [
 ]
 
 _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
-    "GKParams": ("gyaradax.params", "GKParams"),
-    "load_config": ("gyaradax.params", "load_config"),
-    "gkparams_from_config": ("gyaradax.params", "gkparams_from_config"),
+    "GKParams": ("gyaradax.core.params", "GKParams"),
+    "load_config": ("gyaradax.core.params", "load_config"),
+    "gkparams_from_config": ("gyaradax.core.params", "gkparams_from_config"),
     "gkparams_from_input_and_geometry": (
-        "gyaradax.params",
+        "gyaradax.core.params",
         "gkparams_from_input_and_geometry",
     ),
-    "GKPre": ("gyaradax.state", "GKPre"),
-    "default_state": ("gyaradax.solver", "default_state"),
-    "gksolve": ("gyaradax.solver", "gksolve"),
-    "gkstep_single": ("gyaradax.solver", "gkstep_single"),
-    "init_f": ("gyaradax.solver", "init_f"),
-    "gksimulate": ("gyaradax.simulate", "gksimulate"),
-    "gk_init": ("gyaradax.simulate", "gk_init"),
-    "gk_run": ("gyaradax.simulate", "gk_run"),
-    "gk_from_config": ("gyaradax.simulate", "gk_from_config"),
-    "gk_from_gkw_dir": ("gyaradax.simulate", "gk_from_gkw_dir"),
+    "GKPre": ("gyaradax.core.state", "GKPre"),
+    "default_state": ("gyaradax.solver.rk4", "default_state"),
+    "gksolve": ("gyaradax.solver.rk4", "gksolve"),
+    "gkstep_single": ("gyaradax.solver.rk4", "gkstep_single"),
+    "init_f": ("gyaradax.solver.rk4", "init_f"),
+    "gksimulate": ("gyaradax.solver.driver", "gksimulate"),
+    "gk_init": ("gyaradax.solver.driver", "gk_init"),
+    "gk_run": ("gyaradax.solver.driver", "gk_run"),
+    "gk_from_config": ("gyaradax.solver.driver", "gk_from_config"),
+    "gk_from_gkw_dir": ("gyaradax.solver.driver", "gk_from_gkw_dir"),
     "compute_geometry": ("gyaradax.geometry", "compute_geometry"),
     "compute_geometry_from_input": ("gyaradax.geometry", "compute_geometry_from_input"),
     "geometry_from_geom_dat_and_input": (
         "gyaradax.geometry",
         "geometry_from_geom_dat_and_input",
     ),
-    "get_integrals": ("gyaradax.integrals", "get_integrals"),
-    "load_geometry": ("gyaradax.utils", "load_geometry"),
-    "load_gkw_k_dump": ("gyaradax.utils", "load_gkw_k_dump"),
-    "eigensolve": ("gyaradax.eigenvalue", "eigensolve"),
-    "eigensolve_ky_spectrum": ("gyaradax.eigenvalue", "eigensolve_ky_spectrum"),
+    "get_integrals": ("gyaradax.diagnostics.fluxes", "get_integrals"),
+    "load_geometry": ("gyaradax.io.gkw", "load_geometry"),
+    "load_gkw_k_dump": ("gyaradax.io.gkw", "load_gkw_k_dump"),
+    "eigensolve": ("gyaradax.solver.eigenvalue", "eigensolve"),
+    "eigensolve_ky_spectrum": ("gyaradax.solver.eigenvalue", "eigensolve_ky_spectrum"),
 }
 
 

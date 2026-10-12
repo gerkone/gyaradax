@@ -4,7 +4,7 @@
 Benchmarks CUDA vs JAX ops backends with proper warmup, full
 synchronisation, statistical reporting, and roofline analysis.
 
-Architecture: solver.py delegates linear_rhs and nonlinear_term_iii to backend.
+Architecture: solver/rk4.py delegates linear_rhs and nonlinear_term_iii to backend.
 Backend handles all shape dispatch (5D adiabatic / 6D kinetic electrons).
 """
 
@@ -25,7 +25,7 @@ _early, _ = _p.parse_known_args()
 configure_runtime_env(device=_early.device)
 
 import jax  # noqa: E402
-from gyaradax.jax_config import enable_x64  # noqa: E402
+from gyaradax.core.jax_config import enable_x64  # noqa: E402
 
 enable_x64()
 
@@ -38,7 +38,7 @@ from common import (  # noqa: E402
     analyze_cost,
     BASELINES_DIR,
 )
-from gyaradax.solver import gkstep_single, default_state  # noqa: E402
+from gyaradax.solver.rk4 import gkstep_single, default_state  # noqa: E402
 from gyaradax.backends import create_ops  # noqa: E402
 
 # ---------------------------------------------------------------------------

@@ -34,7 +34,7 @@ from typing import Any, NamedTuple, Optional, TypeVar, cast
 import jax
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 
-from gyaradax.state import Precompute
+from gyaradax.core.state import Precompute
 
 
 class GridShape(NamedTuple):
@@ -240,7 +240,7 @@ def precompute_sharded(geometry, params, mesh: Optional[Mesh], grid: GridShape):
     On single-device (mesh=None) this falls through to the normal
     ``linear_precompute`` path.
     """
-    from gyaradax.precompute import linear_precompute
+    from gyaradax.operators.precompute import linear_precompute
     import jax.numpy as jnp
 
     if mesh is None:
@@ -277,7 +277,7 @@ def precompute_sharded(geometry, params, mesh: Optional[Mesh], grid: GridShape):
     statics: dict[str, Any] = {}
 
     def _wrapped(geom, p):
-        from gyaradax.precompute import _linear_precompute_core
+        from gyaradax.operators.precompute import _linear_precompute_core
 
         geom_with_scalars: dict[str, Any] = {**geom, **int_scalars}
         pre = _linear_precompute_core(geom_with_scalars, p)
@@ -296,7 +296,7 @@ def precompute_sharded(geometry, params, mesh: Optional[Mesh], grid: GridShape):
     out_shardings = jax.tree_util.tree_map(_leaf_sharding, shapes)
     result_dict = jax.jit(_wrapped, out_shardings=out_shardings)(geom_rep, params_rep)
 
-    from gyaradax.state import GKPre
+    from gyaradax.core.state import GKPre
 
     return GKPre({**result_dict, **statics})
 
@@ -337,7 +337,7 @@ def init_f_sharded(
     Returns sharded df with the same values as init_f would produce.
     """
     from jax.sharding import NamedSharding, PartitionSpec
-    from gyaradax.solver import init_f
+    from gyaradax.solver.rk4 import init_f
 
     # Build output sharding from mesh and grid
     if n_species > 1:

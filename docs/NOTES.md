@@ -149,7 +149,7 @@ $$-\frac{Z_s}{T_s} (k_x v_{d,x} + k_y v_{d,y}) F_{M,s} J_0 \phi$$
 - **perpendicular hyper-dissipation**: spectral damping
   $(k_x/k_{x,max})^4 + (k_y/k_{y,max})^4$, coefficients `disp_x`, `disp_y`.
   $k_{x,max}$/$k_{y,max}$ are sourced from the geometry dict in
-  `precompute.py`, not from `GKParams` — the params defaults (1.0)
+  `operators/precompute.py`, not from `GKParams` — the params defaults (1.0)
   silently misnormalized the damping for direct-constructed params
   (corrected 2026-06-11)
 
@@ -275,30 +275,37 @@ $v_\parallel$. They are stored per stencil class and shift (`s_upar_tab`,
 
 ### 4.1 modules
 
-(table refreshed 2026-06-11: precompute/CFL/field-solve split out of
-`solver.py`; `geometry.py` is now the `geometry/` package)
+(table refreshed 2026-10-12: modules grouped into the `core/`, `operators/`,
+`solver/`, `diagnostics/` and `io/` subpackages; the old module paths
+(`gyaradax.solver`, `gyaradax.integrals`, `gyaradax.utils`, ...) still import,
+via `gyaradax/_compat.py` and the `gyaradax.solver` package attributes)
 
 | module | purpose |
 |--------|---------|
-| `solver.py` | RK4 integrator (`gkstep_single`, `gksolve`), per-ky normalization; linear/nonlinear RHS dispatch via `backends/` |
+| `core/params.py` | `GKParams` dataclass, config/input.dat loading |
+| `core/state.py` | `GKPre` / `GKState` pytrees |
+| `core/constants.py`, `core/jax_config.py`, `core/runtime_config.py` | constants, JAX x64 policy, XLA / device environment |
+| `operators/precompute.py` | one-time precomputation: stencils, species coefficients, EM weights, dissipation arrays, FFT half-spectrum layout |
+| `operators/stencils.py` | finite difference coefficient tables |
+| `operators/poisson.py` | Bessel helpers, `geom_tensors`, phi solvers (adiabatic + kinetic) |
+| `operators/ampere.py` | A_par (Ampere) and coupled Poisson-B_par solve precompute + apply |
+| `operators/fields.py` | field solve dispatch (`_compute_fields`), g↔f transforms |
+| `operators/collisions.py` | Fokker-Planck collision stencil precompute + apply |
 | `backends/` | `SolverOps` with the JAX and CUDA implementations of the field solve, linear RHS and Poisson bracket (§10.14) |
-| `precompute.py` | one-time precomputation: stencils, species coefficients, EM weights, dissipation arrays |
-| `cfl.py` | adaptive CFL timestep estimation (nonlinear + von Neumann + field) |
-| `fields.py` | field solve dispatch (`_compute_fields`), g↔f transforms |
-| `integrals.py` | phi solvers (adiabatic + kinetic), flux calculations (ES + EM) |
-| `params.py` | `GKParams` dataclass, config/input.dat loading |
+| `solver/rk4.py` | RK4 integrator (`gkstep_single`, `gksolve`), `init_f`, per-ky normalization; linear/nonlinear RHS dispatch via `backends/` |
+| `solver/cfl.py` | adaptive CFL timestep estimation (nonlinear + von Neumann + field) |
+| `solver/driver.py` | high-level simulation runner (`gk_init`, `gk_run`, `gksimulate`, batched, from YAML / GKW dir) |
+| `solver/eigenvalue.py` | linear eigenvalue solver (GKW `eiv_integration`) |
+| `diagnostics/fluxes.py` | flux calculations (ES + EM), `get_integrals` |
+| `diagnostics/diag.py` | spectra (`phi_spectra`), 1D projections, nonlinear term analysis |
+| `diagnostics/telemetry.py` | run telemetry and profiler summaries |
+| `diagnostics/plot_utils.py` | publication-quality visualization |
+| `io/gkw.py` | GKW file loading: K-dumps, `input.dat` / `geom.dat` parsing, `load_geometry`, `gkw_to_yaml` |
+| `io/rundir.py` | run-directory output: diagnostic histories, restart snapshots, `config.yaml` / `geometry.pkl` |
 | `geometry/` | geometry package: circular (Lapillonne), s-alpha, Miller, tensors, grids, mode connectivity |
-| `stencils.py` | finite difference coefficient tables |
-| `collisions.py` | Fokker-Planck collision stencil precompute + apply |
 | `quasilinear/` | quasilinear flux rule (saturation), calibration, linear pipeline |
-| `utils.py` | K-dump loading, checkpoint save/load, diagnostics, GKW file-loading (`load_geometry`, `parse_input_dat`) |
-| `simulate.py` | high-level simulation runner from YAML config |
-| `cli.py` | `gyaradax run / bench / info` console script (docs/CLI.md) |
 | `sharding.py` | device mesh, sharded precompute and init, `shard_map` helpers for the kernels |
-| `eigenvalue.py` | linear eigenvalue solver (GKW `eiv_integration`) |
-| `diag.py` | spectral diagnostics, 1D projections, nonlinear term analysis |
-| `jax_config.py` | centralized JAX configuration and device initialization |
-| `plot_utils.py` | publication-quality visualization |
+| `cli.py` | `gyaradax run / bench / info` console script (docs/CLI.md) |
 
 ### 4.2 key interfaces
 
@@ -473,14 +480,14 @@ gyaradax matches the GKW growth rate definition (`diagnos_growth_freq.f90`).
 **Amplitude.** Both codes compute per-$k_y$ amplitude as
 $A(k_y) = \sqrt{\Delta s \sum_s \sum_{k_x \in \text{chain}} |\phi(s, k_x, k_y)|^2}$,
 where the $k_x$ sum runs only over the connected mode chain containing $k_x = 0$
-(determined by `mode_label`). See `solver.py:mode_amplitude`.
+(determined by `mode_label`). See `solver/rk4.py:mode_amplitude`.
 
 **Growth rate.** Computed as $\gamma = \ln(A_\text{end} / A_\text{start}) / \Delta t_\text{window}$
 over each `naverage` window. In linear mode, per-$k_y$ normalization resets the
 amplitude to $\approx 1$ at each window boundary, so $A_\text{start} = 1$. In
 nonlinear mode (no normalization), $A_\text{start}$ is set to the amplitude at
 the previous window boundary, giving the instantaneous growth rate between
-consecutive windows. See `solver.py:advance_state`.
+consecutive windows. See `solver/rk4.py:advance_state`.
 
 ## 8. validation results
 
@@ -1175,7 +1182,7 @@ formulas in `caldthth`, `caldvv`, `calfv` (`collisionop.f90:697-870`).
 
 Discretely each grid point gets a **9-point $(v_\parallel, v_\perp)$ stencil**
 — self, four axis neighbors, and four diagonal corners — precomputed once
-in `gyaradax/collisions.py:precompute_collisions` and stored in
+in `gyaradax/operators/collisions.py:precompute_collisions` and stored in
 `GKPre["coll_stencil"]` with shape `(9, nv, nmu, ns)`. At RHS time
 `collision_rhs(df, stencil)` applies the stencil with zero-padded
 boundaries. The boundary mass-conserve flux-zeroing is baked into the

@@ -17,12 +17,12 @@ import numpy as np
 from jax import ffi
 from jax.sharding import PartitionSpec
 
+import gyaradax.operators.stencils as stencils
 import gyaradax.sharding as sharding
-import gyaradax.stencils as stencils
 from gyaradax.backends.ops import SolverOps
-from gyaradax.collisions import collision_term, collisions_on
-from gyaradax.fields import g_to_f
-from gyaradax.state import GKPre
+from gyaradax.core.state import GKPre
+from gyaradax.operators.collisions import collision_term, collisions_on
+from gyaradax.operators.fields import g_to_f
 
 log = logging.getLogger(__name__)
 
@@ -42,18 +42,6 @@ def _concrete_int_or_none(value: Any) -> int | None:
     if arr.shape != ():
         raise ValueError(f"expected scalar metadata, got shape {arr.shape}")
     return int(arr.item())
-
-
-def _concrete_float(value: Any, name: str) -> float:
-    """Return a Python float for scalar metadata passed as an FFI attribute."""
-    try:
-        return float(np.asarray(value))
-    except (
-        jax.errors.ConcretizationTypeError,
-        jax.errors.TracerArrayConversionError,
-        TypeError,
-    ) as exc:
-        raise ValueError(f"CUDA backend needs a concrete {name}") from exc
 
 
 def _cuda_zero_mode_index(pre: GKPre, key: str, fallback: int, size: int) -> np.int32:
@@ -271,7 +259,6 @@ class CUDAOps(SolverOps):
             c_d4_2=float(d4[2]),
             c_d4_3=float(d4[3]),
             c_d4_4=float(d4[4]),
-            dvp=_concrete_float(pre["dvp"], "pre['dvp']"),
             disp_vp=float(params.disp_vp),
             drive_scale=float(params.drive_scale),
         )
@@ -307,6 +294,8 @@ class CUDAOps(SolverOps):
             "dproj_m1": (dproj_m1, ("sp",)),
             "dproj_e0": (dproj_e0, sp_v_mu),
             "dproj_e1": (dproj_e1, sp_v_mu),
+            # a buffer, not an attribute: dvp may be traced (geometry passed through jit)
+            "dvp": (jnp.asarray(pre["dvp"], dtype=jnp.float64).reshape(1), ()),
         }
         names = tuple(inputs)
         args = tuple(x for x, _ in inputs.values())

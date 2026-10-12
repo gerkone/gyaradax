@@ -18,9 +18,9 @@ from conftest import HAS_CUDA, noisy_case, rel_l2  # type: ignore[import-not-fou
 
 from gyaradax import sharding
 from gyaradax.geometry import compute_geometry
-from gyaradax.params import GKParams, gkparams_from_config
-from gyaradax.precompute import linear_precompute
-from gyaradax.simulate import gk_init, gk_run
+from gyaradax.core.params import GKParams, gkparams_from_config
+from gyaradax.operators.precompute import linear_precompute
+from gyaradax.solver.driver import gk_init, gk_run
 from gyaradax import load_config
 
 
@@ -259,7 +259,7 @@ def test_vpar_halo_matches_unsharded_stencil():
 
 def _assert_sharded_matches_single(df, geometry, params, state, sharded_params):
     """3 steps on the 2-device mesh of ``sharded_params`` match one device and never gather df."""
-    from gyaradax.solver import gksolve
+    from gyaradax.solver.rk4 import gksolve
 
     if params.backend == "cuda" and not HAS_CUDA:
         pytest.skip("CUDA not available")

@@ -32,8 +32,8 @@ from gyaradax.geometry import (
 )
 from gyaradax.geometry.circular import CircularGeometryModel, SAlphaGeometryModel
 from gyaradax.geometry.miller import MillerGeometryModel
-from gyaradax.simulate import _geometry_from_config
-from gyaradax.utils import load_geometry
+from gyaradax.solver.driver import _geometry_from_config
+from gyaradax.io.gkw import load_geometry
 
 
 _BASE_KWARGS: dict[str, Any] = dict(
