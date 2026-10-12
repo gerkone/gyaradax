@@ -298,3 +298,12 @@ def test_collisions_sharded_matches_single_device(backend, axis, conserve):
     }
     df, geometry, params, state, _ = _build(coll)
     _assert_sharded_matches_single(df, geometry, params, state, replace(params, **{axis: 2}))
+
+
+@pytest.mark.skipif(len(jax.devices()) < 2, reason="requires ≥2 GPUs")
+@pytest.mark.parametrize("backend", ["cuda", "jax"])
+@pytest.mark.parametrize("axis", ["n_gpus_vp", "n_gpus_mu"])
+def test_arakawa_sharded_matches_single_device(backend, axis):
+    df, geometry, params, state = _em_case(backend)
+    params = replace(params, ltrapping_arakawa=True)
+    _assert_sharded_matches_single(df, geometry, params, state, replace(params, **{axis: 2}))

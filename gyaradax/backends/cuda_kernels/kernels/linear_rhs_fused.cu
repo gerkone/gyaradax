@@ -35,6 +35,7 @@ struct LinearRhsArgs {
     const double*  bpar_chi;      // (nsp, nmu, ns, nkx, nky)
     const double*  s_disp_tab;    // (nsp, nv, ns, n_class, 9)
     const double*  dvp;           // (1,): parallel velocity grid spacing
+    const double*  ara_tab;       // (nsp, nv, nmu, ns, n_class, 13): arakawa terms I + IV
     const double2* dproj_m0;      // (nsp, ns, nkx, nky)
     const double2* dproj_m1;      // (nsp, ns, nkx, nky)
     const double*  dproj_e0;      // (nsp, nv, nmu, ns, nkx, nky)
@@ -58,8 +59,13 @@ __device__ __forceinline__ double2 g_to_f(double2 g, double g2f_v, double bes, d
     return make_double2(g.x + g2f * apar.x, g.y + g2f * apar.y);
 }
 
+// (s, vpar) offsets of the arakawa stencil points, in the order of the python table
+__constant__ int kAraDs[13] = {-2, -1, -1, -1, 0, 0, 0, 0, 0, 1, 1, 1, 2};
+__constant__ int kAraDv[13] = {0, -1, 0, 1, -2, -1, 0, 1, 2, -1, 0, 1, 0};
+
 // APAR: df is g, f = g + g2f*apar formed in-kernel; BPAR: psi = J0*phi + bpar_chi*bpar; NS == 0: runtime-sized
-template <int NS, int NKY, bool APAR, bool BPAR, bool DPC, bool HALO = false>
+// ara: terms i + iv as the arakawa bracket, s_upar_tab then holds only the parallel dissipation
+template <int NS, int NKY, bool APAR, bool BPAR, bool DPC, bool HALO = false, bool ARA = false>
 __device__ __forceinline__ void linear_rhs_fused_body(const LinearRhsArgs& a) {
     // NS > 0: compile-time sizes; NS == 0: runtime sizes; NS < 0: runtime sizes with ky tiles
     constexpr bool kDyn   = (NS <= 0);
@@ -258,6 +264,48 @@ __device__ __forceinline__ void linear_rhs_fused_body(const LinearRhsArgs& a) {
         a.c_d4_0 * df_vm2.y + a.c_d4_1 * df_vm1.y + a.c_d4_2 * my_df.y + a.c_d4_3 * df_vp1.y + a.c_d4_4 * df_vp2.y
     );
 
+    // ── arakawa bracket (phase 2b) ──
+    double2 acc_ara = make_double2(0.0, 0.0);
+    if constexpr (ARA) {
+        // f at vpar plane vt (local index) and spatial point (src_s, src_kx), zero past the grid
+        auto load_f = [&](int vt, int src_s, int src_kx) -> double2 {
+            const size_t src_sp = (size_t)src_s * (nkx * nky) + (size_t)src_kx * nky + ky;
+            if (vt >= 0 && vt < nv) {
+                const double2 g = __ldg(&a.df[(((size_t)sp * nv + vt) * nmu + mu_idx) * spatial_stride + src_sp]);
+                if (!APAR) return g;
+                const double fm = __ldg(&a.fmaxwl[(((size_t)sp * nv + vt) * nmu + mu_idx) * ns + src_s]);
+                return g_to_f(g, __ldg(&a.g2f_vfac[(size_t)sp * nv + vt]), __ldg(&bessel_mu[src_sp]), fm,
+                              inv_tmp0, __ldg(&a.apar[src_sp]));
+            }
+            if constexpr (HALO) {
+                const size_t hk = (size_t)sp * 4 + (vt < 0 ? vt + 2 : vt - nv + 2);
+                const double2 g = __ldg(&a.df_halo[(hk * nmu + mu_idx) * spatial_stride + src_sp]);
+                if (!APAR) return g;
+                const double fm = __ldg(&a.fm_halo[(hk * nmu + mu_idx) * ns + src_s]);
+                return g_to_f(g, __ldg(&a.g2f_halo[hk]), __ldg(&bessel_mu[src_sp]), fm, inv_tmp0,
+                              __ldg(&a.apar[src_sp]));
+            }
+            return make_double2(0.0, 0.0);
+        };
+        const double* c_ara_row = a.ara_tab + ((size_t)v_mu_s_idx * a.n_class + cls) * 13;
+        #pragma unroll
+        for (int p = 0; p < 13; ++p) {
+            const double c = __ldg(&c_ara_row[p]);
+            const int ds = kAraDs[p], dv = kAraDv[p];
+            double2 v;
+            if (ds == 0) {
+                // the vpar neighbours on this s are already loaded
+                v = dv == -2 ? df_vm2 : dv == -1 ? df_vm1 : dv == 0 ? my_df : dv == 1 ? df_vp1 : df_vp2;
+            } else {
+                const int2 m = __ldg(&a.packed_maps[(size_t)(ds + 4) * spatial_stride + spatial_idx]);
+                if (m.x < 0) continue;
+                v = (dv == 0 && m.y == kx) ? smem_df[m.x * ky_tile + ky_local] : load_f(v_phys + dv, m.x, m.y);
+            }
+            acc_ara.x += c * v.x;
+            acc_ara.y += c * v.y;
+        }
+    }
+
     // ── Elementwise Assembly (Phase 3) ──
     double utrap_val   = __ldg(&a.utrap[mu_s_idx]);
     double abs_vp_val  = __ldg(&a.abs_dum2_vp[mu_s_idx]);
@@ -273,8 +321,9 @@ __device__ __forceinline__ void linear_rhs_fused_body(const LinearRhsArgs& a) {
     double inv_dvp = 1.0 / __ldg(a.dvp);
     double inv_tmp = 1.0 / fmax(tmp0, 1e-15);
 
-    // term_iv = utrap * out_d1 / dvp
-    double2 term_iv = make_double2(utrap_val * out_d1.x * inv_dvp, utrap_val * out_d1.y * inv_dvp);
+    // term_iv = utrap * out_d1 / dvp (inside the bracket with ara)
+    double2 term_iv = ARA ? make_double2(0.0, 0.0)
+                          : make_double2(utrap_val * out_d1.x * inv_dvp, utrap_val * out_d1.y * inv_dvp);
 
     // term_vp_diss = disp_vp * abs_vp * out_d4 / dvp
     double vp_diss_coeff = a.disp_vp * abs_vp_val * inv_dvp;
@@ -309,6 +358,10 @@ __device__ __forceinline__ void linear_rhs_fused_body(const LinearRhsArgs& a) {
     double2 res;
     res.x = acc_par_r + term_iv.x + term_vp_diss.x + drift_term.x + hyper_term.x + drive_term.x + acc_t7_r;
     res.y = acc_par_i + term_iv.y + term_vp_diss.y + drift_term.y + hyper_term.y + drive_term.y + acc_t7_i;
+    if (ARA) {
+        res.x += acc_ara.x;
+        res.y += acc_ara.y;
+    }
     // conservative parallel dissipation: drop the dissipation of the field-sourcing projection
     if (DPC) {
         res.x -= acc_dp_r;
@@ -318,60 +371,68 @@ __device__ __forceinline__ void linear_rhs_fused_body(const LinearRhsArgs& a) {
     if (live) a.rhs_out[field_idx] = res;
 }
 
-template <int NS, int NKY, int MAX_THREADS, bool DPC, bool HALO = false>
+template <int NS, int NKY, int MAX_THREADS, bool DPC, bool HALO = false, bool ARA = false>
 __global__ __launch_bounds__(MAX_THREADS)
 void linear_rhs_fused_kernel(const LinearRhsArgs a) {
-    linear_rhs_fused_body<NS, NKY, false, false, DPC, HALO>(a);
+    linear_rhs_fused_body<NS, NKY, false, false, DPC, HALO, ARA>(a);
 }
 
 // EM variants: at most 64 registers per thread, 1024 resident threads per SM
-template <int NS, int NKY, int MAX_THREADS, bool APAR, bool BPAR, bool DPC, bool HALO = false>
+template <int NS, int NKY, int MAX_THREADS, bool APAR, bool BPAR, bool DPC, bool HALO = false, bool ARA = false>
 __global__ __launch_bounds__(MAX_THREADS, 1024 / MAX_THREADS)
 void linear_rhs_fused_em_kernel(const LinearRhsArgs a) {
-    linear_rhs_fused_body<NS, NKY, APAR, BPAR, DPC, HALO>(a);
+    linear_rhs_fused_body<NS, NKY, APAR, BPAR, DPC, HALO, ARA>(a);
 }
 
-template <int NS, int NKY, int MAX_THREADS, bool APAR, bool BPAR, bool DPC, bool HALO = false>
+template <int NS, int NKY, int MAX_THREADS, bool APAR, bool BPAR, bool DPC, bool HALO = false, bool ARA = false>
 static void launch_variant(const LinearRhsArgs& args, int num_blocks, int threads, size_t smem,
                            cudaStream_t stream) {
     if constexpr (APAR || BPAR)
-        linear_rhs_fused_em_kernel<NS, NKY, MAX_THREADS, APAR, BPAR, DPC, HALO>
+        linear_rhs_fused_em_kernel<NS, NKY, MAX_THREADS, APAR, BPAR, DPC, HALO, ARA>
             <<<num_blocks, threads, smem, stream>>>(args);
     else
-        linear_rhs_fused_kernel<NS, NKY, MAX_THREADS, DPC, HALO><<<num_blocks, threads, smem, stream>>>(args);
+        linear_rhs_fused_kernel<NS, NKY, MAX_THREADS, DPC, HALO, ARA><<<num_blocks, threads, smem, stream>>>(args);
 }
 
 
 // ── FFI Implementation ──────────────────────────────────────────────────────
 
-template <bool APAR, bool BPAR, bool DPC, bool HALO>
+template <bool APAR, bool BPAR, bool DPC, bool HALO, bool ARA = false>
 static void launch_sized(const LinearRhsArgs& args, int num_blocks, int threads, size_t smem,
                          cudaStream_t stream) {
-#define DISPATCH_CASE(NS_VAL, NKY_VAL)                                                   \
-    case (((NS_VAL) << 16) | (NKY_VAL)):                                                 \
-        launch_variant<NS_VAL, NKY_VAL, (NS_VAL) * (NKY_VAL), APAR, BPAR, DPC, HALO>(    \
-            args, num_blocks, (NS_VAL) * (NKY_VAL), smem, stream);                       \
+#define DISPATCH_CASE(NS_VAL, NKY_VAL)                                                        \
+    case (((NS_VAL) << 16) | (NKY_VAL)):                                                      \
+        launch_variant<NS_VAL, NKY_VAL, (NS_VAL) * (NKY_VAL), APAR, BPAR, DPC, HALO, ARA>(    \
+            args, num_blocks, (NS_VAL) * (NKY_VAL), smem, stream);                            \
         break;
 
     if (args.ky_tile != args.nky) {
-        launch_variant<-1, 0, 1024, APAR, BPAR, DPC, HALO>(args, num_blocks, threads, smem, stream);
+        launch_variant<-1, 0, 1024, APAR, BPAR, DPC, HALO, ARA>(args, num_blocks, threads, smem, stream);
         return;
     }
-    switch ((args.ns << 16) | args.nky) {
-        DISPATCH_CASE(16, 32)
-        DISPATCH_CASE(32, 32)
-        DISPATCH_CASE(16, 64)
-        default:
-            // small blocks get the register budget of a 256-thread launch
-            if (threads <= 256)
-                launch_variant<0, 0, 256, APAR, BPAR, DPC, HALO>(args, num_blocks, threads, smem, stream);
-            else
-                launch_variant<0, 0, 1024, APAR, BPAR, DPC, HALO>(args, num_blocks, threads, smem, stream);
+    if constexpr (ARA) {
+        // the opt-in arakawa scheme runs on the runtime-sized kernels only
+        if (threads <= 256)
+            launch_variant<0, 0, 256, APAR, BPAR, DPC, HALO, ARA>(args, num_blocks, threads, smem, stream);
+        else
+            launch_variant<0, 0, 1024, APAR, BPAR, DPC, HALO, ARA>(args, num_blocks, threads, smem, stream);
+    } else {
+        switch ((args.ns << 16) | args.nky) {
+            DISPATCH_CASE(16, 32)
+            DISPATCH_CASE(32, 32)
+            DISPATCH_CASE(16, 64)
+            default:
+                // small blocks get the register budget of a 256-thread launch
+                if (threads <= 256)
+                    launch_variant<0, 0, 256, APAR, BPAR, DPC, HALO>(args, num_blocks, threads, smem, stream);
+                else
+                    launch_variant<0, 0, 1024, APAR, BPAR, DPC, HALO>(args, num_blocks, threads, smem, stream);
+        }
     }
 #undef DISPATCH_CASE
 }
 
-template <bool APAR, bool BPAR, bool DPC>
+template <bool APAR, bool BPAR, bool DPC, bool ARA = false>
 static cudaError_t launch_linear_rhs(const LinearRhsArgs& args, cudaStream_t stream) {
     const int n_tiles    = (args.nky + args.ky_tile - 1) / args.ky_tile;
     const int num_blocks = args.nsp * args.nv * args.nmu * args.nkx * n_tiles;
@@ -381,9 +442,9 @@ static cudaError_t launch_linear_rhs(const LinearRhsArgs& args, cudaStream_t str
 
     // a vpar shard takes the edge neighbours from the halo buffers
     if (args.df_halo != nullptr)
-        launch_sized<APAR, BPAR, DPC, true>(args, num_blocks, threads, smem, stream);
+        launch_sized<APAR, BPAR, DPC, true, ARA>(args, num_blocks, threads, smem, stream);
     else
-        launch_sized<APAR, BPAR, DPC, false>(args, num_blocks, threads, smem, stream);
+        launch_sized<APAR, BPAR, DPC, false, ARA>(args, num_blocks, threads, smem, stream);
     return cudaGetLastError();
 }
 
@@ -418,12 +479,13 @@ xla_ffi::Error LinearRhsFusedImpl(
     xla_ffi::Buffer<xla_ffi::DataType::F64>  dproj_e0,
     xla_ffi::Buffer<xla_ffi::DataType::F64>  dproj_e1,
     xla_ffi::Buffer<xla_ffi::DataType::F64>  dvp,
+    xla_ffi::Buffer<xla_ffi::DataType::F64>  ara_tab,
     xla_ffi::Buffer<xla_ffi::DataType::C128> df_halo,
     xla_ffi::Buffer<xla_ffi::DataType::F64>  fm_halo,
     xla_ffi::Buffer<xla_ffi::DataType::F64>  g2f_halo,
     xla_ffi::Result<xla_ffi::Buffer<xla_ffi::DataType::C128>> rhs_out,
     int32_t nsp, int32_t nv, int32_t nmu, int32_t ns, int32_t nkx, int32_t nky, int32_t n_class,
-    int32_t has_apar, int32_t has_bpar, int32_t has_dpc, int32_t has_halo,
+    int32_t has_apar, int32_t has_bpar, int32_t has_dpc, int32_t has_halo, int32_t has_ara,
     double c_d1_0, double c_d1_1, double c_d1_2, double c_d1_3, double c_d1_4,
     double c_d4_0, double c_d4_1, double c_d4_2, double c_d4_3, double c_d4_4,
     double disp_vp, double drive_scale
@@ -447,6 +509,7 @@ xla_ffi::Error LinearRhsFusedImpl(
         (const double2*)bpar.typed_data(), bpar_chi.typed_data(),
         s_disp_tab.typed_data(),
         dvp.typed_data(),
+        has_ara ? ara_tab.typed_data() : nullptr,
         (const double2*)dproj_m0.typed_data(), (const double2*)dproj_m1.typed_data(),
         dproj_e0.typed_data(), dproj_e1.typed_data(),
         (double2*)rhs_out->typed_data(),
@@ -461,6 +524,21 @@ xla_ffi::Error LinearRhsFusedImpl(
 
     cudaError_t err;
     const int variant = (has_apar ? 4 : 0) | (has_bpar ? 2 : 0) | (has_dpc ? 1 : 0);
+    if (has_ara) {
+        switch (variant) {
+            case 0: err = launch_linear_rhs<false, false, false, true>(args, stream); break;
+            case 1: err = launch_linear_rhs<false, false, true,  true>(args, stream); break;
+            case 2: err = launch_linear_rhs<false, true,  false, true>(args, stream); break;
+            case 3: err = launch_linear_rhs<false, true,  true,  true>(args, stream); break;
+            case 4: err = launch_linear_rhs<true,  false, false, true>(args, stream); break;
+            case 5: err = launch_linear_rhs<true,  false, true,  true>(args, stream); break;
+            case 6: err = launch_linear_rhs<true,  true,  false, true>(args, stream); break;
+            default: err = launch_linear_rhs<true, true,  true,  true>(args, stream); break;
+        }
+        if (err != cudaSuccess)
+            return xla_ffi::Error(XLA_FFI_Error_Code_INTERNAL, cudaGetErrorString(err));
+        return xla_ffi::Error::Success();
+    }
     switch (variant) {
         case 0: err = launch_linear_rhs<false, false, false>(args, stream); break;
         case 1: err = launch_linear_rhs<false, false, true >(args, stream); break;
@@ -510,6 +588,7 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(
         .Arg<xla_ffi::Buffer<xla_ffi::DataType::F64>>()  // dproj_e0
         .Arg<xla_ffi::Buffer<xla_ffi::DataType::F64>>()  // dproj_e1
         .Arg<xla_ffi::Buffer<xla_ffi::DataType::F64>>()  // dvp
+        .Arg<xla_ffi::Buffer<xla_ffi::DataType::F64>>()  // ara_tab
         .Arg<xla_ffi::Buffer<xla_ffi::DataType::C128>>() // df_halo
         .Arg<xla_ffi::Buffer<xla_ffi::DataType::F64>>()  // fm_halo
         .Arg<xla_ffi::Buffer<xla_ffi::DataType::F64>>()  // g2f_halo
@@ -525,6 +604,7 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(
         .Attr<int32_t>("has_bpar")
         .Attr<int32_t>("has_dpc")
         .Attr<int32_t>("has_halo")
+        .Attr<int32_t>("has_ara")
         .Attr<double>("c_d1_0").Attr<double>("c_d1_1").Attr<double>("c_d1_2")
         .Attr<double>("c_d1_3").Attr<double>("c_d1_4")
         .Attr<double>("c_d4_0").Attr<double>("c_d4_1").Attr<double>("c_d4_2")

@@ -45,6 +45,28 @@ class _StencilTable:
         return self.tab[..., s_idx, self.par_class, i]
 
 
+def _arakawa_bracket(ext: jnp.ndarray, tab: jnp.ndarray, pre) -> jnp.ndarray:
+    """Terms I + IV as the Arakawa bracket of ``ext``: f with two extra vpar planes on each side.
+
+    ``ext`` is (..., nv + 4, nmu, ns, nkx, nky), the planes past the grid zero; ``tab`` is the
+    (..., nv, nmu, ns, 5, 13) table of precompute._arakawa_tables.
+    """
+    nv = ext.shape[-5] - 4
+    v_axis = ext.ndim - 5
+    st = _StencilTable(tab, pre["par_stencil_class"])
+    ky_idx = jnp.reshape(jnp.arange(ext.shape[-1], dtype=jnp.int32), (1, 1, -1))
+    out = jnp.zeros(ext.shape[:v_axis] + (nv,) + ext.shape[v_axis + 1 :], dtype=ext.dtype)
+    for di in range(-2, 3):
+        i = di + 4
+        shifted = jnp.where(
+            pre["valid_shift"][i], ext[..., pre["s_shift"][i], pre["kx_shift"][i], ky_idx], 0.0
+        )
+        for p, (pdi, dk) in enumerate(stencils.ARAKAWA_POINTS):
+            if pdi == di:
+                out = out + st[p] * jax.lax.slice_in_dim(shifted, 2 + dk, 2 + dk + nv, axis=v_axis)
+    return out
+
+
 @jax.tree_util.register_pytree_node_class
 class JAXOps(SolverOps):
     """JAX implementation of solver operations.
@@ -107,6 +129,19 @@ class JAXOps(SolverOps):
 
         spec = PartitionSpec(*vel)
         return sharding.velocity_map(local, self.mesh, (df,), (vel,), (spec, spec))
+
+    def _arakawa_sharded(self, df: jnp.ndarray) -> jnp.ndarray:
+        """Arakawa bracket of a vpar-sharded df, with the neighbours' planes as halo."""
+        vel = ("sp", "vp", "mu") if df.ndim == 6 else ("vp", "mu")
+        v_axis = 1 if df.ndim == 6 else 0
+        n_vp = self.mesh.shape["vp"]
+
+        def local(f, tab):
+            return _arakawa_bracket(sharding.halo(f, v_axis, "vp", n_vp), tab, self.pre)
+
+        return sharding.velocity_map(
+            local, self.mesh, (df, self.pre["ara_tab"]), (vel, vel), PartitionSpec(*vel)
+        )
 
     def _apply_parallel(self, field: jnp.ndarray, coeffs: jnp.ndarray) -> jnp.ndarray:
         """Apply 9-point parallel stencil using precomputed shift maps."""
@@ -367,6 +402,7 @@ class JAXOps(SolverOps):
         bpar: jnp.ndarray | None = None,
         vpar_d: Tuple[jnp.ndarray, jnp.ndarray] | None = None,
         coll_term: jnp.ndarray | None = None,
+        ara_term: jnp.ndarray | None = None,
     ) -> dict[str, jnp.ndarray]:
         """Return each linear-RHS term as a dict entry.
 
@@ -403,6 +439,16 @@ class JAXOps(SolverOps):
             out_d1, out_d4 = vpar_d
         term_IV_trapping = pre["utrap"] * out_d1 / pre["dvp"]
         term_IV_vp_diss = params.disp_vp * pre["abs_dum2_vp"] * out_d4 / pre["dvp"]
+
+        # arakawa: streaming (already out of s_upar_tab) and trapping as one bracket
+        term_I_IV_arakawa = jnp.zeros_like(df)
+        if ara_term is not None or "ara_tab" in pre:
+            if ara_term is None:
+                pad = [(0, 0)] * df.ndim
+                pad[df.ndim - 5] = (2, 2)
+                ara_term = _arakawa_bracket(jnp.pad(df, pad), pre["ara_tab"], self.pre)
+            term_I_IV_arakawa = ara_term
+            term_IV_trapping = jnp.zeros_like(df)
 
         kdotvd = pre["drift_x"] * pre["kx_b"] + pre["drift_y"] * pre["ky_b"]
 
@@ -466,6 +512,7 @@ class JAXOps(SolverOps):
             "I_par_streaming_plus_diss": term_I_par,
             "II_drift_df": term_II_drift_df,
             "IV_trapping": term_IV_trapping,
+            "I_IV_arakawa": term_I_IV_arakawa,
             "IV_vp_diss": term_IV_vp_diss,
             "V_drive_chi": term_V_drive_chi,
             "VII_landau_phi": term_VII_landau,
@@ -487,6 +534,7 @@ class JAXOps(SolverOps):
         bpar: jnp.ndarray | None = None,
         vpar_d: Tuple[jnp.ndarray, jnp.ndarray] | None = None,
         coll_term: jnp.ndarray | None = None,
+        ara_term: jnp.ndarray | None = None,
     ) -> jnp.ndarray:
         """Total linear RHS = sum of all linear terms.
 
@@ -494,7 +542,8 @@ class JAXOps(SolverOps):
         the fused expression. JAX/XLA will fuse term computations under JIT.
         """
         terms = self._linear_rhs_terms(
-            df, phi, params, pre, apar=apar, bpar=bpar, vpar_d=vpar_d, coll_term=coll_term
+            df, phi, params, pre, apar=apar, bpar=bpar, vpar_d=vpar_d, coll_term=coll_term,
+            ara_term=ara_term,
         )
         total = terms["I_par_streaming_plus_diss"]
         for k, v in terms.items():
@@ -523,6 +572,8 @@ class JAXOps(SolverOps):
         extra: dict[str, Any] = {}
         if self.mesh is not None and self.mesh.shape["vp"] > 1:
             extra["vpar_d"] = self._vpar_dual_sharded(df)
+            if "ara_tab" in pre:
+                extra["ara_term"] = self._arakawa_sharded(df)
         if sharding.splits_velocity(self.mesh) and collisions_on(params, pre):
             extra["coll_term"] = collision_term(df, params, pre, self.mesh)
         if df.ndim == 5:
@@ -541,6 +592,8 @@ class JAXOps(SolverOps):
                 "s_upar_tab": pre["s_upar_tab"],
                 "s_t7_tab": pre["s_t7_tab"],
             }
+            if "ara_tab" in pre:
+                sp_arrays["ara_tab"] = pre["ara_tab"]
             if "s_disp_par_tab" in pre:
                 sp_arrays["s_disp_par_tab"] = pre["s_disp_par_tab"]
                 for k in ("dproj_w0", "dproj_w1", "dproj_e0", "dproj_e1"):

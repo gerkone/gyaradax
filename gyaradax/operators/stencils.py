@@ -76,3 +76,9 @@ VPAR_D1 = np.asarray([1.0, -8.0, 0.0, 8.0, -1.0], dtype=np.float64) / 12.0
 
 # VPAR_D4: Central fourth derivative in parallel velocity space
 VPAR_D4 = np.asarray([-1.0, 4.0, -6.0, 4.0, -1.0], dtype=np.float64) / 12.0
+
+# (s, vpar) offsets of the terms i + iv poisson-bracket stencil (linear_terms.f90::igh)
+ARAKAWA_POINTS = (
+    (-2, 0), (-1, -1), (-1, 0), (-1, 1), (0, -2), (0, -1), (0, 0),
+    (0, 1), (0, 2), (1, -1), (1, 0), (1, 1), (2, 0),
+)

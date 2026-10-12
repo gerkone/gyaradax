@@ -39,6 +39,9 @@ CASES = {
     "kinetic_apar_dpc3": ("nl_em_waltz_b01.yaml", dict(disp_par_conserve=3)),
     "adiabatic_apar": ("iteration_13.yaml", dict(non_linear=True, nlapar=True, beta=0.002)),
     "adiabatic_collisions": ("iteration_13.yaml", dict(collisions=True, coll_freq=0.05)),
+    "kinetic_es_ara": ("nl_em_waltz_b01.yaml", dict(nlapar=False, beta=0.0, ltrapping_arakawa=True)),
+    "kinetic_apar_ara": ("nl_em_waltz_b01.yaml", dict(ltrapping_arakawa=True)),
+    "adiabatic_ara": ("iteration_13.yaml", dict(non_linear=True, ltrapping_arakawa=True)),
     "adiabatic_collisions_cons": (
         "iteration_13.yaml",
         dict(
@@ -75,7 +78,7 @@ def _per_backend(pre, mixed_precision, call, *arrays):
     [(name, "small") for name in CASES]
     + [
         (name, "tiled")
-        for name in ("kinetic_es", "kinetic_apar_bpar", "kinetic_apar_dpc", "adiabatic_apar")
+        for name in ("kinetic_es", "kinetic_apar_bpar", "kinetic_apar_dpc", "adiabatic_apar", "kinetic_es_ara")
     ],
 )
 def test_linear_rhs_from_g_matches_jax(name, grid):
@@ -97,6 +100,9 @@ def test_linear_rhs_from_g_matches_jax(name, grid):
         ("kinetic_apar_dpc3", dict(disp_par_conserve=0)),
         ("adiabatic_collisions", dict(collisions=False)),
         ("adiabatic_collisions_cons", dict(collisions=False)),
+        ("kinetic_es_ara", dict(ltrapping_arakawa=False)),
+        ("kinetic_apar_ara", dict(ltrapping_arakawa=False)),
+        ("adiabatic_ara", dict(ltrapping_arakawa=False)),
     ],
 )
 def test_linear_rhs_optional_term_matches_jax(name, off):
@@ -187,7 +193,9 @@ def test_nonlinear_term_keeps_zero_mode_when_not_excluded():
     assert rel_l2(out["cuda"], out["jax"]) < 1e-12
 
 
-@pytest.mark.parametrize("name", ["kinetic_apar", "kinetic_apar_bpar", "adiabatic_apar"])
+@pytest.mark.parametrize(
+    "name", ["kinetic_apar", "kinetic_apar_bpar", "adiabatic_apar", "kinetic_es_ara", "adiabatic_ara"]
+)
 def test_gksolve_em_trajectory_matches_jax(name):
     df, geometry, params, state, pre = _setup(name)
     params = replace(params, adaptive_dt=True)

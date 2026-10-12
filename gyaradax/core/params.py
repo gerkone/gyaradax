@@ -64,6 +64,8 @@ class GKParams:
     disp_x: float = 0.1
     disp_y: float = 0.1
     idisp: int = 2
+    # terms i and iv as one arakawa poisson bracket in (s, vpar) (gkw ltrapping_arakawa)
+    ltrapping_arakawa: bool = False
     # CGYRO-style conservative parallel dissipation: project out of the
     # dissipated distribution the components that source the field solves,
     # so disp_par cannot drive phi/A_par (cures the GKW issue #201 EM
@@ -213,6 +215,7 @@ class GKParams:
         "disp_x",
         "disp_y",
         "idisp",
+        "ltrapping_arakawa",
         "disp_par_conserve",
         "disp_par_conserve_kycut",
         "drive_scale",
@@ -277,6 +280,8 @@ def gkparams_from_runtime(runtime: Dict[str, Any], **overrides: Any) -> GKParams
         "disp_vp": float(runtime.get("disp_vp", 0.2)),
         "disp_x": float(runtime.get("disp_x", 0.1)),
         "disp_y": float(runtime.get("disp_y", 0.1)),
+        "idisp": int(runtime.get("idisp", 2)),
+        "ltrapping_arakawa": bool(runtime.get("ltrapping_arakawa", False)),
         "non_linear": non_linear,
         "finit": str(runtime.get("finit", "cosine2")),
         "amp_init": float(runtime.get("amp_init", 1.0e-4)),
@@ -507,6 +512,7 @@ def gkparams_from_config(config: Any, **overrides: Any) -> GKParams:
         "disp_x": float(getattr(solver_cfg, "disp_x", 0.1)),
         "disp_y": float(getattr(solver_cfg, "disp_y", 0.1)),
         "idisp": int(getattr(solver_cfg, "idisp", 2)),
+        "ltrapping_arakawa": bool(getattr(solver_cfg, "ltrapping_arakawa", False)),
         "disp_par_conserve": int(getattr(solver_cfg, "disp_par_conserve", 0)),
         "disp_par_conserve_kycut": float(
             getattr(solver_cfg, "disp_par_conserve_kycut", 0.0)

@@ -222,6 +222,89 @@ def _stencil_class_tables(upar, abs_par, term7_fac, disp_par, sgr_dist):
     return s_upar_tab, s_t7_tab, s_disp_tab
 
 
+def _arakawa_tables(vpgr, mugr, bn, ffun, vthrat, sgr_dist, dvp):
+    """Terms I + IV as the Arakawa Poisson bracket vthrat * F * {H, f} in (s, vpar).
+
+    H = vpar^2 / 2 + mu B (linear_terms.f90::igh). Returns coefficients
+    (nsp, nv, nmu, ns, 5, 13) for a vthrat array, (nv, nmu, ns, 5, 13) for a scalar, per
+    stencil class (pos_par_grid + 2) and point of stencils.ARAKAWA_POINTS. Interior points
+    use jhg_interior (J = 2 J1 - J2), the outflow side of open chain ends igh_two /
+    igh_zero_two; neighbours past the grid are dropped by the shift maps.
+    """
+    vpgr = jnp.asarray(vpgr, dtype=jnp.float64).ravel()
+    mugr = jnp.asarray(mugr, dtype=jnp.float64).ravel()
+    bn = jnp.asarray(bn, dtype=jnp.float64).ravel()
+    ffun = jnp.asarray(ffun, dtype=jnp.float64).ravel()
+    nv, nmu, ns = vpgr.shape[0], mugr.shape[0], bn.shape[0]
+    vthrat = jnp.asarray(vthrat, dtype=jnp.float64)
+    vth = jnp.reshape(vthrat, vthrat.shape + (1, 1, 1))
+
+    # ghost points: vpar grid continued uniformly, bn periodic along the field line
+    vp_ext = vpgr[0] + jnp.arange(-2, nv + 2, dtype=jnp.float64) * dvp
+    bn_ext = bn[jnp.arange(-2, ns + 2) % ns]
+    hh = 0.5 * vp_ext[:, None, None] ** 2 + mugr[None, :, None] * bn_ext[None, None, :]
+
+    def h(a, b):
+        return hh[2 + b : 2 + b + nv, :, 2 + a : 2 + a + ns]
+
+    dum = vth * jnp.reshape(ffun, (1, 1, ns)) / (sgr_dist * dvp)
+    dum2 = -vth * jnp.reshape(ffun, (1, 1, ns)) * jnp.reshape(vpgr, (nv, 1, 1))
+    shape = vthrat.shape + (nv, nmu, ns)
+    idx = {p: n for n, p in enumerate(stencils.ARAKAWA_POINTS)}
+
+    def table(entries):
+        cols = [jnp.zeros(shape, dtype=jnp.float64)] * len(stencils.ARAKAWA_POINTS)
+        for p, v in entries.items():
+            cols[idx[p]] = jnp.broadcast_to(v, shape)
+        return jnp.stack(cols, axis=-1)
+
+    d1, d2 = dum / 6.0, -dum / 24.0
+    interior = table({
+        (-2, 0): d2 * (h(-1, 1) - h(-1, -1)),
+        (-1, -1): d1 * (h(-1, 0) - h(0, -1)) + d2 * (h(-2, 0) + h(-1, 1) - h(0, -2) - h(1, -1)),
+        (-1, 0): d1 * (h(-1, 1) - h(-1, -1) - h(0, -1) + h(0, 1)),
+        (-1, 1): d1 * (h(0, 1) - h(-1, 0)) + d2 * (h(1, 1) - h(-1, -1) - h(-2, 0) + h(0, 2)),
+        (0, -2): d2 * (h(-1, -1) - h(1, -1)),
+        (0, -1): d1 * (h(-1, -1) + h(-1, 0) - h(1, -1) - h(1, 0)),
+        (0, 1): d1 * (h(1, 0) + h(1, 1) - h(-1, 0) - h(-1, 1)),
+        (0, 2): d2 * (h(1, 1) - h(-1, 1)),
+        (1, -1): d1 * (h(0, -1) - h(1, 0)) + d2 * (h(-1, -1) - h(1, 1) - h(2, 0) + h(0, -2)),
+        (1, 0): d1 * (h(0, -1) + h(1, -1) - h(0, 1) - h(1, 1)),
+        (1, 1): d1 * (h(1, 0) - h(0, 1)) + d2 * (h(1, -1) - h(-1, 1) + h(2, 0) - h(0, 2)),
+        (2, 0): d2 * (h(1, -1) - h(1, 1)),
+    })
+
+    dvh = 0.25 * dum * (h(0, 1) - h(0, -1))
+    vl = 0.25 * dum * (-3.0 * h(0, 0) + 4.0 * h(1, 0) - h(2, 0))
+    zero_two_l = table({(0, -1): -vl, (0, 1): vl, (0, 0): 3.0 * dvh, (1, 0): -4.0 * dvh, (2, 0): dvh})
+    vr = 0.25 * dum * (3.0 * h(0, 0) - 4.0 * h(-1, 0) + h(-2, 0))
+    zero_two_r = table({(0, -1): -vr, (0, 1): vr, (0, 0): -3.0 * dvh, (-1, 0): 4.0 * dvh, (-2, 0): -dvh})
+
+    dvh4 = -dum / 72.0 * (h(0, -2) - 8.0 * h(0, -1) + 8.0 * h(0, 1) - h(0, 2))
+    ul = dum / 72.0 * (-2.0 * h(-1, 0) - 3.0 * h(0, 0) + 6.0 * h(1, 0) - h(2, 0))
+    two_l = table({
+        (0, -2): ul, (0, -1): -8.0 * ul, (0, 1): 8.0 * ul, (0, 2): -ul,
+        (-1, 0): -2.0 * dvh4, (0, 0): -3.0 * dvh4, (1, 0): 6.0 * dvh4, (2, 0): -dvh4,
+    })
+    ur = dum / 72.0 * (h(-2, 0) - 6.0 * h(-1, 0) + 3.0 * h(0, 0) + 2.0 * h(1, 0))
+    two_r = table({
+        (0, -2): ur, (0, -1): -8.0 * ur, (0, 1): 8.0 * ur, (0, 2): -ur,
+        (-2, 0): dvh4, (-1, 0): -6.0 * dvh4, (0, 0): 3.0 * dvh4, (1, 0): 2.0 * dvh4,
+    })
+
+    # class = ist + 2; the outflow side (dum2 * ist < 0) is upwinded, a vanishing velocity drops the term
+    sgn = jnp.broadcast_to(jnp.sign(dum2), shape)[..., None]
+    zeros = jnp.zeros_like(interior)
+    classes = [
+        jnp.where(sgn > 0, zero_two_l, jnp.where(sgn < 0, interior, zeros)),
+        jnp.where(sgn > 0, two_l, jnp.where(sgn < 0, interior, zeros)),
+        interior,
+        jnp.where(sgn < 0, two_r, jnp.where(sgn > 0, interior, zeros)),
+        jnp.where(sgn < 0, zero_two_r, jnp.where(sgn > 0, interior, zeros)),
+    ]
+    return jnp.stack(classes, axis=-2)
+
+
 def _compute_species_coeffs(
     mas,
     signz,
@@ -488,6 +571,13 @@ def _linear_precompute_core(geometry: Dict[str, jnp.ndarray], params: GKParams) 
         sp["s_upar_tab"], sp["s_t7_tab"], s_disp_tab = _stencil_class_tables(
             sp["upar"], sp["abs_dum2_par"], sp["term7_fac"], params.disp_par, out["sgr_dist"]
         )
+        if params.ltrapping_arakawa:
+            # terms i and iv become one bracket; the parallel table keeps only the dissipation
+            sp["s_upar_tab"] = s_disp_tab
+            sp["ara_tab"] = _arakawa_tables(
+                vpgr, mugr, bn, ffun, jnp.asarray(params.vthrat, dtype=jnp.float64),
+                out["sgr_dist"], out["dvp"],
+            )
         if params.disp_par_conserve:
             # conservative parallel dissipation (CGYRO trick, cgyro_upwind.F90):
             # the RHS subtracts disp(P[g]) where P projects g onto the
@@ -685,6 +775,11 @@ def _linear_precompute_core(geometry: Dict[str, jnp.ndarray], params: GKParams) 
         sp["s_upar_tab"], sp["s_t7_tab"], s_disp_tab = _stencil_class_tables(
             sp["upar"], sp["abs_dum2_par"], sp["term7_fac"], params.disp_par, out["sgr_dist"]
         )
+        if params.ltrapping_arakawa:
+            sp["s_upar_tab"] = s_disp_tab
+            sp["ara_tab"] = _arakawa_tables(
+                vpgr, mugr, bn, ffun, params.vthrat, out["sgr_dist"], out["dvp"]
+            )
         if params.disp_par_conserve:
             # conservative parallel dissipation — see kinetic branch above
             sp["s_disp_par_tab"] = s_disp_tab

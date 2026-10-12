@@ -6,7 +6,9 @@ from typing import TYPE_CHECKING, Any, Optional, cast
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 
+import gyaradax.operators.stencils as stencils
 from gyaradax.core.constants import EPS
 from gyaradax.core.jax_config import enable_x64
 from gyaradax.core.state import GKPre, Precompute
@@ -75,6 +77,24 @@ def estimate_nl_timestep(
     return jnp.minimum(dt_est, jnp.asarray(dt_input, dtype=jnp.float64))
 
 
+def arakawa_max_element(pre: GKPre) -> jnp.ndarray:
+    """Largest bracket element that enters the operator, as GKW's estimate records it (matdat.F90)."""
+    tab = pre["ara_tab"]
+    nv = tab.shape[-5]
+    ds = np.array([p[0] for p in stencils.ARAKAWA_POINTS])
+    dv = np.array([p[1] for p in stencils.ARAKAWA_POINTS])
+    # class = ist + 2: an open chain end drops the points past it
+    ist = np.arange(5)[:, None] - 2
+    keep_s = ~(((ist == 2) & (ds >= 1)) | ((ist == 1) & (ds >= 2)) | ((ist == -1) & (ds <= -2)) | ((ist == -2) & (ds <= -1)))
+    vt = np.arange(nv)[:, None] + dv
+    keep_v = (vt >= 0) & (vt < nv)
+    par_class = jnp.asarray(pre["par_stencil_class"])
+    used = jnp.stack([jnp.any(par_class == c, axis=(1, 2)) for c in range(5)], axis=-1)
+    mask = keep_s[None, None, :, :] & keep_v[:, None, None, :] & used[None, :, :, None]
+    shape = (1,) * (tab.ndim - 5) + (nv, 1) + mask.shape[1:]
+    return jnp.max(jnp.where(jnp.reshape(mask, shape), jnp.abs(tab), 0.0))
+
+
 def estimate_linear_timestep(
     pre: GKPre,
     params: Optional["GKParams"] = None,
@@ -111,6 +131,8 @@ def estimate_linear_timestep(
         jnp.where(max_upar > EPS, max_upar * _D1S / sgr_dist, 0.0),
         jnp.where(max_utrap > EPS, max_utrap * _D1V / dvp, 0.0),
     )
+    if "ara_tab" in pre:
+        tmax1 = arakawa_max_element(pre)
 
     # ideriv=4: parallel and velocity dissipation
     disp_par_val = jnp.abs(

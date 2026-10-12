@@ -239,6 +239,13 @@ class CUDAOps(SolverOps):
             s_disp_tab = dproj_e0 = dproj_e1 = dummy_r
             dproj_m0 = dproj_m1 = dummy_c
 
+        has_ara = "ara_tab" in pre
+        if has_ara:
+            ara = (nsp, nv, nmu, ns, n_class, len(stencils.ARAKAWA_POINTS))
+            ara_tab = table("ara_tab", ara, ara)
+        else:
+            ara_tab = dummy_r
+
         d1 = stencils.VPAR_D1
         d4 = stencils.VPAR_D4
         attrs = dict(
@@ -249,6 +256,7 @@ class CUDAOps(SolverOps):
             has_apar=np.int32(has_apar),
             has_bpar=np.int32(has_bpar),
             has_dpc=np.int32(has_dpc),
+            has_ara=np.int32(has_ara),
             c_d1_0=float(d1[0]),
             c_d1_1=float(d1[1]),
             c_d1_2=float(d1[2]),
@@ -296,6 +304,7 @@ class CUDAOps(SolverOps):
             "dproj_e1": (dproj_e1, sp_v_mu),
             # a buffer, not an attribute: dvp may be traced (geometry passed through jit)
             "dvp": (jnp.asarray(pre["dvp"], dtype=jnp.float64).reshape(1), ()),
+            "ara_tab": (ara_tab, sp_v_mu),
         }
         names = tuple(inputs)
         args = tuple(x for x, _ in inputs.values())
