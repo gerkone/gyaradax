@@ -8,7 +8,7 @@ import pytest
 import jax
 import jax.numpy as jnp
 
-from gyaradax.utils import load_geometry
+from gyaradax.io.gkw import load_geometry
 from gyaradax.geometry import compute_geometry, compute_geometry_from_input
 
 GKW_DATA_ROOT = os.environ.get(

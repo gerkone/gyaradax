@@ -5,12 +5,12 @@ import pytest
 from typing import cast
 from conftest import ALL_BACKENDS  # type: ignore[import-not-found]
 
-from gyaradax.solver import gksolve, init_f, default_state
-from gyaradax.params import GKParams
-from gyaradax.diag import project_all_modes_to_kx0
-from gyaradax.utils import parse_input_dat
-from gyaradax.utils import poten_files
-from gyaradax.integrals import (
+from gyaradax.solver.rk4 import gksolve, init_f, default_state
+from gyaradax.core.params import GKParams
+from gyaradax.diagnostics.diag import project_all_modes_to_kx0
+from gyaradax.io.gkw import parse_input_dat
+from gyaradax.io.gkw import poten_files
+from gyaradax.operators.poisson import (
     geom_tensors,
     _phi_adiabatic,
     precompute_phi_adiabatic,

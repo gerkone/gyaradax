@@ -7,7 +7,7 @@ used in the GKW linear and nonlinear terms.
 
 import numpy as np
 
-from gyaradax.jax_config import enable_x64
+from gyaradax.core.jax_config import enable_x64
 
 # enforce 64-bit precision
 enable_x64()

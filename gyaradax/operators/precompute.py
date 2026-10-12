@@ -7,19 +7,19 @@ from typing import Dict, Tuple, cast
 
 import jax.numpy as jnp
 
-import gyaradax.stencils as stencils
-from gyaradax.collisions import precompute_collisions
-from gyaradax.constants import EPS
-from gyaradax.integrals import (
+import gyaradax.operators.stencils as stencils
+from gyaradax.core.constants import EPS
+from gyaradax.core.jax_config import enable_x64
+from gyaradax.core.params import GKParams
+from gyaradax.core.state import GKPre
+from gyaradax.operators.ampere import precompute_bpar
+from gyaradax.operators.collisions import precompute_collisions
+from gyaradax.operators.poisson import (
     geom_tensors,
     j0,
-    precompute_bpar,
     precompute_phi_adiabatic,
     precompute_phi_kinetic,
 )
-from gyaradax.jax_config import enable_x64
-from gyaradax.params import GKParams
-from gyaradax.state import GKPre
 
 enable_x64()
 
@@ -557,7 +557,7 @@ def _linear_precompute_core(geometry: Dict[str, jnp.ndarray], params: GKParams) 
         out["phi_diag"] = phi_d
 
         if params.nlapar:
-            from gyaradax.integrals import precompute_apar
+            from gyaradax.operators.ampere import precompute_apar
 
             # precompute_apar's diag is the same numerical gamma_num moment; it is
             # recomputed below from the sp arrays (bessel/fmaxwl) for exact parity
@@ -747,7 +747,7 @@ def _linear_precompute_core(geometry: Dict[str, jnp.ndarray], params: GKParams) 
         out["phi_iyzero"] = iyzero
 
         if params.nlapar:
-            from gyaradax.integrals import precompute_apar
+            from gyaradax.operators.ampere import precompute_apar
 
             # apar_d carries the numerical gamma_num diagonal (GKW ampere_dia),
             # matching the kinetic 6D path; the analytic Gamma_0 loses the
@@ -787,3 +787,16 @@ def linear_precompute(geometry: Dict[str, jnp.ndarray], params: GKParams) -> "GK
             grid = sharding.grid_shape_from(params, geometry)
             return sharding.precompute_sharded(geometry, params, mesh, grid)
     return _linear_precompute_core(geometry, params)
+
+
+def pack_half_spectrum(
+    spec_kxky: jnp.ndarray, jind: jnp.ndarray, mrad: int, mphiw3: int
+) -> jnp.ndarray:
+    out_shape = spec_kxky.shape[:-2] + (mrad, mphiw3)
+    out = jnp.zeros(out_shape, dtype=jnp.complex128)
+    nky = spec_kxky.shape[-1]
+    return out.at[..., jind, :nky].set(spec_kxky)
+
+
+def unpack_half_spectrum(spec_half: jnp.ndarray, jind: jnp.ndarray, nky: int) -> jnp.ndarray:
+    return spec_half[..., jind, :nky]

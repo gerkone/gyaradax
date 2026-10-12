@@ -3,15 +3,17 @@ import numpy as np
 import os
 import pytest
 from conftest import read_dump_time  # type: ignore[import-not-found]
-from gyaradax.integrals import (
+from gyaradax.diagnostics.fluxes import (
     get_integrals,
-    geom_tensors,
-    calculate_phi,
-    calculate_phi_kinetic,
     calculate_fluxes,
     calculate_fluxes_kinetic,
 )
-from gyaradax.utils import load_gkw_k_dump, load_gkw_dump, K_files
+from gyaradax.operators.poisson import (
+    geom_tensors,
+    calculate_phi,
+    calculate_phi_kinetic,
+)
+from gyaradax.io.gkw import load_gkw_k_dump, load_gkw_dump, K_files
 
 
 def test_flux_integral_shapes(adiabatic_geom, adiabatic_shape):

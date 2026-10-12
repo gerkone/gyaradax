@@ -12,24 +12,35 @@ stencil and cuFFT kernels (electrostatic and electromagnetic).
 
 ```
 gyaradax/
-  solver.py      — RK4 step (gkstep_single) and multi-step driver (gksolve)
-  fields.py      — field solve wrapper (_compute_fields: phi, A_par, B_par), g <-> f transforms
-  integrals.py   — phi solve (adiabatic + kinetic), Ampere solve (A_par), Bpar coupled solve, flux integrals, EM flux diagnostics
-  precompute.py  — linear_precompute: stencil class tables, species coefficients, EM factors
-  cfl.py         — adaptive CFL timestep estimates
-  collisions.py  — Fokker-Planck stencil precompute + apply (9-point in (vpar, mu))
-  geometry/      — geometry models (circular, s-alpha, Miller, loaded geom.dat), metric and drift tensors
-  params.py      — GKParams dataclass (JAX pytree), YAML/input.dat loading
-  state.py       — GKPre (precomputed coeffs pytree), GKState (diagnostic state)
-  stencils.py    — 4th-order FD stencil coefficients (parallel + velocity)
-  simulate.py    — high-level entry points (gksimulate, gksimulate_batched, gk_run, gk_run_batched)
-  sharding.py    — device mesh, sharded precompute / init, shard_map helpers for the kernels
-  eigenvalue.py  — linear eigenvalue solver (GKW eiv_integration)
-  quasilinear/   — quasilinear transport: linear harvest, saturation rules, calibration
-  diag.py        — diagnostics: growth rates, spectra, term_iii_rhs
-  utils.py       — GKW I/O (K-dumps, geom.dat, input.dat parsing)
-  plot_utils.py  — publication-quality plotting functions
-  cli.py         — `gyaradax` console script: run/bench/info (see docs/CLI.md)
+  core/
+    params.py         — GKParams dataclass (JAX pytree), YAML/input.dat loading
+    state.py          — GKPre (precomputed coeffs pytree), GKState (diagnostic state)
+    constants.py, jax_config.py, runtime_config.py — EPS, x64 policy, XLA / device environment
+  operators/
+    precompute.py     — linear_precompute: stencil class tables, species coefficients, EM factors, FFT half-spectrum layout
+    stencils.py       — 4th-order FD stencil coefficients (parallel + velocity)
+    poisson.py        — Bessel helpers, geom_tensors, phi solve (adiabatic + kinetic)
+    ampere.py         — Ampere solve (A_par), Bpar coupled solve
+    fields.py         — field solve wrapper (_compute_fields: phi, A_par, B_par), g <-> f transforms
+    collisions.py     — Fokker-Planck stencil precompute + apply (9-point in (vpar, mu))
+  solver/
+    rk4.py            — RK4 step (gkstep_single), multi-step driver (gksolve), init_f
+    cfl.py            — adaptive CFL timestep estimates
+    driver.py         — high-level entry points (gk_init, gk_run, gksimulate, gksimulate_batched, gk_run_batched)
+    eigenvalue.py     — linear eigenvalue solver (GKW eiv_integration)
+  diagnostics/
+    fluxes.py         — flux integrals, EM flux diagnostics, get_integrals
+    diag.py           — diagnostics: growth rates, spectra (phi_spectra), term_iii_rhs
+    telemetry.py      — run telemetry, profiler summaries
+    plot_utils.py     — publication-quality plotting functions
+  io/
+    gkw.py            — GKW I/O (K-dumps, geom.dat, input.dat parsing, load_geometry, gkw_to_yaml)
+    rundir.py         — run directory output (save_dumps, save_run_metadata, checkpoints)
+  geometry/           — geometry models (circular, s-alpha, Miller, loaded geom.dat), metric and drift tensors
+  quasilinear/        — quasilinear transport: linear harvest, saturation rules, calibration
+  sharding.py         — device mesh, sharded precompute / init, shard_map helpers for the kernels
+  cli.py              — `gyaradax` console script: run/bench/info (see docs/CLI.md)
+  _compat.py          — old module paths (gyaradax.params, .integrals, .utils, .simulate, ...) -> new modules
 
   backends/
     __init__.py  — create_ops(): backend dispatch (auto/jax/cuda)
@@ -58,8 +69,8 @@ docs/NOTES.md    — detailed physics notes and validation results
 ## Call graph
 
 ```
-gksimulate / gk_run_batched          <- entry points (simulate.py)
-  +- gksolve                         <- multi-step driver via jax.lax.scan (solver.py)
+gksimulate / gk_run_batched          <- entry points (solver/driver.py)
+  +- gksolve                         <- multi-step driver via jax.lax.scan (solver/rk4.py)
        +- gkstep_single              <- one RK4 step
        |    +- _compute_fields       <- field solve (phi + optional A_par)
        |    |    +- _phi_adiabatic   <- adiabatic: quasineutrality + zonal FSA correction
@@ -134,7 +145,7 @@ SolverOps interface: `linear_rhs()`, `linear_rhs_from_g()`, `nonlinear_term_iii(
   `drive_scale` controls Terms V and VIII jointly -- do NOT set to 0.
 - **Collisions**: Enabled by `collisions=True, coll_freq>0` in GKParams.
   Linearized Fokker-Planck via 9-point `(vpar, mu)` stencil precomputed
-  in `gyaradax/collisions.py` and applied as an additive RHS in
+  in `gyaradax/operators/collisions.py` and applied as an additive RHS in
   `_linear_rhs_core`. MVP scope: adiabatic electrons + 1 kinetic ion,
   `freq_override=True` only, `mass_conserve=True`, no momentum/energy
   conservation corrections. Kinetic-electron path raises clearly.

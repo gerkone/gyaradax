@@ -7,13 +7,13 @@ from typing import TYPE_CHECKING, Any, Optional, cast
 import jax
 import jax.numpy as jnp
 
-from gyaradax.constants import EPS
-from gyaradax.jax_config import enable_x64
-from gyaradax.state import GKPre, Precompute
-from gyaradax.utils import pack_half_spectrum
+from gyaradax.core.constants import EPS
+from gyaradax.core.jax_config import enable_x64
+from gyaradax.core.state import GKPre, Precompute
+from gyaradax.operators.precompute import pack_half_spectrum
 
 if TYPE_CHECKING:
-    from gyaradax.params import GKParams
+    from gyaradax.core.params import GKParams
 
 
 enable_x64()

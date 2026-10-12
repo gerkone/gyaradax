@@ -13,12 +13,12 @@ from dataclasses import replace
 from conftest import ALL_BACKENDS  # type: ignore[import-not-found]
 
 from gyaradax.geometry import compute_geometry, compute_geometry_from_input
-from gyaradax.params import gkparams_from_input_and_geometry
-from gyaradax.params import GKParams
-from gyaradax.precompute import linear_precompute
-from gyaradax.solver import init_f, default_state
-from gyaradax.simulate import gk_run
-from gyaradax.integrals import calculate_phi
+from gyaradax.core.params import gkparams_from_input_and_geometry
+from gyaradax.core.params import GKParams
+from gyaradax.operators.precompute import linear_precompute
+from gyaradax.solver.rk4 import init_f, default_state
+from gyaradax.solver.driver import gk_run
+from gyaradax.operators.poisson import calculate_phi
 
 
 GKW_CASES_DIR = os.path.join(os.path.dirname(__file__), "..", "data", "gkw_cases")
@@ -102,8 +102,8 @@ def test_adiabat_collisions_weak_1step_parity():
     With normalization disabled in both codes the comparison is a clean
     stencil-for-stencil match.
     """
-    from gyaradax.utils import load_gkw_dump
-    from gyaradax.params import gkparams_from_input_and_geometry
+    from gyaradax.io.gkw import load_gkw_dump
+    from gyaradax.core.params import gkparams_from_input_and_geometry
 
     case_dir = os.path.join(GKW_CASES_DIR, "adiabat_collisions_weak_1step")
     input_dat = os.path.join(case_dir, "input.dat")

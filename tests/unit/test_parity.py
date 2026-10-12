@@ -11,19 +11,19 @@ import numpy as np
 import pytest
 from dataclasses import replace
 
-from gyaradax.diag import term_iii_fft_pack_roundtrip, term_iii_rhs
-from gyaradax.utils import load_runtime_params
-from gyaradax.cfl import estimate_linear_timestep, estimate_nl_timestep, estimate_timestep
-from gyaradax.precompute import linear_precompute
-from gyaradax.solver import (
+from gyaradax.diagnostics.diag import term_iii_fft_pack_roundtrip, term_iii_rhs
+from gyaradax.io.gkw import load_runtime_params
+from gyaradax.solver.cfl import estimate_linear_timestep, estimate_nl_timestep, estimate_timestep
+from gyaradax.operators.precompute import linear_precompute
+from gyaradax.solver.rk4 import (
     init_f,
     gksolve,
-    GKState,
     default_state,
 )
-from gyaradax.params import gkparams_from_input_dat
-from gyaradax.utils import load_gkw_k_dump
-from gyaradax.integrals import calculate_phi, calculate_phi_kinetic, geom_tensors
+from gyaradax.core.state import GKState
+from gyaradax.core.params import gkparams_from_input_dat
+from gyaradax.io.gkw import load_gkw_k_dump
+from gyaradax.operators.poisson import calculate_phi, calculate_phi_kinetic, geom_tensors
 
 
 @pytest.mark.parametrize("backend, use_z2z, mixed_precision", ALL_BACKENDS)
@@ -35,7 +35,7 @@ def test_init_f_trajectory_parity(
     Since GKW does not output t=0 data (K00), we prove parity by initializing
     from scratch in JAX and integrating forward to match the K01 dump.
     """
-    from gyaradax.utils import parse_input_dat
+    from gyaradax.io.gkw import parse_input_dat
 
     inp = parse_input_dat(f"{nonlin_dir}/input.dat")
     amp_init = inp.get("spcgeneral", {}).get("amp_init")
@@ -76,7 +76,7 @@ def test_init_f_kinetic_parity(
     short forward integration with flux diagnostics.
     """
     from gyaradax import gk_init, gksolve
-    from gyaradax.utils import parse_input_dat
+    from gyaradax.io.gkw import parse_input_dat
 
     n_species = 2
     input_path = os.path.join(kinetic_dir, "input.dat")
@@ -165,7 +165,7 @@ def test_term_iii_fft_roundtrip(nonlin_geom, nonlin_shape):
 @pytest.mark.parametrize("backend, use_z2z, mixed_precision", ALL_BACKENDS)
 def test_term_iii_rhs_shapes(nonlin_geom, nonlin_shape, backend, use_z2z, mixed_precision):
     """verify nonlinear term iii output shape."""
-    from gyaradax.params import GKParams
+    from gyaradax.core.params import GKParams
 
     df = jnp.zeros(nonlin_shape, dtype=jnp.complex128)
     params = GKParams(backend=backend, use_z2z=use_z2z, mixed_precision=mixed_precision)
@@ -292,7 +292,7 @@ def test_linear_cfl_adiabatic_is_loose(nonlin_geom, nonlin_shape):
 
 def test_combined_cfl_tighter_than_nl_alone(kinetic_dir, kinetic_geom, kinetic_shape):
     """Combined estimate must be <= nonlinear-only estimate for kinetic cases."""
-    from gyaradax.utils import K_files
+    from gyaradax.io.gkw import K_files
 
     ks = K_files(kinetic_dir)
     if len(ks) == 0:
@@ -330,7 +330,7 @@ def test_combined_cfl_matches_gkw_adaptive_dt(kinetic_dir, kinetic_geom, kinetic
     GKW runs CFL adaptation and records the actual dtim in dump metadata.
     Our combined estimate should produce a dt of similar magnitude.
     """
-    from gyaradax.utils import K_files
+    from gyaradax.io.gkw import K_files
 
     ks = K_files(kinetic_dir)
     if len(ks) == 0:
@@ -371,7 +371,7 @@ def test_adaptive_dt_kinetic_no_nan(
     Without CFL adaptation, dt=0.004 causes NaN within ~15 steps.
     With adaptive CFL, the simulation must remain finite.
     """
-    from gyaradax.utils import K_files
+    from gyaradax.io.gkw import K_files
 
     ks = K_files(kinetic_dir)
     if len(ks) == 0:

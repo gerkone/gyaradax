@@ -28,7 +28,7 @@ _early, _ = _p.parse_known_args()
 configure_runtime_env(device=_early.device)
 
 import jax
-from gyaradax.jax_config import enable_x64
+from gyaradax.core.jax_config import enable_x64
 
 enable_x64()
 import numpy as np
@@ -64,7 +64,7 @@ def main():
     # ── C1: _apply_parallel ────────────────────────────────────────────────
     print("\nC1: _apply_parallel")
 
-    # replicate closure logic from solver.py:758-768
+    # replicate closure logic from solver/rk4.py
     pre["s_shift"]
     pre["kx_shift"]
     pre["valid_shift"]
@@ -83,7 +83,7 @@ def main():
 
     # ── C2: _apply_vpar ───────────────────────────────────────────────────
     print("\nC2: _apply_vpar")
-    from gyaradax import stencils
+    from gyaradax.operators import stencils
 
     @jax.jit
     def _apply_vpar(field, coeffs):
@@ -133,7 +133,7 @@ def main():
 
     # ── C5: _compute_phi ─────────────────────────────────────────────────
     print("\nC5: _compute_phi")
-    from gyaradax.fields import _compute_phi
+    from gyaradax.operators.fields import _compute_phi
 
     @jax.jit
     def _phi():
@@ -144,7 +144,7 @@ def main():
 
     # ── C6: pack/unpack_half_spectrum ────────────────────────────────────
     print("\nC6: pack/unpack_half_spectrum")
-    from gyaradax.solver import pack_half_spectrum, unpack_half_spectrum
+    from gyaradax.operators.precompute import pack_half_spectrum, unpack_half_spectrum
 
     jind = pre["nl_jind"]
     mrad = int(pre["nl_mrad"])
@@ -176,7 +176,7 @@ def main():
 
     # ── C7: gkstep_single (full RK4 step) ───────────────────────────────────
     print("\nC7: gkstep_single")
-    from gyaradax.solver import gkstep_single, default_state
+    from gyaradax.solver.rk4 import gkstep_single, default_state
     from dataclasses import replace
 
     state = default_state(nky=df.shape[-1])

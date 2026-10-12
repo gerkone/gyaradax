@@ -55,8 +55,8 @@ import numpy as np
 import scipy.sparse.linalg as spla
 
 from gyaradax.backends import create_ops
-from gyaradax.solver import linear_precompute
-from gyaradax.simulate import gk_init
+from gyaradax.operators.precompute import linear_precompute
+from gyaradax.solver.driver import gk_init
 
 
 def _df_shape(geometry: Dict[str, jnp.ndarray], n_species: int, kinetic: bool) -> Tuple[int, ...]:
@@ -127,7 +127,7 @@ def _build_rhs_matvec(geometry, params, pre, ops):
     """Pure linear-operator matvec: L(dg) = linear_rhs(g_to_f(dg), fields(dg)).
 
     Identical to the operator integrated by ``gkstep_single`` when
-    ``params.non_linear`` is False (solver.py `_rhs`).
+    ``params.non_linear`` is False (rk4.py `_rhs`).
     """
 
     @jax.jit

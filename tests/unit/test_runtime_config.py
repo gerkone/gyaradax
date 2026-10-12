@@ -10,7 +10,7 @@ from types import ModuleType
 
 def _load_runtime_config() -> ModuleType:
     """Load runtime_config without importing the gyaradax package or JAX."""
-    path = Path(__file__).resolve().parents[2] / "gyaradax" / "runtime_config.py"
+    path = Path(__file__).resolve().parents[2] / "gyaradax" / "core" / "runtime_config.py"
     spec = importlib.util.spec_from_file_location("_gyaradax_runtime_config_test", path)
     assert spec is not None
     assert spec.loader is not None

@@ -20,19 +20,20 @@ import numpy as np
 import pytest
 from dataclasses import replace
 
-from gyaradax.params import (
+from gyaradax.core.params import (
     GKParams,
     gkparams_from_config,
     gkparams_from_input_and_geometry,
     load_config,
 )
 from gyaradax.geometry import compute_geometry_from_input
-from gyaradax.precompute import linear_precompute
-from gyaradax.solver import init_f, default_state
-from gyaradax.simulate import gk_run
-from gyaradax.integrals import calculate_em_fluxes, precompute_bpar
-from gyaradax.fields import _compute_fields, g_to_f
-from gyaradax.utils import load_gkw_dump, parse_input_dat
+from gyaradax.operators.precompute import linear_precompute
+from gyaradax.solver.rk4 import init_f, default_state
+from gyaradax.solver.driver import gk_run
+from gyaradax.diagnostics.fluxes import calculate_em_fluxes
+from gyaradax.operators.ampere import precompute_bpar
+from gyaradax.operators.fields import _compute_fields, g_to_f
+from gyaradax.io.gkw import load_gkw_dump, parse_input_dat
 from gyaradax import load_geometry
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -433,7 +434,8 @@ class TestAmpereCandyMoment:
 
     @staticmethod
     def _gammas(geom_sp):
-        from gyaradax.integrals import _species_bessel_gamma, ampere_gamma_num
+        from gyaradax.operators.poisson import _species_bessel_gamma
+        from gyaradax.operators.ampere import ampere_gamma_num
 
         gamma_num = np.asarray(ampere_gamma_num(geom_sp)).squeeze()
         _, gamma0 = _species_bessel_gamma(geom_sp)
@@ -468,7 +470,7 @@ class TestAmpereCandyMoment:
     def test_adiabatic_5d_matches_kinetic_6d_diag(self):
         """5D (adiabatic) and 6D (kinetic) paths give the same Ampere diagonal
         for identical single-ion parameters, and it is the numerical one."""
-        from gyaradax.integrals import _species_bessel_gamma
+        from gyaradax.operators.poisson import _species_bessel_gamma
 
         geometry, geom_sp = _candy_geometry(nvpar=16, nmu=8, vpar_max=3.0)
         common: dict[str, Any] = dict(
@@ -591,7 +593,7 @@ class TestAmpereSolve:
 
     def test_apar_output_shape(self, em_full_setup):
         """A_par solve returns (ns, nkx, nky) array."""
-        from gyaradax.integrals import calculate_apar
+        from gyaradax.operators.ampere import calculate_apar
 
         geometry, params, pre, shape = em_full_setup
         df = jnp.zeros(shape, dtype=jnp.complex128)
@@ -601,7 +603,7 @@ class TestAmpereSolve:
 
     def test_apar_zero_df_gives_zero(self, em_full_setup):
         """Zero distribution function gives zero A_parallel."""
-        from gyaradax.integrals import calculate_apar
+        from gyaradax.operators.ampere import calculate_apar
 
         geometry, params, pre, shape = em_full_setup
         df = jnp.zeros(shape, dtype=jnp.complex128)
@@ -610,7 +612,7 @@ class TestAmpereSolve:
 
     def test_apar_dtype_complex128(self, em_full_setup):
         """A_par should be complex128 (same as phi)."""
-        from gyaradax.integrals import calculate_apar
+        from gyaradax.operators.ampere import calculate_apar
 
         geometry, params, pre, shape = em_full_setup
         df = jnp.ones(shape, dtype=jnp.complex128) * 1e-4
@@ -619,8 +621,8 @@ class TestAmpereSolve:
 
     def test_compute_fields_apar_uses_mixed_g_source(self):
         """_compute_fields A_parallel matches direct Ampere solve from mixed g."""
-        from gyaradax.fields import _compute_fields
-        from gyaradax.integrals import calculate_apar
+        from gyaradax.operators.fields import _compute_fields
+        from gyaradax.operators.ampere import calculate_apar
 
         geometry, params, pre, shape = self._a_only_setup("em_cbc_apar")
         dg = self._random_complex(shape, seed=101)
@@ -636,8 +638,8 @@ class TestAmpereSolve:
 
     def test_apar_from_physical_f_differs_from_mixed_g_source(self):
         """Passing physical f into Ampere double-counts g2f and changes A_parallel."""
-        from gyaradax.fields import g_to_f
-        from gyaradax.integrals import calculate_apar
+        from gyaradax.operators.fields import g_to_f
+        from gyaradax.operators.ampere import calculate_apar
 
         geometry, params, pre, shape = self._a_only_setup("em_cbc_apar")
         dg = self._random_complex(shape, seed=202)
@@ -653,7 +655,7 @@ class TestAmpereSolve:
     @pytest.mark.parametrize("case_name", ["em_adiabat_apar", "em_cbc_apar"])
     def test_phi_from_g_equals_phi_from_f_for_a_only_symmetric_vpar(self, case_name):
         """A-only g2f correction is odd in v_parallel and cancels from phi."""
-        from gyaradax.fields import _compute_fields, _compute_phi, g_to_f
+        from gyaradax.operators.fields import _compute_fields, _compute_phi, g_to_f
 
         geometry, params, pre, shape = self._a_only_setup(case_name)
         dg = self._random_complex(shape, seed=303)
@@ -719,7 +721,7 @@ class TestBParallelLowRiskDeltas:
 
     def test_kinetic_bpar_only_compute_fields_returns_bpar_without_apar(self):
         """Bpar-only field solve returns finite phi/Bpar and no A_parallel."""
-        from gyaradax.fields import _compute_fields
+        from gyaradax.operators.fields import _compute_fields
 
         geometry, params, pre, shape = self._bpar_only_setup()
         dg = self._random_complex(shape, seed=505)
@@ -737,7 +739,7 @@ class TestBParallelLowRiskDeltas:
     def test_kinetic_bpar_only_jax_rhs_finite_with_x_and_xi_terms(self):
         """JAX linear RHS accepts apar=None,bpar!=None and includes Terms X/XI."""
         from gyaradax.backends._jax import JAXOps
-        from gyaradax.fields import _compute_fields
+        from gyaradax.operators.fields import _compute_fields
 
         geometry, params, pre, shape = self._bpar_only_setup()
         dg = self._random_complex(shape, seed=606)
@@ -804,8 +806,9 @@ class TestBParallelLowRiskDeltas:
 
     def test_bpar_coupled_fields_same_from_g_and_physical_f_for_supported_case(self):
         """Current Waltz Bpar phi/Bpar solve is invariant to g->f by parity."""
-        from gyaradax.fields import g_to_f
-        from gyaradax.integrals import calculate_apar, calculate_phi
+        from gyaradax.operators.fields import g_to_f
+        from gyaradax.operators.ampere import calculate_apar
+        from gyaradax.operators.poisson import calculate_phi
 
         geometry, params, pre, shape = self._bpar_waltz_setup()
         dg = self._random_complex(shape, seed=404)
@@ -887,7 +890,7 @@ class TestBParallelLowRiskDeltas:
 
     def test_adiabatic_em_flux_uses_j0_gyroaveraged_apar(self):
         """5D EM flux diagnostic uses J0*A_parallel, not bare A_parallel."""
-        from gyaradax.integrals import calculate_em_fluxes
+        from gyaradax.diagnostics.fluxes import calculate_em_fluxes
 
         case_dir = _load_em_case("em_adiabat_apar")
         geometry = _load_em_geometry(case_dir)
@@ -953,7 +956,7 @@ class TestG2FTransform:
 
     def test_g2f_identity_when_no_em(self):
         """When nlapar=False, g=f (identity transform)."""
-        from gyaradax.fields import g_to_f
+        from gyaradax.operators.fields import g_to_f
 
         params = GKParams(nlapar=False)
         dg = jnp.ones((32, 8, 16, 1, 1), dtype=jnp.complex128)
@@ -964,7 +967,7 @@ class TestG2FTransform:
 
     def test_g2f_nonzero_correction(self):
         """When nlapar=True and apar!=0, g!=f."""
-        from gyaradax.fields import g_to_f
+        from gyaradax.operators.fields import g_to_f
 
         case_dir = _load_em_case("em_bpar_waltz")
         geometry = _load_em_geometry(case_dir)
@@ -986,7 +989,7 @@ class TestG2FTransform:
 
     def test_g2f_roundtrip(self):
         """f -> g -> f should be identity."""
-        from gyaradax.fields import f_to_g, g_to_f
+        from gyaradax.operators.fields import f_to_g, g_to_f
 
         case_dir = _load_em_case("em_bpar_waltz")
         geometry = _load_em_geometry(case_dir)
@@ -1052,7 +1055,7 @@ class TestEMBackwardsCompat:
 
     def test_gkstep_nlapar_false_matches_es(self):
         """gkstep_single with nlapar=False produces finite results (backwards compat)."""
-        from gyaradax.solver import gkstep_single
+        from gyaradax.solver.rk4 import gkstep_single
 
         case_dir = _load_em_case("em_bpar_waltz")
         geometry = _load_em_geometry(case_dir)
@@ -1118,7 +1121,7 @@ class TestEMFDSParity:
         )
         assert result.returncode == 0, f"GKW failed: {result.stderr[-200:]}"
 
-        from gyaradax.utils import load_gkw_dump as _load_dump
+        from gyaradax.io.gkw import load_gkw_dump as _load_dump
 
         geom = load_geometry(tmpdir)
         params = gkparams_from_input_and_geometry(os.path.join(tmpdir, "input.dat"), geom)
@@ -1139,7 +1142,7 @@ class TestEMFDSParity:
         df = init_f(geom, finit="cosine2", amp_init_real=params.amp_init, n_species=nsp)
         state = default_state(nky=nky)
         for s in range(params.naverage):
-            from gyaradax.solver import gkstep_single as _step
+            from gyaradax.solver.rk4 import gkstep_single as _step
 
             df, _, state = _step(df, geom, params, state, pre)
 
@@ -1235,7 +1238,7 @@ class TestEMGKWValidation:
 
         gyaradax doesn't currently surface per-run EM-only fluxes through
         `gk_run` (only total / ES fluxes are returned). A dedicated
-        `calculate_em_fluxes` exists in `integrals.py` but is not hooked
+        `calculate_em_fluxes` exists in `diagnostics/fluxes.py` but is not hooked
         into `save_dumps`. Once that's wired up this test can become a
         proper EM-flux numerical comparison; for now it exercises the code
         path and checks finiteness.

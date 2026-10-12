@@ -3,7 +3,7 @@ import re
 import pytest
 import numpy as np
 from gyaradax import load_geometry
-from gyaradax.jax_config import enable_x64
+from gyaradax.core.jax_config import enable_x64
 
 enable_x64()
 
@@ -56,8 +56,8 @@ def noisy_case(cfg_name, grid, overrides=None, seed=0, **param_kw):
     import jax.numpy as jnp
 
     from gyaradax.geometry import compute_geometry_from_config
-    from gyaradax.params import gkparams_from_config, load_config
-    from gyaradax.simulate import gk_init
+    from gyaradax.core.params import gkparams_from_config, load_config
+    from gyaradax.solver.driver import gk_init
 
     cfg = load_config(os.path.join(REPO_ROOT, "configs", cfg_name))
     for key, value in grid.items():

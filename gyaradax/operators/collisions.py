@@ -30,8 +30,8 @@ import jax
 import jax.numpy as jnp
 from jax.scipy.special import erf
 
-from gyaradax.constants import EPS
-from gyaradax.params import GKParams
+from gyaradax.core.constants import EPS
+from gyaradax.core.params import GKParams
 
 
 def _erfp(x):

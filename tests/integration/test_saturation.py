@@ -5,13 +5,14 @@ import numpy as np
 import jax.numpy as jnp
 
 from gyaradax import load_config
-from gyaradax.simulate import (
+from gyaradax.solver.driver import (
     gk_from_config,
     gksimulate,
     _compute_phi_for_init,
 )
-from gyaradax.solver import GKState, mode_amplitude
-from gyaradax.utils import load_gkw_k_dump, read_gkw_dump_time
+from gyaradax.core.state import GKState
+from gyaradax.solver.rk4 import mode_amplitude
+from gyaradax.io.gkw import load_gkw_k_dump, read_gkw_dump_time
 
 
 @pytest.mark.skip(

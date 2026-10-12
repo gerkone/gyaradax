@@ -17,12 +17,12 @@ import numpy as np
 from jax import ffi
 from jax.sharding import PartitionSpec
 
+import gyaradax.operators.stencils as stencils
 import gyaradax.sharding as sharding
-import gyaradax.stencils as stencils
 from gyaradax.backends.ops import SolverOps
-from gyaradax.collisions import collision_term, collisions_on
-from gyaradax.fields import g_to_f
-from gyaradax.state import GKPre
+from gyaradax.core.state import GKPre
+from gyaradax.operators.collisions import collision_term, collisions_on
+from gyaradax.operators.fields import g_to_f
 
 log = logging.getLogger(__name__)
 

@@ -10,9 +10,9 @@ from conftest import noisy_case  # type: ignore[import-not-found]
 
 import gyaradax.backends._jax as jax_backend
 from gyaradax.backends import create_ops
-from gyaradax.fields import _compute_fields
-from gyaradax.precompute import linear_precompute
-from gyaradax.solver import gksolve
+from gyaradax.operators.fields import _compute_fields
+from gyaradax.operators.precompute import linear_precompute
+from gyaradax.solver.rk4 import gksolve
 
 GRID = dict(nvpar=8, nmu=2, ns=8, nkx=11, nky=5)
 

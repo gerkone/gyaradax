@@ -12,8 +12,10 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from gyaradax.integrals import calculate_fluxes, geom_tensors
-from gyaradax.solver import default_state, gksolve, linear_precompute
+from gyaradax.diagnostics.fluxes import calculate_fluxes
+from gyaradax.operators.poisson import geom_tensors
+from gyaradax.operators.precompute import linear_precompute
+from gyaradax.solver.rk4 import default_state, gksolve
 
 from .rules import RULES
 from .saturation import ql_flux
@@ -178,8 +180,8 @@ def _linear_harvest(
     gt = geom_tensors(geom)
     diag_df = df_final
     if params.nlapar:
-        from gyaradax.fields import _compute_fields, g_to_f
-        from gyaradax.integrals import calculate_em_fluxes
+        from gyaradax.operators.fields import _compute_fields, g_to_f
+        from gyaradax.diagnostics.fluxes import calculate_em_fluxes
 
         _phi2, apar, _bpar = _compute_fields(df_final, geom, params, pre)
         diag_df = g_to_f(df_final, apar, params, pre)
@@ -281,8 +283,8 @@ def harvest_linear_from_config(
     """
     import dataclasses
 
-    from gyaradax.cfl import estimate_linear_timestep
-    from gyaradax.simulate import gk_from_config
+    from gyaradax.solver.cfl import estimate_linear_timestep
+    from gyaradax.solver.driver import gk_from_config
 
     from .linear_pipeline import _harvest
 

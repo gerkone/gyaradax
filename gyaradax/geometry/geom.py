@@ -327,7 +327,7 @@ def geometry_spec_from_input_dat(input_dat_path: str) -> GeometrySpec:
     Preserves the historical ``compute_geometry_from_input`` defaults,
     including absent ``geom_type`` -> ``s-alpha``.
     """
-    from gyaradax.utils import parse_input_dat
+    from gyaradax.io.gkw import parse_input_dat
 
     inp = parse_input_dat(input_dat_path)
     geom_sec = inp.get("geom", {})
@@ -427,7 +427,7 @@ def geometry_from_geom_dat_and_input(input_dat_path: str) -> Dict[str, Any]:
     Use this for geometry types not supported by the analytic models
     (e.g. slab_periodic) when reference/geom.dat is available.
     """
-    from gyaradax.utils import parse_input_dat, load_geom_dat_file
+    from gyaradax.io.gkw import parse_input_dat, load_geom_dat_file
 
     data_dir = os.path.dirname(input_dat_path)
     ref_dir = os.path.join(data_dir, "reference")

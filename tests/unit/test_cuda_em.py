@@ -15,9 +15,9 @@ import pytest
 from conftest import HAS_CUDA, noisy_case, rel_l2  # type: ignore[import-not-found]
 
 from gyaradax.backends import create_ops
-from gyaradax.fields import _compute_fields, g_to_f
-from gyaradax.precompute import linear_precompute
-from gyaradax.solver import gksolve
+from gyaradax.operators.fields import _compute_fields, g_to_f
+from gyaradax.operators.precompute import linear_precompute
+from gyaradax.solver.rk4 import gksolve
 
 pytestmark = pytest.mark.skipif(not HAS_CUDA, reason="CUDA not available")
 

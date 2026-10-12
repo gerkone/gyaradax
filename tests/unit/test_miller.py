@@ -5,7 +5,7 @@ import numpy as np
 import pytest
 
 from gyaradax.geometry import compute_geometry
-from gyaradax.utils import load_geom_dat_file
+from gyaradax.io.gkw import load_geom_dat_file
 
 
 GKW_CASE = os.path.join(

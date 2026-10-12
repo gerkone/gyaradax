@@ -1,14 +1,15 @@
 import jax.numpy as jnp
 from typing import Dict, Tuple, Any
-from gyaradax.precompute import (
+from gyaradax.core.params import GKParams
+from gyaradax.operators.precompute import (
     build_jind,
     extended_firstdim_fft_size,
     extended_seconddim_fft_size,
     linear_precompute,
+    pack_half_spectrum,
+    unpack_half_spectrum,
 )
-from gyaradax.solver import nonlinear_term_iii
-from gyaradax.utils import pack_half_spectrum, unpack_half_spectrum
-from gyaradax.params import GKParams
+from gyaradax.solver.rk4 import nonlinear_term_iii
 
 
 def kx0_mode_columns(mode_label: jnp.ndarray, kxrh: jnp.ndarray) -> Tuple[int, jnp.ndarray]:
@@ -50,7 +51,7 @@ def term_iii_rhs(
     if params is None:
         params = GKParams()
     pre = linear_precompute(geometry, params)
-    from gyaradax.integrals import calculate_phi
+    from gyaradax.operators.poisson import calculate_phi
 
     phi = calculate_phi(geometry, df, params=params)
     return nonlinear_term_iii(
@@ -118,3 +119,15 @@ def get_diagnostics(
         "time": state.time,
         "step": state.step,
     }
+
+
+def phi_spectra(phi, geometry):
+    """(ky_spec, kx_spec) of a spectral phi (s, kx, ky), field-line averaged as in GKW."""
+    # ky_spec = ds * sum_{s,kx} |phi|^2; kx_spec weights ky > 0 twice (parseval [1, 2, 2, ...])
+    ds = float(jnp.asarray(geometry["ints"])[0])
+    nky = phi.shape[-1]
+    parseval_ky = jnp.array([1.0] + [2.0] * (nky - 1))
+    phi_sq = jnp.abs(phi) ** 2
+    ky_spec = jnp.sum(ds * phi_sq, axis=(0, 1))
+    kx_spec = jnp.sum(ds * phi_sq * parseval_ky[None, None, :], axis=(0, 2))
+    return ky_spec, kx_spec

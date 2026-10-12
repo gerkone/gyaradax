@@ -13,13 +13,15 @@ import os
 import pytest
 from dataclasses import replace
 
-from gyaradax.precompute import build_jind, linear_precompute
-from gyaradax.solver import gksolve, GKState, default_state
-from gyaradax.params import GKParams, gkparams_from_input_dat
-from gyaradax.utils import load_gkw_k_dump
-from gyaradax.integrals import calculate_phi_kinetic, calculate_fluxes_kinetic
+from gyaradax.operators.precompute import build_jind, linear_precompute
+from gyaradax.solver.rk4 import gksolve, default_state
+from gyaradax.core.state import GKState
+from gyaradax.core.params import GKParams, gkparams_from_input_dat
+from gyaradax.io.gkw import load_gkw_k_dump
+from gyaradax.operators.poisson import calculate_phi_kinetic
+from gyaradax.diagnostics.fluxes import calculate_fluxes_kinetic
 from gyaradax.backends import create_ops
-from gyaradax.state import GKPre
+from gyaradax.core.state import GKPre
 
 
 def _make_pre_bessel(bessel, nkx=4, nky=3, ns=4):
@@ -387,7 +389,7 @@ def test_kinetic_flux_trajectory(kinetic_dir, kinetic_geom, kinetic_shape):
     Note: This test is backend-agnostic as it only tests integral calculations
     (calculate_phi_kinetic, calculate_fluxes_kinetic), not the solver backend.
     """
-    from gyaradax.utils import K_files
+    from gyaradax.io.gkw import K_files
 
     n_species = 2
     ks = K_files(kinetic_dir)
@@ -439,7 +441,7 @@ def test_adiabatic_fallback_identity(adiabatic_dir, adiabatic_geom, adiabatic_sh
     different equations. This test validates that the kinetic path is self-consistent
     when called with single-species data (correct shapes, finite output).
     """
-    from gyaradax.utils import K_files
+    from gyaradax.io.gkw import K_files
 
     ks = K_files(adiabatic_dir)
     if len(ks) == 0:

@@ -1,7 +1,7 @@
 """Loaded/reference GKW geometry model.
 
 This module contains the file-backed geometry construction used by
-``gyaradax.utils.load_geometry``.  It intentionally reads GKW reference/output
+``gyaradax.io.gkw.load_geometry``.  It intentionally reads GKW reference/output
 files directly and does not route through analytic ``compute_geometry``.
 """
 
@@ -18,8 +18,7 @@ from gyaradax.geometry.topology import (
     _build_parallel_shift_maps,
     _build_pos_par_grid_classes,
 )
-from gyaradax.gkw_input import as_int, species_blocks
-from gyaradax.utils import load_geom_dat_file, parse_input_dat
+from gyaradax.io.gkw import as_int, load_geom_dat_file, parse_input_dat, species_blocks
 
 
 def _add_loaded_species_metadata(geometry: dict[str, Any], input_data: dict[str, Any]) -> None:

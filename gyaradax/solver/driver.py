@@ -10,29 +10,26 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from gyaradax.jax_config import enable_x64
+from gyaradax.core.jax_config import enable_x64
 
 enable_x64()
 
-from gyaradax.utils import load_geometry
+import gyaradax.diagnostics.telemetry as telemetry_mod
+from gyaradax.core.params import gkparams_from_config, load_config, GKParams
+from gyaradax.core.state import GKPre, GKState
+from gyaradax.diagnostics.fluxes import get_integrals
 from gyaradax.geometry import compute_geometry_from_config
-from gyaradax.integrals import (
-    get_integrals,
-    calculate_phi,
-)
-from gyaradax.params import gkparams_from_config, load_config, GKParams
-from gyaradax.precompute import linear_precompute
-from gyaradax.solver import (
+from gyaradax.io.gkw import load_geometry
+from gyaradax.io.rundir import save_dumps as save_dumps_fn
+from gyaradax.operators.fields import _compute_fields, g_to_f
+from gyaradax.operators.poisson import calculate_phi
+from gyaradax.operators.precompute import linear_precompute
+from gyaradax.solver.rk4 import (
     gksolve,
     init_f,
-    GKState,
-    GKPre,
     default_state,
     mode_amplitude,
 )
-import gyaradax.telemetry as telemetry_mod
-from gyaradax.fields import _compute_fields, g_to_f
-from gyaradax.utils import save_dumps as save_dumps_fn
 
 
 def _compute_phi_for_init(df, geometry, params):
@@ -617,8 +614,8 @@ def gk_from_gkw_dir(
     Args:
         k_index: which K-file to load (default -1, i.e. the last one).
     """
-    from gyaradax.params import gkparams_from_input_and_geometry
-    from gyaradax.utils import K_files, load_gkw_k_dump, read_gkw_dump_time
+    from gyaradax.core.params import gkparams_from_input_and_geometry
+    from gyaradax.io.gkw import K_files, load_gkw_k_dump, read_gkw_dump_time
 
     input_dat = os.path.join(gkw_dir, "input.dat")
     geometry = load_geometry(gkw_dir)

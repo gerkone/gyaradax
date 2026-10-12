@@ -1,10 +1,65 @@
+"""GKW I/O: dump readers, input.dat / geom.dat parsing, GKW run directory -> YAML."""
+
+from __future__ import annotations
+
 import os
 import re
-import numpy as np
-import jax.numpy as jnp
-from typing import Tuple, Dict, Any, cast
+from collections.abc import Mapping
+from typing import Any, Dict, Tuple
 
-from gyaradax.gkw_input import as_bool, as_float, as_int, species_blocks
+import jax.numpy as jnp
+import numpy as np
+
+ParsedInput = Mapping[str, Mapping[str, Any]]
+
+_TRUE_STRINGS = (".true.", "true", "t")
+_FALSE_STRINGS = (".false.", "false", "f")
+
+
+def as_float(value: Any, default: float) -> float:
+    """Coerce a parsed namelist scalar to float, preserving default-on-None."""
+    return float(default) if value is None else float(value)
+
+
+def as_int(value: Any, default: int) -> int:
+    """Coerce a parsed namelist scalar to int, preserving default-on-None."""
+    return int(default) if value is None else int(value)
+
+
+def as_bool(value: Any, default: bool) -> bool:
+    """Coerce a parsed namelist scalar to bool using current GKW conventions.
+
+    Parsed booleans are already real ``bool`` values.  String handling is kept
+    for callers that pass raw or manually constructed parsed dictionaries.  An
+    unrecognized non-bool value falls back to the supplied default, matching the
+    local helper behavior previously used by ``load_runtime_params``.
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lv = value.strip().lower()
+        if lv in _TRUE_STRINGS:
+            return True
+        if lv in _FALSE_STRINGS:
+            return False
+    return bool(default)
+
+
+def species_section_keys(parsed: ParsedInput, limit: int | None = None) -> tuple[str, ...]:
+    """Return repeated ``&SPECIES`` section keys in parser insertion order.
+
+    ``parse_input_dat`` names repeated sections ``species``, ``species0``,
+    ``species00``, ... by repeatedly appending ``0``.  This helper deliberately
+    preserves that existing key-order quirk by iterating the parsed mapping in
+    insertion order and filtering keys with the historical ``startswith`` rule.
+    """
+    keys = tuple(k for k in parsed if k.startswith("species"))
+    return keys if limit is None else keys[:limit]
+
+
+def species_blocks(parsed: ParsedInput, limit: int | None = None) -> tuple[Mapping[str, Any], ...]:
+    """Return repeated ``&SPECIES`` blocks in parser insertion order."""
+    return tuple(parsed[key] for key in species_section_keys(parsed, limit=limit))
 
 
 def read_gkw_dump_time(dat_path: str) -> float:
@@ -95,277 +150,6 @@ def poten_files(directory):
     poten_files = sorted([file for file in files if file.startswith("Poten")])
     timestep_slices = [int(f.replace("Poten", "")) for f in poten_files]
     return poten_files, np.array(timestep_slices) - 1
-
-
-def _compute_em_fluxes_arr(df, geometry, params, pre, fluxes_shape):
-    """Compute magnetic-flutter EM fluxes as a numpy array shaped like the ES
-    fluxes array. Returns zeros when nlapar is off, params/pre missing, or
-    apar/bpar are unavailable.
-    """
-    zero = np.zeros(fluxes_shape, dtype=np.float64)
-    if params is None or pre is None or not getattr(params, "nlapar", False):
-        return zero
-    # field imports here to avoid a top-level cycle
-    from gyaradax.fields import _compute_fields, g_to_f
-    from gyaradax.integrals import calculate_em_fluxes
-
-    _, apar, bpar = _compute_fields(df, geometry, params, pre)
-    if apar is None:
-        return zero
-    df_f = g_to_f(df, apar, params, pre)
-    res = calculate_em_fluxes(geometry, df_f, apar, params=params, bpar=bpar, pre=pre)
-    if len(fluxes_shape) == 1:  # (3,)
-        em_p, em_e, em_v = (np.asarray(r, dtype=np.float64) for r in res)
-        out = np.zeros(fluxes_shape, dtype=np.float64)
-        out[0] = float(em_p)
-        out[1] = float(em_e)
-        out[2] = float(em_v)
-    else:  # 6D path returns (nsp, 3)
-        arr = np.asarray(res, dtype=np.float64)
-        out = np.zeros(fluxes_shape, dtype=np.float64)
-        out[..., :3] = arr
-    return out
-
-
-def save_dumps(
-    output_dir: str,
-    df: jnp.ndarray,
-    phi: jnp.ndarray,
-    fluxes: Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray],
-    state: Any,
-    geometry: Dict[str, jnp.ndarray],
-    save_dumps: bool = True,
-    params: Any = None,
-    pre: Any = None,
-    dt_info: Any = None,
-    block_start_step: int = 0,
-    block_start_time: float = 0.0,
-    snapshot_f32: bool = False,
-):
-    """Handle simulation output. Saves heavy 5D distribution snapshots if requested
-    and appends diagnostic history to persistent files.
-
-    When ``params`` and ``pre`` are supplied and ``params.nlapar`` is set, also
-    writes ``fluxes_em.npz`` with the magnetic-flutter EM fluxes computed from
-    the final (f, A_par, B_par). When ``dt_info`` is supplied (dict with per-step
-    ``dt_used``/``dt_nl``/``dt_lin`` arrays and scalar ``dt_input``), also
-    appends a per-step ``dt_history.npz`` matching GKW's debug4 columns:
-    step, time, dt_used, dt_nl, dt_lin, dt_input.
-    """
-    os.makedirs(output_dir, exist_ok=True)
-
-    # spectra use field-line-averaged |phi|^2 (GKW convention):
-    #   ky_spec = ds * sum_{s,kx} |phi|^2
-    #   kx_spec = ds * sum_{s,ky} parseval_ky * |phi|^2,  parseval_ky = [1, 2, 2, ...]
-    ds = float(jnp.asarray(geometry["ints"])[0])
-    nky = phi.shape[-1]
-    parseval_ky = jnp.array([1.0] + [2.0] * (nky - 1))
-    phi_sq = jnp.abs(phi) ** 2
-    ky_spec = jnp.sum(ds * phi_sq, axis=(0, 1))
-    kx_spec = jnp.sum(ds * phi_sq * parseval_ky[None, None, :], axis=(0, 2))
-
-    fluxes_arr = np.asarray(fluxes)
-    if fluxes_arr.ndim == 0 or (fluxes_arr.ndim == 1 and fluxes_arr.shape[0] != 3):
-        fluxes_arr = np.array([fluxes[0], fluxes[1], fluxes[2]])
-
-    # em fluxes shape matches ES: (3,) for 5D df, (nsp, 3) for 6D, including
-    # the EM vflux (flutter momentum flux). A_par + B_par contributions are
-    # summed into one triple; GKW writes them as separate fluxes_em/fluxes_bpar.
-    em_fluxes_arr = _compute_em_fluxes_arr(df, geometry, params, pre, fluxes_arr.shape)
-
-    diags = {
-        "fluxes": fluxes_arr,
-        "fluxes_em": em_fluxes_arr,
-        "kx_spec": np.array(kx_spec),
-        "ky_spec": np.array(ky_spec),
-        "time": np.array(state.time),
-        "growth": np.array(state.last_growth_rate),
-        "step": np.array(state.step),
-    }
-
-    def _append_to_npz(filename, new_data):
-        path = os.path.join(output_dir, filename)
-        current_step = int(state.step)
-        if os.path.exists(path):
-            try:
-                with np.load(path) as data:
-                    # truncate at current_step so resume doesn't double-append
-                    if "step" in data.files:
-                        mask = data["step"] < current_step
-                        updated = {
-                            k: np.append(data[k][mask], [new_data[k]], axis=0) for k in data.files
-                        }
-                    else:
-                        updated = {k: np.append(data[k], [new_data[k]], axis=0) for k in data.files}
-            except (IOError, ValueError):
-                updated = {k: np.array([v]) for k, v in new_data.items()}
-        else:
-            updated = {k: np.array([v]) for k, v in new_data.items()}
-        np.savez(path, **updated)
-
-    # include step and time in every diagnostic file for self-description
-    common = {"step": diags["step"], "time": diags["time"]}
-
-    _append_to_npz("fluxes.npz", {"fluxes": diags["fluxes"], **common})
-    _append_to_npz("kyspec.npz", {"ky_spec": diags["ky_spec"], **common})
-    _append_to_npz("kxspec.npz", {"kx_spec": diags["kx_spec"], **common})
-    _append_to_npz("growth.npz", {"growth": diags["growth"], **common})
-    # EM flux kept in a separate file so existing consumers of fluxes.npz are
-    # unaffected; with nlapar off the array is zeros.
-    _append_to_npz("fluxes_em.npz", {"fluxes_em": diags["fluxes_em"], **common})
-
-    # dt_history: per-step record of the adaptive CFL controller, mirroring
-    # GKW's debug4 dt_history.dat for diagnosing dt ramp-up on resume.
-    last_dt = None
-    if dt_info is not None:
-        dt_used = np.asarray(dt_info["dt_used"]).reshape(-1)
-        dt_nl = np.asarray(dt_info["dt_nl"]).reshape(-1)
-        dt_lin = np.asarray(dt_info["dt_lin"]).reshape(-1)
-        dt_input = float(np.asarray(dt_info["dt_input"]))
-        n = int(dt_used.shape[0])
-        if n > 0:
-            # cumulative time within the block; step is the absolute step at
-            # the END of each substep.
-            step_arr = (
-                np.asarray(block_start_step, dtype=np.int64) + 1 + np.arange(n, dtype=np.int64)
-            )
-            time_arr = float(block_start_time) + np.cumsum(dt_used)
-            dt_input_arr = np.full((n,), dt_input, dtype=np.float64)
-            _append_dt_path = os.path.join(output_dir, "dt_history.npz")
-            new_data: dict[str, Any] = {
-                "step": step_arr,
-                "time": time_arr,
-                "dt_used": dt_used.astype(np.float64),
-                "dt_nl": dt_nl.astype(np.float64),
-                "dt_lin": dt_lin.astype(np.float64),
-                "dt_input": dt_input_arr,
-            }
-            if os.path.exists(_append_dt_path):
-                try:
-                    with np.load(_append_dt_path) as data:
-                        if "step" in data.files:
-                            mask = data["step"] < int(step_arr[0])
-                            updated = {
-                                k: np.concatenate([data[k][mask], new_data[k]]) for k in new_data
-                            }
-                        else:
-                            updated = {k: np.concatenate([data[k], new_data[k]]) for k in new_data}
-                except (IOError, ValueError):
-                    updated = new_data
-            else:
-                updated = new_data
-            np.savez(_append_dt_path, **cast(Any, updated))
-            last_dt = float(dt_used[-1])
-
-    if save_dumps:
-        ckpt_name = f"step_{int(state.step):06d}.npz"
-        path = os.path.join(output_dir, ckpt_name)
-        # halve on-disk size: 5D df/phi to complex64, diagnostics stay f64
-        df_out = np.asarray(df)
-        phi_out = np.asarray(phi)
-        if snapshot_f32:
-            df_out = df_out.astype(np.complex64)
-            phi_out = phi_out.astype(np.complex64)
-        checkpoint: dict[str, Any] = {
-            "df": df_out,
-            "phi": phi_out,
-            "fluxes": fluxes_arr,
-            "time": np.array(state.time),
-            "step": np.array(state.step),
-            "accumulated_norm_factor": np.array(state.accumulated_norm_factor),
-            "window_start_amp": np.array(state.window_start_amp),
-            "last_growth_rate": np.array(state.last_growth_rate),
-            "kx_spec": diags["kx_spec"],
-            "ky_spec": diags["ky_spec"],
-        }
-        # record last dt so resume can warm-start the CFL controller from the
-        # saturated state instead of params.dt.
-        if last_dt is not None:
-            checkpoint["dt_last"] = np.array(last_dt, dtype=np.float64)
-        np.savez(path, **cast(Any, checkpoint))
-
-
-def save_run_metadata(output_dir: str, config: Any, geometry: Dict[str, Any]) -> None:
-    """Write config.yaml and geometry.pkl alongside a run's dumps.
-
-    Downstream preprocessing/inference otherwise reconstructs a trajectory from
-    GKW's ``input.dat`` (physical parameters) and ``geom.dat`` (geometry), which
-    gyaradax runs do not produce. This records the equivalent information: the
-    run configuration as ``config.yaml`` and the full geometry dict as
-    ``geometry.pkl`` (jax arrays converted to numpy, mirroring how the dataset
-    metadata stores ``geometry``).
-    """
-    import pickle
-
-    from omegaconf import OmegaConf
-
-    os.makedirs(output_dir, exist_ok=True)
-    if config is not None:
-        cfg = config if OmegaConf.is_config(config) else OmegaConf.create(config)
-        OmegaConf.save(cfg, os.path.join(output_dir, "config.yaml"))
-
-    np_geom: Dict[str, Any] = {}
-    for key, value in geometry.items():
-        try:
-            np_geom[key] = np.asarray(value)
-        except Exception:
-            np_geom[key] = value  # keep non-array metadata (labels, classes) as-is
-    with open(os.path.join(output_dir, "geometry.pkl"), "wb") as handle:
-        pickle.dump(np_geom, handle)
-
-
-def load_checkpoint(path: str) -> Dict[str, Any]:
-    """Load a .npz checkpoint into a dictionary of arrays."""
-    with np.load(path) as data:
-        return {k: jnp.array(v) for k, v in data.items()}
-
-
-def print_params(params, grid_shape=None):
-    """Pretty-print GKParams and optional grid shape."""
-    d = vars(params)
-
-    solver_keys = [
-        "dt",
-        "naverage",
-        "non_linear",
-        "adaptive_dt",
-        "cfl_safety",
-        "finit",
-        "adiabatic_electrons",
-        "mixed_precision",
-    ]
-    dissipation_keys = ["disp_par", "disp_vp", "disp_x", "disp_y", "idisp"]
-    species_keys = ["rlt", "rln", "mas", "tmp", "de", "signz", "vthrat"]
-    geometry_keys = ["shat", "q", "eps", "kthnorm", "Rref", "d2X", "signB"]
-    grid_keys = ["dvp", "sgr_dist", "kxmax", "kymax", "dgrid", "tgrid"]
-
-    def _fmt(v):
-        if hasattr(v, "shape") and v.shape:
-            return "[" + ", ".join(f"{float(x):.6g}" for x in np.asarray(v).flat) + "]"
-        elif isinstance(v, float):
-            return f"{v:.6g}"
-        return str(v)
-
-    def _section(title, keys):
-        print(f"  {title}:")
-        for k in keys:
-            if k in d:
-                print(f"    {k:<24s} {_fmt(d[k])}")
-
-    _section("solver", solver_keys)
-    _section("dissipation", dissipation_keys)
-    _section("species", species_keys)
-    _section("geometry", geometry_keys)
-    _section("grid", grid_keys)
-
-    if grid_shape is not None:
-        labels = ["nvpar", "nmu", "ns", "nkx", "nky"]
-        if len(grid_shape) == 6:
-            labels = ["nsp"] + labels
-        dims = ", ".join(f"{name}={s}" for name, s in zip(labels, grid_shape))
-        print(f"  grid shape: {dims}")
-
-    print("=" * 88)
 
 
 def is_number(string):
@@ -834,16 +618,3 @@ def load_geometry(directory):
     from gyaradax.geometry.loaded import load_loaded_geometry
 
     return load_loaded_geometry(directory)
-
-
-def pack_half_spectrum(
-    spec_kxky: jnp.ndarray, jind: jnp.ndarray, mrad: int, mphiw3: int
-) -> jnp.ndarray:
-    out_shape = spec_kxky.shape[:-2] + (mrad, mphiw3)
-    out = jnp.zeros(out_shape, dtype=jnp.complex128)
-    nky = spec_kxky.shape[-1]
-    return out.at[..., jind, :nky].set(spec_kxky)
-
-
-def unpack_half_spectrum(spec_half: jnp.ndarray, jind: jnp.ndarray, nky: int) -> jnp.ndarray:
-    return spec_half[..., jind, :nky]

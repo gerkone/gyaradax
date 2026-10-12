@@ -1,7 +1,7 @@
 import jax
 import jax.numpy as jnp
 
-from gyaradax.jax_config import enable_x64
+from gyaradax.core.jax_config import enable_x64
 
 # enforce 64-bit precision
 enable_x64()
@@ -10,8 +10,7 @@ import os
 from omegaconf import OmegaConf
 from dataclasses import dataclass
 from typing import Dict, Any
-from gyaradax.gkw_input import as_int, species_blocks
-from gyaradax.utils import load_scalars
+from gyaradax.io.gkw import as_int, load_scalars, species_blocks
 
 
 @jax.tree_util.register_pytree_node_class
@@ -109,7 +108,7 @@ class GKParams:
     beta: float = 0.0  # reference plasma beta = 2*mu0*n_ref*T_ref/B_ref^2
     # beta-prime: pressure-gradient (finite-beta) correction of the curvature
     # drift (GKW veta_prime, linear_terms.f90 drift()). Resolved value of
-    # GKW's betaprime_ref / betaprime_type='sp' (input parsing in utils.py).
+    # GKW's betaprime_ref / betaprime_type='sp' (input parsing in io/gkw.py).
     # GKW convention: betaprime <= 0 for a normal (peaked) pressure profile.
     betaprime: float = 0.0
     # 'full_drift': correction uses vpar^2 only (applied on curvature +
@@ -368,7 +367,7 @@ def gkparams_from_input_and_geometry(
     other GKW output files — geometry scalars come from the dict.
     """
     import numpy as np
-    from gyaradax.utils import load_runtime_params, parse_input_dat
+    from gyaradax.io.gkw import load_runtime_params, parse_input_dat
 
     runtime = load_runtime_params(input_dat_path)
     inp = parse_input_dat(input_dat_path)

@@ -22,8 +22,8 @@ import numpy as np
 
 
 def _setup_params(gkw_dir, disable_per_ky_norm):
-    from gyaradax.params import gkparams_from_input_and_geometry
-    from gyaradax.utils import load_geometry
+    from gyaradax.core.params import gkparams_from_input_and_geometry
+    from gyaradax.io.gkw import load_geometry
 
     geometry = load_geometry(gkw_dir)
     params = gkparams_from_input_and_geometry(os.path.join(gkw_dir, "input.dat"), geometry)
@@ -44,13 +44,13 @@ def _harvest(geometry, df, phi, state, params=None, apar=None, bpar=None, pre=No
     ``jnp.sum(fluxes_kxy_sp[:, c], axis=0)`` exactly. Feed it to
     ``rules.ql_flux_per_species`` for per-species QL fluxes.
     """
-    from gyaradax.integrals import (
+    from gyaradax.diagnostics.fluxes import (
         calculate_em_fluxes,
         calculate_fluxes,
         calculate_fluxes_kinetic,
-        geom_tensors,
     )
-    from gyaradax.simulate import _ensure_species_arrays
+    from gyaradax.operators.poisson import geom_tensors
+    from gyaradax.solver.driver import _ensure_species_arrays
 
     is_kinetic = df.ndim == 6
 
@@ -133,8 +133,9 @@ def linear_from_fds(gkw_dir):
     Detects adiabatic / kinetic from input.dat and ES / EM from `params.nlapar`,
     `params.nlbpar`. γ(ky) comes from `growth.dat`. ~1–2 s per ES adiabatic sim.
     """
-    from gyaradax.solver import _compute_fields, linear_precompute
-    from gyaradax.utils import load_gkw_k_dump
+    from gyaradax.operators.fields import _compute_fields
+    from gyaradax.operators.precompute import linear_precompute
+    from gyaradax.io.gkw import load_gkw_k_dump
 
     from .data import _robust_loadtxt
 
@@ -188,9 +189,10 @@ def linear_run(gkw_dir, n_steps=1000, warm_start_from_fds=False, disable_per_ky_
     Returns: dict with γ, |φ|², per-(kx, ky) Γ/Q/Π linear flux fields,
     |φ|²(kx, ky), krho, kxrh, little_g, ds.
     """
-    from gyaradax.simulate import gk_init
-    from gyaradax.solver import gksolve, linear_precompute
-    from gyaradax.utils import load_gkw_k_dump
+    from gyaradax.solver.driver import gk_init
+    from gyaradax.solver.rk4 import gksolve
+    from gyaradax.operators.precompute import linear_precompute
+    from gyaradax.io.gkw import load_gkw_k_dump
 
     geometry, params = _setup_params(gkw_dir, disable_per_ky_norm)
 
@@ -227,9 +229,10 @@ def linear_run_blocked(
     ky (argmax of γ), not the global max, so a spurious tail mode does not keep
     the loop running.
     """
-    from gyaradax.simulate import gk_init
-    from gyaradax.solver import gksolve, linear_precompute
-    from gyaradax.utils import load_gkw_k_dump
+    from gyaradax.solver.driver import gk_init
+    from gyaradax.solver.rk4 import gksolve
+    from gyaradax.operators.precompute import linear_precompute
+    from gyaradax.io.gkw import load_gkw_k_dump
 
     geometry, params = _setup_params(gkw_dir, disable_per_ky_norm)
 

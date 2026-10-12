@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import jax.numpy as jnp
 
-from gyaradax.jax_config import enable_x64
+from gyaradax.core.jax_config import enable_x64
 
-from gyaradax.integrals import calculate_phi, calculate_phi_adiabatic
+from gyaradax.operators.poisson import calculate_phi, calculate_phi_adiabatic
 
 
 enable_x64()

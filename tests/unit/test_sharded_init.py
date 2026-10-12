@@ -6,9 +6,9 @@ import pytest
 
 from gyaradax import sharding
 from gyaradax.geometry import compute_geometry
-from gyaradax.params import gkparams_from_config
-from gyaradax.precompute import linear_precompute
-from gyaradax.solver import init_f
+from gyaradax.core.params import gkparams_from_config
+from gyaradax.operators.precompute import linear_precompute
+from gyaradax.solver.rk4 import init_f
 from gyaradax import load_config
 import os
 from typing import Any, cast

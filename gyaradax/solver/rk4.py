@@ -25,38 +25,24 @@ Time Integration: Explicit RK4 with optional per-ky normalization (linear mode).
 import jax
 import jax.numpy as jnp
 
-from gyaradax.jax_config import enable_x64
+from gyaradax.core.jax_config import enable_x64
 
 enable_x64()
 
 import functools
 from typing import Any, Dict, Tuple, Optional
 
-from gyaradax.constants import EPS
-from gyaradax.integrals import get_integrals, calculate_phi
 from gyaradax.backends import create_ops
-from gyaradax.params import GKParams
-from gyaradax.state import GKPre, GKState, Precompute
 from gyaradax.backends.ops import SolverOps
+from gyaradax.core.constants import EPS
+from gyaradax.core.params import GKParams
+from gyaradax.core.state import GKPre, GKState, Precompute
+from gyaradax.diagnostics.fluxes import get_integrals
+from gyaradax.operators.fields import _compute_fields, g_to_f
+from gyaradax.operators.poisson import calculate_phi
+from gyaradax.operators.precompute import linear_precompute, pack_half_spectrum
 from gyaradax.sharding import build_mesh
-from gyaradax.cfl import (  # noqa: F401
-    estimate_linear_timestep,
-    estimate_nl_timestep,
-    estimate_timestep,
-)
-from gyaradax.fields import _compute_fields, _compute_phi, f_to_g, g_to_f  # noqa: F401
-from gyaradax.precompute import (  # noqa: F401
-    _compute_species_coeffs,
-    _linear_precompute_core,
-    _precompute_shared,
-    build_jind,
-    extended_firstdim_fft_size,
-    extended_seconddim_fft_size,
-    kx_ky_grids,
-    linear_precompute,
-    prime_factors_smallereq_than,
-)
-from gyaradax.utils import pack_half_spectrum, unpack_half_spectrum  # noqa: F401
+from gyaradax.solver.cfl import estimate_linear_timestep, estimate_nl_timestep
 
 
 def default_state(nky: int = 1) -> GKState:

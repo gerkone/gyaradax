@@ -11,9 +11,9 @@ from pathlib import Path
 import numpy as np
 
 from gyaradax.geometry import compute_geometry
-from gyaradax.gkw_input import as_bool, as_float, as_int, species_blocks, species_section_keys
-from gyaradax.params import gkparams_from_input_and_geometry
-from gyaradax.utils import parse_input_dat
+from gyaradax.io.gkw import as_bool, as_float, as_int, species_blocks, species_section_keys
+from gyaradax.core.params import gkparams_from_input_and_geometry
+from gyaradax.io.gkw import parse_input_dat
 
 
 def test_parse_input_dat_preserves_repeated_section_suffix_order(tmp_path: Path) -> None:
