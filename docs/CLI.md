@@ -269,6 +269,115 @@ process started (setup included), for the busiest GPU of a mesh.
   bracket are available, and whether NCCL is installed.
 - Details and measurements: `docs/NOTES.md` §13.
 
+## Campaign scheduler
+
+`scripts/gpu_scheduler.py` runs a list of jobs over a pool of GPU slots that may change while it
+runs. It launches `gyaradax run` over ssh and follows each run through files on the shared
+filesystem, so the scheduler can be stopped and restarted at any time.
+
+```bash
+S=scripts/gpu_scheduler.py
+python $S run --pool pool.yaml --jobs jobs.yaml --state camp/state.json [--poll 30] [--dry-run]
+python $S status --state camp/state.json          # jobs, slots, progress, ETAs
+python $S cancel NAME --state camp/state.json     # stop and hold (--requeue: stop and queue again)
+python $S resume NAME --state camp/state.json     # queue a cancelled / failed / diverged job again
+```
+
+**Pool.** One entry per slot: `host`, `gpus`, and optionally `speed` (relative throughput),
+`python` (default: the gyaradax env), `env`, `name` and `drain`. The file is re-read on every poll:
+an added slot gets work at the next poll, and a removed slot has its job stopped and queued again.
+`drain: true` lets the slot finish its job and then gives it nothing new. A file that does not
+parse, or is empty, is ignored and the previous pool kept. Multi-GPU slots on lizard must be an
+NVLink pair (`[0, 1]`, `[2, 3]` or `[4, 5]`); `gpu_groups` sets this rule for other hosts.
+
+```yaml
+defaults: {python: /system/apps/userenv/galletti/gyaradax_env/bin/python}
+slots:   # one slot per GPU; speeds are placeholders, measure with `gyaradax bench` and adjust
+  - {host: scorpion, gpus: [0], speed: 2.0}   # 8 x B300
+  - {host: scorpion, gpus: [1], speed: 2.0}
+  - {host: scorpion, gpus: [2], speed: 2.0}
+  - {host: scorpion, gpus: [3], speed: 2.0}
+  - {host: scorpion, gpus: [4], speed: 2.0}
+  - {host: scorpion, gpus: [5], speed: 2.0}
+  - {host: scorpion, gpus: [6], speed: 2.0}
+  - {host: scorpion, gpus: [7], speed: 2.0}
+  - {host: shark, gpus: [0], speed: 1.0}      # 4 x A100 SXM
+  - {host: shark, gpus: [1], speed: 1.0}
+  - {host: shark, gpus: [2], speed: 1.0}
+  - {host: shark, gpus: [3], speed: 1.0}
+  - {host: lizard, gpus: [0], speed: 0.9}     # 6 x A100 PCIe
+  - {host: lizard, gpus: [1], speed: 0.9}
+  - {host: lizard, gpus: [2], speed: 0.9}
+  - {host: lizard, gpus: [3], speed: 0.9}
+  - {host: lizard, gpus: [4], speed: 0.9}
+  - {host: lizard, gpus: [5], speed: 0.9}
+```
+
+For a two-GPU job, replace two lizard entries with one NVLink pair, e.g.
+`{host: lizard, gpus: [0, 1], speed: 0.9}`.
+
+Scorpion runs no sshd, and the other hosts cannot resolve its name. Slots on the machine the
+scheduler runs on are launched locally, so a pool with scorpion slots needs the scheduler to run
+on scorpion.
+
+**Jobs.** `name`, then `config` (a new run, `output_dir` required) or `run_dir` (resume an
+existing run in place), plus optional `args`, `gpus` (default 1), `cost` (default 1) and `env`.
+Relative paths are taken from `workdir`, itself relative to the job file. `workdir` is also the
+directory the run is launched from. `python -m gyaradax` imports the checkout in the launch
+directory before the env's install, so use the repository root, or set `PYTHONPATH` in `env`.
+Jobs appended to the file are picked up at the next poll. Removing a job from the file does not
+cancel it; use `cancel` for that. `--device`, `--device-list` and `--output-dir` are refused:
+the scheduler sets `CUDA_VISIBLE_DEVICES` and `XLA_PYTHON_CLIENT_PREALLOCATE=false` itself.
+
+```yaml
+workdir: /system/user/galletti/git/gyaradax-dataset
+defaults: {args: --backend cuda --dataset /data/kinetic}
+jobs:
+  - {name: k603, config: configs/kinetic_603.yaml, output_dir: /data/runs/k603, cost: 40}
+  - {name: k604_more, run_dir: /data/runs/k604, args: --n-steps 2000, cost: 10}
+  - {name: big, config: configs/big.yaml, output_dir: /data/runs/big, gpus: 2, cost: 80}
+```
+
+**Placement.** At each poll, pending jobs are taken by decreasing `cost`. Each one gets the
+fastest free slot with exactly its GPU count, or else the fastest larger slot. A larger slot is
+kept free while a waiting job needs it. A job with `gpus: N > 1` gets `--n-gpus N`, unless its
+args or config set a mesh. A job that failed prefers another slot for its retry.
+
+**Launch and monitoring.** The scheduler starts each run detached, through
+`gpu_scheduler.py wrap`. The wrapper writes `RUN_DIR/.sched/` (`pid`, `host`, `slot`, `gpus`,
+`launch`, a `heartbeat` refreshed every `--heartbeat` seconds, then `exit`), and the run's output
+goes to `.sched/log`. The scheduler reads these files and uses ssh only to launch, to signal,
+and to check a process whose heartbeat has stopped changing (`kill -0` plus its command line).
+What happens next:
+
+| Outcome | Result |
+|---|---|
+| exit 0 | done |
+| nonzero exit, or no heartbeat for `--heartbeat-timeout` and no process | retried up to `--max-retries` times, resuming from the run directory |
+| exit 2 with a `DIVERGED` marker | diverged, not retried (a resume would diverge again) |
+| `gyaradax run` cannot even start | the slot is paused for `--slot-backoff` |
+
+A retry or a requeued job continues with `gyaradax run RUN_DIR`, dropping `--n-steps`,
+`--n-blocks`, `--from-scratch`, `--resume-from` and `--overwrite`, so the leg runs to the target
+stored in the run's `config.yaml`. A run stopped before its first snapshot starts over with
+`--overwrite`; that flag is only added once the job has written to the directory itself.
+
+**Preemption.** Removing a slot, `cancel` or `--requeue` sends SIGTERM to the wrapper, which
+passes it on to `gyaradax`. After `--grace` seconds the scheduler sends SIGKILL to the whole
+process group. gyaradax has no SIGTERM handler, so it dies at once: the steps since the last
+snapshot are lost, which is up to `--snapshot-every` blocks plus the block in progress. Use a
+small `--snapshot-every` for campaigns that get preempted. A kill during a snapshot write leaves
+a truncated `step_*.npz`; the scheduler moves it to `.sched/broken/` and resumes from the
+previous snapshot. A truncated diagnostics file (`fluxes.npz`, ...) makes gyaradax fail on
+resume, so the job is marked failed with a note instead of using up its retries.
+
+**Restarts.** The state file is rewritten atomically after every poll. A restarted scheduler
+picks up its running jobs from the state file and their `.sched` files, without relaunching
+them. Even without a state file, it reattaches to any live launch it finds in a job's `.sched`.
+A lock file (`STATE.lock`) keeps a second scheduler off the same state. `cancel` and `resume`
+drop request files next to the state file (`STATE.requests/`), which the scheduler applies at
+its next poll.
+
 ## Legacy entry point
 
 `python scripts/run.py CONFIG ...` still works and forwards to `gyaradax run`.
