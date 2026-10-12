@@ -155,6 +155,10 @@ SolverOps interface: `linear_rhs()`, `linear_rhs_from_g()`, `nonlinear_term_iii(
   Evolves the mixed variable g = f + (2Z/T)*v_R*v_par*J0*A_par*F_M.
   Field solve: self-consistent phi + A_par (Ampere's law with g2f correction).
   RHS uses generalized potential chi = phi - 2*v_R*v_par*A_par in drive terms.
+- **Arakawa (terms I + IV)**: `ltrapping_arakawa=True` replaces the separate streaming and
+  trapping stencils by GKW's Arakawa bracket in (s, vpar) (`precompute._arakawa_tables`,
+  `pre["ara_tab"]`); dissipation is unchanged. JAX and CUDA (`ARA` kernel variant). Banding
+  along s with kinetic electrons and what dissipation does about it: docs/NOTES.md §7.4.
 - **Electromagnetic (B_parallel)**: `nlbpar=True` adds magnetic compression via the
   coupled Poisson-B_par solve; chi gains bpar_chi_factor * B_par (terms X, XI).
 - **CFL**: adaptive dt from von Neumann analysis + nonlinear ExB velocity.

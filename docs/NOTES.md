@@ -449,6 +449,7 @@ order. Species is the outermost (slowest) index.
 - all 7 linear RHS terms (I, II, III, IV, V, VII, VIII) plus EM terms X and XI
 - nonlinear ExB advection (pseudospectral, spectral Poisson bracket)
 - 4th-order parallel and velocity dissipation
+- Arakawa scheme for terms I + IV (`ltrapping_arakawa`, §7.4)
 - perpendicular hyper-dissipation
 - RK4 explicit time integration
 - per-$k_y$ normalization (linear mode)
@@ -488,6 +489,93 @@ amplitude to $\approx 1$ at each window boundary, so $A_\text{start} = 1$. In
 nonlinear mode (no normalization), $A_\text{start}$ is set to the amplitude at
 the previous window boundary, giving the instantaneous growth rate between
 consecutive windows. See `solver/rk4.py:advance_state`.
+
+### 7.4 odd–even banding along s, parallel dissipation and the Arakawa scheme
+
+**Failure mode.** Nonlinear runs with kinetic electrons at low magnetic shear
+($\hat s \lesssim 2$), high $q$ ($\gtrsim 4$) and strong gradients can develop an
+odd–even (grid-scale) pattern of $\phi$ along $s$ after saturation, at the standard
+campaign resolution ($n_s = 18$, `disp_par` 1, `disp_vp` 0.2, `idisp` 2). Measured by
+the share of power in the $s$-Nyquist mode,
+
+$$R = \frac{\sum |\hat g(N_s/2)|^2}{\sum_m |\hat g(m)|^2},\qquad
+\hat g(N_s/2) = \sum_j (-1)^j g(s_j),$$
+
+taken for the zonal ($y$-averaged) and the non-zonal part of the real-space $\phi$
+(summed over $x$, and $y$), the non-zonal share jumps from $\sim 10^{-3}$ to $\approx 0.6$
+at saturation and the zonal share bursts between 0.2 and 0.9. Characteristics:
+- it sits in the lowest finite $k_y$ (60–90 % of the Nyquist power) and in the zonal
+  modes, and shows in the spectral modes themselves (power at the Nyquist $k_\parallel$),
+  not only in the real-space transform;
+- only $s$ is under-resolved: the grid-scale content of $\delta f$ grows ~20× along $s$
+  for both species, while along $v_\parallel$, $\mu$, $k_x$, $k_y$ it stays flat or drops;
+  in the electrons it sits in the fast passing part ($|v_\parallel| \gtrsim 1.5$, low $\mu$);
+- zonal spikes are bursts of the alternating zonal part (spread 44× vs 6× for the smooth
+  zonal part), driven by the non-zonal banding;
+- heat fluxes stay within the turbulent fluctuation level of unbanded reruns.
+
+**Cause.** The centred fourth-order derivative $[1,-8,0,8,-1]/12$ annihilates $(-1)^j$,
+so streaming (term I) and Landau damping (term VII) cannot act on the pattern; only
+`disp_par` damps it. Adiabatic electrons shield it through the Boltzmann response,
+kinetic electrons cannot, so only kinetic runs band. The discretisation is GKW's
+(matrix-level identical), so GKW shares the behaviour.
+
+**What helps** (same case, $t$ in $R/v_{th}$; banding onset at $t \approx 25$ otherwise):
+
+| change | onset | late non-zonal share | note |
+|---|---|---|---|
+| $n_s$ 24 | $t \approx 25$ | 0.45 | no effect |
+| $n_s$ 36 | $t \approx 40$ | 0.44 | delayed only; dt halves |
+| `disp_par` 2 | $t \approx 45$ | 0.44 ($t$ 60–150) | delayed, lower |
+| `disp_par` 4 | none to $t = 150$ | $\le 0.003$ | clean; dt unchanged (the field CFL limits) |
+| `idisp` 1 | $t \approx 0$ | 0.79 | worse: linear grid-scale instability ($\gamma \approx 0.7$) |
+| small $\beta$ | – | – | changes the physics; unstable in this setup |
+| Arakawa, `disp_par` 1 | $t \approx 26$ | 0.3–0.5 | no effect |
+| Arakawa, `disp_par` 0.2 | $t \approx 3$ | 0.4–0.8 | worse: grid-scale mode in the linear phase |
+
+**Arakawa scheme.** `solver.ltrapping_arakawa: true` (GKW `ltrapping_arakawa`,
+`linear_terms.f90::igh`) replaces the separate centred differences of terms I and IV by
+the Poisson bracket $v_R \mathcal{F}\{H, f\}$ in $(s, v_\parallel)$,
+$H = v_\parallel^2/2 + \mu B$, differenced as Arakawa's fourth-order Jacobian
+$J = 2J_1 - J_2$ (13-point stencil with diagonal points). The outflow side of open chain
+ends uses GKW's one-sided `igh_two` / `igh_zero_two`; points past the grid are dropped;
+$H$ uses a uniformly continued $v_\parallel$ grid and periodic $B(s)$, as GKW's ghost
+points. Parallel and velocity dissipation are unchanged (GKW's `diffus` equals
+`parallel_dissipation` / `dfdvp_dissipation` for these stencils). The CFL rate is
+GKW's: the largest bracket element that enters the operator. The bracket conserves the
+discrete invariants of streaming + trapping; the GKW manual says it usually needs little
+or no `disp_par`.
+
+Validation against GKW (`/system/user/publicwork/galletti/arakawa_val/validate_cases.py`),
+each case with both schemes: GKW's matrix dump (`loutput_matrix`, only terms I + IV and
+their dissipation on) against gyaradax's operator on random vectors, and a linear run
+with all terms (growth rates, frequencies). Grids are small (ns 16, nvpar 16, nmu 4,
+5 × 3 modes) unless noted.
+
+| case | operator rel. error | growth rate rel. error |
+|---|---|---|
+| kinetic electrons, circular | 2–7e-6 | 2–4e-6 |
+| adiabatic electrons ($T_e = T_i$) | 3–5e-6 | 1e-6 |
+| `ikxspace` 5 | 2–5e-6 | 1–4e-6 |
+| s-alpha | 3–5e-6 | 4–6e-6 |
+| Miller ($\kappa$ 1.4, $\delta$ 0.2) | 3e-6 | 1–2e-6 |
+| ballooning (one mode, `nperiod` 2, ns 36) | 4e-5 | 1–2e-5 |
+| `idisp` 1 | 2–6e-6 | 1–2e-6 |
+| low dissipation (`disp_par` 0.1, `disp_vp` 0.05) | 2–7e-6 | 1–2e-6 |
+| electromagnetic ($\beta$ 0.4 %) | 2–5e-6 | 2–3e-6 |
+
+The residual is the 6-digit precision of GKW's grid files; the standard scheme shows the
+same level. Two cases fail for both schemes, from parity gaps outside this scheme:
+adiabatic electrons with $T_e \ne T_i$ (the adiabatic response uses the ion temperature)
+and negative $\hat s$ or `signB` = −1 (the parallel connection direction is not flipped as
+in GKW `mode.f90`). The CFL timestep equals GKW's; CUDA matches JAX to 1e-12; sharded
+(vpar, mu) runs match one device.
+
+**Does it help?** Not in this case. At `disp_par` 1 the banding appears at saturation
+($t \approx 26$) as with the separate stencils; at `disp_par` 0.2 a grid-scale mode takes
+over already in the linear phase. The bracket's diagonal points do act on the odd–even
+pattern, but not enough to replace the dissipation; `disp_par` 4 remains the fix. The
+matching GKW nonlinear runs are in progress.
 
 ## 8. validation results
 
