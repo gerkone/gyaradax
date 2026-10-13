@@ -328,6 +328,42 @@ def precompute_phi_kinetic(geometry: Dict[str, jnp.ndarray]):
     return weight, diag
 
 
+def _velocity_moment(weight, df, keep_species):
+    if weight.shape == df.shape:
+        return jnp.einsum(f"avmjkl,avmjkl->{'ajkl' if keep_species else 'jkl'}", weight, df)
+    return jnp.sum(weight * df, axis=(-5, -4) if keep_species else (-6, -5, -4))
+
+
+def charge_density(
+    geometry: Dict[str, jnp.ndarray],
+    df: jnp.ndarray,
+    phi_weight: Optional[jnp.ndarray] = None,
+) -> jnp.ndarray:
+    """Per-species gyrocenter charge density c_s = Z_s n_s int J0 f_s d^3v.
+
+    Its species sum is the numerator of the kinetic quasineutrality solve::
+
+        sum_s Z_s n_s int J0 f_s d^3v = -sum_s Z_s^2 n_s (Gamma0_s - 1) / T_s * phi
+
+    with the right-hand diagonal set to 1 at (kx, ky) = (0, 0).
+
+    Args:
+        geometry: geometry dict with per-species mas, signz, tmp, de, vthrat.
+        df: (nsp, nvpar, nmu, ns, nkx, nky) distribution.
+        phi_weight: Poisson weight Z_s n_s J0 B intvp intmu, dense shape
+            (nsp, nvpar, nmu, ns, nkx, nky) or any shape broadcastable to it,
+            e.g. (nsp, 1, nmu, ns, nkx, nky) on the uniform vpar grid. Defaults
+            to ``precompute_phi_kinetic(geometry)[0]``; ``pre["phi_weight"]`` is
+            the coupled phi-B_par weight when nlbpar is on.
+
+    Returns:
+        (nsp, ns, nkx, nky) charge density.
+    """
+    if phi_weight is None:
+        phi_weight, _ = precompute_phi_kinetic(geometry)
+    return _velocity_moment(phi_weight, df, keep_species=True)
+
+
 def _phi_kinetic(
     geometry: Dict[str, jnp.ndarray],
     df: jnp.ndarray,
@@ -337,14 +373,16 @@ def _phi_kinetic(
     """
     Kinetic electron phi from multi-species quasineutrality.
 
+    phi = -sum_s charge_density_s / phi_diag, with the species sum taken inside
+    the same contraction.
+
     df: (nsp, nvpar, nmu, ns, nkx, nky).
     Internal — use calculate_phi() as the public interface.
     """
     if phi_weight is None or phi_diag is None:
         phi_weight, phi_diag = precompute_phi_kinetic(geometry)
 
-    phi_num = jnp.einsum("avmjkl,avmjkl->jkl", phi_weight, df)
-    return -phi_num / phi_diag
+    return -_velocity_moment(phi_weight, df, keep_species=False) / phi_diag
 
 
 def calculate_phi(
