@@ -30,6 +30,7 @@ from gyaradax.jax_config import enable_x64
 enable_x64()
 
 import functools
+from dataclasses import replace
 from typing import Any, Dict, Tuple, Optional
 
 from gyaradax.constants import EPS
@@ -347,7 +348,7 @@ def advance_state(
         state.window_start_amp > params.norm_eps, per_mode_amp > params.norm_eps
     )
     steps_in_window = jnp.mod(new_step - 1, params.naverage) + 1
-    growth_dt = jnp.array(params.dt * steps_in_window, dtype=jnp.float64)
+    growth_dt = dt * steps_in_window
     growth_rate = jnp.where(
         valid_growth,
         jnp.log(per_mode_amp / state.window_start_amp) / growth_dt,
@@ -528,8 +529,9 @@ def gksolve(
     Returns (final_df, (final_phi, final_fluxes), final_state) by default.
     When ``return_dt_info`` is True, returns an extra trailing dict with
     per-step arrays ``dt_used``/``dt_nl``/``dt_lin`` (shape (n_steps,)) and
-    scalar ``dt_input``. In the fixed-dt path ``dt_used`` is filled with
-    ``params.dt`` and the CFL estimates are zero.
+    scalar ``dt_input``. The fixed-dt path steps with ``params.dt`` reduced to
+    the linear stability estimate when it exceeds it (as GKW does for every
+    explicit run); ``dt_lin`` holds that estimate and ``dt_nl`` is zero.
     """
     if pre is None:
         pre = linear_precompute(geometry, params)
@@ -593,11 +595,24 @@ def gksolve(
             "dt_input": dt_input_scalar,
         }
     else:
-        # fixed dt path
+        # fixed dt path, capped at the linear stability estimate (GKW linear_terms.f90:318)
+        dt_lin = estimate_linear_timestep(pre, params=params)
+        dt_override = None
+        try:
+            dt_cap = float(dt_lin)
+        except jax.errors.ConcretizationTypeError:
+            dt_cap = None
+            dt_override = jnp.minimum(dt_input_scalar, dt_lin)
+        if dt_cap is not None and dt_cap < params.dt:
+            params = replace(params, dt=dt_cap)
+        dt_fixed = (
+            dt_override if dt_override is not None else jnp.array(params.dt, dtype=jnp.float64)
+        )
+
         def _scan_body_fixed(carry, _):
             curr_df, curr_state = carry
             next_df, out, next_state = gkstep_single(
-                curr_df, geometry, params, curr_state, pre, ops
+                curr_df, geometry, params, curr_state, pre, ops, dt_override=dt_override
             )
             return (next_df, next_state), None
 
@@ -605,9 +620,9 @@ def gksolve(
             _scan_body_fixed, (df, state), None, length=n_steps
         )
         dt_info = {
-            "dt_used": jnp.full((n_steps,), dt_input_scalar, dtype=jnp.float64),
+            "dt_used": jnp.full((n_steps,), dt_fixed, dtype=jnp.float64),
             "dt_nl": jnp.zeros((n_steps,), dtype=jnp.float64),
-            "dt_lin": jnp.zeros((n_steps,), dtype=jnp.float64),
+            "dt_lin": jnp.full((n_steps,), dt_lin, dtype=jnp.float64),
             "dt_input": dt_input_scalar,
         }
 
