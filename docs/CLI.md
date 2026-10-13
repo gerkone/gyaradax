@@ -408,6 +408,7 @@ resumes them. `status` shows the deadline.
 | `configs/<name>.yaml` | each config as run, with the `--set` overrides and `run.name` set to the job name |
 | `runs/<name>/` | the run directories |
 | `jobs.yaml`, `state.json` | the generated job list and the scheduler state |
+| `state.sqlite` | the run database (below), rebuilt on every poll |
 
 - **Names.** `--name` is a template over `{run}` (the config's `run.name`, the default), `{stem}`
   (the file name) and `{id}` (the last number in the file name). The name is used for the job, its
@@ -423,20 +424,56 @@ resumes them. `status` shows the deadline.
 - **Equally spaced frames.** `--set solver.dump_dt=1.4 --set solver.t_end=400` runs every job in
   time mode (see "Equally spaced frames"); the end time stays in each run's `config.yaml`, so
   resumed legs run to it.
-- **GPUs per job.** `--gpus N`, else the config's `sharding`, else 1.
+- **GPUs per job.** `--gpus N`, else the config's `sharding`, else 1. `--gpus all` gives every job
+  all the GPUs of the slot it lands on, and each leg sizes its mesh (`--n-gpus`) to that slot, so a
+  run can resume on a slot with a different GPU count. Sharding is close to linear (kinetic,
+  192 × 32 × 18 × 32 × 12: 1.93× on 2 A100s, 3.78× on 4), so wide slots return runs sooner at
+  almost no cost in throughput.
+- **Run database.** `state.sqlite` next to `state.json` mirrors the queue for SQL queries: `runs`
+  (state, slot, legs, start and finish times, dataset frames written, simulation time, ETA, the
+  config's `geometry`/`physics`/`grid` as JSON in `params`), `legs` (one row per launch: slot,
+  times, exit code, outcome), `slots` (drain, busy, current job) and `meta`. It is rebuilt and
+  swapped in whole on every poll, so a reader on any host sees a complete file; read it, do not
+  write it. Example: `sqlite3 state.sqlite "SELECT name, state, frames, frames_total, eta_h,
+  json_extract(params, '$.geometry.eps') FROM runs ORDER BY state"`.
 - **Unchanged configs.** Adding a config that is already in the campaign is a no-op. Adding a
   changed config under an existing name, or changing the settings, is refused: start another
   campaign for that.
 
 ### Targets: ssh mesh
 
-One entry per slot: `host`, `gpus`, and optionally `speed` (relative throughput), `python`
-(default: the gyaradax env), `env`, `name` and `drain`. The file is re-read on every poll:
+One entry per slot: `host`, `gpus`, and optionally `speed` (throughput per GPU, relative), `python`
+(default: the gyaradax env), `env`, `name`, `drain` and `busy_mib`. The file is re-read on every
+poll:
 
 - an added slot gets work at the next poll;
 - a removed slot has its job stopped and queued again;
 - `drain: true` lets the slot finish its job and then gives it nothing new;
+- `busy_mib: N` (0, the default, turns it off) places nothing on a slot while one of its GPUs holds
+  more than N MiB, i.e. while someone else uses it (`nvidia-smi` on the host, once per poll);
 - a file that does not parse, or is empty, is ignored and the previous pool kept.
+
+A `hosts` section switches whole machines; a host without an entry is `on`:
+
+| Switch | Effect at the next poll |
+|---|---|
+| `on` | the host's slots take jobs |
+| `drain` | its jobs run to the end; nothing new is placed there |
+| `off` | its jobs get SIGTERM, write a snapshot and exit (up to `--grace`), then go back in the queue |
+| `kill` | its jobs get SIGKILL at once and go back in the queue; the next leg resumes from the last snapshot |
+
+`gyaradax datagen host HOST SWITCH --campaign DIR` sets the switch in the campaign's
+`targets.yaml` (rewriting the file, so comments in it are dropped); a host name also matches its
+short form (`shark` matches `shark.example.org`). A stopped or killed job does not count as a
+failure. Restart snapshots keep df and φ in complex128 (`--snapshot-dtype`, default `c128`)
+whatever the dataset's precision, so `kill` loses at most the frames since the last snapshot
+(`--snapshot-every`).
+
+```yaml
+hosts: {shark: drain, coyote: kill}
+```
+
+Jobs with `--gpus all` go to the free slot with the largest `speed` × GPUs.
 
 Multi-GPU slots on lizard must be an NVLink pair (`[0, 1]`, `[2, 3]` or `[4, 5]`); `gpu_groups`
 sets this rule for other hosts.

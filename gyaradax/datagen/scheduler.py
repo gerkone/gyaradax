@@ -17,11 +17,13 @@ import contextlib
 import fcntl
 import glob
 import json
+import math
 import os
 import re
 import shlex
 import signal
 import socket
+import sqlite3
 import subprocess
 import time
 import uuid
@@ -71,9 +73,75 @@ INTERRUPTED = 75
 # exit code of a run refused by its linear check (gyaradax.diagnostics.growth.EXIT_LINEAR_CHECK)
 LINEAR_CHECK_FAILED = 3
 SLURM_HOST = "slurm"
+# job gpus value meaning every GPU of the slot it lands on ("all" in the job file)
+ALL_GPUS = 0
+# host switches: drain finishes jobs, off stops them with a snapshot, kill stops them now
+HOST_SWITCHES = ("on", "drain", "off", "kill")
 SLURM_QUEUED = ("PENDING", "CONFIGURING", "REQUEUED", "REQUEUE_HOLD", "RESIZING", "SUSPENDED")
 SLURM_RUNNING = ("RUNNING", "COMPLETING", "SIGNALING", "STAGE_OUT")
 GPU_FLAGS = ("--gres", "--gpus", "--gpus-per-node", "--gpus-per-task", "-G")
+
+
+RUNS_DB_SCHEMA = """
+CREATE TABLE runs (
+    name TEXT PRIMARY KEY, state TEXT, slot TEXT, host TEXT, gpus TEXT, legs INTEGER,
+    attempts INTEGER, failures INTEGER, first_start TEXT, last_start TEXT, finished TEXT,
+    frames INTEGER, frames_total INTEGER, t REAL, t_end REAL, dump_dt REAL, step INTEGER,
+    target_step INTEGER, eta_h REAL, cost REAL, note TEXT, output_dir TEXT, dataset_dir TEXT,
+    config TEXT, params TEXT
+);
+CREATE TABLE legs (
+    name TEXT, leg INTEGER, launch TEXT, slot TEXT, host TEXT, gpus TEXT, start TEXT, end TEXT,
+    hours REAL, exit INTEGER, result TEXT, note TEXT, PRIMARY KEY (name, leg)
+);
+CREATE TABLE slots (
+    id TEXT PRIMARY KEY, host TEXT, gpus TEXT, speed REAL, drain INTEGER, busy INTEGER,
+    paused_until TEXT, job TEXT
+);
+CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);
+"""
+
+
+def _when(epoch: float | None) -> str | None:
+    return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(epoch)) if epoch else None
+
+
+def _flag_value(args: Sequence[str], flag: str) -> str | None:
+    for i, a in enumerate(args):
+        if a == flag and i + 1 < len(args):
+            return args[i + 1]
+        if a.startswith(flag + "="):
+            return a.split("=", 1)[1]
+    return None
+
+
+def job_meta(spec: JobSpec) -> dict[str, Any]:
+    """Physics and geometry inputs, end time, frame spacing and dataset frame directory of a job."""
+    meta: dict[str, Any] = {"params": {}}
+    path = spec.config or (os.path.join(spec.run_dir, "config.yaml") if spec.run_dir else None)
+    with contextlib.suppress(OSError, yaml.YAMLError, AttributeError, TypeError, ValueError):
+        with open(path or "") as fh:
+            cfg = yaml.safe_load(fh) or {}
+        meta["params"] = {
+            k: cfg[k] for k in ("geometry", "physics", "grid") if isinstance(cfg.get(k), dict)
+        }
+        solver = cfg.get("solver") or {}
+        if solver.get("t_end") is not None and solver.get("dump_dt"):
+            meta["t_end"], meta["dump_dt"] = float(solver["t_end"]), float(solver["dump_dt"])
+    root, name = _flag_value(spec.args, "--dataset"), _flag_value(spec.args, "--dataset-name")
+    if root:
+        meta["dataset_dir"] = os.path.join(root, f"{name or spec.name}_ifft_realpotens")
+    return meta
+
+
+def dataset_frames(dataset_dir: str | None) -> int | None:
+    """Frames a run has written to its dataset trajectory so far (``data/poten_*`` shards)."""
+    try:
+        return sum(
+            n.startswith("poten_") for n in os.listdir(os.path.join(dataset_dir or "", "data"))
+        )
+    except OSError:
+        return None
 
 
 def _atomic_write(path: str, text: str) -> None:
@@ -216,6 +284,7 @@ class Slot:
     env: dict[str, str] = field(default_factory=dict)
     drain: bool = False
     name: str = ""
+    busy_mib: int = 0
 
     @property
     def id(self) -> str:
@@ -233,6 +302,11 @@ class JobSpec:
     cost: float = 1.0
     workdir: str = "/"
     env: dict[str, str] = field(default_factory=dict)
+
+
+def job_gpus(spec: JobSpec, slot: Slot) -> list[int]:
+    """The GPUs of ``slot`` a leg of ``spec`` runs on."""
+    return list(slot.gpus) if spec.gpus == ALL_GPUS else slot.gpus[: spec.gpus]
 
 
 def _env(value: Any, where: str) -> dict[str, str]:
@@ -278,6 +352,9 @@ def _slot(raw: Any, defaults: dict[str, Any], where: str) -> Slot:
     speed = float(merged.get("speed", 1.0))
     if speed <= 0:
         raise ValueError(f"{where}: speed must be positive")
+    busy_mib = merged.get("busy_mib", 0)
+    if isinstance(busy_mib, bool) or not isinstance(busy_mib, int) or busy_mib < 0:
+        raise ValueError(f"{where}: busy_mib must be a non-negative integer")
     return Slot(
         host=host,
         gpus=list(gpus),
@@ -286,7 +363,22 @@ def _slot(raw: Any, defaults: dict[str, Any], where: str) -> Slot:
         env={**_env(defaults.get("env"), where), **_env(raw.get("env"), where)},
         drain=bool(merged.get("drain", False)),
         name=str(raw.get("name") or ""),
+        busy_mib=busy_mib,
     )
+
+
+def host_switches(doc: dict[str, Any]) -> tuple[dict[str, str], list[str]]:
+    """The valid ``hosts`` switches of a targets document, plus the entries skipped and why."""
+    raw = doc.get("hosts") or {}
+    if not isinstance(raw, dict):
+        return {}, [f"hosts: expected a mapping of host to {', '.join(HOST_SWITCHES)}"]
+    switches, problems = {}, []
+    for host, value in raw.items():
+        if value in HOST_SWITCHES:
+            switches[str(host)] = value
+        else:
+            problems.append(f"hosts: {host}: {value!r} is not one of {', '.join(HOST_SWITCHES)}")
+    return switches, problems
 
 
 def load_pool(path: str) -> tuple[dict[str, Slot], list[str]]:
@@ -300,6 +392,8 @@ def load_pool(path: str) -> tuple[dict[str, Slot], list[str]]:
     slots: dict[str, Slot] = {}
     used: dict[str, set[int]] = {}
     problems = []
+    switches, bad = host_switches(doc)
+    problems.extend(bad)
     for i, raw in enumerate(doc.get("slots") or []):
         try:
             slot = _slot(raw, defaults, f"pool slot {i}")
@@ -307,6 +401,10 @@ def load_pool(path: str) -> tuple[dict[str, Slot], list[str]]:
             problems.append(str(exc))
             continue
         short = slot.host.split(".")[0]
+        switch = switches.get(slot.host, switches.get(short, "on"))
+        if switch in ("off", "kill"):
+            continue
+        slot.drain = slot.drain or switch == "drain"
         allowed = groups.get(slot.host, groups.get(short))
         if allowed and len(slot.gpus) > 1 and sorted(slot.gpus) not in [sorted(g) for g in allowed]:
             problems.append(
@@ -415,9 +513,10 @@ def _job(raw: Any, defaults: dict[str, Any], base: str, where: str) -> JobSpec:
         raise ValueError(
             f"{where}: --device, --device-list and --output-dir are set by the scheduler"
         )
-    gpus = int(merged.get("gpus", 1))
-    if gpus < 1:
-        raise ValueError(f"{where}: gpus must be >= 1")
+    raw_gpus = merged.get("gpus", 1)
+    gpus = ALL_GPUS if raw_gpus == "all" else int(raw_gpus)
+    if gpus < 1 and gpus != ALL_GPUS:
+        raise ValueError(f"{where}: gpus must be >= 1 or 'all'")
     return JobSpec(
         name=name,
         output_dir=output_dir,
@@ -643,6 +742,10 @@ class Scheduler:
         self.probes: dict[str, dict[str, Any]] = {}
         self._queue: dict[str, str] | None = None
         self.down_until: dict[str, float] = {}
+        self._gpu_mem: dict[str, dict[int, int] | None] = {}
+        self._meta: dict[str, dict[str, Any]] = {}
+        self.killed_hosts: set[str] = set()
+        self._busy: set[str] = set()
         self.next_order = 0
         self._warned: set[str] = set()
         self._fresh = True
@@ -679,6 +782,133 @@ class Scheduler:
         }
         os.makedirs(os.path.dirname(self.state_path), exist_ok=True)
         _atomic_write(self.state_path, json.dumps(doc, indent=1, sort_keys=True))
+        try:
+            self.write_db(doc["updated"])
+        except (OSError, sqlite3.Error) as exc:
+            self._warn(f"run database not written ({exc})")
+
+    @property
+    def db_path(self) -> str:
+        return os.path.splitext(self.state_path)[0] + ".sqlite"
+
+    def _meta_of(self, spec: JobSpec) -> dict[str, Any]:
+        if spec.name not in self._meta:
+            self._meta[spec.name] = job_meta(spec)
+        return self._meta[spec.name]
+
+    def write_db(self, now: float) -> None:
+        """Rebuild the SQLite mirror of the queue and swap it in whole, for readers on any host."""
+        tmp = f"{self.db_path}.{os.getpid()}.tmp"
+        with contextlib.suppress(FileNotFoundError):
+            os.remove(tmp)
+        con = sqlite3.connect(tmp)
+        try:
+            con.executescript(RUNS_DB_SCHEMA)
+            for name, job in self.jobs.items():
+                spec, p, meta = job.spec, job.progress, self._meta_of(job.spec)
+                starts = [h.get("start") for h in job.history if h.get("start")]
+                starts += [job.launched_at] if job.launched_at else []
+                finished = (
+                    job.history[-1].get("end") if job.history and job.state not in ACTIVE else None
+                )
+                frames, total = p.get("frames"), p.get("frames_total")
+                eta = None
+                if job.state in ACTIVE:
+                    eta = frames_eta(p, now) if total else eta_seconds(p, now)
+                con.execute(
+                    "INSERT INTO runs VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        name,
+                        job.state,
+                        job.slot,
+                        job.host,
+                        ",".join(map(str, job.gpus)) or None,
+                        len(job.history) + (job.state in ACTIVE),
+                        job.attempts,
+                        job.failures,
+                        _when(min(starts) if starts else None),
+                        _when(max(starts) if starts else None),
+                        _when(finished),
+                        frames,
+                        total,
+                        frames * meta["dump_dt"]
+                        if frames is not None and "dump_dt" in meta
+                        else None,
+                        meta.get("t_end"),
+                        meta.get("dump_dt"),
+                        p.get("step"),
+                        p.get("target"),
+                        round(eta / 3600.0, 3) if eta is not None else None,
+                        spec.cost,
+                        job.note or None,
+                        spec.output_dir,
+                        meta.get("dataset_dir"),
+                        spec.config or spec.run_dir,
+                        json.dumps(meta.get("params") or {}),
+                    ),
+                )
+                legs = list(job.history)
+                if job.state in ACTIVE:
+                    legs.append(
+                        {
+                            "slot": job.slot,
+                            "host": job.host,
+                            "gpus": job.gpus,
+                            "launch": job.launch_id,
+                            "start": job.launched_at,
+                            "result": job.state,
+                        }
+                    )
+                for i, h in enumerate(legs):
+                    start, end = h.get("start"), h.get("end")
+                    con.execute(
+                        "INSERT INTO legs VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                        (
+                            name,
+                            i + 1,
+                            h.get("launch"),
+                            h.get("slot"),
+                            h.get("host"),
+                            ",".join(map(str, h.get("gpus") or [])) or None,
+                            _when(start),
+                            _when(end),
+                            round(((end or now) - start) / 3600.0, 3) if start else None,
+                            h.get("exit"),
+                            h.get("result"),
+                            h.get("note") or None,
+                        ),
+                    )
+            running = {j.slot: n for n, j in self.jobs.items() if j.state in ACTIVE and j.slot}
+            for sid, slot in self.pool.items():
+                con.execute(
+                    "INSERT INTO slots VALUES (?,?,?,?,?,?,?,?)",
+                    (
+                        sid,
+                        slot.host,
+                        ",".join(map(str, slot.gpus)),
+                        slot.speed,
+                        int(slot.drain),
+                        int(sid in self._busy),
+                        _when(self.down_until.get(sid))
+                        if self.down_until.get(sid, 0) > now
+                        else None,
+                        running.get(sid),
+                    ),
+                )
+            con.executemany(
+                "INSERT INTO meta VALUES (?,?)",
+                [
+                    ("updated", _when(now)),
+                    ("scheduler", f"{socket.gethostname()} pid {os.getpid()}"),
+                    ("targets", self.pool_path),
+                    ("jobs", self.jobs_path),
+                    ("deadline", _when(self.deadline)),
+                ],
+            )
+            con.commit()
+        finally:
+            con.close()
+        os.replace(tmp, self.db_path)
 
     def _warn(self, msg: str) -> None:
         if msg not in self._warned:
@@ -794,7 +1024,7 @@ class Scheduler:
             f"#SBATCH --signal=B:TERM@{target.signal_lead}",
         ]
         if not _has_flag(target.sbatch, GPU_FLAGS):
-            lines.append(f"#SBATCH --gres=gpu:{spec.gpus}")
+            lines.append(f"#SBATCH --gres=gpu:{max(spec.gpus, 1)}")
         lines += [f"#SBATCH {a}" for a in target.sbatch]
         lines += target.setup
         lines.append(f"cd {shlex.quote(spec.workdir)}")
@@ -839,6 +1069,7 @@ class Scheduler:
         """One round: re-read pool and jobs, apply requests, follow active jobs, launch pending."""
         now = self.clock()
         self._queue = None
+        self._gpu_mem = {}
         self._refresh_pool()
         self._refresh_jobs(now)
         if self.dry_run:
@@ -853,7 +1084,10 @@ class Scheduler:
             self._monitor(job, now)
         for job in self._active():
             if job.host != SLURM_HOST and job.slot not in self.pool:
-                self._stop(job, "slot removed", True, now)
+                if {job.host, (job.host or "").split(".")[0]} & self.killed_hosts:
+                    self._kill(job, f"host {job.host} killed", now)
+                else:
+                    self._stop(job, "slot removed", True, now)
         if self.deadline is not None and now >= self.deadline:
             for job in self._active():
                 self._stop(job, "time limit", True, now)
@@ -875,6 +1109,9 @@ class Scheduler:
             )
             return
         self.slurm = slurm
+        with contextlib.suppress(OSError, ValueError, yaml.YAMLError):
+            switches, _ = host_switches(_load_yaml(self.pool_path, "slots"))
+            self.killed_hosts = {h for h, v in switches.items() if v == "kill"}
         for problem in problems:
             self._warn(problem)
         for sid in slots.keys() - self.pool.keys():
@@ -905,7 +1142,7 @@ class Scheduler:
                 self.next_order += 1
                 self.jobs[spec.name] = job
                 claimed[spec.output_dir] = spec.name
-                self.log(f"job {spec.name} added (cost {spec.cost:g}, {spec.gpus} GPU)")
+                self.log(f"job {spec.name} added (cost {spec.cost:g}, {spec.gpus or 'all'} GPU)")
                 if not self._fresh and not self.dry_run:
                     self._adopt(job, now)
             elif job.state == "pending" and job.spec != spec:
@@ -1060,6 +1297,22 @@ class Scheduler:
             f"{job.spec.name}: {reason}; stopping it on {job.slot} (SIGTERM, SIGKILL after {self.grace:.0f} s)"
         )
 
+    def _kill(self, job: Job, reason: str, now: float) -> None:
+        """SIGKILL ``job`` at once (no SIGTERM, so no snapshot is cut short) and queue it again."""
+        if job.state == "stopping" and job.killed_at is not None:
+            return
+        if job.handle and job.pid is None:
+            self._stop(job, reason, True, now)
+            return
+        job.state, job.stop_reason, job.requeue = "stopping", reason, True
+        job.stop_started, job.killed_at = now - self.grace - 1.0, None
+        if job.pid is not None:
+            self._signal(job, "KILL", group=True)
+            job.killed_at = now
+        self.log(
+            f"{job.spec.name}: {reason}; SIGKILL on {job.slot}, it resumes from its last snapshot"
+        )
+
     def _finish(
         self, job: Job, code: int | None, now: float, note: str = "", startup: bool = False
     ) -> None:
@@ -1110,6 +1363,19 @@ class Scheduler:
         job.stop_reason, job.stop_started, job.killed_at, job.requeue = None, None, None, True
 
     def _update_progress(self, job: Job, now: float) -> None:
+        meta = self._meta_of(job.spec)
+        frames = dataset_frames(meta.get("dataset_dir"))
+        if frames is not None:
+            p = job.progress
+            p["frames"] = frames
+            if "t_end" in meta:
+                p["frames_total"] = math.ceil(meta["t_end"] / meta["dump_dt"] - 1e-9)
+            if p.get("frame_leg") != job.launch_id:
+                p.update(
+                    frame_leg=job.launch_id, frames_first=[frames, now], frames_last=[frames, now]
+                )
+            elif frames != p["frames_last"][0]:
+                p["frames_last"] = [frames, now]
         steps = snapshot_steps(job.spec.output_dir)
         legs = run_legs(job.spec.output_dir)
         p = job.progress
@@ -1130,6 +1396,10 @@ class Scheduler:
         A larger slot is left alone while a waiting job needs more GPUs than this one and fits it.
         """
         need = job.spec.gpus
+        if need == ALL_GPUS and not any(s.host == SLURM_HOST for s in free):
+            if not free:
+                return None
+            return min(free, key=lambda s: (s.id in job.avoid, -s.speed * len(s.gpus), s.id))
 
         def reserved(slot: Slot) -> bool:
             return len(slot.gpus) > need and any(
@@ -1151,6 +1421,43 @@ class Scheduler:
             key=lambda s: (s.id in job.avoid, len(s.gpus) != need, -s.speed, len(s.gpus), s.id),
         )
 
+    def _gpu_memory(self, host: str) -> dict[int, int] | None:
+        """Memory in use per GPU index on a host (MiB), read once per poll; None on failure."""
+        if host not in self._gpu_mem:
+            try:
+                res = self.executor.run(
+                    host, "nvidia-smi --query-gpu=index,memory.used --format=csv,noheader,nounits"
+                )
+                mem = {}
+                for line in res.stdout.strip().splitlines():
+                    idx, used = (int(float(x)) for x in line.split(","))
+                    mem[idx] = used
+                self._gpu_mem[host] = mem if res.returncode == 0 and mem else None
+            except (subprocess.TimeoutExpired, OSError, ValueError):
+                self._gpu_mem[host] = None
+        return self._gpu_mem[host]
+
+    def _occupied(self, slot: Slot) -> bool:
+        """True if another process holds more than ``busy_mib`` on one of the slot's GPUs."""
+        if slot.busy_mib <= 0 or slot.host == SLURM_HOST or self.dry_run:
+            return False
+        mem = self._gpu_memory(slot.host)
+        hot = None if mem is None else [g for g in slot.gpus if mem.get(g, 0) > slot.busy_mib]
+        if mem is None or hot:
+            if slot.id not in self._busy:
+                why = (
+                    "GPU memory unreadable"
+                    if mem is None
+                    else f"GPU {hot} in use by another process"
+                )
+                self.log(f"slot {slot.id}: {why}; nothing placed there until it is free")
+                self._busy.add(slot.id)
+            return True
+        if slot.id in self._busy:
+            self.log(f"slot {slot.id}: free again")
+            self._busy.discard(slot.id)
+        return False
+
     def _place(self, now: float) -> None:
         busy = {j.slot for j in self._active()}
         free = [
@@ -1158,6 +1465,8 @@ class Scheduler:
             for s in self.pool.values()
             if s.id not in busy and not s.drain and self.down_until.get(s.id, 0.0) <= now
         ]
+        if any(j.state == "pending" for j in self.jobs.values()):
+            free = [s for s in free if not self._occupied(s)]
         pending = sorted(
             (j for j in self.jobs.values() if j.state == "pending"),
             key=lambda j: (-j.spec.cost, j.order),
@@ -1172,7 +1481,7 @@ class Scheduler:
             if self._launch(job, slot, now):
                 placed.add(job.spec.name)
 
-    def gyaradax_args(self, job: Job) -> list[str]:
+    def gyaradax_args(self, job: Job, slot: Slot | None = None) -> list[str]:
         """The ``gyaradax`` arguments of the job's next leg: first launch, resume, or restart.
 
         A leg resumes the run directory once it holds a snapshot written by this job. Runs that
@@ -1192,7 +1501,10 @@ class Scheduler:
             args = ["run", run_dir] + strip_flags(spec.args, FRESH_FLAGS)
         else:
             args = first + ([] if "--overwrite" in first else ["--overwrite"])
-        if spec.gpus > 1 and not _has_flag(args, MESH_FLAGS) and not config_shards(args[1]):
+        if spec.gpus == ALL_GPUS and slot is not None and not _has_flag(args, MESH_FLAGS):
+            # every leg sizes its mesh to its slot; this overrides a layout saved by an earlier leg
+            args += ["--n-gpus", str(len(slot.gpus))]
+        elif spec.gpus > 1 and not _has_flag(args, MESH_FLAGS) and not config_shards(args[1]):
             args += ["--n-gpus", str(spec.gpus)]
         return args
 
@@ -1203,7 +1515,7 @@ class Scheduler:
             **slot.env,
             **spec.env,
             "XLA_PYTHON_CLIENT_PREALLOCATE": "false",
-            "CUDA_VISIBLE_DEVICES": ",".join(map(str, slot.gpus[: spec.gpus])),
+            "CUDA_VISIBLE_DEVICES": ",".join(map(str, job_gpus(spec, slot))),
         }
         wrapper = [
             slot.python,
@@ -1240,7 +1552,8 @@ class Scheduler:
             )
             self.log(f"{spec.name}: {job.note}")
             return False
-        argv = [a.replace("{python}", slot.python) for a in self.program] + self.gyaradax_args(job)
+        argv = [a.replace("{python}", slot.python) for a in self.program]
+        argv += self.gyaradax_args(job, slot)
         argv += self._backend_args(job, slot, now)
         launch_id = uuid.uuid4().hex[:16]
         if slot.host == SLURM_HOST:
@@ -1260,7 +1573,7 @@ class Scheduler:
             )
             return False
         job.state, job.slot, job.host = "starting", slot.id, slot.host
-        job.gpus = slot.gpus[: spec.gpus]
+        job.gpus = job_gpus(spec, slot)
         job.launch_id, job.launched_at, job.pid = launch_id, now, None
         job.hb_value, job.hb_seen, job.argv, job.note = None, None, argv, ""
         job.attempts += 1
@@ -1340,6 +1653,19 @@ def _duration(seconds: float | None) -> str:
     return f"{s}s"
 
 
+def frames_eta(progress: dict[str, Any], now: float) -> float | None:
+    """Seconds left from the dataset frames written in the current leg, None before two frames."""
+    first, last, total = (
+        progress.get("frames_first"),
+        progress.get("frames_last"),
+        progress.get("frames_total"),
+    )
+    if not first or not last or not total or last[0] <= first[0] or last[1] <= first[1]:
+        return None
+    rate = (last[0] - first[0]) / (last[1] - first[1])
+    return max(0.0, (total - last[0]) / rate - (now - last[1]))
+
+
 def eta_seconds(progress: dict[str, Any], now: float) -> float | None:
     """Time left for a running leg, from the snapshot steps seen during it."""
     target, first, last = progress.get("target"), progress.get("first"), progress.get("last")
@@ -1383,12 +1709,15 @@ def format_status(doc: dict[str, Any], now: float, pending_requests: int = 0) ->
         p = j.get("progress") or {}
         step = f"{p['step']}/{p.get('target', '?')}" if "step" in p else "-"
         eta = eta_seconds(p, now) if j["state"] in ACTIVE else None
+        if p.get("frames_total"):
+            step = f"frame {p.get('frames', 0)}/{p['frames_total']}"
+            eta = frames_eta(p, now) if j["state"] in ACTIVE else None
         rows.append(
             (
                 j["spec"]["name"],
                 j["state"],
                 (j.get("slot") or "-") + (f" (job {j['handle']})" if j.get("handle") else ""),
-                ",".join(map(str, j.get("gpus") or [])) or str(j["spec"]["gpus"]),
+                ",".join(map(str, j.get("gpus") or [])) or str(j["spec"]["gpus"] or "all"),
                 f"{j['spec']['cost']:g}",
                 str(j.get("failures", 0)),
                 step,

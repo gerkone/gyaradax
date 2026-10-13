@@ -377,6 +377,39 @@ def _cmd_request(args: argparse.Namespace) -> int:
     return 0
 
 
+def _gpus_arg(text: str) -> int | str:
+    if text == "all":
+        return text
+    value = int(text)
+    if value < 1:
+        raise argparse.ArgumentTypeError("--gpus must be >= 1 or 'all'")
+    return value
+
+
+def _cmd_host(args: argparse.Namespace) -> int:
+    camp = Campaign(args.campaign)
+    with open(camp.targets) as fh:
+        doc = yaml.safe_load(fh) or {}
+    hosts = doc.get("hosts") or {}
+    if args.switch == "on":
+        hosts.pop(args.host, None)
+    else:
+        hosts[args.host] = args.switch
+    if hosts:
+        doc["hosts"] = hosts
+    else:
+        doc.pop("hosts", None)
+    sched._atomic_write(camp.targets, yaml.safe_dump(doc, sort_keys=False))
+    effect = {
+        "on": "takes jobs again",
+        "drain": "finishes its jobs and takes no new ones",
+        "off": "stops its jobs (SIGTERM, snapshot) and they go back in the queue",
+        "kill": "kills its jobs now (SIGKILL) and they resume elsewhere from their last snapshot",
+    }[args.switch]
+    print(f"{args.host}: {args.switch} in {camp.targets}; at the next poll it {effect}")
+    return 0
+
+
 def _cmd_probe(args: argparse.Namespace) -> int:
     camp = Campaign(args.campaign)
     path = args.targets or camp.targets
@@ -437,9 +470,10 @@ def build_parser() -> argparse.ArgumentParser:
         )
         p.add_argument(
             "--gpus",
-            type=int,
+            type=_gpus_arg,
             default=None,
-            help="GPUs per job (default: the config's sharding, else 1)",
+            help="GPUs per job, or 'all': every GPU of the slot it lands on, mesh sized per "
+            "leg (default: the config's sharding, else 1)",
         )
         p.add_argument(
             "--linear-check",
@@ -528,6 +562,14 @@ def build_parser() -> argparse.ArgumentParser:
     resume_p.add_argument("names", nargs="+")
     campaign(resume_p)
     resume_p.set_defaults(func=_cmd_request)
+
+    host_p = sub.add_parser(
+        "host", help="switch a host on, to drain, off or kill while the campaign runs"
+    )
+    host_p.add_argument("host")
+    host_p.add_argument("switch", choices=sched.HOST_SWITCHES)
+    campaign(host_p)
+    host_p.set_defaults(func=_cmd_host)
 
     probe_p = sub.add_parser("probe", help="check the CUDA library on every target host")
     campaign(probe_p)

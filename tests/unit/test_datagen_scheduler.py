@@ -187,9 +187,12 @@ class Campaign:
         self.entries = []
         self.logs = []
 
-    def pool(self, *slots):
+    def pool(self, *slots, hosts=None):
+        doc = {"defaults": {"python": sys.executable}, "slots": list(slots)}
+        if hosts:
+            doc["hosts"] = hosts
         with open(self.pool_path, "w") as fh:
-            yaml.safe_dump({"defaults": {"python": sys.executable}, "slots": list(slots)}, fh)
+            yaml.safe_dump(doc, fh)
 
     def slurm(self, **target):
         with open(self.pool_path, "w") as fh:
@@ -516,6 +519,74 @@ def test_drained_slot_finishes_its_job_then_gets_nothing(camp):
     camp.drive(sched, done(sched, "second"))
 
 
+def test_host_switched_off_at_runtime_moves_its_job_elsewhere(camp):
+    camp.pool(slot("a", 0, speed=2), slot("b", 1))
+    camp.add_job("long", steps=1000, step_time=0.04, args=["--n-steps", "40"])
+    sched = camp.scheduler()
+    sched.poll()
+    assert sched.jobs["long"].slot == "a:0"
+    run_dir = camp.run_dir("long")
+    camp.drive(sched, lambda: max(gs.snapshot_steps(run_dir) or [0]) >= 5)
+
+    camp.pool(slot("a", 0, speed=2), slot("b", 1), hosts={"a": "off"})
+    camp.drive(sched, done(sched, "long"))
+    first, second = camp.legs("long")
+    assert first["gpus"] == "0" and second["gpus"] == "1"
+    assert sched.jobs["long"].failures == 0
+
+
+def test_killed_host_stops_its_job_at_once_and_it_resumes_from_its_snapshot(camp):
+    camp.pool(slot("a", 0, speed=2), slot("b", 1))
+    camp.add_job("long", steps=1000, step_time=0.04, args=["--n-steps", "60"])
+    sched = camp.scheduler(grace=60.0)
+    sched.poll()
+    run_dir = camp.run_dir("long")
+    camp.drive(sched, lambda: max(gs.snapshot_steps(run_dir) or [0]) >= 5)
+
+    camp.pool(slot("a", 0, speed=2), slot("b", 1), hosts={"a": "kill"})
+    started = time.time()
+    job = sched.jobs["long"]
+    camp.drive(sched, lambda: job.state in ("starting", "running") and job.slot == "b:1")
+    assert time.time() - started < 10.0
+    camp.drive(sched, done(sched, "long"))
+    first, second = camp.legs("long")
+    assert first["gpus"] == "0" and second["gpus"] == "1"
+    assert second["start_step"] >= 5
+    stop = sched.jobs["long"].history[0]
+    assert stop["exit"] != 75 and stop["note"].startswith("host a killed")
+    assert stop["result"] == "pending"
+    assert sched.jobs["long"].failures == 0
+
+
+def test_busy_gpus_get_no_jobs_until_they_are_free(camp):
+    class Smi(gs.LocalExecutor):
+        mem = {0: 5000, 1: 0}
+
+        def run(self, host, command):
+            if command.startswith("nvidia-smi"):
+                out = "\n".join(f"{i}, {m}" for i, m in self.mem.items())
+                return subprocess.CompletedProcess(command, 0, out, "")
+            return super().run(host, command)
+
+    smi = Smi()
+    camp.pool(slot("a", 0, speed=2, busy_mib=1000), slot("a", 1, busy_mib=1000))
+    camp.add_job("first", steps=40, cost=2)
+    sched = camp.scheduler(executor=smi)
+    sched.poll()
+    assert sched.jobs["first"].slot == "a:1"
+    camp.add_job("second", steps=2, cost=1)
+    for _ in range(3):
+        sched.poll()
+        time.sleep(0.05)
+    assert sched.jobs["second"].state == "pending"
+    assert sum("in use by another process" in line for line in camp.logs) == 1
+
+    smi.mem[0] = 200
+    camp.drive(sched, done(sched))
+    assert camp.legs("second")[0]["gpus"] == "0"
+    assert any("a:0: free again" in line for line in camp.logs)
+
+
 def test_unreadable_pool_keeps_the_previous_one(camp):
     camp.pool(slot("a", 0))
     camp.add_job("long", steps=60)
@@ -574,6 +645,31 @@ def test_pool_validation(tmp_path):
     path.write_text("")
     with pytest.raises(ValueError):
         gs.load_pool(str(path))
+
+
+def test_host_switches(tmp_path):
+    path = tmp_path / "pool.yaml"
+    path.write_text(
+        yaml.safe_dump(
+            {
+                "hosts": {"shark": "drain", "coyote": "off", "lizard": "maybe"},
+                "slots": [
+                    {"host": "shark", "gpus": [0]},
+                    {"host": "shark.local", "gpus": [1]},
+                    {"host": "coyote", "gpus": [0]},
+                    {"host": "lizard", "gpus": [0], "busy_mib": 1500},
+                    {"host": "scorpion", "gpus": [0], "busy_mib": -1},
+                ]
+            }
+        )
+    )
+    slots, problems = gs.load_pool(str(path))
+    assert list(slots) == ["shark:0", "shark.local:1", "lizard:0"]
+    assert slots["shark:0"].drain and slots["shark.local:1"].drain
+    assert not slots["lizard:0"].drain and slots["lizard:0"].busy_mib == 1500
+    assert len(problems) == 2
+    assert any("'maybe' is not one of" in p for p in problems)
+    assert any("busy_mib" in p for p in problems)
 
 
 def test_job_validation(tmp_path):
@@ -652,6 +748,75 @@ def test_next_leg_arguments(camp):
     assert gs.strip_flags(
         ["--n-steps=5", "--mp", "--resume-from", "K03", "--overwrite"], gs.FRESH_FLAGS
     ) == ["--mp"]
+
+
+def test_all_gpu_job_takes_the_whole_slot_and_sizes_its_mesh_per_leg(camp):
+    camp.pool(slot("a", 0, speed=2), slot("b", 1, 2, 3, 4), slot("c", 5, 6))
+    camp.add_job("wide", gpus="all", args=["--backend", "cuda"])
+    camp.add_job("narrow", gpus=1, cost=0.5)
+    sched = camp.scheduler(dry_run=True)
+    sched.poll()
+    lines = {line.split()[1]: line for line in camp.logs if line.startswith("[dry-run]")}
+    assert "-> b:1,2,3,4" in lines["wide"]
+    assert "CUDA_VISIBLE_DEVICES=1,2,3,4" in lines["wide"] and "--n-gpus 4" in lines["wide"]
+    assert "-> a:0" in lines["narrow"] and "--n-gpus" not in lines["narrow"]
+
+    job = sched.jobs["wide"]
+    job.base_legs = 0
+    run_dir = camp.run_dir("wide")
+    os.makedirs(run_dir)
+    with open(os.path.join(run_dir, "run_info.jsonl"), "w") as fh:
+        fh.write(json.dumps({"start_step": 0, "target_step": 30}) + "\n")
+    with open(os.path.join(run_dir, "config.yaml"), "w") as fh:
+        fh.write("sharding: {n_gpus_sp: 2, n_gpus_mu: 2}\n")
+    with zipfile.ZipFile(os.path.join(run_dir, "step_000004.npz"), "w") as zf:
+        zf.writestr("df.npy", b"df")
+    small = sched.pool["c:5,6"]
+    assert sched.gyaradax_args(job, small) == ["run", run_dir, "--backend", "cuda", "--n-gpus", "2"]
+    assert gs.job_gpus(job.spec, small) == [5, 6]
+
+
+def test_run_database_follows_the_queue(camp, tmp_path):
+    import sqlite3
+
+    dataset = tmp_path / "dataset"
+    camp.pool(slot("a", 0))
+    camp.add_job("first", steps=30, cost=2, args=["--dataset", str(dataset), "--dataset-name", "f"])
+    camp.add_job("second", steps=2, cost=1)
+    cfg_path = camp.root / "configs" / "first.yaml"
+    cfg = yaml.safe_load(cfg_path.read_text())
+    cfg.update(solver={"t_end": 5.0, "dump_dt": 1.0}, geometry={"eps": 0.18, "q": 2.5})
+    cfg_path.write_text(yaml.safe_dump(cfg))
+    data = dataset / "f_ifft_realpotens" / "data"
+    data.mkdir(parents=True)
+    for k in range(3):
+        (data / f"poten_{k:05d}.zstd16.bin").write_bytes(b"x")
+    sched = camp.scheduler()
+
+    def rows(sql):
+        con = sqlite3.connect(sched.db_path)
+        try:
+            return con.execute(sql).fetchall()
+        finally:
+            con.close()
+
+    camp.drive(sched, lambda: sched.jobs["first"].state == "running")
+    states = dict(rows("SELECT name, state FROM runs"))
+    assert states == {"first": "running", "second": "pending"}
+    frames, total, t, eps = rows(
+        "SELECT frames, frames_total, t, json_extract(params, '$.geometry.eps') FROM runs "
+        "WHERE name = 'first'"
+    )[0]
+    assert (frames, total, t, eps) == (3, 5, 3.0, 0.18)
+    assert rows("SELECT job FROM slots") == [("first",)]
+
+    camp.drive(sched, done(sched))
+    sched.save()
+    assert dict(rows("SELECT name, state FROM runs")) == {"first": "done", "second": "done"}
+    leg = rows("SELECT leg, slot, exit, result FROM legs WHERE name = 'first'")
+    assert leg == [(1, "a:0", 0, "done")]
+    assert rows("SELECT value IS NOT NULL FROM meta WHERE key = 'updated'") == [(1,)]
+    assert not glob.glob(sched.db_path + ".*.tmp")
 
 
 def test_truncated_diagnostics_fail_the_job_instead_of_burning_retries(camp):
