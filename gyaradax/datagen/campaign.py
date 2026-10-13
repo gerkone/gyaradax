@@ -88,6 +88,8 @@ class Campaign:
             "set": _parse_sets(args.set or []),
             "args": shlex.split(args.args) if args.args else [],
             "gpus": args.gpus,
+            "linear_check": args.linear_check,
+            "linear_check_tol": args.linear_check_tol,
         }
         if self.exists:
             # only flags given on this call are compared
@@ -97,6 +99,8 @@ class Campaign:
                 "set": args.set,
                 "args": args.args,
                 "gpus": args.gpus,
+                "linear_check": args.linear_check,
+                "linear_check_tol": args.linear_check_tol,
             }
             bad = [k for k, v in explicit.items() if v and given[k] != self.settings.get(k)]
             if bad:
@@ -107,6 +111,10 @@ class Campaign:
         if sched._has_flag(given["args"], OWN_FLAGS):
             raise SystemExit(
                 f"error: --args may not contain {', '.join(OWN_FLAGS)}; the campaign sets them"
+            )
+        if given["linear_check"] and sched._has_flag(given["args"], ("--linear-check",)):
+            raise SystemExit(
+                "error: give the linear check either as --linear-check or in --args, not both"
             )
         given["name"] = given["name"] or "{run}"
         commit = _git("rev-parse", "HEAD")
@@ -174,6 +182,10 @@ class Campaign:
         dataset = self.settings.get("dataset")
         if dataset:
             args += ["--dataset", dataset, "--dataset-name", name]
+        if self.settings.get("linear_check"):
+            args += ["--linear-check", str(self.settings["linear_check"])]
+            if self.settings.get("linear_check_tol") is not None:
+                args += ["--linear-check-tol", f"{float(self.settings['linear_check_tol']):g}"]
         return {
             "name": name,
             "config": config,
@@ -332,7 +344,28 @@ def _cmd_status(args: argparse.Namespace) -> int:
         f"campaign {camp.root}: dataset {s.get('dataset') or '-'}, names {s.get('name')}, set {s.get('set') or {}}"
     )
     print(sched.format_status(doc, time.time(), waiting))
+    checks = _linear_checks(doc)
+    if checks:
+        print("\nlinear check (γ at the reference's dominant ky):")
+        width = max(len(n) for n in checks)
+        for name, line in checks.items():
+            print(f"  {name:<{width}}  {line}")
     return 0
+
+
+def _linear_checks(doc: dict[str, Any]) -> dict[str, str]:
+    """Summary per job of RUN_DIR/linear_check.json, where present."""
+    from gyaradax.diagnostics.growth import summary
+
+    out = {}
+    for name, job in sorted(doc.get("jobs", {}).items()):
+        path = os.path.join(job["spec"]["output_dir"], "linear_check.json")
+        try:
+            with open(path) as fh:
+                out[name] = summary(json.load(fh))
+        except (OSError, ValueError, KeyError):
+            continue
+    return out
 
 
 def _cmd_request(args: argparse.Namespace) -> int:
@@ -408,6 +441,20 @@ def build_parser() -> argparse.ArgumentParser:
             default=None,
             help="GPUs per job (default: the config's sharding, else 1)",
         )
+        p.add_argument(
+            "--linear-check",
+            default=None,
+            metavar="NS[,NS...]",
+            help="before each run, compare linear growth rates with these reference resolutions "
+            "(gyaradax run --linear-check)",
+        )
+        p.add_argument(
+            "--linear-check-tol",
+            type=float,
+            default=None,
+            metavar="X",
+            help="reject a job (state rejected, not retried) whose relative γ deviation exceeds X",
+        )
 
     def campaign(p: argparse.ArgumentParser) -> None:
         p.add_argument(
@@ -476,7 +523,7 @@ def build_parser() -> argparse.ArgumentParser:
     cancel_p.set_defaults(func=_cmd_request)
 
     resume_p = sub.add_parser(
-        "resume", help="put cancelled, failed or diverged jobs back in the queue"
+        "resume", help="put cancelled, failed, diverged or rejected jobs back in the queue"
     )
     resume_p.add_argument("names", nargs="+")
     campaign(resume_p)

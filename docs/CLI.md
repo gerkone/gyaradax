@@ -335,6 +335,40 @@ process started (setup included), for the busiest GPU of a mesh.
   bracket are available, and whether NCCL is installed.
 - Details and measurements: `docs/NOTES.md` §13.
 
+## Linear growth check
+
+A linear run of a config gives per-ky growth rates γ(kθρ). Run at a finer parallel resolution, it
+is a ground truth for the production grid and dissipation: if γ at the production `ns` matches
+γ at `ns 36`, the parallel direction is resolved for that parameter point; if a dissipation
+change (e.g. `solver.disp_par`) moves γ away from it, the change alters the physics.
+
+```bash
+gyaradax growth my_case.yaml --ns 18 36                      # one linear run per resolution
+gyaradax growth my_case.yaml --ns 18 36 --set solver.disp_par=4.0 --output growth.json
+gyaradax run my_case.yaml --linear-check 36                  # check, then the nonlinear run
+gyaradax run my_case.yaml --linear-check 24,36 --linear-check-tol 0.1
+```
+
+- **Linear run.** `solver.non_linear` is switched off, the geometry is computed from the
+  config, and `--ns N` sets `grid.ns` (with `geometry.sgr_dist` scaled to keep the field-line
+  length). `--set KEY=VALUE` overrides any other entry. The run is unsharded on one GPU.
+- **Time step.** Capped at the linear stability estimate (`estimate_linear_timestep`), as GKW does
+  for every explicit run; the input `solver.dt` is kept when it is below the estimate.
+- **Stop.** After `t ≥ 15`, once the unstable ky (kθρ ≤ 1, γ > 0.02) vary by less than 0.005
+  over 6 time units, or at `--t-end` (default 40). γ is the mean over those last 6 time units; a
+  row marked "not settled" reached `--t-end` first.
+- **Report.** Per resolution: the peak γ and its kθρ, γ at the dominant kθρ of the finest
+  resolution (the reference), and the relative deviation from it.
+- **`run --linear-check NS[,NS...]`** (off by default) runs this before the nonlinear run, at the
+  run's own `ns` and the listed ones, writes `RUN_DIR/linear_check.json` and prints the table.
+  A resumed run reuses the file while the physics of the config is unchanged (its name, length,
+  backend and layout do not count). With `--linear-check-tol X` the run exits with code 3,
+  without starting, when the deviation exceeds `X`; without it the check only reports.
+  `--linear-check-t-end` caps each linear run.
+- **datagen.** `datagen add|run --linear-check NS[,NS...] [--linear-check-tol X]` adds the check to
+  every job of the campaign; `datagen status` lists each job's result, and a job refused by
+  the tolerance becomes `rejected` (not retried; `resume` puts it back).
+
 ## Data generation (`gyaradax datagen`)
 
 `gyaradax datagen` runs a list of configs over an ssh GPU mesh or a Slurm cluster and collects
@@ -509,6 +543,7 @@ only to launch, to signal, and to check a process whose heartbeat has stopped ch
 | exit 75 (stopped by SIGTERM after a snapshot) | queued again, not a failure |
 | nonzero exit, or no heartbeat for 300 s and no process | retried up to `--max-retries` times, resuming from the run directory |
 | exit 2 with a `DIVERGED` marker | diverged, not retried (a resume would diverge again) |
+| exit 3 (refused by `--linear-check-tol`) | rejected, not retried |
 | `gyaradax run` cannot even start | the slot is paused for 300 s |
 
 A retry or a requeued job continues with `gyaradax run RUN_DIR`, dropping `--n-steps`,

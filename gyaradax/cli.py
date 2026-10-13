@@ -1,4 +1,5 @@
-"""gyaradax command-line interface: ``run``, ``bench``, ``info``, ``build-cuda``, ``datagen``.
+"""gyaradax command-line interface: ``run``, ``bench``, ``growth``, ``info``, ``build-cuda``,
+``datagen``.
 
 Run mode (adiabatic/kinetic), electromagnetic terms and velocity-space
 sharding all come from the YAML config; flags only override it. See docs/CLI.md.
@@ -221,6 +222,112 @@ class RunSetup(TypedDict):
     trajectory: str | None
 
 
+def _default_output_dir(cfg: Any, args: argparse.Namespace, run_dir: str | None) -> str:
+    kinetic = not bool((cfg.get("grid") or {}).get("adiabatic_electrons", True))
+    default = f"outputs_{'kinetic' if kinetic else 'adiabatic'}_{cfg.run.name}"
+    return args.output_dir or run_dir or default
+
+
+def _parse_sets(items: Sequence[str] | None) -> dict[str, Any]:
+    import yaml
+
+    out: dict[str, Any] = {}
+    for item in items or []:
+        key, sep, value = item.partition("=")
+        if not sep or not key.strip():
+            raise SystemExit(f"error: --set expects KEY=VALUE, got {item!r}")
+        out[key.strip()] = yaml.safe_load(value)
+    return out
+
+
+def _parse_ns_list(text: str) -> list[int]:
+    try:
+        values = [int(v) for v in text.replace(",", " ").split()]
+    except ValueError:
+        raise SystemExit(f"error: expected resolutions like 36 or 24,36, got {text!r}")
+    if not values or min(values) < 2:
+        raise SystemExit(f"error: expected resolutions like 36 or 24,36, got {text!r}")
+    return values
+
+
+def _progress(every: int = 10) -> Any:
+    count = [0]
+
+    def log(msg: str) -> None:
+        count[0] += 1
+        if count[0] % every == 0:
+            print(f"    {msg}", flush=True)
+
+    return log
+
+
+def _linear_check(args: argparse.Namespace, config_path: str, run_dir: str | None) -> int:
+    """Linear growth rates at the run's ns and the reference ones, cached in the run directory."""
+    from gyaradax.diagnostics import growth
+
+    cfg = OmegaConf.load(config_path)
+    output_dir = _default_output_dir(cfg, args, run_dir)
+    path = os.path.join(output_dir, "linear_check.json")
+    refs = _parse_ns_list(args.linear_check)
+    key = growth.config_key(growth.adjusted_config(cfg))
+    report = None
+    if os.path.isfile(path):
+        with open(path) as fh:
+            cached = json.load(fh)
+        have = {int(r["ns"]) for r in cached.get("runs", [])}
+        if cached.get("config_key") == key and set(refs) | {int(cfg.grid.ns)} <= have:
+            report = cached
+            print(f"linear check: {path} (computed before)")
+    if report is None:
+        print(f"linear check: growth rates at ns {int(cfg.grid.ns)} and reference ns {refs}")
+        report = growth.check(
+            cfg, refs, backend=args.backend, log=_progress(), t_end=args.linear_check_t_end
+        )
+        os.makedirs(output_dir, exist_ok=True)
+        tmp = path + ".tmp"
+        with open(tmp, "w") as fh:
+            json.dump(report, fh, indent=1)
+        os.replace(tmp, path)
+    print(growth.format_check(report))
+    own = report["comparison"][str(report["ns"])]
+    tol = args.linear_check_tol
+    if tol is not None and own["rel"] is not None and abs(own["rel"]) > tol:
+        print(
+            f"exit {growth.EXIT_LINEAR_CHECK}: γ at kθρ {own['ky']:.3f} is {own['gamma']:+.4f} "
+            f"at ns {report['ns']} against {own['gamma_ref']:+.4f} at ns {report['reference_ns']} "
+            f"({own['rel']:+.1%}, tolerance {tol:.1%}); not starting the nonlinear run"
+        )
+        return growth.EXIT_LINEAR_CHECK
+    return 0
+
+
+def _cmd_growth(args: argparse.Namespace) -> int:
+    if args.mem_fraction:
+        os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = str(args.mem_fraction)
+    configure_runtime_env(
+        device=args.device if args.device is not None else -1, device_list=args.device_list
+    )
+    from gyaradax.diagnostics import growth
+
+    cfg = growth.adjusted_config(OmegaConf.load(args.config), sets=_parse_sets(args.set))
+    own = int(cfg.grid.ns)
+    runs = []
+    for ns in sorted(set(args.ns or [own])):
+        print(f"ns {ns}: linear run to settled growth rates (t_end {args.t_end:g})", flush=True)
+        runs.append(
+            growth.growth_rates(cfg, ns, backend=args.backend, t_end=args.t_end, log=_progress())
+        )
+    report = growth.assemble(runs, own)
+    report["config"] = os.path.abspath(args.config)
+    report["sets"] = _parse_sets(args.set)
+    print(growth.format_check(report))
+    if args.output:
+        with open(args.output, "w") as fh:
+            json.dump(report, fh, indent=1)
+        print(f"wrote {args.output}")
+    return 0
+
+
 def _resolve_config(path: str) -> tuple[str, str | None]:
     """A run directory stands for its dumped ``config.yaml`` and is resumed in place."""
     from gyaradax.io.dataset import is_trajectory
@@ -352,9 +459,7 @@ def _setup_run(config_path: str, args: argparse.Namespace, run_dir: str | None =
     name = cfg.run.name
     kinetic = not facts["adiabatic"]
 
-    output_dir: str = (
-        args.output_dir or run_dir or f"outputs_{'kinetic' if kinetic else 'adiabatic'}_{name}"
-    )
+    output_dir = _default_output_dir(cfg, args, run_dir)
 
     overrides: dict[str, Any] = {}
     if args.mp:
@@ -815,6 +920,10 @@ def _cmd_run(args: argparse.Namespace) -> int:
     _configure_env(args, facts)
 
     if len(args.configs) > 1:
+        if args.linear_check:
+            raise SystemExit(
+                "error: --linear-check takes one config; run the configs one at a time"
+            )
         return _run_batched(args, run_dirs)
     return _run_single(args, args.configs[0], run_dirs[0])
 
@@ -926,6 +1035,10 @@ def _run_single(args: argparse.Namespace, config_path: str, run_dir: str | None)
 
     from gyaradax.solver.driver import EXIT_INTERRUPTED, gksimulate
 
+    if args.linear_check and not args.dry_run:
+        code = _linear_check(args, config_path, run_dir)
+        if code:
+            return code
     setup = _setup_run(config_path, args, run_dir=run_dir)
     _describe(setup, config_path)
     if args.dry_run:
@@ -1402,6 +1515,21 @@ def build_parser() -> argparse.ArgumentParser:
         "--no-stop-on-nan", dest="stop_on_nan", action="store_false", default=True,
         help="keep integrating after df goes non-finite (default: stop and exit 2)",
     )
+    run_p.add_argument(
+        "--linear-check", type=str, default=None, metavar="NS[,NS...]",
+        help="before the run, compare linear growth rates at the run's ns with these reference "
+             "resolutions (written to RUN_DIR/linear_check.json, reused on resume)",
+    )
+    run_p.add_argument(
+        "--linear-check-t-end", type=float, default=40.0, metavar="T",
+        help="with --linear-check: stop each linear run here if its growth rates have not settled "
+             "(default 40)",
+    )
+    run_p.add_argument(
+        "--linear-check-tol", type=float, default=None, metavar="X",
+        help="with --linear-check: exit 3 instead of running when γ at the reference's dominant "
+             "ky deviates by more than X (relative, e.g. 0.1)",
+    )
     run_p.add_argument("--dry-run", action="store_true", help="set up and report, do not step")
     run_p.add_argument(
         "--telemetry", action="store_true",
@@ -1425,6 +1553,33 @@ def build_parser() -> argparse.ArgumentParser:
     bench_p.add_argument("--output-dir", type=str, default=None, help="where --profile writes the trace")
     bench_p.set_defaults(func=_cmd_bench, block_size=0, n_blocks=0, n_steps=0,
                          resume_from=None, save_dumps=False, dry_run=False)
+
+    growth_p = sub.add_parser(
+        "growth", help="linear growth rates of a config, at its own or other parallel resolutions"
+    )
+    growth_p.add_argument("config", metavar="CONFIG", help="YAML config (run linearly)")
+    growth_p.add_argument(
+        "--ns", type=int, nargs="+", default=None,
+        help="parallel resolutions to run (default: the config's); the finest is the reference",
+    )
+    growth_p.add_argument(
+        "--set", action="append", default=None, metavar="KEY=VALUE",
+        help="override a config entry, e.g. solver.disp_par=4.0 (repeatable)",
+    )
+    growth_p.add_argument(
+        "--t-end", type=float, default=40.0,
+        help="stop here if the growth rates have not settled (default 40)",
+    )
+    growth_p.add_argument(
+        "--output", type=str, default=None, metavar="FILE", help="write the report as JSON"
+    )
+    growth_p.add_argument("--backend", choices=["auto", "jax", "cuda"], default=None)
+    growth_p.add_argument("--device", type=int, default=None, help="pin to a single GPU index")
+    growth_p.add_argument(
+        "--device-list", type=str, default=None, help="comma-separated GPU indices"
+    )
+    growth_p.add_argument("--mem-fraction", type=float, default=None)
+    growth_p.set_defaults(func=_cmd_growth)
 
     stats_p = sub.add_parser("dataset-stats", help="recompute the statistics of preprocessed trajectories")
     stats_p.add_argument("trajectories", nargs="+", metavar="TRAJECTORY", help="trajectory directories")

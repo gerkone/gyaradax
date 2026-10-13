@@ -1,0 +1,238 @@
+"""Linear growth rates of a config, optionally at another parallel resolution.
+
+A linear run of the config (non_linear off) whose per-ky growth rates are averaged once they
+have settled. Run at a finer ns it gives a ground truth to check the production resolution and
+dissipation against (``gyaradax growth``, ``gyaradax run --linear-check``).
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+from dataclasses import replace
+from typing import Any, Callable, Mapping, Sequence
+
+import numpy as np
+from omegaconf import OmegaConf
+
+# exit code of a run whose linear check deviates beyond the tolerance
+EXIT_LINEAR_CHECK = 3
+# settings a linear growth rate does not depend on
+_IGNORED_SECTIONS = ("run", "dataset", "sharding")
+_IGNORED_SOLVER_KEYS = (
+    "n_steps",
+    "t_end",
+    "dump_dt",
+    "dump_interval",
+    "block_size",
+    "non_linear",
+    "adaptive_dt",
+    "cfl_safety",
+    "fac_dtim_nl",
+    "backend",
+    "mixed_precision",
+    "use_z2z",
+)
+
+
+def adjusted_config(cfg: Any, ns: int | None = None, sets: Mapping[str, Any] | None = None) -> Any:
+    """Copy of ``cfg`` run linearly, with dotted-key overrides and another ``grid.ns`` applied."""
+    out = OmegaConf.create(OmegaConf.to_container(cfg, resolve=True))
+    for key, value in (sets or {}).items():
+        OmegaConf.update(out, key, value, force_add=True)
+    if ns is not None and int(ns) != int(out.grid.ns):
+        old = int(out.grid.ns)
+        out.grid.ns = int(ns)
+        sgr = OmegaConf.select(out, "geometry.sgr_dist")
+        if sgr is not None:
+            # keeps the field-line length: nperiod turns over ns points
+            out.geometry.sgr_dist = float(sgr) * old / int(ns)
+    OmegaConf.update(out, "solver.non_linear", False, force_add=True)
+    return out
+
+
+def config_key(cfg: Any) -> str:
+    """Hash of what a linear growth rate depends on (not the run's name, length, backend or layout)."""
+    data = OmegaConf.to_container(cfg, resolve=True)
+    for key in _IGNORED_SECTIONS:
+        data.pop(key, None)
+    for key in _IGNORED_SOLVER_KEYS:
+        (data.get("solver") or {}).pop(key, None)
+    return hashlib.sha256(json.dumps(data, sort_keys=True, default=str).encode()).hexdigest()[:16]
+
+
+def growth_rates(
+    cfg: Any,
+    ns: int | None = None,
+    sets: Mapping[str, Any] | None = None,
+    *,
+    backend: str | None = None,
+    t_end: float = 40.0,
+    t_min: float = 15.0,
+    settle: float = 6.0,
+    tol: float = 0.005,
+    ky_max: float = 1.0,
+    gamma_min: float = 0.02,
+    block: int = 250,
+    log: Callable[[str], None] | None = None,
+) -> dict[str, Any]:
+    """Per-ky growth rates of ``cfg`` run linearly, averaged over the last ``settle`` time units.
+
+    The time step is capped at the linear stability estimate (as GKW does for every explicit
+    run). The run stops once the unstable ky (kθρ <= ``ky_max``, γ > ``gamma_min``) vary by less
+    than ``tol`` over ``settle`` time units after ``t_min``, or at ``t_end``.
+    """
+    import jax.numpy as jnp
+
+    from gyaradax.core.params import gkparams_from_config
+    from gyaradax.geometry import compute_geometry_from_config
+    from gyaradax.operators.precompute import linear_precompute
+    from gyaradax.solver.cfl import estimate_linear_timestep
+    from gyaradax.solver.driver import gk_init, gk_run
+
+    run_cfg = adjusted_config(cfg, ns, sets)
+    overrides: dict[str, Any] = {"n_gpus_sp": 1, "n_gpus_vp": 1, "n_gpus_mu": 1}
+    if backend:
+        overrides["backend"] = backend
+    params = gkparams_from_config(run_cfg, **overrides)
+    n_species = 1 if params.adiabatic_electrons else int(jnp.asarray(params.mas).shape[0])
+    geometry = compute_geometry_from_config(run_cfg)
+    df, geometry, state = gk_init(geometry, params, n_species=n_species)
+    pre = linear_precompute(geometry, params)
+    dt_input = float(params.dt)
+    dt_lin = float(estimate_linear_timestep(pre, params=params))
+    params = replace(params, dt=min(dt_input, dt_lin))
+    kthnorm = float(np.asarray(geometry.get("kthnorm", 1.0)).reshape(-1)[0])
+    ky = np.asarray(geometry["krho"], dtype=float) * kthnorm
+    in_range = (ky > 0) & (ky <= ky_max)
+
+    times: list[float] = []
+    rates: list[np.ndarray] = []
+    converged = False
+    t = float(state.time)
+    while t < t_end:
+        df, _, _, state = gk_run(df, geometry, params, state, block, pre=pre)
+        t = float(state.time)
+        g = np.asarray(state.last_growth_rate, dtype=float)
+        if not np.all(np.isfinite(g)):
+            raise FloatingPointError(f"non-finite growth rate at t={t:.2f} (ns {run_cfg.grid.ns})")
+        times.append(t)
+        rates.append(g)
+        if log is not None:
+            log(f"t {t:6.2f}  max γ {g[in_range].max() if in_range.any() else float('nan'):+.4f}")
+        if t >= t_min:
+            late = np.asarray(rates)[np.asarray(times) >= t - settle]
+            unstable = in_range & (late.mean(0) > gamma_min)
+            sel = unstable if unstable.any() else in_range
+            if sel.any() and late[:, sel].std(0).max() < tol:
+                converged = True
+                break
+
+    tt, gg = np.asarray(times), np.asarray(rates)
+    late = gg[tt >= tt[-1] - settle]
+    mean, std = late.mean(0), late.std(0)
+    result = {
+        "ns": int(run_cfg.grid.ns),
+        "ky": ky.tolist(),
+        "gamma": mean.tolist(),
+        "gamma_std": std.tolist(),
+        "t": t,
+        "converged": converged,
+        "dt": float(params.dt),
+        "dt_input": dt_input,
+        "dt_linear_estimate": dt_lin,
+        "disp_par": float(params.disp_par),
+        "sets": dict(sets or {}),
+        "config_key": config_key(run_cfg),
+    }
+    result["peak"] = peak(result, ky_max=ky_max)
+    return result
+
+
+def peak(result: Mapping[str, Any], ky_max: float = 1.0) -> dict[str, float] | None:
+    ky, g = np.asarray(result["ky"]), np.asarray(result["gamma"])
+    sel = (ky > 0) & (ky <= ky_max)
+    if not sel.any():
+        return None
+    i = int(np.flatnonzero(sel)[np.argmax(g[sel])])
+    return {"ky": float(ky[i]), "gamma": float(g[i])}
+
+
+def compare(
+    result: Mapping[str, Any],
+    reference: Mapping[str, Any],
+    ky_max: float = 1.0,
+    gamma_min: float = 0.02,
+) -> dict[str, Any]:
+    """γ of ``result`` at the dominant ky of ``reference``, and its relative deviation."""
+    ky, ref_ky = np.asarray(result["ky"]), np.asarray(reference["ky"])
+    if ky.shape != ref_ky.shape or not np.allclose(ky, ref_ky):
+        raise ValueError("growth rates on different ky grids")
+    top = peak(reference, ky_max)
+    if top is None or top["gamma"] <= gamma_min:
+        return {"ky": None, "gamma": None, "gamma_ref": top["gamma"] if top else None, "rel": None}
+    i = int(np.argmin(np.abs(ky - top["ky"])))
+    g = float(np.asarray(result["gamma"])[i])
+    return {
+        "ky": top["ky"],
+        "gamma": g,
+        "gamma_ref": top["gamma"],
+        "rel": (g - top["gamma"]) / abs(top["gamma"]),
+    }
+
+
+def check(
+    cfg: Any,
+    reference_ns: Sequence[int],
+    *,
+    backend: str | None = None,
+    log: Callable[[str], None] | None = None,
+    **kwargs: Any,
+) -> dict[str, Any]:
+    """Growth rates at the config's own resolution and at ``reference_ns``, compared to the finest."""
+    own = int(cfg.grid.ns)
+    runs = [growth_rates(cfg, None, backend=backend, log=log, **kwargs)]
+    for ns in sorted({int(n) for n in reference_ns} - {own}):
+        runs.append(growth_rates(cfg, ns, backend=backend, log=log, **kwargs))
+    return assemble(runs, own)
+
+
+def assemble(runs: Sequence[Mapping[str, Any]], own_ns: int) -> dict[str, Any]:
+    """Report of several resolutions of one config; the finest is the reference."""
+    reference = max(runs, key=lambda r: r["ns"])
+    return {
+        "config_key": config_key_of(runs, own_ns),
+        "ns": int(own_ns),
+        "reference_ns": reference["ns"],
+        "runs": list(runs),
+        "comparison": {str(r["ns"]): compare(r, reference) for r in runs},
+    }
+
+
+def config_key_of(runs: Sequence[Mapping[str, Any]], own_ns: int) -> str | None:
+    own = [r for r in runs if r["ns"] == int(own_ns)]
+    return own[0]["config_key"] if own else None
+
+
+def format_check(report: Mapping[str, Any]) -> str:
+    """One line per resolution: peak γ, γ at the reference's dominant ky and its deviation."""
+    lines = [f"{'ns':>4}  {'t':>6}  {'peak γ':>8}  {'at kθρ':>7}  {'γ(ky ref)':>9}  {'vs ref':>7}"]
+    for r in report["runs"]:
+        top = r["peak"] or {"gamma": float("nan"), "ky": float("nan")}
+        c = report["comparison"][str(r["ns"])]
+        g = "-" if c["gamma"] is None else f"{c['gamma']:+.4f}"
+        rel = "-" if c["rel"] is None else f"{c['rel']:+.1%}"
+        mark = "" if r["converged"] else " (not settled)"
+        lines.append(
+            f"{r['ns']:>4}  {r['t']:6.1f}  {top['gamma']:+8.4f}  {top['ky']:7.3f}  {g:>9}  {rel:>7}{mark}"
+        )
+    return "\n".join(lines)
+
+
+def summary(report: Mapping[str, Any]) -> str:
+    """Short form for status lines: γ at the reference's dominant ky, own vs reference."""
+    own = report["comparison"].get(str(report["ns"])) or {}
+    ref = report["reference_ns"]
+    if own.get("rel") is None:
+        return f"linear: no unstable ky at ns {ref}"
+    return f"γ ns{report['ns']} {own['gamma']:.3f} / ns{ref} {own['gamma_ref']:.3f} ({own['rel']:+.0%})"

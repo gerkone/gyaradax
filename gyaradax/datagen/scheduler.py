@@ -43,6 +43,7 @@ STATE_ORDER = (
     "pending",
     "failed",
     "diverged",
+    "rejected",
     "cancelled",
     "done",
 )
@@ -67,6 +68,8 @@ REFUSED_FLAGS = ("--device", "--device-list", "--output-dir")
 ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 # exit code of a run stopped by SIGTERM after its snapshot (gyaradax.solver.driver.EXIT_INTERRUPTED)
 INTERRUPTED = 75
+# exit code of a run refused by its linear check (gyaradax.diagnostics.growth.EXIT_LINEAR_CHECK)
+LINEAR_CHECK_FAILED = 3
 SLURM_HOST = "slurm"
 SLURM_QUEUED = ("PENDING", "CONFIGURING", "REQUEUED", "REQUEUE_HOLD", "RESIZING", "SUSPENDED")
 SLURM_RUNNING = ("RUNNING", "COMPLETING", "SIGNALING", "STAGE_OUT")
@@ -973,7 +976,7 @@ class Scheduler:
                 else:
                     self.log(f"request {action} {name}: nothing to do, the job is {job.state}")
             elif action == "resume":
-                if job.state in ("cancelled", "failed", "diverged"):
+                if job.state in ("cancelled", "failed", "diverged", "rejected"):
                     job.state, job.failures, job.note = "pending", 0, ""
                     self.log(f"{name}: back in the queue")
                 elif job.state == "stopping":
@@ -1075,6 +1078,9 @@ class Scheduler:
         elif diverged:
             state = "diverged"
             note = "diverged (DIVERGED marker); not retried"
+        elif code == LINEAR_CHECK_FAILED:
+            state = "rejected"
+            note = "linear check outside its tolerance (linear_check.json); not retried"
         else:
             job.failures += 1
             job.avoid = [job.slot] if job.slot else []
@@ -1542,7 +1548,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     resume_p = sub.add_parser(
-        "resume", help="put cancelled, failed or diverged jobs back in the queue"
+        "resume", help="put cancelled, failed, diverged or rejected jobs back in the queue"
     )
     resume_p.add_argument("names", nargs="+")
     resume_p.add_argument("--state", required=True)

@@ -72,6 +72,9 @@ def main(argv):
             "gpus": os.environ.get("CUDA_VISIBLE_DEVICES"),
             "prealloc": os.environ.get("XLA_PYTHON_CLIENT_PREALLOCATE"),
         }) + "\n")
+    # as gyaradax run --linear-check-tol: refused before the first step
+    if cfg.get("linear_reject"):
+        return 3
     stop = []
     if cfg.get("ignore_term"):
         signal.signal(signal.SIGTERM, signal.SIG_IGN)
@@ -105,7 +108,9 @@ def main(argv):
 sys.exit(main(sys.argv[1:]))
 """
 
-FAKE_KEYS = ("steps", "step_time", "fail_once_at", "fail_at", "diverge_at", "ignore_term")
+FAKE_KEYS = (
+    "steps", "step_time", "fail_once_at", "fail_at", "diverge_at", "ignore_term", "linear_reject"
+)
 
 # sbatch / squeue / scancel on one machine: a job is its batch script run in a new session
 FAKE_SLURM = r"""
@@ -407,6 +412,17 @@ def test_divergence_is_not_retried(camp):
     sched = camp.scheduler()
     camp.drive(sched, lambda: sched.jobs["nan"].state == "diverged")
     assert sched.jobs["nan"].attempts == 1
+
+
+def test_linear_check_rejection_is_not_retried(camp):
+    camp.pool(slot("a", 0))
+    camp.add_job("off", steps=10, linear_reject=True)
+    sched = camp.scheduler()
+    camp.drive(sched, lambda: sched.jobs["off"].state == "rejected")
+    assert sched.jobs["off"].attempts == 1 and sched.jobs["off"].failures == 0
+    assert gs.main(["resume", "off", "--state", camp.state_path]) == 0
+    sched.poll()
+    assert sched.jobs["off"].state in ("starting", "running", "rejected")
 
 
 def test_restart_reattaches_to_the_running_job(camp):

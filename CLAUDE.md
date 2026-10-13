@@ -32,6 +32,7 @@ gyaradax/
     fluxes.py         — flux integrals, EM flux diagnostics, get_integrals
     diag.py           — diagnostics: growth rates, spectra (phi_spectra), term_iii_rhs
     telemetry.py      — run telemetry, profiler summaries
+    growth.py         — linear growth rates per resolution (`gyaradax growth`, `run --linear-check`)
     plot_utils.py     — publication-quality plotting functions
   io/
     gkw.py            — GKW I/O (K-dumps, geom.dat, input.dat parsing, load_geometry, gkw_to_yaml)
@@ -43,7 +44,7 @@ gyaradax/
   geometry/           — geometry models (circular, s-alpha, Miller, loaded geom.dat), metric and drift tensors
   quasilinear/        — quasilinear transport: linear harvest, saturation rules, calibration
   sharding.py         — device mesh, sharded precompute / init, shard_map helpers for the kernels
-  cli.py              — `gyaradax` console script: run/bench/info/build-cuda/datagen (see docs/CLI.md)
+  cli.py              — `gyaradax` console script: run/bench/growth/info/build-cuda/datagen (see docs/CLI.md)
   _compat.py          — old module paths (gyaradax.params, .integrals, .utils, .simulate, ...) -> new modules
 
   backends/
@@ -202,6 +203,7 @@ gyaradax run configs/nl_em_apar.yaml --n-gpus 4      # EM, sharded over 4 GPUs (
 gyaradax run outputs_kinetic_my_case                 # resume / extend a previous run directory
 gyaradax run my_case.yaml --dump-dt 1.4 --t-end 400  # frames on an equally spaced time grid
 gyaradax run DIR/name_ifft_realpotens --t-end 600    # extend a dataset trajectory from its resume dump
+gyaradax growth my_case.yaml --ns 18 36              # linear growth rates, ns 36 as ground truth
 gyaradax bench configs/adiabatic_a.yaml --backend=cuda
 gyaradax convert /path/to/gkw_run configs/my_case.yaml
 gyaradax info
@@ -224,6 +226,8 @@ Add `--backend=cuda` to force CUDA backend.
 SIGTERM stops a run after the running block and its snapshot, with exit code 75;
 `gyaradax run RUN_DIR` continues it (this is how datagen preempts and resumes).
 `scripts/run.py` is a back-compat shim that forwards to `gyaradax run`.
+`run --linear-check 36` (off by default) compares linear growth rates at the run's ns with a
+finer reference before the run (docs/CLI.md, "Linear growth check").
 `gyaradax datagen` (docs/CLI.md, "Data generation") runs a list of configs over an ssh GPU
 mesh or Slurm, with run directories, trajectory names and resumes handled per campaign directory.
 
