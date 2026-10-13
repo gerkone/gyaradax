@@ -9,13 +9,16 @@ A trajectory lives in ``<root>/<name>_ifft_realpotens/``::
     metadata_light.pkl               the same without the per-element df / phi moments
     config.yaml                      the run's effective config
     .gyaradax_run                    the run directory that writes the trajectory
+    resume/state.npz                 df (complex64, or complex128) and solver state of the last frame
+    resume/config.yaml               the config of the leg that wrote it
 
 ``bits`` is ``zstd16`` (bfloat16 values byte-shuffled and zstd-compressed in 4 MiB chunks behind
 a 4 KiB header, ``neugk_jax.dataset.zframe`` v1) or ``bf16`` (the raw values); either way the
 metadata records ``quantization: bf16``, the precision of the values. Keys, transforms and
 rounding follow ``neugk_jax.dataset.preprocess.preprocess_gyaradax_kinetic``, so the neugk
 loaders read the output unchanged. The df / phi statistics are computed from the stored frames
-once the run ends (:func:`write_statistics`).
+once the run ends (:func:`write_statistics`). Every leg of the run replaces the resume dump at
+its end, so ``gyaradax run TRAJECTORY`` can extend the trajectory without the run directory.
 """
 
 from __future__ import annotations
@@ -36,6 +39,9 @@ GEOMETRY_KEYS = ("kxrh", "krho", "intvp", "vpgr", "intmu", "mugr", "ints", "bn",
                  "little_g", "mas", "tmp", "de", "signz", "vthrat", "d2X", "signB", "parseval")
 
 OWNER_FILE = ".gyaradax_run"
+RESUME_DIR = "resume"
+STATE_FIELDS = ("time", "step", "accumulated_norm_factor", "window_start_amp", "last_growth_rate")
+RESUME_DTYPES = {"f32": np.complex64, "f64": np.complex128}
 
 # zstd16 shard layout (neugk_jax.dataset.zframe v1)
 MAGIC, VERSION, ALIGN, CHUNK_BYTES = b"NGKZ", 1, 4096, 4 << 20
@@ -46,19 +52,35 @@ def trajectory_path(root: str, name: str) -> str:
     return os.path.join(root, f"{name}_ifft_realpotens")
 
 
-def _claim(traj: str, run_dir: str) -> None:
-    """Make ``traj`` the trajectory of ``run_dir``, refusing one another run or tool wrote."""
+def _claim(traj: str, run_dir: str, takeover: bool = False) -> None:
+    """Make ``traj`` the trajectory of ``run_dir``, refusing one another run or tool wrote.
+
+    ``takeover`` hands a gyaradax trajectory to ``run_dir``: a run extending it from its resume dump.
+    """
     owner_path = os.path.join(traj, OWNER_FILE)
     if os.path.islink(traj):
         raise FileExistsError(f"{traj} is a symlink to an existing trajectory; choose another dataset name")
     owner = open(owner_path).read().strip() if os.path.exists(owner_path) else None
     if owner is None and os.path.isdir(traj) and os.listdir(traj):
         raise FileExistsError(f"{traj} exists and was not written by a gyaradax run; choose another dataset name")
-    if owner is not None and owner != run_dir:
+    if owner is not None and owner != run_dir and not takeover:
         raise FileExistsError(f"{traj} belongs to the run in {owner}; choose another dataset name")
     os.makedirs(os.path.join(traj, "data"), exist_ok=True)
-    if owner is None:
+    if owner != run_dir:
         _atomic_write(owner_path, (run_dir + "\n").encode())
+
+
+def resume_path(traj: str) -> str:
+    return os.path.join(traj, RESUME_DIR, "state.npz")
+
+
+def is_trajectory(path: str) -> bool:
+    return os.path.isdir(path) and os.path.exists(os.path.join(path, OWNER_FILE))
+
+
+def frame_bits(traj: str) -> str:
+    names = os.listdir(os.path.join(traj, "data")) if os.path.isdir(os.path.join(traj, "data")) else []
+    return "bf16" if names and not any(n.endswith(".zstd16.bin") for n in names) else "zstd16"
 
 
 def frame_path(traj: str, kind: str, index: int, bits: str) -> str:
@@ -304,17 +326,24 @@ class DatasetWriter:
     step (a resume from an older snapshot) are dropped, earlier ones are kept and the new
     frames continue their numbering. ``finalize`` computes the statistics of the frames from
     time ``stats_from`` on. The trajectory belongs to the run directory holding ``config_path``:
-    an existing trajectory of another run, or one not written by a run, is refused.
+    an existing trajectory of another run, or one not written by a run, is refused unless
+    ``takeover`` (the run extends it from its resume dump). ``write_resume`` replaces the
+    resume dump, with df in ``resume_dtype`` (f32 or f64).
     """
 
     def __init__(self, root: str, name: str, geometry: dict, params: Any, config_path: str,
-                 bits: str = "zstd16", start_step: int = 0, stats_from: float = 0.0):
+                 bits: str = "zstd16", start_step: int = 0, stats_from: float = 0.0,
+                 resume_dtype: str = "f32", takeover: bool = False):
         if bits not in ("zstd16", "bf16"):
             raise ValueError(f"dataset bits must be zstd16 or bf16, got {bits!r}")
+        if resume_dtype not in RESUME_DTYPES:
+            raise ValueError(f"resume dtype must be one of {sorted(RESUME_DTYPES)}, got {resume_dtype!r}")
         self.path = trajectory_path(root, name)
         self.bits = bits
         self.stats_from = float(stats_from)
-        _claim(self.path, os.path.dirname(os.path.abspath(config_path)))
+        self.resume_dtype = resume_dtype
+        self.config_path = config_path
+        _claim(self.path, os.path.dirname(os.path.abspath(config_path)), takeover=takeover)
         shutil.copyfile(config_path, os.path.join(self.path, "config.yaml"))
         self.static = _static_metadata(geometry, params, os.path.join(self.path, "config.yaml"))
         self.series: dict[str, list] = {k: [] for k in SERIES_KEYS}
@@ -360,6 +389,25 @@ class DatasetWriter:
         for k, v in self.series.items():
             meta[k] = np.asarray(v)
         return meta
+
+    def write_resume(self, df, state, dump_origin: Optional[float] = None) -> None:
+        """Replace ``resume/`` with ``df`` and ``state``, the state of the last frame written."""
+        folder = os.path.join(self.path, RESUME_DIR)
+        os.makedirs(folder, exist_ok=True)
+        arrays = {
+            "df": np.asarray(df).astype(RESUME_DTYPES[self.resume_dtype]),
+            **{k: np.asarray(getattr(state, k)) for k in STATE_FIELDS},
+            "frame": np.array(self.n_frames - 1),
+        }
+        if dump_origin is not None:
+            arrays["dump_origin"] = np.array(dump_origin, np.float64)
+        with open(self.config_path, "rb") as fh:
+            _atomic_write(os.path.join(folder, "config.yaml"), fh.read())
+        # the state file goes last: it is the commit point of the dump
+        tmp = f"{resume_path(self.path)}.tmp{os.getpid()}"
+        with open(tmp, "wb") as fh:
+            np.savez(fh, **arrays)
+        os.replace(tmp, resume_path(self.path))
 
     def finalize(self) -> None:
         if self.n_frames and self.series["timesteps"][-1] >= self.stats_from:

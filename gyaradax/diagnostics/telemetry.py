@@ -176,17 +176,18 @@ def kernel_summary(trace_dir: str, n_steps: int, top: int = 40) -> dict[str, Any
 
 
 @contextlib.contextmanager
-def profile_block(output_dir: str, n_steps: int, step: int) -> Iterator[None]:
+def profile_block(output_dir: str, n_steps: Any, step: int) -> Iterator[None]:
     """Trace the enclosed block, which starts at ``step``, into ``<output_dir>/profile/step_NNNNNN``.
 
-    ``profile_summary.json`` gets the kernel times of this trace only.
+    ``profile_summary.json`` gets the kernel times of this trace only. ``n_steps`` may be a
+    callable giving the block's step count once it has run.
     """
     trace_dir = os.path.join(output_dir, "profile", f"step_{step:06d}")
     shutil.rmtree(trace_dir, ignore_errors=True)
     os.makedirs(trace_dir)
     with jax.profiler.trace(trace_dir):
         yield
-    summary = {"step": step, **kernel_summary(trace_dir, n_steps)}
+    summary = {"step": step, **kernel_summary(trace_dir, n_steps() if callable(n_steps) else n_steps)}
     with open(os.path.join(output_dir, "profile_summary.json"), "w") as fh:
         json.dump(summary, fh, indent=1)
     print(f"profile: {trace_dir} ({summary.get('gpu_ms_per_step', 0):.3f} GPU ms/step)")

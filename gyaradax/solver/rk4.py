@@ -519,22 +519,8 @@ def gksolve(
     """
     if pre is None:
         pre = linear_precompute(geometry, params)
-
-    # ensure multi-species arrays are present for downstream flux calculations
-    if not params.adiabatic_electrons:
-        geometry = dict(geometry)
-        for k in ("mas", "signz", "tmp", "de", "vthrat"):
-            v = getattr(params, k, None)
-            if v is not None:
-                geometry[k] = jnp.atleast_1d(jnp.asarray(v, dtype=jnp.float64))
-
-    ops = create_ops(
-        pre,
-        backend=params.backend,
-        use_z2z=params.use_z2z,
-        mixed_precision=params.mixed_precision,
-        mesh=build_mesh(params),
-    )
+    geometry = _species_geometry(geometry, params)
+    ops = _solver_ops(pre, params)
 
     dt_input_scalar = jnp.array(params.dt, dtype=jnp.float64)
 
@@ -548,26 +534,11 @@ def gksolve(
             next_df, out, next_state = gkstep_single(
                 curr_df, geometry, params, curr_state, pre, ops, dt_override=curr_dt
             )
-            # inline substage CFL from gkstep_single + linear CFL
-            substage_dt = out[1][2]
-            dt_lin = estimate_linear_timestep(pre, params=params)
-            dt_nl = jnp.minimum(cfl_safety * substage_dt, dt_input)
-            dt_cfl = jnp.minimum(dt_nl, dt_lin)
-            # Ramp-up rule: dt grows at most by 5% per step
-            ramp_up = jnp.minimum(curr_dt * 1.05, dt_input)
-            next_dt = jnp.where(dt_cfl < curr_dt, dt_cfl, jnp.minimum(dt_cfl, ramp_up))
+            next_dt, dt_nl, dt_lin = _next_dt(curr_dt, out, pre, params, dt_input, cfl_safety)
             dt_info_step = jnp.stack([curr_dt, dt_nl, dt_lin])
             return (next_df, next_state, next_dt), dt_info_step
 
-        # init_dt must reflect the CURRENT NL amplitude, not just params.dt,
-        # to avoid resetting dt at every block boundary when gksolve is called
-        # in a block loop with growing NL fields (blow-up observed at β=0.01).
-        phi_init, apar_init, _ = ops.compute_fields(df, geometry, params, pre)
-        dt_nl_init = estimate_nl_timestep(
-            phi_init, pre, pre["bessel"], dt_input, cfl_safety, apar=apar_init
-        )
-        dt_lin_init = estimate_linear_timestep(pre, params=params)
-        init_dt = jnp.minimum(jnp.minimum(dt_input, dt_lin_init), dt_nl_init)
+        init_dt = _initial_dt(df, geometry, params, pre, ops, dt_input, cfl_safety)
         (final_df, final_state, _), dt_stack = jax.lax.scan(
             _scan_body, (df, state, init_dt), None, length=n_steps
         )
@@ -597,20 +568,129 @@ def gksolve(
             "dt_input": dt_input_scalar,
         }
 
-    # diagnostics use the physical distribution f, not the evolved mixed variable g
-    # (GKW diagnos_fluxes_vspace.F90:444 applies get_f_from_g before fluxes/fields)
+    phi, fluxes = _final_integrals(final_df, geometry, params, pre)
+    if return_dt_info:
+        return final_df, (phi, fluxes), final_state, dt_info
+    return final_df, (phi, fluxes), final_state
+
+
+@functools.partial(jax.jit, static_argnames=("max_steps",))
+def gksolve_until(
+    df: jnp.ndarray,
+    geometry: Dict[str, jnp.ndarray],
+    params: GKParams,
+    state: GKState,
+    t_end: Any,
+    max_steps: int = 1,
+    pre: Optional[GKPre] = None,
+) -> Tuple[jnp.ndarray, Tuple[jnp.ndarray, Any], GKState, Dict[str, Any]]:
+    """Steps until ``state.time`` reaches ``t_end``, at most ``max_steps`` of them.
+
+    The time step follows ``gksolve`` (adaptive CFL or ``params.dt``); the step that would
+    pass ``t_end`` is shortened so the state lands on it exactly. ``dt_info`` arrays have
+    length ``max_steps`` and are NaN past the steps taken.
+    """
+    if pre is None:
+        pre = linear_precompute(geometry, params)
+    geometry = _species_geometry(geometry, params)
+    ops = _solver_ops(pre, params)
+    t_end = jnp.asarray(t_end, dtype=jnp.float64)
+    dt_input = jnp.array(params.dt, dtype=jnp.float64)
+    adaptive = params.adaptive_dt and params.non_linear
+    cfl_safety = jnp.array(params.fac_dtim_nl, dtype=jnp.float64)
+    init_dt = (
+        _initial_dt(df, geometry, params, pre, ops, dt_input, cfl_safety) if adaptive else dt_input
+    )
+    history = jnp.full((3, max_steps), jnp.nan, dtype=jnp.float64)
+
+    def _cond(carry):
+        _, curr_state, _, i, _ = carry
+        return jnp.logical_and(i < max_steps, curr_state.time < t_end)
+
+    def _body(carry):
+        curr_df, curr_state, curr_dt, i, hist = carry
+        remaining = t_end - curr_state.time
+        last = curr_dt >= remaining
+        step_dt = jnp.where(last, remaining, curr_dt)
+        next_df, out, next_state = gkstep_single(
+            curr_df, geometry, params, curr_state, pre, ops, dt_override=step_dt
+        )
+        next_state = GKState(
+            time=jnp.where(last, t_end, next_state.time),
+            step=next_state.step,
+            accumulated_norm_factor=next_state.accumulated_norm_factor,
+            window_start_amp=next_state.window_start_amp,
+            last_growth_rate=next_state.last_growth_rate,
+        )
+        if adaptive:
+            next_dt, dt_nl, dt_lin = _next_dt(curr_dt, out, pre, params, dt_input, cfl_safety)
+        else:
+            zero = jnp.array(0.0, dtype=jnp.float64)
+            next_dt, dt_nl, dt_lin = curr_dt, zero, zero
+        hist = hist.at[:, i].set(jnp.stack([step_dt, dt_nl, dt_lin]))
+        return next_df, next_state, next_dt, i + 1, hist
+
+    final_df, final_state, _, _, history = jax.lax.while_loop(
+        _cond, _body, (df, state, init_dt, jnp.array(0, dtype=jnp.int32), history)
+    )
+    dt_info = {"dt_used": history[0], "dt_nl": history[1], "dt_lin": history[2], "dt_input": dt_input}
+    phi, fluxes = _final_integrals(final_df, geometry, params, pre)
+    return final_df, (phi, fluxes), final_state, dt_info
+
+
+def _species_geometry(geometry: Dict[str, jnp.ndarray], params: GKParams) -> Dict[str, jnp.ndarray]:
+    # multi-species arrays for the downstream flux calculations
+    if not params.adiabatic_electrons:
+        geometry = dict(geometry)
+        for k in ("mas", "signz", "tmp", "de", "vthrat"):
+            v = getattr(params, k, None)
+            if v is not None:
+                geometry[k] = jnp.atleast_1d(jnp.asarray(v, dtype=jnp.float64))
+    return geometry
+
+
+def _solver_ops(pre: GKPre, params: GKParams) -> SolverOps:
+    return create_ops(
+        pre,
+        backend=params.backend,
+        use_z2z=params.use_z2z,
+        mixed_precision=params.mixed_precision,
+        mesh=build_mesh(params),
+    )
+
+
+def _initial_dt(df, geometry, params, pre, ops, dt_input, cfl_safety):
+    # from the current fields: a block boundary must not reset dt to params.dt
+    phi_init, apar_init, _ = ops.compute_fields(df, geometry, params, pre)
+    dt_nl_init = estimate_nl_timestep(
+        phi_init, pre, pre["bessel"], dt_input, cfl_safety, apar=apar_init
+    )
+    dt_lin_init = estimate_linear_timestep(pre, params=params)
+    return jnp.minimum(jnp.minimum(dt_input, dt_lin_init), dt_nl_init)
+
+
+def _next_dt(curr_dt, out, pre, params, dt_input, cfl_safety):
+    # inline substage CFL from gkstep_single + linear CFL
+    substage_dt = out[1][2]
+    dt_lin = estimate_linear_timestep(pre, params=params)
+    dt_nl = jnp.minimum(cfl_safety * substage_dt, dt_input)
+    dt_cfl = jnp.minimum(dt_nl, dt_lin)
+    # Ramp-up rule: dt grows at most by 5% per step
+    ramp_up = jnp.minimum(curr_dt * 1.05, dt_input)
+    next_dt = jnp.where(dt_cfl < curr_dt, dt_cfl, jnp.minimum(dt_cfl, ramp_up))
+    return next_dt, dt_nl, dt_lin
+
+
+def _final_integrals(final_df, geometry, params, pre):
+    # diagnostics of the physical f, not g (GKW diagnos_fluxes_vspace.F90:444)
     diag_df = final_df
     if params.nlapar:
         _, apar_final, _ = _compute_fields(final_df, geometry, params, pre)
         diag_df = g_to_f(final_df, apar_final, params, pre)
-
-    phi, fluxes = get_integrals(
+    return get_integrals(
         diag_df,
         geometry,
         params=params,
         pre=pre,
         adiabatic_electrons=params.adiabatic_electrons,
     )
-    if return_dt_info:
-        return final_df, (phi, fluxes), final_state, dt_info
-    return final_df, (phi, fluxes), final_state

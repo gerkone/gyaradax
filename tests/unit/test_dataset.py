@@ -2,6 +2,7 @@
 
 import os
 import pickle
+import shutil
 
 import numpy as np
 import pytest
@@ -105,3 +106,73 @@ def test_writer_refuses_trajectories_of_other_runs(tmp_path):
     with pytest.raises(FileExistsError, match="symlink"):
         ds._claim(ds.trajectory_path(str(root), "linked"), mine)
     assert sorted(os.listdir(stored)) == ["data", "metadata.pkl"]
+
+
+def _tiny_kinetic(tmp_path, name):
+    src, grid = CASES["kinetic"]
+    cfg = OmegaConf.load(os.path.join(REPO_ROOT, "configs", src))
+    for key, value in grid.items():
+        cfg.grid[key] = value
+    cfg.run.pop("data_dir", None)
+    cfg.run.name = name
+    cfg.solver.nlapar = False
+    path = str(tmp_path / f"{name}.yaml")
+    OmegaConf.save(cfg, path)
+    return path
+
+
+def test_trajectory_extends_from_its_resume_dump(tmp_path):
+    root = str(tmp_path / "data")
+    common = ["--from-scratch", "--backend", "jax", "--dump-dt", "0.013", "--dataset", root]
+    # reference: one leg to t = 0.065
+    ref = _tiny_kinetic(tmp_path, "ref")
+    assert main(["run", ref, *common, "--t-end", "0.065", "--output-dir", str(tmp_path / "ref_run")]) == 0
+    # two legs: to t = 0.026 with an f64 resume dump, then from the trajectory alone
+    case = _tiny_kinetic(tmp_path, "case")
+    first = str(tmp_path / "first_run")
+    assert main(["run", case, *common, "--t-end", "0.026", "--resume-dtype", "f64", "--output-dir", first]) == 0
+    traj = ds.trajectory_path(root, "case")
+    with np.load(ds.resume_path(traj)) as r:
+        assert r["df"].dtype == np.complex128 and float(r["time"]) == 2 * 0.013 and int(r["frame"]) == 1
+    shutil.rmtree(first)
+    second = str(tmp_path / "second_run")
+    assert main(["run", traj, "--t-end", "0.065", "--output-dir", second]) == 0
+
+    meta, want = ds.load_metadata(traj), ds.load_metadata(ds.trajectory_path(root, "ref"))
+    np.testing.assert_array_equal(meta["timesteps"], want["timesteps"])
+    np.testing.assert_array_equal(meta["solver_steps"], want["solver_steps"])
+    # f64 resume: the extension equals the uninterrupted run bitwise
+    np.testing.assert_array_equal(meta["flux"], want["flux"])
+    for i in range(len(meta["timesteps"])):
+        for kind, shape in (("timestep", meta["df_shape"]), ("poten", meta["phi_shape"])):
+            np.testing.assert_array_equal(
+                ds.read_frame(ds.frame_path(traj, kind, i, "zstd16"), shape),
+                ds.read_frame(ds.frame_path(ds.trajectory_path(root, "ref"), kind, i, "zstd16"), shape),
+            )
+    with np.load(ds.resume_path(traj)) as r, np.load(os.path.join(second, "step_000015.npz")) as ck:
+        # the leg's own resume dump keeps the dtype its config carries
+        assert r["df"].dtype == np.complex128 and int(r["frame"]) == 4
+        np.testing.assert_array_equal(r["df"], ck["df"])
+    assert "df_mean" in meta
+    # the trajectory now belongs to the extending run
+    with open(os.path.join(traj, ds.OWNER_FILE)) as fh:
+        assert fh.read().strip() == second
+
+
+def test_f32_resume_dump_extends_the_trajectory_on_the_same_grid(tmp_path):
+    root = str(tmp_path / "data")
+    case = _tiny_kinetic(tmp_path, "case")
+    run = str(tmp_path / "run")
+    common = ["--from-scratch", "--backend", "jax", "--dump-dt", "0.013", "--dataset", root]
+    assert main(["run", case, *common, "--t-end", "0.026", "--output-dir", run]) == 0
+    traj = ds.trajectory_path(root, "case")
+    with np.load(ds.resume_path(traj)) as r, np.load(os.path.join(run, "step_000006.npz")) as ck:
+        assert r["df"].dtype == np.complex64
+        np.testing.assert_array_equal(r["df"], ck["df"].astype(np.complex64))
+    assert main(["run", "--resume-from", traj, os.path.join(traj, "resume", "config.yaml"),
+                 "--n-blocks", "2", "--output-dir", str(tmp_path / "more")]) == 0
+    meta = ds.load_metadata(traj)
+    np.testing.assert_array_equal(meta["timesteps"], np.arange(1, 5) * 0.013)
+    # the original run directory no longer owns the trajectory
+    with pytest.raises(FileExistsError, match="belongs to the run"):
+        main(["run", run, "--t-end", "0.1"])

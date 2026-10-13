@@ -1,4 +1,4 @@
-"""gyaradax command-line interface: ``run``, ``bench``, ``info``.
+"""gyaradax command-line interface: ``run``, ``bench``, ``info``, ``build-cuda``, ``datagen``.
 
 Run mode (adiabatic/kinetic), electromagnetic terms and velocity-space
 sharding all come from the YAML config; flags only override it. See docs/CLI.md.
@@ -11,6 +11,7 @@ initialises.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import glob
 import importlib.util
 import json
@@ -18,6 +19,7 @@ import math
 import os
 import re
 import shutil
+import signal
 import sys
 import time
 from dataclasses import replace
@@ -213,10 +215,18 @@ class RunSetup(TypedDict):
     start_step: int
     telemetry: bool
     profile: bool
+    dump_dt: float | None
+    t_end: float | None
+    dump_origin: float | None
+    trajectory: str | None
 
 
 def _resolve_config(path: str) -> tuple[str, str | None]:
     """A run directory stands for its dumped ``config.yaml`` and is resumed in place."""
+    from gyaradax.io.dataset import is_trajectory
+
+    if is_trajectory(path):
+        raise SystemExit(f"error: {path} is a dataset trajectory; extend it alone with `gyaradax run {path}`")
     if os.path.isdir(path):
         config = os.path.join(path, "config.yaml")
         if not os.path.isfile(config):
@@ -369,10 +379,16 @@ def _setup_run(config_path: str, args: argparse.Namespace, run_dir: str | None =
     if not params.adiabatic_electrons:
         n_species = int(jnp.asarray(params.mas).shape[0])
 
+    from gyaradax.io.dataset import is_trajectory, resume_path
+
     snapshot = None
     rolling = False
+    trajectory = None
     if not args.from_scratch:
-        if args.resume_from and args.resume_from.endswith(".npz"):
+        if args.resume_from and is_trajectory(args.resume_from):
+            trajectory = os.path.abspath(args.resume_from)
+            snapshot = resume_path(trajectory)
+        elif args.resume_from and args.resume_from.endswith(".npz"):
             snapshot = args.resume_from
         elif run_dir is not None and not args.resume_from:
             snapshot = _latest_snapshot(run_dir)
@@ -381,6 +397,7 @@ def _setup_run(config_path: str, args: argparse.Namespace, run_dir: str | None =
     if not args.from_scratch and snapshot is None:
         k_path = _find_k_file(data_dir, args.resume_from)
 
+    dump_origin = None
     if snapshot is not None:
         if not os.path.isfile(snapshot):
             raise SystemExit(f"error: snapshot {snapshot} not found")
@@ -399,6 +416,8 @@ def _setup_run(config_path: str, args: argparse.Namespace, run_dir: str | None =
                 window_start_amp=jnp.asarray(ck["window_start_amp"], dtype=jnp.float64),
                 last_growth_rate=jnp.asarray(ck["last_growth_rate"], dtype=jnp.float64),
             )
+            if "dump_origin" in ck.files:
+                dump_origin = float(ck["dump_origin"])
         geometry = _ensure_species_arrays(geometry, params)
         print(f"  resumed from {snapshot} (step {int(state.step)}, t={float(state.time):.4f})")
     elif k_path is not None:
@@ -459,10 +478,17 @@ def _setup_run(config_path: str, args: argparse.Namespace, run_dir: str | None =
         dump_interval = int(getattr(cfg.solver, "dump_interval", 0) or 0)
         block_size = dump_interval * params.naverage if dump_interval else 120
 
+    # time mode: frames every dump_dt time units, the run ends on the first frame at or after t_end
+    dump_dt = float(getattr(args, "dump_dt", None) or getattr(cfg.solver, "dump_dt", 0) or 0) or None
+    t_end = _run_end_time(cfg, args, dump_dt, float(state.time))
+
     # steps: --n-steps more > --n-blocks > up to solver.n_steps (resumed) > solver.n_steps > heuristic
     start_step = int(state.step)
     cfg_steps = int(getattr(cfg.solver, "n_steps", 0) or 0)
-    if args.n_steps:
+    if t_end is not None:
+        # an estimate at the largest time step, for reports only
+        n_steps = max(int(np.ceil((t_end - float(state.time)) / params.dt)), 0)
+    elif args.n_steps:
         n_steps = args.n_steps
     elif args.n_blocks:
         n_steps = args.n_blocks * block_size
@@ -481,7 +507,7 @@ def _setup_run(config_path: str, args: argparse.Namespace, run_dir: str | None =
 
     # a run shorter than the checkpoint interval is one block
     saved_block_size = block_size
-    if 0 < n_steps < block_size:
+    if dump_dt is None and 0 < n_steps < block_size:
         print(f"  note: checkpoint interval {block_size} > n_steps {n_steps}; this run is one block")
         if _confirm(
             f"  keep {n_steps} as the checkpoint interval when this run is resumed "
@@ -494,7 +520,7 @@ def _setup_run(config_path: str, args: argparse.Namespace, run_dir: str | None =
     snapshot_every = int(
         getattr(args, "snapshot_every", 0) or getattr(cfg.run, "snapshot_every", 0) or 1
     )
-    dataset = _dataset_settings(cfg, args, name)
+    dataset = _dataset_settings(cfg, args, name, trajectory)
     archived = bool(getattr(cfg.run, "save_dumps", False))
     save_dumps = archived if args.save_dumps is None else bool(args.save_dumps)
     # the rolling restart file this run continues from goes once a newer one exists
@@ -520,27 +546,71 @@ def _setup_run(config_path: str, args: argparse.Namespace, run_dir: str | None =
         "mesh": mesh,
         "config_path": config_path,
         "effective_config": _effective_config(
-            cfg, params, start_step + n_steps, saved_block_size, snapshot_every, save_dumps, dataset
+            cfg, params, start_step + n_steps, saved_block_size, snapshot_every, save_dumps, dataset,
+            dump_dt=dump_dt, t_end=t_end,
         ),
         "resumed_from": snapshot or k_path,
         "start_step": start_step,
         "telemetry": _debug_flag(cfg, args, "telemetry"),
         "profile": _debug_flag(cfg, args, "profile"),
+        "dump_dt": dump_dt,
+        "t_end": t_end,
+        "dump_origin": dump_origin,
+        "trajectory": trajectory,
     }
 
 
-def _dataset_settings(cfg: Any, args: argparse.Namespace, name: str) -> dict[str, Any] | None:
-    """Preprocessed-dataset output: command-line flags over the config's ``dataset`` section."""
+def _run_end_time(cfg: Any, args: argparse.Namespace, dump_dt: float | None, t_now: float) -> float | None:
+    """End time of a time-mode run: --t-end > --n-blocks frames > (--n-steps: none) > solver.t_end."""
+    t_arg = getattr(args, "t_end", None)
+    if dump_dt is None:
+        if t_arg is not None or getattr(cfg.solver, "t_end", None) is not None:
+            raise SystemExit("error: an end time needs a dump spacing (--dump-dt or solver.dump_dt)")
+        return None
+    if t_arg is not None:
+        return float(t_arg)
+    if args.n_blocks:
+        return t_now + args.n_blocks * dump_dt
+    if args.n_steps:
+        return None
+    t_cfg = getattr(cfg.solver, "t_end", None)
+    return None if t_cfg is None else float(t_cfg)
+
+
+def _dataset_settings(
+    cfg: Any, args: argparse.Namespace, name: str, trajectory: str | None = None
+) -> dict[str, Any] | None:
+    """Preprocessed-dataset output: command-line flags over the config's ``dataset`` section.
+
+    A run extending a ``trajectory`` from its resume dump writes into it unless --dataset is given.
+    """
+    from gyaradax.io.dataset import frame_bits
+
     section = cfg.get("dataset") or {}
+    stats_from = getattr(args, "dataset_stats_from", None)
+    out = {
+        "stats_from": float(section.get("stats_from", 0.0) if stats_from is None else stats_from),
+        "resume_dtype": getattr(args, "resume_dtype", None) or str(section.get("resume_dtype", "f32")),
+        "takeover": False,
+    }
+    if trajectory is not None and not getattr(args, "dataset", None):
+        suffix = "_ifft_realpotens"
+        base = os.path.basename(trajectory.rstrip(os.sep))
+        return {
+            **out,
+            "dir": os.path.dirname(trajectory.rstrip(os.sep)),
+            "bits": frame_bits(trajectory),
+            "name": base[: -len(suffix)] if base.endswith(suffix) else base,
+            "takeover": True,
+        }
     root = getattr(args, "dataset", None) or section.get("dir")
     if not root:
         return None
-    stats_from = getattr(args, "dataset_stats_from", None)
     return {
+        **out,
         "dir": str(root),
         "bits": getattr(args, "dataset_bits", None) or str(section.get("bits", "zstd16")),
         "name": getattr(args, "dataset_name", None) or str(section.get("name", name)),
-        "stats_from": float(section.get("stats_from", 0.0) if stats_from is None else stats_from),
     }
 
 
@@ -559,6 +629,8 @@ def _dataset_writer(setup: RunSetup) -> Any:
         bits=ds["bits"],
         start_step=setup["start_step"],
         stats_from=ds["stats_from"],
+        resume_dtype=ds["resume_dtype"],
+        takeover=ds["takeover"],
     )
     print(f"  dataset: {writer.path} ({ds['bits']}, {writer.n_frames} frames so far)")
     return writer
@@ -577,22 +649,31 @@ def _effective_config(
     snapshot_every: int,
     save_dumps: bool,
     dataset: dict[str, Any] | None = None,
+    dump_dt: float | None = None,
+    t_end: float | None = None,
 ) -> Any:
     """The config with the command-line choices folded in, so the run directory reproduces it."""
     eff = OmegaConf.create(OmegaConf.to_container(cfg, resolve=True))
+    if dump_dt is not None:
+        OmegaConf.update(eff, "solver.dump_dt", float(dump_dt), force_add=True)
+        # the end time, or the step budget when the run has none
+        if t_end is not None:
+            OmegaConf.update(eff, "solver.t_end", float(t_end), force_add=True)
+        elif "t_end" in eff.solver:
+            eff.solver.pop("t_end")
     for key, value in (
         ("solver.backend", params.backend),
         ("solver.mixed_precision", bool(params.mixed_precision)),
         ("solver.use_z2z", bool(params.use_z2z)),
         ("solver.dt", float(params.dt)),
-        ("solver.n_steps", int(target_step)),
+        ("solver.n_steps", int(target_step) if t_end is None else int(eff.solver.get("n_steps", 0) or 0)),
         ("run.block_size", int(block_size)),
         ("run.snapshot_every", int(snapshot_every)),
         ("run.save_dumps", bool(save_dumps)),
     ):
         OmegaConf.update(eff, key, value, force_add=True)
     if dataset is not None:
-        eff.dataset = dict(dataset)
+        eff.dataset = {k: v for k, v in dataset.items() if k != "takeover"}
     mesh = (params.n_gpus_sp, params.n_gpus_vp, params.n_gpus_mu)
     if "sharding" in eff or math.prod(mesh) > 1:
         eff.sharding = {"n_gpus_sp": mesh[0], "n_gpus_vp": mesh[1], "n_gpus_mu": mesh[2]}
@@ -617,7 +698,7 @@ def _write_run_record(setup: RunSetup) -> None:
         "config": os.path.abspath(setup["config_path"]),
         "resumed_from": setup["resumed_from"],
         "start_step": setup["start_step"],
-        "target_step": setup["start_step"] + setup["n_steps"],
+        "target_step": None if setup["t_end"] is not None else setup["start_step"] + setup["n_steps"],
         "backend": params.backend,
         "mesh": [params.n_gpus_sp, params.n_gpus_vp, params.n_gpus_mu],
     }
@@ -651,7 +732,10 @@ def _describe(setup: RunSetup, config_path: str) -> None:
     print(f"{mode}{' + EM(' + '+'.join(em) + ')' if em else ''}: {setup['name']} ({config_path})")
     print("=" * 88)
     print_params(params, grid_shape=setup["df"].shape)
-    print(f"  backend={params.backend}  mixed_precision={params.mixed_precision}")
+    backend = params.backend
+    if backend == "auto":
+        backend = f"auto ({'cuda' if _cuda_available() else 'jax'})"
+    print(f"  backend={backend}  mixed_precision={params.mixed_precision}")
     if params.backend == "jax" and _cuda_available():
         print("  note: the CUDA backend is built; --backend cuda runs ~3x faster per step")
     if mesh is not None:
@@ -669,10 +753,21 @@ def _describe(setup: RunSetup, config_path: str) -> None:
     else:
         print(f"  sharding: none (single device {jax.devices()[0]})")
     every = setup["snapshot_every"]
-    print(
-        f"  n_steps={setup['n_steps']}, checkpoint_interval={setup['block_size']}, "
-        f"snapshot every {every} block{'s' if every > 1 else ''}"
-    )
+    if setup["dump_dt"] is not None:
+        end = (
+            f"until t={setup['t_end']:g}"
+            if setup["t_end"] is not None
+            else f"for {setup['n_steps']} steps"
+        )
+        print(
+            f"  frames every {setup['dump_dt']:g} time units {end}, "
+            f"snapshot every {every} frame{'s' if every > 1 else ''}"
+        )
+    else:
+        print(
+            f"  n_steps={setup['n_steps']}, checkpoint_interval={setup['block_size']}, "
+            f"snapshot every {every} block{'s' if every > 1 else ''}"
+        )
     print(f"  output: {setup['output_dir']}")
     debug = [n for n in ("telemetry", "profile") if setup[n]]
     if debug:
@@ -694,7 +789,21 @@ def _cuda_available() -> bool:
 
 
 def _resolve_args(args: argparse.Namespace) -> list[str | None]:
-    """Replace run directories among ``args.configs`` by their config; return the run dirs."""
+    """Replace run directories among ``args.configs`` by their config; return the run dirs.
+
+    A single dataset trajectory stands for the config of its resume dump and is extended from it.
+    """
+    from gyaradax.io.dataset import RESUME_DIR, is_trajectory, resume_path
+
+    if len(args.configs) == 1 and is_trajectory(args.configs[0]):
+        traj = args.configs[0]
+        if not os.path.isfile(resume_path(traj)):
+            raise SystemExit(f"error: {traj} has no resume dump ({resume_path(traj)})")
+        if getattr(args, "resume_from", None) or getattr(args, "from_scratch", False):
+            raise SystemExit("error: extending a trajectory takes neither --resume-from nor --from-scratch")
+        args.resume_from = traj
+        args.configs = [os.path.join(traj, RESUME_DIR, "config.yaml")]
+        return [None]
     resolved = [_resolve_config(p) for p in args.configs]
     args.configs = [c for c, _ in resolved]
     return [d for _, d in resolved]
@@ -763,7 +872,49 @@ def _finish_run(setup: RunSetup) -> int:
     return 0
 
 
+@contextlib.contextmanager
+def _stop_on_sigterm() -> Any:
+    """SIGTERM ends the run after the running block and its snapshot; a second one exits at once."""
+    from gyaradax.solver.driver import STOP_REQUESTED
+
+    def handler(signum: int, frame: Any) -> None:
+        if STOP_REQUESTED.is_set():
+            raise SystemExit(128 + signum)
+        STOP_REQUESTED.set()
+        print("\nSIGTERM: stopping after the running block and its snapshot", flush=True)
+
+    STOP_REQUESTED.clear()
+    previous = signal.signal(signal.SIGTERM, handler)
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+        STOP_REQUESTED.clear()
+
+
+def _interrupted(setups: list[RunSetup], final_state: Any) -> bool:
+    import numpy as np
+
+    diverged = any(os.path.exists(os.path.join(s["output_dir"], "DIVERGED")) for s in setups)
+    t_end, dump_dt = setups[0]["t_end"], setups[0]["dump_dt"]
+    if t_end is not None:
+        return not diverged and bool(np.min(np.asarray(final_state.time)) < t_end - 1e-9 * dump_dt)
+    target = setups[0]["start_step"] + setups[0]["n_steps"]
+    return not diverged and bool(np.min(np.asarray(final_state.step)) < target)
+
+
+def _reached_end(setup: RunSetup) -> bool:
+    t_end, dump_dt = setup["t_end"], setup["dump_dt"]
+    return t_end is not None and float(setup["state"].time) >= t_end - 1e-9 * cast(float, dump_dt)
+
+
 def _nothing_to_run(setup: RunSetup) -> None:
+    if setup["t_end"] is not None:
+        print(
+            f"\nnothing to run ({setup['name']}): t={float(setup['state'].time):g} already reaches "
+            f"t_end={setup['t_end']:g}; pass --t-end T or --n-blocks N (frames) to continue."
+        )
+        return
     print(
         f"\nnothing to run ({setup['name']}): step {setup['start_step']} already reaches "
         "solver.n_steps; pass --n-steps N to continue N more steps."
@@ -773,40 +924,47 @@ def _nothing_to_run(setup: RunSetup) -> None:
 def _run_single(args: argparse.Namespace, config_path: str, run_dir: str | None) -> int:
     import jax
 
-    from gyaradax.solver.driver import gksimulate
+    from gyaradax.solver.driver import EXIT_INTERRUPTED, gksimulate
 
     setup = _setup_run(config_path, args, run_dir=run_dir)
     _describe(setup, config_path)
     if args.dry_run:
         print("\ndry run: setup complete, not stepping.")
         return 0
-    if setup["n_steps"] <= 0:
+    if setup["n_steps"] <= 0 or _reached_end(setup):
         _nothing_to_run(setup)
         return 0
 
     telemetry = _start_run(setup)
     t0 = time.time()
-    gksimulate(
-        setup["df"],
-        setup["geometry"],
-        setup["params"],
-        setup["state"],
-        setup["n_steps"],
-        pre=setup["pre"],
-        output_dir=setup["output_dir"],
-        checkpoint_interval=setup["block_size"],
-        save_snapshots=setup["save_dumps"],
-        stop_on_nan=args.stop_on_nan,
-        snapshot_f32=(args.snapshot_dtype == "c64"),
-        keep_latest_snapshot=True,
-        snapshot_every=setup["snapshot_every"],
-        previous_snapshot=setup["previous_snapshot"],
-        telemetry=telemetry,
-        profile=setup["profile"],
-        dataset=_dataset_writer(setup),
-    )
+    with _stop_on_sigterm():
+        _, _, _, final_state = gksimulate(
+            setup["df"],
+            setup["geometry"],
+            setup["params"],
+            setup["state"],
+            setup["n_steps"],
+            pre=setup["pre"],
+            output_dir=setup["output_dir"],
+            checkpoint_interval=setup["block_size"],
+            save_snapshots=setup["save_dumps"],
+            stop_on_nan=args.stop_on_nan,
+            snapshot_f32=(args.snapshot_dtype == "c64"),
+            keep_latest_snapshot=True,
+            snapshot_every=setup["snapshot_every"],
+            previous_snapshot=setup["previous_snapshot"],
+            telemetry=telemetry,
+            profile=setup["profile"],
+            dataset=_dataset_writer(setup),
+            dump_dt=setup["dump_dt"],
+            t_end=setup["t_end"],
+            dump_origin=setup["dump_origin"],
+        )
     jax.effects_barrier()
     runtime = time.time() - t0
+    if _interrupted([setup], final_state):
+        print(f"exit {EXIT_INTERRUPTED}: interrupted; resuming {setup['output_dir']} continues it")
+        return EXIT_INTERRUPTED
     print(f"\ncompleted in {runtime:.1f}s ({setup['n_steps'] / runtime:.1f} steps/s)")
     return _finish_run(setup)
 
@@ -829,9 +987,14 @@ def _batch_mismatch(setups: list[RunSetup]) -> str | None:
         ("block_size", "block sizes"),
         ("snapshot_every", "snapshot cadences"),
         ("save_dumps", "snapshot archiving"),
+        ("dump_dt", "dump spacings"),
+        ("t_end", "end times"),
+        ("dump_origin", "frame grids"),
     ):
         if len({s[key] for s in setups}) > 1:
             return f"{what} differ"
+    if setups[0]["dump_dt"] is not None and len({float(s["state"].time) for s in setups}) > 1:
+        return "start times differ"
     for key, what in (
         ("df", "grid shapes"),
         ("params", "static parameters"),
@@ -849,7 +1012,7 @@ def _run_batched(args: argparse.Namespace, run_dirs: list[str | None]) -> int:
     import jax
     import jax.numpy as jnp
 
-    from gyaradax.solver.driver import gksimulate_batched
+    from gyaradax.solver.driver import EXIT_INTERRUPTED, gksimulate_batched
 
     def member_args(path: str) -> argparse.Namespace:
         # --output-dir names the parent of the members' run directories
@@ -879,7 +1042,7 @@ def _run_batched(args: argparse.Namespace, run_dirs: list[str | None]) -> int:
     if args.dry_run:
         print("\ndry run: setup complete, not stepping.")
         return 0
-    if setups[0]["n_steps"] <= 0:
+    if setups[0]["n_steps"] <= 0 or _reached_end(setups[0]):
         for s in setups:
             _nothing_to_run(s)
         return 0
@@ -892,28 +1055,35 @@ def _run_batched(args: argparse.Namespace, run_dirs: list[str | None]) -> int:
 
     telemetries = [_start_run(s) for s in setups]
     t0 = time.time()
-    gksimulate_batched(
-        jnp.stack([s["df"] for s in setups]),
-        _stack([s["geometry"] for s in setups]),
-        _stack([s["params"] for s in setups]),
-        _stack([s["state"] for s in setups]),
-        setups[0]["n_steps"],
-        pre_batch=_stack([s["pre"] for s in setups]),
-        output_dirs=[s["output_dir"] for s in setups],
-        labels=names,
-        previous_snapshots=[s["previous_snapshot"] for s in setups],
-        telemetries=telemetries,
-        checkpoint_interval=setups[0]["block_size"],
-        save_snapshots=setups[0]["save_dumps"],
-        stop_on_nan=args.stop_on_nan,
-        snapshot_f32=(args.snapshot_dtype == "c64"),
-        keep_latest_snapshot=True,
-        snapshot_every=setups[0]["snapshot_every"],
-        profile=any(s["profile"] for s in setups),
-        datasets=[_dataset_writer(s) for s in setups],
-    )
+    with _stop_on_sigterm():
+        _, _, _, final_state = gksimulate_batched(
+            jnp.stack([s["df"] for s in setups]),
+            _stack([s["geometry"] for s in setups]),
+            _stack([s["params"] for s in setups]),
+            _stack([s["state"] for s in setups]),
+            setups[0]["n_steps"],
+            pre_batch=_stack([s["pre"] for s in setups]),
+            output_dirs=[s["output_dir"] for s in setups],
+            labels=names,
+            previous_snapshots=[s["previous_snapshot"] for s in setups],
+            telemetries=telemetries,
+            checkpoint_interval=setups[0]["block_size"],
+            save_snapshots=setups[0]["save_dumps"],
+            stop_on_nan=args.stop_on_nan,
+            snapshot_f32=(args.snapshot_dtype == "c64"),
+            keep_latest_snapshot=True,
+            snapshot_every=setups[0]["snapshot_every"],
+            profile=any(s["profile"] for s in setups),
+            datasets=[_dataset_writer(s) for s in setups],
+            dump_dt=setups[0]["dump_dt"],
+            t_end=setups[0]["t_end"],
+            dump_origin=setups[0]["dump_origin"],
+        )
     jax.effects_barrier()
     runtime = time.time() - t0
+    if _interrupted(setups, final_state):
+        print(f"exit {EXIT_INTERRUPTED}: interrupted; resuming the run directories continues them")
+        return EXIT_INTERRUPTED
     n_steps = setups[0]["n_steps"]
     print(f"\ncompleted {len(setups)} configs in {runtime:.1f}s ({n_steps / runtime:.1f} steps/s)")
     return max(_finish_run(s) for s in setups)
@@ -948,12 +1118,12 @@ def _cmd_bench(args: argparse.Namespace) -> int:
     devices = list(mesh.devices.flat) if mesh is not None else [jax.devices()[0]]
     times = []
     for i in range(args.blocks):
-        t0 = time.time()
-        df, _, state = gksolve(df, geometry, params, state, n_steps=args.steps, pre=pre)
-        jax.block_until_ready(df)
-        dt = time.time() - t0
-        times.append(dt)
-        print(
+            t0 = time.time()
+            df, _, state = gksolve(df, geometry, params, state, n_steps=args.steps, pre=pre)
+            jax.block_until_ready(df)
+            dt = time.time() - t0
+            times.append(dt)
+            print(
             f"  block {i + 1}/{args.blocks}: {dt:.3f}s "
             f"({args.steps / dt:.2f} steps/s, {dt * 1000 / args.steps:.2f} ms/step)"
         )
@@ -998,6 +1168,27 @@ def _cmd_convert(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_build_cuda(args: argparse.Namespace) -> int:
+    from gyaradax.backends import cuda_lib
+
+    def caps(text: str | None) -> list[int]:
+        return [int(c.strip().replace(".", "")) for c in (text or "").split(",") if c.strip()]
+
+    archs = caps(args.archs) or cuda_lib.gpu_compute_caps()
+    if not archs:
+        raise SystemExit("error: no GPU visible here; pass --archs, e.g. --archs 80,90,103")
+    print(f"building {cuda_lib.KERNELS_DIR} for sm {archs} into {cuda_lib.env_build_dir(args.prefix)}")
+    lib = cuda_lib.build(archs, caps(args.lto_archs) or None, prefix=args.prefix, jobs=args.jobs)
+    print(f"installed {lib}")
+    return 0
+
+
+def _cmd_datagen(args: argparse.Namespace) -> int:
+    from gyaradax.datagen.campaign import main as datagen_main
+
+    return datagen_main(args.rest)
+
+
 def _cmd_info(args: argparse.Namespace) -> int:
     configure_runtime_env(device=-1, device_list=args.device_list)
 
@@ -1024,7 +1215,17 @@ def _cmd_info(args: argparse.Namespace) -> int:
         cuda_ok = False
         print(f"cuda kernels: error — {exc}")
     print(f"cuda backend: {'available' if cuda_ok else 'not available (JAX backend only)'}")
+    from gyaradax.backends import cuda_lib
+
+    record = cuda_lib.build_info(_cuda.LIB_PATH)
     print(f"lib path    : {_cuda.LIB_PATH} ({'present' if _cuda.LIB_PATH.exists() else 'missing'})")
+    print(f"lib key     : {cuda_lib.build_key()} (kernel sources + jaxlib)")
+    if record:
+        print(f"lib build   : sm {record.get('archs')}, {record.get('nvcc')}, {record.get('built')}")
+    elif _cuda.LIB_PATH.exists():
+        print("lib build   : development build in the checkout (no build record)")
+    else:
+        print("lib build   : none; `gyaradax build-cuda` builds one for this environment")
     if cuda_ok:
         _cuda._register_ffi()
         forced = os.environ.get("GYARADAX_BRACKET")
@@ -1092,7 +1293,8 @@ def _report(output_dir: str, data_dir: str, name: str, kinetic: bool) -> None:
 def _add_common(p: argparse.ArgumentParser) -> None:
     p.add_argument(
         "configs", nargs="+", metavar="CONFIG",
-        help="YAML config path(s), or a previous run directory to resume",
+        help="YAML config path(s), a previous run directory to resume, or one dataset trajectory "
+             "to extend from its resume dump",
     )
     p.add_argument(
         "--backend", choices=["auto", "jax", "cuda"], default=None,
@@ -1140,7 +1342,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     run_p.add_argument(
         "--n-steps", type=int, default=0,
-        help="run N more steps (default: up to the config's solver.n_steps)",
+        help="run N more steps (default: up to the config's solver.n_steps); with --dump-dt the "
+             "run ends on the first frame at or after them",
+    )
+    run_p.add_argument(
+        "--dump-dt", type=float, default=None, metavar="DT",
+        help="time mode: a frame (diagnostics, dataset frame) every DT time units, the last step "
+             "before each shortened to land on it (overrides solver.dump_dt); --n-blocks counts frames",
+    )
+    run_p.add_argument(
+        "--t-end", type=float, default=None, metavar="T",
+        help="time mode: run to the first frame at or after time T (overrides solver.t_end)",
     )
     run_p.add_argument(
         "--from-scratch", action="store_true",
@@ -1148,7 +1360,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     run_p.add_argument(
         "--resume-from", type=str, default=None,
-        help="resume from a GKW K-file in data_dir (e.g. K03) or a step_*.npz snapshot",
+        help="resume from a GKW K-file in data_dir (e.g. K03), a step_*.npz snapshot, or the "
+             "resume dump of a dataset trajectory directory (frames go on into that trajectory)",
     )
     run_p.add_argument("--output-dir", type=str, default=None, help="override output directory")
     run_p.add_argument(
@@ -1174,6 +1387,11 @@ def build_parser() -> argparse.ArgumentParser:
     run_p.add_argument(
         "--dataset-stats-from", type=float, default=None, metavar="T",
         help="compute the dataset statistics over the frames from time T on (default 0)",
+    )
+    run_p.add_argument(
+        "--resume-dtype", choices=["f32", "f64"], default=None,
+        help="df precision of the trajectory's resume dump, replaced at the end of every leg "
+             "(default f32; f64 extends bitwise)",
     )
     run_p.add_argument(
         "--snapshot-dtype", choices=["c128", "c64"], default="c128",
@@ -1221,6 +1439,25 @@ def build_parser() -> argparse.ArgumentParser:
     info_p = sub.add_parser("info", help="show devices, backends and versions")
     info_p.add_argument("--device-list", type=str, default=None)
     info_p.set_defaults(func=_cmd_info)
+
+    build_p = sub.add_parser("build-cuda", help="build the CUDA kernels for this Python environment")
+    build_p.add_argument(
+        "--archs", type=str, default=None,
+        help="compute capabilities, e.g. 80,90,103 (default: the GPUs of this machine)",
+    )
+    build_p.add_argument(
+        "--lto-archs", type=str, default=None,
+        help="cuFFT LTO callback compute capabilities (default: the CMake default, 80,90,100)",
+    )
+    build_p.add_argument("--prefix", type=str, default=None, help="environment prefix (default: this one)")
+    build_p.add_argument("-j", "--jobs", type=int, default=None, help="parallel build jobs")
+    build_p.set_defaults(func=_cmd_build_cuda)
+
+    datagen_p = sub.add_parser(
+        "datagen", add_help=False, help="generate a dataset: run configs over an ssh GPU mesh or Slurm"
+    )
+    datagen_p.add_argument("rest", nargs=argparse.REMAINDER)
+    datagen_p.set_defaults(func=_cmd_datagen)
 
     return parser
 
