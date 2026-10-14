@@ -11,6 +11,10 @@ A trajectory lives in ``<root>/<name>_ifft_realpotens/``::
     .gyaradax_run                    the run directory that writes the trajectory
     resume/state.npz                 df (complex64, or complex128) and solver state of the last frame
     resume/config.yaml               the config of the leg that wrote it
+    data/linear.bin                  with ``run --linear-gate``: the linear eigenmode df in real space,
+                                     float32, the layout of a df frame (``linear_shape``)
+    data/linear_k.bin                the same df in spectral space (re/im, ..., kx, ky), float32
+    data/linear_poten.bin            its phi in real space, (x, s, y), float32
 
 ``bits`` is ``zstd16`` (bfloat16 values byte-shuffled and zstd-compressed in 4 MiB chunks behind
 a 4 KiB header, ``neugk_jax.dataset.zframe`` v1) or ``bf16`` (the raw values); either way the
@@ -23,6 +27,7 @@ its end, so ``gyaradax run TRAJECTORY`` can extend the trajectory without the ru
 
 from __future__ import annotations
 
+import contextlib
 import glob
 import os
 import pickle
@@ -384,6 +389,66 @@ class DatasetWriter:
         self.series["growth"].append(np.asarray(state.last_growth_rate, np.float64))
         write_metadata(self.path, self.metadata())
 
+    def update_static(self, entries: dict) -> None:
+        """Add per-trajectory entries (not per frame) to the metadata and rewrite it."""
+        self.static.update(entries)
+        write_metadata(self.path, self.metadata())
+
+    def add_linear(self, gate: dict, mode_path: str) -> None:
+        """Store the linear eigenmode of ``mode_path`` (``linear_mode.npz``) and the linear results.
+
+        Writes ``data/linear.bin`` (real space), ``data/linear_k.bin`` (spectral) and
+        ``data/linear_poten.bin`` as raw float32, the layout of the adiabatic dataset's paired
+        linear eigenmodes, and the ``linear_*`` metadata keys.
+        """
+        with np.load(mode_path) as mode:
+            df, phi = mode["df"], mode["phi"]
+            mode_time = float(mode["time"])
+        real = np.asarray(df_to_real(df), np.float32)
+        spec = np.stack([df.real, df.imag]).astype(np.float32)
+        poten = phi_to_real(phi)
+        for name, arr in (("linear.bin", real), ("linear_k.bin", spec), ("linear_poten.bin", poten)):
+            path = os.path.join(self.path, "data", name)
+            # a resumed leg finds the eigenmode of its first leg
+            if not (os.path.isfile(path) and os.path.getsize(path) == arr.nbytes):
+                _atomic_write(path, np.ascontiguousarray(arr).tobytes())
+        omega = gate.get("omega")
+        self.update_static({
+            "linear_bin": "data/linear.bin",
+            "linear_shape": np.asarray(real.shape, np.int64),
+            "linear_space": "real",
+            "linear_k_bin": "data/linear_k.bin",
+            "linear_k_bin_shape": np.asarray(spec.shape, np.int64),
+            "linear_poten_bin": "data/linear_poten.bin",
+            "linear_poten_shape": np.asarray(poten.shape, np.int64),
+            "linear_source": os.path.abspath(mode_path),
+            "linear_time": mode_time,
+            "linear_ky": np.asarray(gate["ky"], np.float64),
+            "linear_gamma": np.asarray(gate["gamma"], np.float64),
+            "linear_gamma_std": np.asarray(gate["gamma_std"], np.float64),
+            "linear_omega": np.asarray(omega if omega is not None else np.nan, np.float64),
+            "linear_omega_std": np.asarray(gate.get("omega_std", np.nan), np.float64),
+            "linear_settled": bool(gate["settled"]),
+            "linear_peak_ky": np.float64(np.nan if gate["peak_ky"] is None else gate["peak_ky"]),
+            "linear_gamma_max": np.float64(np.nan if gate["gamma_max"] is None else gate["gamma_max"]),
+            "linear_gate": gate["decision"],
+            **linear_moments(real),
+        })
+
+    def keep_last_frame(self) -> None:
+        """Drop every frame but the last, which becomes frame 0."""
+        n = self.n_frames
+        if n <= 1:
+            return
+        for kind in ("timestep", "poten"):
+            for i in range(n - 1):
+                with contextlib.suppress(FileNotFoundError):
+                    os.remove(frame_path(self.path, kind, i, self.bits))
+            os.replace(frame_path(self.path, kind, n - 1, self.bits), frame_path(self.path, kind, 0, self.bits))
+        for k in self.series:
+            self.series[k] = self.series[k][-1:]
+        write_metadata(self.path, self.metadata())
+
     def metadata(self) -> dict:
         meta = dict(self.static)
         for k, v in self.series.items():
@@ -414,6 +479,23 @@ class DatasetWriter:
             write_statistics(self.path, self.stats_from)
         if self.n_frames:
             print(f"  dataset {os.path.basename(self.path)}: {quantization_summary(self.metadata())}")
+
+
+def linear_moments(arr: np.ndarray) -> dict:
+    """RMS of a linear eigenmode frame, overall and reduced to (y,), (re/im, y), (x, y), (re/im, x, y).
+
+    The reductions of ``neugk_jax`` ``preprocess.linear_moments``; a species axis is reduced too.
+    """
+    sq = np.square(arr, dtype=np.float64)
+    axes = tuple(range(sq.ndim))
+    return {
+        "linear_rms": np.float64(np.sqrt(sq.mean())),
+        "linear_rms_ky": np.sqrt(sq.mean(axis=axes[:-1])),
+        "linear_rms_cky": np.sqrt(sq.mean(axis=axes[1:-1])),
+        "linear_rms_kxky": np.sqrt(sq.mean(axis=axes[:-2])),
+        "linear_rms_ckxky": np.sqrt(sq.mean(axis=axes[1:-2])),
+        "linear_rms_count": np.int64(arr.size),
+    }
 
 
 def quantization_summary(meta: dict) -> str:

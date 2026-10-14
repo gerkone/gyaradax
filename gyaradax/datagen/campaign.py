@@ -41,6 +41,8 @@ SETTINGS = "campaign.yaml"
 NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
 # set by the campaign for every job
 OWN_FLAGS = (*sched.REFUSED_FLAGS, "--dataset", "--dataset-name")
+# campaign switches passed to every job as `gyaradax run --<key with dashes>`
+OUTCOME_SETTINGS = ("linear_gate", "stop_on_decay", "stop_on_banding", "track_outcome")
 
 
 def _git(*args: str) -> str:
@@ -90,6 +92,7 @@ class Campaign:
             "gpus": args.gpus,
             "linear_check": args.linear_check,
             "linear_check_tol": args.linear_check_tol,
+            **{k: bool(getattr(args, k)) for k in OUTCOME_SETTINGS},
         }
         if self.exists:
             # only flags given on this call are compared
@@ -101,8 +104,10 @@ class Campaign:
                 "gpus": args.gpus,
                 "linear_check": args.linear_check,
                 "linear_check_tol": args.linear_check_tol,
+                **{k: getattr(args, k) for k in OUTCOME_SETTINGS},
             }
-            bad = [k for k, v in explicit.items() if v and given[k] != self.settings.get(k)]
+            saved = {**self.settings, **{k: bool(self.settings.get(k)) for k in OUTCOME_SETTINGS}}
+            bad = [k for k, v in explicit.items() if v and given[k] != saved.get(k)]
             if bad:
                 raise SystemExit(
                     f"error: {self.settings_path} fixes {', '.join(bad)}; drop the flags or start another campaign"
@@ -186,6 +191,10 @@ class Campaign:
             args += ["--linear-check", str(self.settings["linear_check"])]
             if self.settings.get("linear_check_tol") is not None:
                 args += ["--linear-check-tol", f"{float(self.settings['linear_check_tol']):g}"]
+        for key in OUTCOME_SETTINGS:
+            flag = "--" + key.replace("_", "-")
+            if self.settings.get(key) and flag not in args:
+                args.append(flag)
         return {
             "name": name,
             "config": config,
@@ -488,6 +497,27 @@ def build_parser() -> argparse.ArgumentParser:
             default=None,
             metavar="X",
             help="reject a job (state rejected, not retried) whose relative γ deviation exceeds X",
+        )
+        p.add_argument(
+            "--linear-gate",
+            action="store_true",
+            help="linear run before each nonlinear run; a linearly stable job ends as `stable` "
+            "(gyaradax run --linear-gate)",
+        )
+        p.add_argument(
+            "--stop-on-decay",
+            action="store_true",
+            help="stop runs whose heat flux has decayed; they end as `decayed`",
+        )
+        p.add_argument(
+            "--stop-on-banding",
+            action="store_true",
+            help="stop runs flagged for s-Nyquist banding; they end as `banded`",
+        )
+        p.add_argument(
+            "--track-outcome",
+            action="store_true",
+            help="track every run's outcome (outcome.json, the outcomes table) without stopping",
         )
 
     def campaign(p: argparse.ArgumentParser) -> None:

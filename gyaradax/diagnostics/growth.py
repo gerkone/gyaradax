@@ -75,12 +75,16 @@ def growth_rates(
     gamma_min: float = 0.02,
     block: int = 250,
     log: Callable[[str], None] | None = None,
+    frequencies: bool = False,
+    keep_mode: bool = False,
 ) -> dict[str, Any]:
     """Per-ky growth rates of ``cfg`` run linearly, averaged over the last ``settle`` time units.
 
     The time step is capped at the linear stability estimate (as GKW does for every explicit
     run). The run stops once the unstable ky (kθρ <= ``ky_max``, γ > ``gamma_min``) vary by less
-    than ``tol`` over ``settle`` time units after ``t_min``, or at ``t_end``.
+    than ``tol`` over ``settle`` time units after ``t_min``, or at ``t_end``. ``frequencies``
+    adds the real frequencies (``omega``, ``omega_std``) from a few short blocks after that;
+    ``keep_mode`` returns the final df and phi under ``mode``.
     """
     import jax.numpy as jnp
 
@@ -110,8 +114,9 @@ def growth_rates(
     rates: list[np.ndarray] = []
     converged = False
     t = float(state.time)
+    phi = None
     while t < t_end:
-        df, _, _, state = gk_run(df, geometry, params, state, block, pre=pre)
+        df, phi, _, state = gk_run(df, geometry, params, state, block, pre=pre)
         t = float(state.time)
         g = np.asarray(state.last_growth_rate, dtype=float)
         if not np.all(np.isfinite(g)):
@@ -146,7 +151,48 @@ def growth_rates(
         "config_key": config_key(run_cfg),
     }
     result["peak"] = peak(result, ky_max=ky_max)
+    if frequencies:
+        omega, omega_std, df, phi, state = real_frequency(df, phi, geometry, params, state, pre)
+        result["omega"], result["omega_std"] = omega.tolist(), omega_std.tolist()
+    if keep_mode:
+        result["mode"] = {"df": np.asarray(df), "phi": np.asarray(phi), "time": float(state.time)}
     return result
+
+
+def _chain_phase(phi: Any, geometry: Mapping[str, Any]) -> np.ndarray:
+    # sum of phi over s and the kx chain through kx = 0, per ky (GKW diagnos_growth_freq)
+    mode_label = np.asarray(geometry["mode_label"])
+    chain = mode_label == mode_label[int(np.asarray(geometry["ixzero"])), :]
+    return np.sum(np.asarray(phi) * chain[None], axis=(0, 1))
+
+
+def real_frequency(
+    df: Any,
+    phi: Any,
+    geometry: Mapping[str, Any],
+    params: Any,
+    state: Any,
+    pre: Any,
+    blocks: int = 4,
+    steps: int = 10,
+) -> tuple[np.ndarray, np.ndarray, Any, Any, Any]:
+    """Real frequency per ky from the phase advance of phi over ``blocks`` runs of ``steps`` steps.
+
+    ω = d arg(Σ phi)/dt, the sum over s and the kx chain through kx = 0, with GKW's sign. The
+    blocks are short so that |ω| dt stays below π. Returns the mean and spread over the blocks,
+    and the state after them.
+    """
+    from gyaradax.solver.driver import gk_run
+
+    samples = []
+    a, ta = _chain_phase(phi, geometry), float(state.time)
+    for _ in range(blocks):
+        df, phi, _, state = gk_run(df, geometry, params, state, steps, pre=pre)
+        b, tb = _chain_phase(phi, geometry), float(state.time)
+        samples.append(np.angle(np.conj(a) * b) / (tb - ta))
+        a, ta = b, tb
+    w = np.asarray(samples)
+    return w.mean(0), w.std(0), df, phi, state
 
 
 def peak(result: Mapping[str, Any], ky_max: float = 1.0) -> dict[str, float] | None:

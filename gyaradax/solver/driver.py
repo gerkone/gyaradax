@@ -357,6 +357,7 @@ def gksimulate(
     dump_dt: Optional[float] = None,
     t_end: Optional[float] = None,
     dump_origin: Optional[float] = None,
+    monitor: Any = None,
 ) -> Tuple[jnp.ndarray, jnp.ndarray, Any, GKState]:
     """Run n_steps with optional IO checkpointing and logging.
 
@@ -376,6 +377,10 @@ def gksimulate(
     ``dump_origin + k * dump_dt`` (default origin: the start time) and lands on it, and the
     run ends on the first frame at or after ``t_end``, or without ``t_end`` on the first
     frame at or after ``n_steps`` steps; ``checkpoint_interval`` is unused.
+
+    ``monitor`` (an ``outcome.RunMonitor``) sees every frame; when it reports a reason to stop
+    (decay, banding) the run ends on that frame with its snapshot, and it decides which frames
+    go to ``dataset``.
 
     Returns:
         (df, phi, fluxes, state)
@@ -397,6 +402,7 @@ def gksimulate(
         "previous_snapshot": previous_snapshot,
         "telemetry": telemetry,
         "dataset": dataset,
+        "monitor": monitor,
         "label": None,
     }
     return _simulate(
@@ -478,6 +484,7 @@ def gksimulate_batched(
             "previous_snapshot": previous_snapshots[i] if previous_snapshots else None,
             "telemetry": telemetries[i] if telemetries else None,
             "dataset": datasets[i] if datasets else None,
+            "monitor": None,
             "label": labels[i] if labels else str(i),
         }
         for i in range(n)
@@ -579,6 +586,8 @@ def _simulate(
     current_phi: Any = None
     current_fluxes: Any = None
     alive = [True] * len(runs)
+    # why a run left the loop early on its own: decayed, banded (None: diverged)
+    ended: List[Optional[str]] = [None] * len(runs)
     stopped: List[Optional[Tuple[int, float]]] = [None] * len(runs)
     previous = [run["previous_snapshot"] for run in runs]
     profile_next = profile and runs[0]["output_dir"] is not None
@@ -664,8 +673,12 @@ def _simulate(
                 continue
 
             steps_i = block_steps if frames is None else len(dt_i["dt_used"])
+            monitor = run["monitor"]
+            stop_reason = None
+            if monitor is not None:
+                stop_reason = monitor.observe(st, view(current_fluxes, i), view(current_phi, i))
             if out is not None:
-                is_final = done(st)
+                is_final = done(st) or stop_reason is not None
                 due = blocks_done % snapshot_every == 0 or is_final or stop_now
                 snapshot = (
                     (save_snapshots and due)
@@ -696,20 +709,12 @@ def _simulate(
                             os.remove(previous[i])
                     previous[i] = latest
 
-            if run["dataset"] is not None:
-                phi_i = view(current_phi, i)
-                ky_spec, kx_spec = phi_spectra(phi_i, run["geometry"])
-                run["dataset"].add(
-                    d,
-                    phi_i,
-                    view(current_fluxes, i),
-                    st,
-                    ky_spec,
-                    kx_spec,
-                    integrals=functools.partial(
-                        _diagnostics, geometry=run["geometry"], params=run["params"], pre=run["pre"]
-                    ),
-                )
+            writes = run["dataset"] is not None and (
+                monitor is None
+                or monitor.write_frame(run["dataset"].n_frames, final=stop_reason is not None)
+            )
+            if writes:
+                _dataset_frame(run, d, view(current_phi, i), view(current_fluxes, i), st)
 
             log_step(
                 view(current_fluxes, i), st, wall_time, n_steps=steps_i, label=run["label"]
@@ -723,6 +728,12 @@ def _simulate(
                     dt_i,
                     profiled=profiled,
                 )
+            if stop_reason is not None:
+                tag = f" ({run['label']})" if run["label"] else ""
+                print(f"\n*** {stop_reason.upper()}{tag}: {monitor.message}; stopping")
+                alive[i] = False
+                ended[i] = stop_reason
+                stopped[i] = (int(st.step) - start_step, time.time() - run_t0)
         if stop_now and not done(view(current_state, 0)):
             interrupted = True
             step = int(view(current_state, 0).step)
@@ -737,15 +748,29 @@ def _simulate(
                     time.time() - run_t0,
                 )
                 status = "completed" if alive[i] and not interrupted else "interrupted"
-                status = status if alive[i] else "diverged"
+                status = status if alive[i] else (ended[i] or "diverged")
                 run["telemetry"].close(wall, steps, status)
     for i, run in enumerate(runs):
+        monitor = run["monitor"]
+        if monitor is not None:
+            writer = run["dataset"]
+            # a run whose frames waited for turbulence that never came keeps its last frame
+            if writer is not None and not interrupted and blocks_done and writer.n_frames == 0:
+                if alive[i] or ended[i]:
+                    _dataset_frame(
+                        run,
+                        view(current_df, i),
+                        view(current_phi, i),
+                        view(current_fluxes, i),
+                        view(current_state, i),
+                    )
+            monitor.finish(writer, final=not interrupted)
         if run["dataset"] is None:
             continue
         # an interrupted run leaves the statistics to the leg that completes it
         if not interrupted:
             run["dataset"].finalize()
-        if blocks_done and alive[i]:
+        if blocks_done and (alive[i] or ended[i]):
             run["dataset"].write_resume(view(current_df, i), view(current_state, i), dump_origin=origin)
 
     if current_phi is None:
@@ -760,6 +785,21 @@ def _simulate(
             current_phi, current_fluxes = diags[0]
 
     return current_df, current_phi, current_fluxes, current_state
+
+
+def _dataset_frame(run: Dict[str, Any], df, phi, fluxes, state) -> None:
+    ky_spec, kx_spec = phi_spectra(phi, run["geometry"])
+    run["dataset"].add(
+        df,
+        phi,
+        fluxes,
+        state,
+        ky_spec,
+        kx_spec,
+        integrals=functools.partial(
+            _diagnostics, geometry=run["geometry"], params=run["params"], pre=run["pre"]
+        ),
+    )
 
 
 def _share_profile_summary(runs: List[Dict[str, Any]]) -> None:

@@ -33,6 +33,7 @@ gyaradax/
     diag.py           — diagnostics: growth rates, spectra (phi_spectra), term_iii_rhs
     telemetry.py      — run telemetry, profiler summaries
     growth.py         — linear growth rates per resolution (`gyaradax growth`, `run --linear-check`)
+    outcome.py        — run outcome: linear gate decision, decay / s-Nyquist banding detectors, outcome.json
     plot_utils.py     — publication-quality plotting functions
   io/
     gkw.py            — GKW I/O (K-dumps, geom.dat, input.dat parsing, load_geometry, gkw_to_yaml)

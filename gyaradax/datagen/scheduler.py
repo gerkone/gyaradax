@@ -47,8 +47,13 @@ STATE_ORDER = (
     "diverged",
     "rejected",
     "cancelled",
+    "banded",
+    "decayed",
+    "stable",
     "done",
 )
+# finished with a physics outcome, like done: not retried, not resumed
+OUTCOME_STATES = ("stable", "decayed", "banded")
 DIAGNOSTICS = (
     "fluxes.npz",
     "fluxes_em.npz",
@@ -72,6 +77,14 @@ ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 INTERRUPTED = 75
 # exit code of a run refused by its linear check (gyaradax.diagnostics.growth.EXIT_LINEAR_CHECK)
 LINEAR_CHECK_FAILED = 3
+# exit codes of the run outcomes (gyaradax.diagnostics.outcome.EXIT_*)
+OUTCOME_EXITS = {
+    4: ("stable", "linearly stable (linear_gate.json); nonlinear run skipped"),
+    5: ("decayed", "heat flux decayed (outcome.json); stopped"),
+    6: ("banded", "s-Nyquist banding (outcome.json); stopped"),
+}
+GATE_FILE = "linear_gate.json"
+OUTCOME_FILE = "outcome.json"
 SLURM_HOST = "slurm"
 # job gpus value meaning every GPU of the slot it lands on ("all" in the job file)
 ALL_GPUS = 0
@@ -88,7 +101,7 @@ CREATE TABLE runs (
     attempts INTEGER, failures INTEGER, first_start TEXT, last_start TEXT, finished TEXT,
     frames INTEGER, frames_total INTEGER, t REAL, t_end REAL, dump_dt REAL, step INTEGER,
     target_step INTEGER, eta_h REAL, cost REAL, note TEXT, output_dir TEXT, dataset_dir TEXT,
-    config TEXT, params TEXT
+    config TEXT, params TEXT, outcome TEXT, banded INTEGER
 );
 CREATE TABLE legs (
     name TEXT, leg INTEGER, launch TEXT, slot TEXT, host TEXT, gpus TEXT, start TEXT, end TEXT,
@@ -99,6 +112,18 @@ CREATE TABLE slots (
     paused_until TEXT, job TEXT
 );
 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);
+CREATE TABLE outcomes (
+    name TEXT PRIMARY KEY, state TEXT, class TEXT, label TEXT,
+    rlt TEXT, rln TEXT, tmp TEXT, mas TEXT, rlt_i REAL, rlt_e REAL, rln_i REAL, temp_ratio REAL,
+    q REAL, shat REAL, eps REAL, grid TEXT,
+    gate TEXT, settled INTEGER, gamma_max REAL, peak_ky REAL, omega_peak REAL, linear_t REAL,
+    ky TEXT, gamma TEXT, gamma_std TEXT, omega TEXT, omega_std TEXT,
+    t REAL, frames INTEGER, dataset_frames INTEGER, stopped TEXT, banded INTEGER, banded_t REAL,
+    nyq_zonal REAL, nyq_nonzonal REAL, nyq_zonal_max REAL, q_peak REAL, q_last REAL,
+    avg_t0 REAL, avg_t1 REAL, avg_frames INTEGER, qi REAL, qi_err REAL, qe REAL, qe_err REAL,
+    gi REAL, gi_err REAL, q_drift REAL, q_drift_sigma REAL, fluxes TEXT,
+    cost REAL, gpu_hours REAL
+);
 """
 
 
@@ -132,6 +157,108 @@ def job_meta(spec: JobSpec) -> dict[str, Any]:
     if root:
         meta["dataset_dir"] = os.path.join(root, f"{name or spec.name}_ifft_realpotens")
     return meta
+
+
+def read_json(path: str) -> dict[str, Any] | None:
+    try:
+        with open(path) as fh:
+            doc = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    return doc if isinstance(doc, dict) else None
+
+
+def _species(values: Any) -> list[Any]:
+    return list(values) if isinstance(values, list) else [values]
+
+
+def outcome_row(
+    name: str,
+    state: str,
+    meta: dict[str, Any],
+    run_dir: str,
+    cost: float,
+    gpu_hours: float,
+    frames: int | None,
+) -> tuple[Any, ...]:
+    """One row of the ``outcomes`` table from the config and the run's linear_gate.json / outcome.json."""
+    params = meta.get("params") or {}
+    physics, geometry, grid = (params.get(k) or {} for k in ("physics", "geometry", "grid"))
+    signz = _species(physics.get("signz", 1.0))
+    ion = next((i for i, z in enumerate(signz) if float(z) > 0), 0)
+    electron = next((i for i, z in enumerate(signz) if float(z) < 0), None)
+
+    def of(key: str, i: int | None) -> float | None:
+        values = _species(physics.get(key)) if physics.get(key) is not None else []
+        return float(values[i]) if i is not None and i < len(values) else None
+
+    tmp_i, tmp_e = of("tmp", ion), of("tmp", electron)
+    gate = read_json(os.path.join(run_dir, GATE_FILE)) or {}
+    out = read_json(os.path.join(run_dir, OUTCOME_FILE)) or {}
+    avg = out.get("average") or {}
+    window = avg.get("window") or [None, None]
+
+    def flux(i: int | None, channel: int, key: str = "mean") -> float | None:
+        rows = avg.get(key) or []
+        return rows[i][channel] if i is not None and i < len(rows) else None
+
+    def js(value: Any) -> str | None:
+        return None if value is None else json.dumps(value)
+
+    return (
+        name,
+        state,
+        out.get("class"),
+        out.get("label"),
+        js(physics.get("rlt")),
+        js(physics.get("rln")),
+        js(physics.get("tmp")),
+        js(physics.get("mas")),
+        of("rlt", ion),
+        of("rlt", electron),
+        of("rln", ion),
+        tmp_e / tmp_i if tmp_e is not None and tmp_i else None,
+        geometry.get("q"),
+        geometry.get("shat"),
+        geometry.get("eps"),
+        js(grid or None),
+        gate.get("decision"),
+        None if "settled" not in gate else int(bool(gate["settled"])),
+        gate.get("gamma_max"),
+        gate.get("peak_ky"),
+        gate.get("omega_peak"),
+        gate.get("t"),
+        js(gate.get("ky")),
+        js(gate.get("gamma")),
+        js(gate.get("gamma_std")),
+        js(gate.get("omega")),
+        js(gate.get("omega_std")),
+        out.get("t"),
+        out.get("frames"),
+        frames,
+        out.get("stopped"),
+        None if "banded" not in out else int(bool(out["banded"])),
+        out.get("banded_t"),
+        out.get("nyq_zonal"),
+        out.get("nyq_nonzonal"),
+        out.get("nyq_zonal_max"),
+        out.get("q_peak"),
+        out.get("q_last"),
+        window[0],
+        window[1],
+        avg.get("frames"),
+        flux(ion, 1),
+        flux(ion, 1, "err"),
+        flux(electron, 1),
+        flux(electron, 1, "err"),
+        flux(ion, 0),
+        flux(ion, 0, "err"),
+        avg.get("q_drift"),
+        avg.get("q_drift_sigma"),
+        js(avg or None),
+        cost,
+        gpu_hours,
+    )
 
 
 def dataset_frames(dataset_dir: str | None) -> int | None:
@@ -815,8 +942,10 @@ class Scheduler:
                 eta = None
                 if job.state in ACTIVE:
                     eta = frames_eta(p, now) if total else eta_seconds(p, now)
+                outcome = read_json(os.path.join(spec.output_dir, OUTCOME_FILE)) or {}
                 con.execute(
-                    "INSERT INTO runs VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "INSERT INTO runs VALUES "
+                    "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (
                         name,
                         job.state,
@@ -845,6 +974,8 @@ class Scheduler:
                         meta.get("dataset_dir"),
                         spec.config or spec.run_dir,
                         json.dumps(meta.get("params") or {}),
+                        outcome.get("class"),
+                        None if "banded" not in outcome else int(bool(outcome["banded"])),
                     ),
                 )
                 legs = list(job.history)
@@ -859,8 +990,13 @@ class Scheduler:
                             "result": job.state,
                         }
                     )
+                gpu_hours = 0.0
                 for i, h in enumerate(legs):
                     start, end = h.get("start"), h.get("end")
+                    if start:
+                        gpu_hours += (
+                            ((end or now) - start) / 3600.0 * max(len(h.get("gpus") or []), 1)
+                        )
                     con.execute(
                         "INSERT INTO legs VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                         (
@@ -878,6 +1014,10 @@ class Scheduler:
                             h.get("note") or None,
                         ),
                     )
+                row = outcome_row(
+                    name, job.state, meta, spec.output_dir, spec.cost, gpu_hours, frames
+                )
+                con.execute(f"INSERT INTO outcomes VALUES ({','.join('?' * len(row))})", row)
             running = {j.slot: n for n, j in self.jobs.items() if j.state in ACTIVE and j.slot}
             for sid, slot in self.pool.items():
                 con.execute(
@@ -1129,7 +1269,9 @@ class Scheduler:
         for problem in problems:
             self._warn(problem)
         claimed = {
-            j.spec.output_dir: j.spec.name for j in self.jobs.values() if j.state not in ("done",)
+            j.spec.output_dir: j.spec.name
+            for j in self.jobs.values()
+            if j.state not in ("done", *OUTCOME_STATES)
         }
         for spec in specs:
             job = self.jobs.get(spec.name)
@@ -1322,6 +1464,9 @@ class Scheduler:
         diverged = code == 2 and os.path.exists(os.path.join(job.spec.output_dir, "DIVERGED"))
         if code == 0:
             state = "done"
+        elif code in OUTCOME_EXITS:
+            state, note = OUTCOME_EXITS[code]
+            note += "; not retried"
         elif stopping:
             state = "pending" if job.requeue else "cancelled"
             note = f"{job.stop_reason}" + (f", {note}" if note else "")
@@ -1364,6 +1509,9 @@ class Scheduler:
 
     def _update_progress(self, job: Job, now: float) -> None:
         meta = self._meta_of(job.spec)
+        out = read_json(os.path.join(job.spec.output_dir, OUTCOME_FILE))
+        if out is not None:
+            job.progress["outcome"] = out.get("label") or out.get("class")
         frames = dataset_frames(meta.get("dataset_dir"))
         if frames is not None:
             p = job.progress
@@ -1703,7 +1851,9 @@ def format_status(doc: dict[str, Any], now: float, pending_requests: int = 0) ->
     for j in jobs:
         counts[j["state"]] = counts.get(j["state"], 0) + 1
     lines.append("jobs: " + ", ".join(f"{counts[s]} {s}" for s in STATE_ORDER if s in counts))
-    rows = [("JOB", "STATE", "SLOT", "GPUS", "COST", "FAIL", "STEP", "ETA", "NOTE")]
+    rows = [("JOB", "STATE", "SLOT", "GPUS", "COST", "FAIL", "STEP", "ETA", "OUTCOME", "NOTE")]
+    # the outcome column only once a run tracks its outcome
+    outcomes = any((j.get("progress") or {}).get("outcome") for j in jobs)
     rank = {s: i for i, s in enumerate(STATE_ORDER)}
     for j in sorted(jobs, key=lambda j: (rank.get(j["state"], 99), -j["spec"]["cost"], j["order"])):
         p = j.get("progress") or {}
@@ -1722,9 +1872,12 @@ def format_status(doc: dict[str, Any], now: float, pending_requests: int = 0) ->
                 str(j.get("failures", 0)),
                 step,
                 _duration(eta),
+                (p.get("outcome") or "-")[:60],
                 (j.get("note") or "")[:80],
             )
         )
+    if not outcomes:
+        rows = [r[:8] + r[9:] for r in rows]
     lines += [""] + _table(rows)
     for probe in (doc.get("probes") or {}).values():
         if not probe.get("usable"):

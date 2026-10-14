@@ -157,3 +157,18 @@ def test_time_mode_cost_follows_the_end_time(tmp_path):
     assert cg.main(["add", str(timed), stepped, "--campaign", str(tmp_path / "camp")]) == 0
     jobs = _jobs(tmp_path / "camp")
     assert jobs["k_1"]["cost"] == jobs["k_2"]["cost"] > 0
+
+
+def test_outcome_switches_go_to_every_job(tmp_path):
+    a = _config(tmp_path / "kinetic_5.yaml", "kinetic_5")
+    camp = str(tmp_path / "camp")
+    argv = ["add", a, "--campaign", camp, "--linear-gate", "--stop-on-decay"]
+    assert cg.main([*argv, "--args", "--decay-t-min 40"]) == 0
+    job = _jobs(camp)["kinetic_5"]
+    assert job["args"] == ["--decay-t-min", "40", "--linear-gate", "--stop-on-decay"]
+    with open(os.path.join(camp, "campaign.yaml")) as fh:
+        settings = yaml.safe_load(fh)
+    assert settings["linear_gate"] and settings["stop_on_decay"] and not settings["stop_on_banding"]
+    assert cg.main(["add", a, "--campaign", camp, "--linear-gate"]) == 0
+    with pytest.raises(SystemExit, match="fixes stop_on_banding"):
+        cg.main(["add", a, "--campaign", camp, "--stop-on-banding"])

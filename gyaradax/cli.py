@@ -301,6 +301,98 @@ def _linear_check(args: argparse.Namespace, config_path: str, run_dir: str | Non
     return 0
 
 
+def _linear_gate(args: argparse.Namespace, config_path: str, run_dir: str | None) -> dict[str, Any]:
+    """Linear run of the config on its own grid, cached in the run directory with its eigenmode."""
+    import numpy as np
+
+    from gyaradax.diagnostics import growth, outcome
+
+    cfg = OmegaConf.load(config_path)
+    output_dir = _default_output_dir(cfg, args, run_dir)
+    path = os.path.join(output_dir, outcome.GATE_FILE)
+    mode_path = os.path.join(output_dir, outcome.MODE_FILE)
+    key = growth.config_key(growth.adjusted_config(cfg))
+    gate = None
+    if os.path.isfile(path) and os.path.isfile(mode_path):
+        with open(path) as fh:
+            cached = json.load(fh)
+        if cached.get("config_key") == key:
+            gate = cached
+            print(f"linear gate: {path} (computed before)")
+    if gate is None:
+        print(f"linear gate: linear run on the config's grid (t_end {args.linear_gate_t_end:g})")
+        t0 = time.time()
+        result = growth.growth_rates(
+            cfg,
+            None,
+            backend=args.backend,
+            log=_progress(),
+            t_end=args.linear_gate_t_end,
+            ky_max=math.inf,
+            frequencies=True,
+            keep_mode=True,
+        )
+        mode = result.pop("mode")
+        result["wall_s"] = time.time() - t0
+        os.makedirs(output_dir, exist_ok=True)
+        tmp = f"{mode_path}.tmp{os.getpid()}.npz"
+        np.savez(tmp, df=mode["df"].astype(np.complex64), phi=mode["phi"], time=mode["time"])
+        os.replace(tmp, mode_path)
+        gate = result
+    gate = outcome.gate_report(gate, args.linear_gate_stable, args.linear_gate_gamma_min)
+    os.makedirs(output_dir, exist_ok=True)
+    outcome._atomic_json(path, gate)
+    print(outcome.format_gate(gate))
+    return gate
+
+
+def _monitor_settings(args: argparse.Namespace) -> Any:
+    """Outcome tracking settings when a flag asks for it, else None."""
+    from gyaradax.diagnostics.outcome import MonitorSettings
+
+    wanted = (
+        args.linear_gate
+        or args.stop_on_decay
+        or args.stop_on_banding
+        or args.track_outcome
+        or args.dataset_from_flux is not None
+    )
+    if not wanted:
+        return None
+    return MonitorSettings(
+        stop_on_decay=args.stop_on_decay,
+        decay_t_min=args.decay_t_min,
+        decay_floor=args.decay_floor,
+        decay_rel_floor=args.decay_rel_floor,
+        decay_window=args.decay_window,
+        decay_keep_frames=args.decay_keep_frames,
+        banding_threshold=args.banding_threshold,
+        banding_window=args.banding_window,
+        stop_on_banding=args.stop_on_banding,
+        dataset_from_flux=args.dataset_from_flux,
+    )
+
+
+def _run_monitor(settings: Any, setup: RunSetup, gate: dict[str, Any] | None) -> Any:
+    if settings is None:
+        return None
+    import numpy as np
+
+    from gyaradax.diagnostics.outcome import RunMonitor
+
+    params = setup["params"]
+    signz = np.atleast_1d(np.asarray(params.signz, dtype=float))
+    kinetic = not params.adiabatic_electrons
+    return RunMonitor(
+        setup["output_dir"],
+        settings,
+        start_step=setup["start_step"],
+        ion=int(np.argmax(signz > 0)) if kinetic else 0,
+        electron=int(np.argmax(signz < 0)) if kinetic else None,
+        gate=gate,
+    )
+
+
 def _cmd_growth(args: argparse.Namespace) -> int:
     if args.mem_fraction:
         os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = str(args.mem_fraction)
@@ -730,7 +822,7 @@ def _dataset_settings(
     }
 
 
-def _dataset_writer(setup: RunSetup) -> Any:
+def _dataset_writer(setup: RunSetup, gate: dict[str, Any] | None = None) -> Any:
     if setup["dataset"] is None:
         return None
     from gyaradax.io.dataset import DatasetWriter
@@ -749,6 +841,10 @@ def _dataset_writer(setup: RunSetup) -> Any:
         takeover=ds["takeover"],
     )
     print(f"  dataset: {writer.path} ({ds['bits']}, {writer.n_frames} frames so far)")
+    if gate is not None:
+        from gyaradax.diagnostics.outcome import MODE_FILE
+
+        writer.add_linear(gate, os.path.join(setup["output_dir"], MODE_FILE))
     return writer
 
 
@@ -935,6 +1031,11 @@ def _cmd_run(args: argparse.Namespace) -> int:
             raise SystemExit(
                 "error: --linear-check takes one config; run the configs one at a time"
             )
+        if _monitor_settings(args) is not None:
+            raise SystemExit(
+                "error: --linear-gate, --stop-on-decay, --stop-on-banding, --track-outcome and "
+                "--dataset-from-flux take one config; run the configs one at a time"
+            )
         return _run_batched(args, run_dirs)
     return _run_single(args, args.configs[0], run_dirs[0])
 
@@ -1046,10 +1147,23 @@ def _run_single(args: argparse.Namespace, config_path: str, run_dir: str | None)
 
     from gyaradax.solver.driver import EXIT_INTERRUPTED, gksimulate
 
+    from gyaradax.diagnostics import outcome
+
     if args.linear_check and not args.dry_run:
         code = _linear_check(args, config_path, run_dir)
         if code:
             return code
+    gate = None
+    if args.linear_gate and not args.dry_run:
+        gate = _linear_gate(args, config_path, run_dir)
+        if gate["decision"] == "stable":
+            out = _default_output_dir(OmegaConf.load(config_path), args, run_dir)
+            outcome.gate_outcome(out, gate)
+            print(
+                f"exit {outcome.EXIT_STABLE}: linearly stable (no ky grows); "
+                "not starting the nonlinear run"
+            )
+            return outcome.EXIT_STABLE
     setup = _setup_run(config_path, args, run_dir=run_dir)
     _describe(setup, config_path)
     if args.dry_run:
@@ -1060,6 +1174,7 @@ def _run_single(args: argparse.Namespace, config_path: str, run_dir: str | None)
         return 0
 
     telemetry = _start_run(setup)
+    monitor = _run_monitor(_monitor_settings(args), setup, gate)
     t0 = time.time()
     with _stop_on_sigterm():
         _, _, _, final_state = gksimulate(
@@ -1079,13 +1194,18 @@ def _run_single(args: argparse.Namespace, config_path: str, run_dir: str | None)
             previous_snapshot=setup["previous_snapshot"],
             telemetry=telemetry,
             profile=setup["profile"],
-            dataset=_dataset_writer(setup),
+            dataset=_dataset_writer(setup, gate),
             dump_dt=setup["dump_dt"],
             t_end=setup["t_end"],
             dump_origin=setup["dump_origin"],
+            monitor=monitor,
         )
     jax.effects_barrier()
     runtime = time.time() - t0
+    if monitor is not None and monitor.stopped:
+        code = _finish_run(setup) or monitor.exit_code
+        print(f"exit {code}: {monitor.stopped} ({monitor.message}); see outcome.json")
+        return code
     if _interrupted([setup], final_state):
         print(f"exit {EXIT_INTERRUPTED}: interrupted; resuming {setup['output_dir']} continues it")
         return EXIT_INTERRUPTED
@@ -1540,6 +1660,62 @@ def build_parser() -> argparse.ArgumentParser:
         "--linear-check-tol", type=float, default=None, metavar="X",
         help="with --linear-check: exit 3 instead of running when γ at the reference's dominant "
              "ky deviates by more than X (relative, e.g. 0.1)",
+    )
+    run_p.add_argument(
+        "--linear-gate", action="store_true",
+        help="before the run, a linear run on the config's grid (RUN_DIR/linear_gate.json, "
+             "linear_mode.npz, reused on resume); exit 4 instead of running when no ky grows",
+    )
+    run_p.add_argument(
+        "--linear-gate-t-end", type=float, default=60.0, metavar="T",
+        help="with --linear-gate: end of the linear run if its growth rates have not settled "
+             "(default 60)",
+    )
+    run_p.add_argument(
+        "--linear-gate-stable", type=float, default=-0.01, metavar="G",
+        help="with --linear-gate: stable when the rates settled and the largest is below G "
+             "(default -0.01)",
+    )
+    run_p.add_argument(
+        "--linear-gate-gamma-min", type=float, default=0.02, metavar="G",
+        help="with --linear-gate: unstable when the largest rate exceeds G (default 0.02); in "
+             "between, or not settled, the nonlinear run goes ahead",
+    )
+    run_p.add_argument(
+        "--track-outcome", action="store_true",
+        help="track the outcome per frame: RUN_DIR/outcome.json, monitor_series.npz (heat flux, "
+             "s-Nyquist share of phi, banding flag, flux averages, outcome class)",
+    )
+    run_p.add_argument(
+        "--stop-on-decay", action="store_true",
+        help="stop (exit 5) once the heat flux has decayed: after --decay-t-min, below the floor "
+             "and still falling over --decay-window frames",
+    )
+    run_p.add_argument("--decay-t-min", type=float, default=30.0, metavar="T",
+                       help="earliest time the run may stop on decay (default 30)")
+    run_p.add_argument("--decay-floor", type=float, default=1e-3, metavar="Q",
+                       help="absolute heat-flux floor, gyro-Bohm (default 1e-3)")
+    run_p.add_argument("--decay-rel-floor", type=float, default=1e-3, metavar="X",
+                       help="heat-flux floor relative to its peak (default 1e-3); the larger "
+                            "floor applies")
+    run_p.add_argument("--decay-window", type=int, default=5, metavar="N",
+                       help="frames the flux must stay below the floor and fall (default 5)")
+    run_p.add_argument(
+        "--decay-keep-frames", action="store_true",
+        help="keep every dataset frame of a decayed run (default: only the last)",
+    )
+    run_p.add_argument("--banding-threshold", type=float, default=0.3, metavar="X",
+                       help="zonal s-Nyquist share of phi that flags banding (default 0.3)")
+    run_p.add_argument("--banding-window", type=int, default=3, metavar="N",
+                       help="frames in a row over the threshold to flag banding (default 3)")
+    run_p.add_argument(
+        "--stop-on-banding", action="store_true",
+        help="stop (exit 6) once banding is flagged instead of only recording it",
+    )
+    run_p.add_argument(
+        "--dataset-from-flux", type=float, default=None, metavar="Q",
+        help="write dataset frames only once the total heat flux has reached Q; a run that never "
+             "does keeps its last frame",
     )
     run_p.add_argument("--dry-run", action="store_true", help="set up and report, do not step")
     run_p.add_argument(

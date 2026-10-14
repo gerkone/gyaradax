@@ -75,6 +75,13 @@ def main(argv):
     # as gyaradax run --linear-check-tol: refused before the first step
     if cfg.get("linear_reject"):
         return 3
+    # as gyaradax run --linear-gate / --stop-on-decay / --stop-on-banding / --track-outcome
+    for name in ("linear_gate", "outcome"):
+        if cfg.get(name):
+            with open(os.path.join(run_dir, name + ".json"), "w") as fh:
+                json.dump(cfg[name], fh)
+    if cfg.get("outcome_exit"):
+        return cfg["outcome_exit"]
     stop = []
     if cfg.get("ignore_term"):
         signal.signal(signal.SIGTERM, signal.SIG_IGN)
@@ -109,7 +116,8 @@ sys.exit(main(sys.argv[1:]))
 """
 
 FAKE_KEYS = (
-    "steps", "step_time", "fail_once_at", "fail_at", "diverge_at", "ignore_term", "linear_reject"
+    "steps", "step_time", "fail_once_at", "fail_at", "diverge_at", "ignore_term", "linear_reject",
+    "linear_gate", "outcome", "outcome_exit",
 )
 
 # sbatch / squeue / scancel on one machine: a job is its batch script run in a new session
@@ -426,6 +434,76 @@ def test_linear_check_rejection_is_not_retried(camp):
     assert gs.main(["resume", "off", "--state", camp.state_path]) == 0
     sched.poll()
     assert sched.jobs["off"].state in ("starting", "running", "rejected")
+
+
+GATE = {
+    "decision": "stable", "settled": True, "gamma_max": -0.03, "peak_ky": 0.35, "omega_peak": 0.1,
+    "t": 41.0, "ky": [0.0, 0.35], "gamma": [0.0, -0.03], "gamma_std": [0.0, 0.001],
+    "omega": [0.0, 0.1], "omega_std": [0.0, 0.01],
+}  # fmt: skip
+SATURATED = {
+    "class": "saturated", "label": "saturated t 150.0 Qi 3.2±0.4", "t": 150.0, "frames": 107,
+    "stopped": None, "banded": False, "banded_t": None, "nyq_zonal": 0.01, "nyq_nonzonal": 0.002,
+    "nyq_zonal_max": 0.05, "q_peak": 40.0, "q_last": 3.5,
+    "average": {"window": [105.0, 150.0], "frames": 33, "mean": [[0.5, 3.2, 0.0], [0.4, 1.1, 0.0]],
+                "err": [[0.1, 0.4, 0.0], [0.1, 0.2, 0.0]], "q_drift": 0.05, "q_drift_sigma": 0.7},
+}  # fmt: skip
+
+
+def test_outcome_exits_end_jobs_without_retries_and_fill_the_outcome_table(camp):
+    import sqlite3
+
+    camp.pool(slot("a", 0), slot("b", 1))
+    decayed = {**SATURATED, "class": "decayed", "label": "decayed", "stopped": "decayed"}
+    banded = {**SATURATED, "class": "banded", "label": "banded", "stopped": "banded", "banded": True}
+    camp.add_job("stable", steps=3, linear_gate=GATE, outcome_exit=4, cost=3)
+    camp.add_job("decay", steps=3, outcome=decayed, outcome_exit=5, cost=2)
+    camp.add_job("band", steps=3, outcome=banded, outcome_exit=6, cost=1)
+    camp.add_job("turb", steps=3, outcome={**SATURATED, "banded": True, "banded_t": 90.0})
+    for name in ("stable", "decay", "band", "turb"):
+        cfg_path = camp.root / "configs" / f"{name}.yaml"
+        cfg = yaml.safe_load(cfg_path.read_text())
+        cfg.update(
+            physics={"rlt": [5.0, 4.0], "rln": [2.0, 2.0], "tmp": [1.0, 1.2], "signz": [1, -1]},
+            geometry={"q": 1.4, "shat": 0.8, "eps": 0.12},
+            grid={"nvpar": 32, "nmu": 12, "ns": 18, "nkx": 192, "nky": 32},
+        )
+        cfg_path.write_text(yaml.safe_dump(cfg))
+    sched = camp.scheduler()
+    finished = ("stable", "decayed", "banded", "done")
+    camp.drive(sched, lambda: all(j.state in finished for j in sched.jobs.values()))
+    states = {n: j.state for n, j in sched.jobs.items()}
+    assert states == {"stable": "stable", "decay": "decayed", "band": "banded", "turb": "done"}
+    assert all(j.attempts == 1 and j.failures == 0 for j in sched.jobs.values())
+    assert "not retried" in sched.jobs["stable"].note
+    assert gs.main(["resume", "decay", "--state", camp.state_path]) == 0
+    sched.poll()
+    assert sched.jobs["decay"].state == "decayed"
+
+    con = sqlite3.connect(sched.db_path)
+    try:
+        rows = {r[0]: r[1:] for r in con.execute("SELECT name, state, outcome, banded FROM runs")}
+        assert rows["turb"] == ("done", "saturated", 1) and rows["stable"] == ("stable", None, None)
+        out = con.execute(
+            "SELECT gate, settled, gamma_max, peak_ky, rlt_i, rlt_e, temp_ratio, q, shat, eps, "
+            "json_extract(grid, '$.nkx'), json_extract(gamma, '$[1]') FROM outcomes "
+            "WHERE name = 'stable'"
+        ).fetchone()
+        assert out == ("stable", 1, -0.03, 0.35, 5.0, 4.0, 1.2, 1.4, 0.8, 0.12, 192, -0.03)
+        turb = con.execute(
+            "SELECT class, qi, qi_err, qe, qe_err, gi, avg_t0, avg_t1, banded, banded_t, "
+            "nyq_zonal, q_drift, gpu_hours > 0 FROM outcomes WHERE name = 'turb'"
+        ).fetchone()
+        assert turb == ("saturated", 3.2, 0.4, 1.1, 0.2, 0.5, 105.0, 150.0, 1, 90.0, 0.01, 0.05, 1)
+        assert con.execute("SELECT class FROM outcomes WHERE name = 'band'").fetchone() == (
+            "banded",
+        )
+    finally:
+        con.close()
+    with open(camp.state_path) as fh:
+        status = gs.format_status(json.load(fh), time.time())
+    assert "OUTCOME" in status and "saturated t 150.0 Qi 3.2±0.4" in status
+    assert "jobs: 1 banded, 1 decayed, 1 stable, 1 done" in status
 
 
 def test_restart_reattaches_to_the_running_job(camp):

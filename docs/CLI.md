@@ -63,6 +63,7 @@ Every run writes into its output directory (`--output-dir`, default
 | `step_NNNNNN.npz` | restart snapshot (df, phi, state), refreshed every `--snapshot-every` blocks and after the last; `--save-dumps` keeps them all |
 | `run_info.jsonl` | one line per invocation: command, host, git revision, start and target step |
 | `telemetry.jsonl`, `profile/`, `profile_summary.json` | debug output, see below |
+| `linear_gate.json`, `linear_mode.npz`, `outcome.json`, `monitor_series.npz` | run outcome, with the flags of "Run outcome" below |
 
 SIGTERM stops a run after the block in progress and its snapshot, with exit code 75 (a second
 SIGTERM exits at once); resuming the directory continues it from there. The dataset statistics
@@ -188,6 +189,8 @@ gyaradax run configs/kinetic_603.yaml --dataset /restricteddata/ukaea/gyrokineti
   continuation into a new trajectory instead. From an `f64` dump the continuation is bitwise the
   run that never stopped; from `f32` it starts from df rounded to complex64.
 - Electromagnetic fields (A_par, B_par) are not written yet.
+- With `--linear-gate` the trajectory also holds the linear eigenmode and the linear results, and
+  with any outcome flag the full per-frame traces and the outcome (see "Run outcome").
 
 ## Debugging: telemetry and profiling
 
@@ -369,6 +372,113 @@ gyaradax run my_case.yaml --linear-check 24,36 --linear-check-tol 0.1
   every job of the campaign; `datagen status` lists each job's result, and a job refused by
   the tolerance becomes `rejected` (not retried; `resume` puts it back).
 
+## Run outcome: linear gate, decay and banding
+
+For campaigns near the turbulence threshold, `gyaradax run` can skip linearly stable configs,
+stop runs whose turbulence has died out, and flag (or stop) runs with the s-Nyquist banding
+mode. All of it is off by default; without these flags a run is bitwise what it was.
+
+```bash
+gyaradax run my_case.yaml --linear-gate --stop-on-decay --dataset DIR    # the low-drive campaign
+gyaradax run my_case.yaml --track-outcome                                # record only
+gyaradax run my_case.yaml --stop-on-banding --banding-threshold 0.3
+```
+
+**Linear gate** (`--linear-gate`). Before the nonlinear run, a linear run of the config on its own
+grid (`solver.non_linear` off, unsharded, time step capped at the linear stability estimate, as
+`gyaradax growth`). It stops once the growth rates of every ky > 0 vary by less than 0.005 over
+6 time units after t = 15, or at `--linear-gate-t-end` (default 60).
+
+| Decision | Condition | Effect |
+|---|---|---|
+| `stable` | settled, and the largest γ is below `--linear-gate-stable` (default -0.01) | exit 4, no nonlinear run |
+| `unstable` | the largest γ is above `--linear-gate-gamma-min` (default 0.02) | the nonlinear run goes ahead |
+| `ambiguous` | anything else: between the two, or not settled | the nonlinear run goes ahead |
+
+The gate only ever skips stable configs: linearly unstable does not mean turbulent (Dimits
+shift), and the nonlinear run decides that.
+
+- `RUN_DIR/linear_gate.json`: ky, γ(ky) and its spread over the last 6 time units, the real
+  frequency ω(ky) and its spread, `settled`, `gamma_max`, `peak_ky`, `omega_peak`, the end time,
+  time steps and wall time, and the decision. ω = d arg(Σ φ)/dt with GKW's sign
+  (`diagnos_growth_freq`), the sum over s and the kx chain through kx = 0, measured over four
+  10-step blocks after the growth rates settled.
+- `RUN_DIR/linear_mode.npz`: the final linear eigenmode, df (complex64) and φ, normalized per
+  connected kx chain as the linear solver keeps it.
+- Both are reused on resume while the physics of the config is unchanged (as `--linear-check`);
+  changed thresholds re-decide from the cached rates.
+- With `--dataset`, the trajectory gets the eigenmode in the layout of the adiabatic dataset's
+  paired linear runs (`data/linear.bin`, `data/linear_k.bin`): raw float32, `linear.bin` in real
+  space with the shape of a df frame (`linear_shape`, here with the species axis), `linear_k.bin`
+  the spectral df as re/im (`linear_k_bin_shape`), plus `data/linear_poten.bin`, φ in real space
+  (x, s, y). The metadata carries `linear_bin`, `linear_space: real`, `linear_k_bin`, the
+  `linear_rms*` moments of neugk's `linear_moments` (a species axis is reduced with the others),
+  and `linear_ky`, `linear_gamma`, `linear_gamma_std`, `linear_omega`, `linear_omega_std`,
+  `linear_settled`, `linear_peak_ky`, `linear_gamma_max`, `linear_gate`, `linear_time`,
+  `linear_source`. A stable job writes no trajectory: its record is the run directory and the
+  campaign's `outcomes` table.
+
+**Outcome tracking.** Any of `--linear-gate`, `--stop-on-decay`, `--stop-on-banding`,
+`--track-outcome` or `--dataset-from-flux` follows the run frame by frame:
+
+- `RUN_DIR/monitor_series.npz`: per frame the time, step, fluxes, growth rates and the s-Nyquist
+  shares of φ. A resumed leg continues it from its start step.
+- `RUN_DIR/outcome.json`, rewritten every frame: the outcome class, a one-line `label`, the
+  stop reason, frames and time reached, the heat-flux peak and last value, the banding flag and
+  the time it was first flagged, the last and largest zonal s-Nyquist share, and the flux
+  averages. The flags are command-line only, so the next leg needs them again (the datagen
+  scheduler passes every job's arguments to every leg).
+
+| Class | Meaning |
+|---|---|
+| `linear_stable` | skipped by the linear gate |
+| `decayed` | stopped by `--stop-on-decay` |
+| `banded` | banding flagged (stopped or not) |
+| `flat` | mean heat flux over the averaging window below `--decay-floor` |
+| `growing` / `decaying` | the heat flux drifts by more than 20% of its mean over the window, at two standard errors |
+| `saturated` | none of the above |
+| `running` | the run has not finished (an interrupted leg) |
+
+**Flux averages.** Over the last 30% of the run time (the whole series, all legs): the mean of
+every flux (per species: particle, heat, momentum) and of the total heat flux, the batch-means
+error (5 consecutive batches, standard error of their means), and the trend: a line fitted to the
+batch means, its change over the window relative to the mean (`drift`) and that change in
+standard errors (`drift_sigma`).
+
+**Stop on decay** (`--stop-on-decay`, exit 5). After `--decay-t-min` (default 30) the run stops
+once the total heat flux has stayed below the floor for `--decay-window` frames (default 5) and
+still falls over them (negative slope of log Q, and the last frame below the first). The floor is
+the larger of `--decay-floor` (default 1e-3, gyro-Bohm) and `--decay-rel-floor` (default 1e-3)
+times the peak heat flux. The falling condition keeps a slow linear phase, small but rising, from
+counting. The stop frame gets a snapshot, so the run directory can still be extended (without the
+flag). With `--dataset` the trajectory then keeps only that last frame (renumbered 0, as the
+stored stable runs), unless `--decay-keep-frames`.
+
+**Banding** (`--track-outcome`, `--stop-on-banding`). Per frame, φ in real space (x, s, y), the
+stored-frame transform: zonal part = mean over y; its FFT along s; the zonal share is the power at
+index ns // 2 summed over x, over the total zonal power. The non-zonal share is the same for φ
+minus its zonal part. Banding is flagged once the zonal share exceeds `--banding-threshold`
+(default 0.3) for `--banding-window` frames in a row (default 3). With `--stop-on-banding` the run
+stops there (exit 6); otherwise it is only recorded.
+
+**Deferred dataset frames** (`--dataset-from-flux Q`). Dataset frames are written only from the
+first frame whose total heat flux reaches Q. A run that never does, or stops first, still writes
+its last frame. The run directory diagnostics are complete either way.
+
+**Trajectory metadata.** With any of these flags and `--dataset`, the metadata also holds the
+full per-frame traces of the run (including frames not stored): `trace_timesteps`,
+`trace_solver_steps`, `trace_flux` (frames x `flux_labels`), `trace_growth`, `trace_nyq_zonal`,
+`trace_nyq_nonzonal`, plus `outcome` (the `outcome.json` document) and `stable` (class
+`linear_stable`, `decayed` or `flat`).
+
+| Exit code | Meaning |
+|---|---|
+| 4 | linearly stable, nonlinear run skipped (`--linear-gate`) |
+| 5 | stopped on decay (`--stop-on-decay`) |
+| 6 | stopped on banding (`--stop-on-banding`) |
+
+These flags take one config: they are refused for batched runs.
+
 ## Data generation (`gyaradax datagen`)
 
 `gyaradax datagen` runs a list of configs over an ssh GPU mesh or a Slurm cluster and collects
@@ -403,7 +513,7 @@ resumes them. `status` shows the deadline.
 
 | Path | Content |
 |---|---|
-| `campaign.yaml` | settings fixed at creation: `--dataset`, `--name`, `--set`, `--args`, `--gpus`, the code (checkout and commit) |
+| `campaign.yaml` | settings fixed at creation: `--dataset`, `--name`, `--set`, `--args`, `--gpus`, the linear check, the outcome switches, the code (checkout and commit) |
 | `targets.yaml` | where jobs run (copied from `--targets`); edit it while the campaign runs |
 | `configs/<name>.yaml` | each config as run, with the `--set` overrides and `run.name` set to the job name |
 | `runs/<name>/` | the run directories |
@@ -431,11 +541,41 @@ resumes them. `status` shows the deadline.
   almost no cost in throughput.
 - **Run database.** `state.sqlite` next to `state.json` mirrors the queue for SQL queries: `runs`
   (state, slot, legs, start and finish times, dataset frames written, simulation time, ETA, the
-  config's `geometry`/`physics`/`grid` as JSON in `params`), `legs` (one row per launch: slot,
-  times, exit code, outcome), `slots` (drain, busy, current job) and `meta`. It is rebuilt and
-  swapped in whole on every poll, so a reader on any host sees a complete file; read it, do not
-  write it. Example: `sqlite3 state.sqlite "SELECT name, state, frames, frames_total, eta_h,
-  json_extract(params, '$.geometry.eps') FROM runs ORDER BY state"`.
+  config's `geometry`/`physics`/`grid` as JSON in `params`, the outcome class and banding flag),
+  `legs` (one row per launch: slot, times, exit code, outcome), `slots` (drain, busy, current job),
+  `outcomes` (below) and `meta`. It is rebuilt and swapped in whole on every poll, so a reader on
+  any host sees a complete file; read it, do not write it. Example: `sqlite3 state.sqlite "SELECT
+  name, state, frames, frames_total, eta_h, json_extract(params, '$.geometry.eps') FROM runs ORDER
+  BY state"`.
+- **Outcome switches.** `--linear-gate`, `--stop-on-decay`, `--stop-on-banding` and
+  `--track-outcome` add the `gyaradax run` flag of the same name to every job (see "Run
+  outcome"); their thresholds go in `--args`, e.g. `--args "--decay-t-min 40"`. A linearly
+  stable job ends as `stable`, a decayed one as `decayed`, a run stopped on banding as `banded`;
+  none is retried, and `resume` does not requeue them (continue such a run by hand with
+  `gyaradax run RUN_DIR` and no stop flag). `status` adds an OUTCOME column with each run's
+  `outcome.json` label once one exists.
+- **Outcome table.** `outcomes` has one row per job, from the config and the run's
+  `linear_gate.json` / `outcome.json` (filled as far as they exist, the scheduler reads them
+  without numpy):
+
+  | Columns | Content |
+  |---|---|
+  | `name`, `state`, `class`, `label` | job, scheduler state, outcome class (see "Run outcome") |
+  | `rlt`, `rln`, `tmp`, `mas` | per-species lists (JSON) from `physics` |
+  | `rlt_i`, `rlt_e`, `rln_i`, `temp_ratio` | ion and electron gradients, Te/Ti (species from `signz`) |
+  | `q`, `shat`, `eps`, `grid` | geometry, and the `grid` section (JSON) |
+  | `gate`, `settled`, `gamma_max`, `peak_ky`, `omega_peak`, `linear_t` | linear gate decision and results |
+  | `ky`, `gamma`, `gamma_std`, `omega`, `omega_std` | linear spectra (JSON lists) |
+  | `t`, `frames`, `dataset_frames`, `stopped` | time and frames reached, frames in the trajectory, stop reason |
+  | `banded`, `banded_t`, `nyq_zonal`, `nyq_nonzonal`, `nyq_zonal_max` | banding flag, its first time, last and largest s-Nyquist shares |
+  | `q_peak`, `q_last` | total heat flux, peak and last frame |
+  | `avg_t0`, `avg_t1`, `avg_frames` | averaging window (last 30% of the run) |
+  | `qi`, `qi_err`, `qe`, `qe_err`, `gi`, `gi_err` | mean ion / electron heat flux and ion particle flux, batch-means errors |
+  | `q_drift`, `q_drift_sigma`, `fluxes` | trend of the total heat flux; every average as JSON |
+  | `cost`, `gpu_hours` | the job's cost estimate, GPU hours over all legs |
+
+  Example: `sqlite3 state.sqlite "SELECT name, class, gamma_max, qi, qi_err, q_drift FROM
+  outcomes ORDER BY class"`.
 - **Unchanged configs.** Adding a config that is already in the campaign is a no-op. Adding a
   changed config under an existing name, or changing the settings, is refused: start another
   campaign for that.
@@ -581,6 +721,9 @@ only to launch, to signal, and to check a process whose heartbeat has stopped ch
 | nonzero exit, or no heartbeat for 300 s and no process | retried up to `--max-retries` times, resuming from the run directory |
 | exit 2 with a `DIVERGED` marker | diverged, not retried (a resume would diverge again) |
 | exit 3 (refused by `--linear-check-tol`) | rejected, not retried |
+| exit 4 (`--linear-gate`: linearly stable) | stable, not retried |
+| exit 5 (`--stop-on-decay`) | decayed, not retried |
+| exit 6 (`--stop-on-banding`) | banded, not retried |
 | `gyaradax run` cannot even start | the slot is paused for 300 s |
 
 A retry or a requeued job continues with `gyaradax run RUN_DIR`, dropping `--n-steps`,
