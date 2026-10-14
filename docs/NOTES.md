@@ -1164,9 +1164,16 @@ no longer apply and contradicted the bullets above them)
   (`coll_mom_conservation`, `coll_ene_conservation`), added via
   `conservation_correction` as a scalar rebalance on top of the base
   operator RHS. Drives `Δp, ΔE → 0` to machine precision.
-- `mass_conserve=True` (zero outward flux at $v_\parallel = \pm v_{par,\max}$
-  and $v_\perp = v_{\perp,\max}$).
-- JAX backend only; no CUDA fused kernel.
+- Conservation corrections cancel the moments of the **self-collision** part only
+  (GKW `selfcollcon = .true.`, its default, `coll_mom_change_int_numu`), so the
+  inter-species exchange (e-i friction, e-i energy exchange) is kept; the restoring
+  Maxwellian is the species' own $e^{-v^2}$ (velocities in its thermal speed).
+- `mass_conserve` (default false, as GKW): true sets zero outward flux at
+  $v_\parallel = \pm v_{par,\max}$ and $v_\perp = v_{\perp,\max}$.
+- Both backends apply the same JAX stencil (`collision_term`); the CUDA backend adds it
+  to the fused linear kernel's output (no host round trip, but not fused into the kernel).
+- Not in gyaradax: GKW's `zeff` rescaling of e-i pitch-angle scattering, `lorentz`,
+  `freq_input`/`nu_ab`, `cons_type='Lin'`, `selfcollcon=.false.`, rotation (`cfen_G`).
 
 ### 11.2 operator and discretization
 
@@ -1186,27 +1193,73 @@ in `gyaradax/operators/collisions.py:precompute_collisions` and stored in
 `GKPre["coll_stencil"]` with shape `(9, nv, nmu, ns)`. At RHS time
 `collision_rhs(df, stencil)` applies the stencil with zero-padded
 boundaries. The boundary mass-conserve flux-zeroing is baked into the
-precomputed coefficients.
+precomputed coefficients, and so is GKW's $\mu = 0$ boundary: the ghost
+point below the first $v_\perp$ cell is that cell's mirror image
+(`vgridboundary`, `velocitygrid.f90`), so the $\mu-1$ coefficients of the
+first row (the $v_\parallel$-half-point cross terms) are folded onto the
+row itself. Without this fold (before 2026-10-14) the collision increment at
+$\mu$ index 0 was off by 2 % (ions) and 70 % (electrons) against GKW, and
+pitch-angle scattering did not annihilate isotropic functions on that row.
 
 ### 11.3 config and plumbing
 
 YAML section `collisions:` and GKW namelist `&collisions` both map to
-`GKParams` fields:
+`GKParams` fields (YAML key / GKW key -> field, default). The defaults are GKW's
+(`collisionop_read_nml`) in the YAML section, in `GKParams` and on the GKW import path;
+until 2026-10-14 `freq_override` and `mass_conserve` defaulted to True in gyaradax (set
+them explicitly to keep the old behaviour):
 
 ```
-collisions            master switch (default False)
-coll_pitch_angle      D_theta_theta (default True)
-coll_en_scatter       D_vv            (default True)
-coll_friction         F_v             (default True)
-coll_freq             scalar collision frequency for freq_override mode
-coll_freq_override    True: scalar coll_freq; False: Coulomb-log path (default True)
-coll_mass_conserve    zero boundary flux (default True)
-coll_mom_conservation Xu momentum conservation correction (default False)
-coll_ene_conservation Xu energy conservation correction (default False)
+enabled            / control: collisions -> collisions             True (False without the section)
+pitch_angle        / pitch_angle         -> coll_pitch_angle       True
+en_scatter         / en_scatter          -> coll_en_scatter        True
+friction           / friction_coll       -> coll_friction          True
+freq               / coll_freq           -> coll_freq              0.0
+freq_override      / freq_override       -> coll_freq_override     False
+rref               / rref                -> coll_rref [m]          1.0
+nref               / nref                -> coll_nref [1e19 m^-3]  1.0
+tref               / tref                -> coll_tref [keV]        1.0
+mass_conserve      / mass_conserve       -> coll_mass_conserve     False
+mom_conservation   / mom_conservation    -> coll_mom_conservation  False
+ene_conservation   / ene_conservation    -> coll_ene_conservation  False
+-                  / selfcollcon         -  (fixed)                True
+-                  / cons_type           -  (fixed)                'Xu'
+-                  / zeff, lorentz, freq_input, nu_ab: not implemented
 ```
 
-(flag list corrected 2026-06-11: `coll_freq_override`/`coll_mass_conserve`
-are no longer MVP-locked, and the conservation flags exist)
+GKW inputs with `selfcollcon = .false.`, `cons_type` other than `'Xu'`, `lorentz`,
+`freq_input` or `zeff > 1` are refused on import. In YAML, `freq` without
+`freq_override: true` (GKW ignores it silently) and `freq_override: true` without `freq`
+are refused. `gyaradax convert` writes the `collisions` section of a collisional GKW run.
+
+- `freq_override: true`: $\Gamma^{a/b} = Z_a^2 Z_b^2\,\nu\,n_b\,(L_{ab}/L_{ii})/T_a^2$
+  with `freq` the ion-ion frequency $\nu$ of the first species (a $Z=1$ ion). The Coulomb
+  logs are still evaluated at `nref`/`tref` (as in GKW, which warns "tref, nref still used in
+  Coulomb logarithm"); at the defaults `nref = tref = 1` the e-i, i-e and e-e rates come out
+  4-7 % high relative to i-i for ITER-like references ($n = 10^{20}$, $T = 5$-$20$ keV).
+- `freq_override: false`: $\Gamma^{a/b} = 6.5141\times10^{-5}\,R_{ref} n_{ref}/T_{ref}^2
+  \; n_b Z_a^2 Z_b^2 L_{ab}/T_a^2$, the Coulomb logs per pair (NRL, `collision_init`):
+  e-e $14.9 - \tfrac12\ln(0.1 n_e) + \ln T_e$; e-i / i-e $14.8 - \tfrac12\ln(0.1 n_e) + \ln T_e$
+  ($17.2 - \tfrac12\ln(0.1 Z^2 n_e) + \tfrac32\ln T_e$ below $T_e = 0.01 Z^2$ keV);
+  i-i the full NRL mixed-ion formula. $n$ in $10^{19}$ m$^{-3}$, $T$ in keV, both
+  dimensional (normalized value times `nref` / `tref`). `collision_frequencies(params)`
+  returns the $(L_{ab}, \Gamma^{a/b})$ matrices, the numbers of GKW's `CoulombLog` /
+  `CollFreqs` files.
+- A run at physical references, e.g. the ranges_v1 campaign:
+
+  ```yaml
+  collisions:
+    freq_override: false
+    rref: 6.229      # m
+    nref: 10.0       # 1e19 m^-3
+    tref: 6.55       # keV, T_i (the species temperatures are normalized to it)
+  ```
+
+  The level then follows $R n / T^2$ and the e-i / i-i balance follows $T_e/T_i$, the
+  densities and the Coulomb logs. `freq_override: true` with `freq <= 0` and non-positive
+  references are refused.
+- YAML configs use the kinetic species as the collision backgrounds; the GKW import path
+  also adds an adiabatic electron species (`coll_bg_*`), as GKW does.
 
 All are static pytree fields (resolved at trace time). When
 `collisions=False` the compile-time branch in `_linear_rhs_core` drops
@@ -1219,14 +1272,31 @@ Unit tests in `tests/unit/test_collisions.py`:
 | test | what it checks |
 |------|----------------|
 | `test_full_operator_preserves_maxwellian` | full operator residual on $F_M$ is below $10^{-2}$ (FDT cancellation) |
-| `test_pitch_angle_preserves_isotropic_function` | $C_{\text{pitch}}(v^2) \approx 0$ in the interior |
+| `test_pitch_angle_preserves_isotropic_function` | $C_{\text{pitch}}(v^2) = 0$ to round-off, $\mu = 0$ row included |
 | `test_perturbation_relaxes_to_maxwellian` | a $v_\parallel$-perturbed Maxwellian decays under the operator |
 | `test_xu_conservation_zeroes_deltas` | with mom/ene conservation ON, $\Delta p, \Delta E \to 0$ to machine precision |
 | `test_coulomb_log_path_runs_and_scales` | freq_override=False yields gamma_pref $=6.5\!\times\!10^{-5} L_\text{ii}$ |
 | `test_kinetic_produces_per_species_stencil` | 6D path yields `(nsp, 9, nv, nmu, ns)` and per-species residuals stay small |
 | `test_disabled_gives_zero_stencil` | `collisions=False` emits no stencil |
+| `test_collision_frequencies_match_gkw` | Coulomb logs and $\Gamma^{a/b}$ equal GKW's `CoulombLog` / `CollFreqs` (5 reference sets) |
+| `test_yaml_collisions_section_sets_references` | YAML `rref/nref/tref`, `freq_override: false`, GKW defaults, refused combinations |
+| `test_kinetic_timestep_bound_includes_electron_collisions` | the collision dt bound takes every species' diagonal |
+| `test_kinetic_conservation_uses_self_collisions` | corrections cancel the self-collision moments, the e-i exchange stays |
+| `test_conservation_maxwellian_is_the_species_own` | restoring terms use the species' own $F_M$ |
 
 Trajectory parity test in `tests/unit/test_gk_cases.py::test_adiabat_collisions_weak_1step_parity` checks 1-step FDS parity to rel L2 < $10^{-4}$ (measured 1.75e-5).
+
+Kinetic electrons (2026-10-14, `test_kinetic_collisions_1step_parity`, data in
+`tests/data/gkw_cases/kinetic_collisions_1step`): two kinetic species with
+$T_e/T_i = 0.903$, all three terms, `freq_override=False` at
+$R = 6.229$ m, $n = 10^{20}$ m$^{-3}$, $T = 1$ keV ($\nu_{ii} = 0.069$), circ geometry,
+$16 \times 8 \times 16$. The collision increment of one step (df with collisions minus
+df without, so the rest of the operator cancels) agrees with GKW to $3\times10^{-8}$
+relative (ions and electrons; mass_conserve on and off; freq_override on as well),
+after 20 steps to $10^{-6}$. Before the $\mu = 0$ fold above: 1.2 % (ions), 42 % (electrons).
+`test_collision_frequencies_match_gkw` checks the Coulomb logs and $\Gamma^{a/b}$ against
+GKW's outputs for five reference sets (both e-i branches, $m_i \ne 1$, freq_override)
+to $10^{-13}$.
 
 GKW parity (weak case, `coll_freq=1e-4`, $50\times4\times16$, nperiod=3,
 kthrho=0.5, s-alpha, normalization disabled on both codes):
@@ -1260,17 +1330,19 @@ Run via `python scripts/validate_collisions.py`.
   gyaradax normalizes per-ky. For parity validation the cleanest path
   is to set `normalized=.false.` in the GKW input and force
   `naverage` large in gyaradax, so both run without normalization.
-- **Coordinate singularity at $\mu=0$.** Individual operator pieces
-  (pitch-only, energy-only, friction-only) have O(1) discretization
-  error at the lowest $v_\perp$ grid cell due to the $1/v_\perp$ factor
-  in the operator. The *full* operator cancels these to $O(\Delta v^2)$
-  thanks to the FDT balance $F_v = 2v\,D_{vv}/T$ — this is why the
-  `test_full_operator_preserves_maxwellian` threshold (1e-2) is much
-  tighter than the per-term isolation would suggest.
-- **CFL contribution.** The collision stencil adds a spectral-radius
-  bound to `tmax4` via `pre["coll_stencil"][0]` (diagonal). At
-  `coll_freq ≤ 1` this is never the limiting constraint; above
-  `coll_freq ~ 10` it can dominate velocity dissipation.
+- **$\mu = 0$.** With the mirror ghost point (11.2) pitch-angle scattering annihilates
+  isotropic functions on the first $v_\perp$ row to round-off; the residual that
+  remains on $F_M$ for the full operator is the $O(\Delta v^2)$ FDT imbalance.
+- **CFL contribution.** The collisions are explicit, as in GKW (no implicit option in
+  either code). `estimate_linear_timestep` takes $\max|$diagonal$|$ of the stencil over all
+  species as `tmax2` and uses it undivided in the RK4 max (GKW `ideriv = 2`, `matdat.F90`).
+  GKW takes the largest single matrix element, which is ~2/3 of the summed diagonal, so
+  gyaradax's bound is ~1.5x tighter. Before 2026-10-14 the kinetic path read the ion
+  stencil only (`coll_stencil[0]` of an `(nsp, 9, ...)` array) and missed the electrons,
+  whose diagonal is ~200x larger. On the production grid
+  ($2 \times 32 \times 12 \times 18 \times 192 \times 32$) the electron collision bound is
+  $\Delta t = 0.020$ at $T_{ref} = 5$ keV ($\nu_{ii} = 3.1\times10^{-3}$) and 0.29 at 20 keV,
+  against the streaming / field estimate $3.4\times10^{-3}$: collisions do not set the step.
 
 ## 12. bugs and limitations
 
