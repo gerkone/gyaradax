@@ -438,6 +438,7 @@ def test_linear_check_rejection_is_not_retried(camp):
 
 GATE = {
     "decision": "stable", "settled": True, "gamma_max": -0.03, "peak_ky": 0.35, "omega_peak": 0.1,
+    "gamma_max_lowky": -0.04, "peak_ky_lowky": 0.2, "low_ky": 1.0,
     "t": 41.0, "ky": [0.0, 0.35], "gamma": [0.0, -0.03], "gamma_std": [0.0, 0.001],
     "omega": [0.0, 0.1], "omega_std": [0.0, 0.01],
 }  # fmt: skip
@@ -495,6 +496,9 @@ def test_outcome_exits_end_jobs_without_retries_and_fill_the_outcome_table(camp)
             "nyq_zonal, q_drift, gpu_hours > 0 FROM outcomes WHERE name = 'turb'"
         ).fetchone()
         assert turb == ("saturated", 3.2, 0.4, 1.1, 0.2, 0.5, 105.0, 150.0, 1, 90.0, 0.01, 0.05, 1)
+        assert con.execute(
+            "SELECT gamma_max_lowky, peak_ky_lowky, low_ky FROM outcomes WHERE name = 'stable'"
+        ).fetchone() == (-0.04, 0.2, 1.0)
         assert con.execute("SELECT class FROM outcomes WHERE name = 'band'").fetchone() == (
             "banded",
         )

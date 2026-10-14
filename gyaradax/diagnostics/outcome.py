@@ -66,17 +66,28 @@ def gate_decision(result: Mapping[str, Any], stable: float = -0.01, gamma_min: f
     return "ambiguous"
 
 
-def gate_report(result: Mapping[str, Any], stable: float, gamma_min: float) -> dict[str, Any]:
-    """The ``linear_gate.json`` document of a ``growth.growth_rates`` result."""
+def gate_report(
+    result: Mapping[str, Any], stable: float, gamma_min: float, low_ky: float = 1.0
+) -> dict[str, Any]:
+    """The ``linear_gate.json`` document of a ``growth.growth_rates`` result.
+
+    ``gamma_max`` is over every ky > 0 (the decision uses it), ``gamma_max_lowky`` over
+    0 < kθρ <= ``low_ky`` only.
+    """
     ky, g = np.asarray(result["ky"], float), np.asarray(result["gamma"], float)
     sel = ky > 0
     i = int(np.flatnonzero(sel)[np.argmax(g[sel])]) if sel.any() else 0
+    low = sel & (ky <= low_ky)
+    j = int(np.flatnonzero(low)[np.argmax(g[low])]) if low.any() else 0
     return {
         **{k: v for k, v in result.items() if k != "peak"},
         "settled": bool(result["converged"]),
         "gamma_max": _finite(g[i]) if sel.any() else None,
         "peak_ky": float(ky[i]) if sel.any() else None,
         "omega_peak": _finite(result["omega"][i]) if "omega" in result and sel.any() else None,
+        "low_ky": float(low_ky),
+        "gamma_max_lowky": _finite(g[j]) if low.any() else None,
+        "peak_ky_lowky": float(ky[j]) if low.any() else None,
         "stable_below": float(stable),
         "gamma_min": float(gamma_min),
         "decision": gate_decision(result, stable, gamma_min),

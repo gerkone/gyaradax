@@ -399,7 +399,8 @@ The gate only ever skips stable configs: linearly unstable does not mean turbule
 shift), and the nonlinear run decides that.
 
 - `RUN_DIR/linear_gate.json`: ky, γ(ky) and its spread over the last 6 time units, the real
-  frequency ω(ky) and its spread, `settled`, `gamma_max`, `peak_ky`, `omega_peak`, the end time,
+  frequency ω(ky) and its spread, `settled`, `gamma_max`, `peak_ky`, `omega_peak`,
+  `gamma_max_lowky`, `peak_ky_lowky`, the end time,
   time steps and wall time, and the decision. ω = d arg(Σ φ)/dt with GKW's sign
   (`diagnos_growth_freq`), the sum over s and the kx chain through kx = 0, measured over four
   10-step blocks after the growth rates settled.
@@ -414,9 +415,21 @@ shift), and the nonlinear run decides that.
   (x, s, y). The metadata carries `linear_bin`, `linear_space: real`, `linear_k_bin`, the
   `linear_rms*` moments of neugk's `linear_moments` (a species axis is reduced with the others),
   and `linear_ky`, `linear_gamma`, `linear_gamma_std`, `linear_omega`, `linear_omega_std`,
-  `linear_settled`, `linear_peak_ky`, `linear_gamma_max`, `linear_gate`, `linear_time`,
-  `linear_source`. A stable job writes no trajectory: its record is the run directory and the
-  campaign's `outcomes` table.
+  `linear_settled`, `linear_peak_ky`, `linear_gamma_max`, `linear_gamma_max_lowky`,
+  `linear_low_ky`, `linear_gate` (the decision), `linear_t` (end of the linear run),
+  `linear_time` (time of the stored eigenmode), `linear_source`.
+- **Low-ky peak.** `gamma_max` and the decision use every ky > 0 of the grid. `gamma_max_lowky`
+  and `peak_ky_lowky` are the same over kθρ <= `--linear-gate-low-ky` (default 1.0), reported
+  alongside (in `linear_gate.json`, the trajectory metadata and the `outcomes` table) to see
+  whether a high-ky branch, possibly spurious on the coarse grid, is what keeps a case unstable.
+- **Stable jobs still get a trajectory** (with `--dataset`): the static metadata of any
+  trajectory, the linear results and eigenmode files above, `stable: True`, `frame_source:
+  linear` and `outcome`, and one data frame (`timestep_00000` / `poten_00000` and the per-frame
+  series) holding the final linear state: df and φ of `linear_mode.npz`, at the linear run's end
+  time, solver step 0, its fluxes (of the normalized eigenmode, so their size is arbitrary) and
+  γ(ky) as the growth rate. Like the stored stable runs (e.g. `iteration_502`, a single frame) it
+  gives the loaders no training pairs; no zero-frame trajectory is written. It has no resume
+  dump: a nonlinear leg should not start from the eigenmode.
 
 **Outcome tracking.** Any of `--linear-gate`, `--stop-on-decay`, `--stop-on-banding`,
 `--track-outcome` or `--dataset-from-flux` follows the run frame by frame:
@@ -565,6 +578,7 @@ resumes them. `status` shows the deadline.
   | `rlt_i`, `rlt_e`, `rln_i`, `temp_ratio` | ion and electron gradients, Te/Ti (species from `signz`) |
   | `q`, `shat`, `eps`, `grid` | geometry, and the `grid` section (JSON) |
   | `gate`, `settled`, `gamma_max`, `peak_ky`, `omega_peak`, `linear_t` | linear gate decision and results |
+  | `gamma_max_lowky`, `peak_ky_lowky`, `low_ky` | the largest γ over kθρ <= `low_ky` and its kθρ |
   | `ky`, `gamma`, `gamma_std`, `omega`, `omega_std` | linear spectra (JSON lists) |
   | `t`, `frames`, `dataset_frames`, `stopped` | time and frames reached, frames in the trajectory, stop reason |
   | `banded`, `banded_t`, `nyq_zonal`, `nyq_nonzonal`, `nyq_zonal_max` | banding flag, its first time, last and largest s-Nyquist shares |

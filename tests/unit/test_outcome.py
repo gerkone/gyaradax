@@ -35,6 +35,14 @@ def test_gate_decision_only_calls_settled_damped_rates_stable():
     )
     assert rep["decision"] == "stable" and rep["gamma_max"] == -0.02
     assert rep["peak_ky"] == 0.7 and rep["omega_peak"] == 0.2 and rep["settled"] is True
+    # a growing high-ky branch: the decision and gamma_max use every ky, gamma_max_lowky kθρ <= 1
+    high = outcome.gate_report({**r([0.0, -0.03, -0.02, -0.1, 0.05]), "t": 30.0}, -0.01, 0.02)
+    assert high["decision"] == "unstable" and high["gamma_max"] == 0.05
+    assert high["gamma_max_lowky"] == -0.02 and high["peak_ky_lowky"] == 0.7
+    assert (
+        outcome.gate_report(r([0.0, -0.03, -0.02, -0.1, 0.05]), -0.01, 0.02, 1.5)["gamma_max_lowky"]
+        == 0.05
+    )
 
 
 def test_nyquist_shares_of_an_odd_even_zonal_mode():
@@ -202,7 +210,7 @@ def test_linear_gate_keeps_the_eigenmode_and_runs_the_ambiguous_case(tmp_path, c
 
 
 def test_cached_stable_gate_skips_the_nonlinear_run(tmp_path, config, capsys):
-    run = tmp_path / "run"
+    run, root = tmp_path / "run", str(tmp_path / "data")
     run.mkdir()
     key = growth.config_key(growth.adjusted_config(OmegaConf.load(config)))
     report = {
@@ -211,14 +219,49 @@ def test_cached_stable_gate_skips_the_nonlinear_run(tmp_path, config, capsys):
     }  # fmt: skip
     with open(run / outcome.GATE_FILE, "w") as fh:
         json.dump(report, fh)
-    np.savez(run / outcome.MODE_FILE, df=np.zeros(1, np.complex64), phi=np.zeros(1), time=40.0)
+    rng = np.random.default_rng(0)
+    shape = (2, 8, 2, 8, 11, 5)
+    df = (rng.standard_normal(shape) + 1j * rng.standard_normal(shape)).astype(np.complex64)
+    phi = rng.standard_normal((8, 11, 5)) + 1j * rng.standard_normal((8, 11, 5))
+    np.savez(run / outcome.MODE_FILE, df=df, phi=phi, time=40.0)
     argv = ["run", config, *COMMON, "--n-steps", "2", "--output-dir", str(run), "--linear-gate"]
-    assert main(argv) == outcome.EXIT_STABLE
+    assert main([*argv, "--dataset", root]) == outcome.EXIT_STABLE
     assert "(computed before)" in capsys.readouterr().out
     assert not any(p.name.startswith("step_") for p in run.iterdir())
     with open(run / outcome.OUTCOME_FILE) as fh:
         doc = json.load(fh)
     assert doc["class"] == "linear_stable" and doc["frames"] == 0
+    with open(run / outcome.GATE_FILE) as fh:
+        gate = json.load(fh)
+    assert gate["gamma_max_lowky"] == -0.03 and gate["low_ky"] == 1.0
+
+    # the trajectory: static metadata, the linear results and eigenmode, one frame of the final
+    # linear state, the stable flag, no resume dump
+    traj = ds.trajectory_path(root, "tiny")
+    meta = _meta(traj)
+    assert meta["stable"] is True and meta["frame_source"] == "linear"
+    assert meta["outcome"]["class"] == "linear_stable" and meta["linear_gate"] == "stable"
+    assert meta["timesteps"].tolist() == [40.0] and meta["flux"].shape == (1, 6)
+    assert meta["n_species"] == 2 and meta["q"].shape == (1,) and "phi_mean" in meta
+    assert meta["linear_gamma"].tolist() == report["gamma"] and meta["linear_t"] == 40.0
+    assert meta["linear_settled"] and meta["linear_peak_ky"] == 0.7
+    assert meta["linear_gamma_max"] == -0.03 and meta["linear_gamma_max_lowky"] == -0.03
+    assert sorted(os.listdir(os.path.join(traj, "data"))) == [
+        "linear.bin",
+        "linear_k.bin",
+        "linear_poten.bin",
+        "poten_00000.zstd16.bin",
+        "timestep_00000.zstd16.bin",
+    ]
+    k = np.fromfile(os.path.join(traj, "data", "linear_k.bin"), np.float32).reshape(2, *shape)
+    np.testing.assert_array_equal(k[0] + 1j * k[1], df)
+    real = np.fromfile(os.path.join(traj, "data", "linear.bin"), np.float32)
+    np.testing.assert_allclose(real.reshape(meta["linear_shape"]), ds.df_to_real(df), atol=1e-5)
+    poten = np.fromfile(os.path.join(traj, "data", "linear_poten.bin"), np.float32)
+    np.testing.assert_array_equal(poten.reshape(meta["phi_shape"]), ds.phi_to_real(phi))
+    frame = ds.read_frame(ds.frame_path(traj, "poten", 0, "zstd16"), meta["phi_shape"])
+    np.testing.assert_allclose(frame, ds.phi_to_real(phi), rtol=1e-2, atol=1e-2)
+    assert not os.path.exists(ds.resume_path(traj))
 
 
 def test_stop_on_decay_keeps_one_frame_and_the_full_trace(tmp_path, config, monkeypatch):

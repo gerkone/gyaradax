@@ -423,6 +423,7 @@ class DatasetWriter:
             "linear_poten_shape": np.asarray(poten.shape, np.int64),
             "linear_source": os.path.abspath(mode_path),
             "linear_time": mode_time,
+            "linear_t": float(gate["t"]),
             "linear_ky": np.asarray(gate["ky"], np.float64),
             "linear_gamma": np.asarray(gate["gamma"], np.float64),
             "linear_gamma_std": np.asarray(gate["gamma_std"], np.float64),
@@ -432,6 +433,10 @@ class DatasetWriter:
             "linear_peak_ky": np.float64(np.nan if gate["peak_ky"] is None else gate["peak_ky"]),
             "linear_gamma_max": np.float64(np.nan if gate["gamma_max"] is None else gate["gamma_max"]),
             "linear_gate": gate["decision"],
+            "linear_low_ky": np.float64(gate.get("low_ky", np.nan)),
+            "linear_gamma_max_lowky": np.float64(
+                np.nan if gate.get("gamma_max_lowky") is None else gate["gamma_max_lowky"]
+            ),
             **linear_moments(real),
         })
 

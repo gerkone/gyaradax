@@ -339,11 +339,63 @@ def _linear_gate(args: argparse.Namespace, config_path: str, run_dir: str | None
         np.savez(tmp, df=mode["df"].astype(np.complex64), phi=mode["phi"], time=mode["time"])
         os.replace(tmp, mode_path)
         gate = result
-    gate = outcome.gate_report(gate, args.linear_gate_stable, args.linear_gate_gamma_min)
+    gate = outcome.gate_report(
+        gate, args.linear_gate_stable, args.linear_gate_gamma_min, args.linear_gate_low_ky
+    )
     os.makedirs(output_dir, exist_ok=True)
     outcome._atomic_json(path, gate)
     print(outcome.format_gate(gate))
     return gate
+
+
+def _stable_trajectory(
+    args: argparse.Namespace,
+    config_path: str,
+    run_dir: str | None,
+    gate: dict[str, Any],
+    doc: dict[str, Any],
+) -> None:
+    """Dataset trajectory of a run the linear gate skipped: its final linear state as the one frame.
+
+    The trajectory holds the run's static metadata, the linear results and eigenmode files, and
+    ``stable``; it gets no resume dump, since a nonlinear leg should not start from the eigenmode.
+    """
+    from types import SimpleNamespace
+
+    import jax.numpy as jnp
+    import numpy as np
+
+    from gyaradax.diagnostics.outcome import MODE_FILE
+    from gyaradax.io.rundir import save_run_metadata
+    from gyaradax.solver.driver import _dataset_frame
+
+    setup = _setup_run(config_path, args, run_dir=run_dir)
+    if setup["dataset"] is None:
+        return
+    save_run_metadata(setup["output_dir"], setup["effective_config"], setup["geometry"])
+    writer = _dataset_writer(setup, gate)
+    with np.load(os.path.join(setup["output_dir"], MODE_FILE)) as mode:
+        df = jnp.asarray(mode["df"]).astype(jnp.complex128)
+        phi = jnp.asarray(mode["phi"])
+        t = float(mode["time"])
+    run = {
+        "dataset": writer,
+        "geometry": setup["geometry"],
+        "params": setup["params"],
+        "pre": setup["pre"],
+    }
+    _, fluxes = _diagnostics_of(df, run)
+    state = SimpleNamespace(time=t, step=0, last_growth_rate=np.asarray(gate["gamma"]))
+    if writer.n_frames == 0:
+        _dataset_frame(run, df, phi, fluxes, state)
+    writer.update_static({"stable": True, "outcome": doc, "frame_source": "linear"})
+    writer.finalize()
+
+
+def _diagnostics_of(df: Any, run: dict[str, Any]) -> Any:
+    from gyaradax.solver.driver import _diagnostics
+
+    return _diagnostics(df, run["geometry"], run["params"], run["pre"])
 
 
 def _monitor_settings(args: argparse.Namespace) -> Any:
@@ -1158,7 +1210,8 @@ def _run_single(args: argparse.Namespace, config_path: str, run_dir: str | None)
         gate = _linear_gate(args, config_path, run_dir)
         if gate["decision"] == "stable":
             out = _default_output_dir(OmegaConf.load(config_path), args, run_dir)
-            outcome.gate_outcome(out, gate)
+            doc = outcome.gate_outcome(out, gate)
+            _stable_trajectory(args, config_path, run_dir, gate, doc)
             print(
                 f"exit {outcome.EXIT_STABLE}: linearly stable (no ky grows); "
                 "not starting the nonlinear run"
@@ -1680,6 +1733,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--linear-gate-gamma-min", type=float, default=0.02, metavar="G",
         help="with --linear-gate: unstable when the largest rate exceeds G (default 0.02); in "
              "between, or not settled, the nonlinear run goes ahead",
+    )
+    run_p.add_argument(
+        "--linear-gate-low-ky", type=float, default=1.0, metavar="K",
+        help="with --linear-gate: also report the largest γ over kθρ <= K (gamma_max_lowky, "
+             "default 1.0); the decision uses every ky",
     )
     run_p.add_argument(
         "--track-outcome", action="store_true",
