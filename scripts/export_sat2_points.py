@@ -21,6 +21,9 @@ def rows(name, kinetic):
         rec["kinetic"] = kinetic
         rec["lin_ky"] = np.asarray(r.lin_ky, dtype=float).tolist()
         rec["lin_gamma"] = np.asarray(r.lin_gamma, dtype=float).tolist()
+        kw = r.get("lin_kx_width")
+        rec["kx_width"] = (None if kw is None or len(np.atleast_1d(kw)) == 0
+                           else np.asarray(kw, dtype=float).tolist())
         for ch in ("Qi", "Qe", "Gamma"):
             w = r.get(f"lin_weight_{ch}")
             rec[f"w_{ch}"] = (None if w is None or len(np.atleast_1d(w)) == 0
