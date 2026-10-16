@@ -2,8 +2,9 @@
 
 Same file layout as gyaradax outputs (gyaradax mirrors GKW). Returns plain
 numpy / jax arrays plus a config dict from input.dat. The set under
-/restricteddata/ukaea/gyrokinetics/raw is the calibration target: pairs of
-`iteration_N_Lin` (linear) and `iteration_N` (nonlinear).
+Readers only. Campaign pairing and feature extraction are gone: the summary
+parquets under /restricteddata/ukaea/gyrokinetics/preprocessed/summary are
+the calibration source now.
 
 For one linear dir:
   krho               : (nky, nx)  ky values broadcast over the extended-x grid
@@ -197,135 +198,4 @@ def load_linear_outputs(sim_dir):
         "meta": {"ns": ns, "nkx": nx, "nky": nky, "sim_dir": sim_dir},
     }
 
-
-def load_nonlinear_target(nl_dir, channel="eflux", n_average=240):
-    """Time-averaged nonlinear flux from the tail of fluxes.dat.
-
-    channel: "pflux" (col 0), "eflux" (col 1), or "vflux" (col 2).
-    n_average: number of trailing rows of fluxes.dat to average (≈ last
-    80 K-dumps × 3 rows/dump for the UKAEA dataset).
-    """
-    cols = {"pflux": 0, "eflux": 1, "vflux": 2}
-    if channel not in cols:
-        raise ValueError(f"unknown channel {channel}")
-    fluxes = _robust_loadtxt(os.path.join(nl_dir, "fluxes.dat"))
-    if fluxes.ndim == 1:
-        fluxes = fluxes[None, :]
-    return float(np.mean(fluxes[-n_average:, cols[channel]]))
-
-
-def pair_sims(raw_root, suffix="_Lin"):
-    """Return sorted list of (linear_dir, nonlinear_dir) pairs.
-
-    Matching: `iteration_N_Lin` ↔ `iteration_N`.
-    """
-    entries = os.listdir(raw_root)
-    linear_map = {}
-    nonlinear_set = set()
-    for d in entries:
-        full = os.path.join(raw_root, d)
-        if not os.path.isdir(full):
-            continue
-        if d.endswith(suffix):
-            linear_map[d[: -len(suffix)]] = d
-        else:
-            nonlinear_set.add(d)
-
-    pairs = []
-    for base in sorted(nonlinear_set):
-        if base in linear_map:
-            pairs.append((os.path.join(raw_root, linear_map[base]), os.path.join(raw_root, base)))
-
-    def sort_key(p):
-        digits = "".join(c for c in os.path.basename(p[1]) if c.isdigit())
-        return int(digits) if digits else 0
-
-    return sorted(pairs, key=sort_key)
-
-
-def _ion_species(config):
-    """Pick the ion species: first &species block with mass >= 0.1, else the first."""
-    species_list = config.get("species_list", [])
-    if not species_list:
-        return config.get("species", {})
-    for sp in species_list:
-        if float(sp.get("mass", 0.0)) >= 0.1:
-            return sp
-    return species_list[0]
-
-
-def _electron_species(config):
-    """Pick the electron species (mass < 0.1 or signz < 0) if present."""
-    for sp in config.get("species_list", []):
-        if float(sp.get("mass", 0.0)) < 0.1 or float(sp.get("signz", 1.0)) < 0:
-            return sp
-    return {}
-
-
-def gradient_labels(config):
-    """Ion (rlt, rln) plus (shat, q) from input.dat for plots."""
-    ion = _ion_species(config)
-    return {
-        "rlt": ion.get("rlt"),
-        "rln": ion.get("rln"),
-        "shat": config.get("geom", {}).get("shat"),
-        "q": config.get("geom", {}).get("q"),
-    }
-
-
 # itg drives dominate; electron entries are often locked to ion ones in this dataset
-FEATURE_NAMES = (
-    "rlt_i",
-    "rln_i",
-    "rlt_e",
-    "rln_e",
-    "shat",
-    "q",
-    "eps",
-    "beta",
-)
-
-
-def physics_features(config):
-    """Extract a fixed-schema feature vector from parsed input.dat. Missing keys → 0.0."""
-    ion = _ion_species(config)
-    el = _electron_species(config)
-    gm = config.get("geom", {})
-    md = config.get("mode", {})
-    spc = config.get("spcgeneral", {})
-    out = {
-        "rlt_i": ion.get("rlt", 0.0),
-        "rln_i": ion.get("rln", 0.0),
-        "rlt_e": el.get("rlt", 0.0),
-        "rln_e": el.get("rln", 0.0),
-        "shat": gm.get("shat", 0.0),
-        "q": gm.get("q", 0.0),
-        "eps": gm.get("eps", 0.0),
-        "beta": spc.get("beta_ref", spc.get("beta", md.get("beta", gm.get("beta", 0.0)))),
-    }
-    return np.asarray([float(out[k]) for k in FEATURE_NAMES], dtype=np.float64)
-
-
-def is_unstable(
-    sim_dir,
-    n_tail=50,
-    mean_threshold=-0.09243312561447203,
-    std_threshold=0.31697104772709916,
-):
-    """Heuristic stability filter ported from quasilinear_torch.py.
-
-    A sim is unstable if growth.dat tail-averaged γ exceeds the mean threshold
-    OR the spread across ky exceeds the std threshold. Thresholds are
-    dataset-specific (UKAEA set); use `growth_rate_max` for a physical cutoff.
-    """
-    g = _robust_loadtxt(os.path.join(sim_dir, "growth.dat"))
-    if g.ndim == 1:
-        g = g[None, :]
-    g_mean_ky = np.mean(g[-n_tail:, :], axis=0)
-    return not ((g_mean_ky < mean_threshold).all() and g_mean_ky.std() < std_threshold)
-
-
-def growth_rate_max(sim_dir):
-    """Max_ky γ from the last row of growth.dat. Physical unstable cutoff: γ > 0."""
-    g = _robust_loadtxt(os.path.join(sim_dir, "growth.dat"))
-    return float(g.max()) if g.ndim == 1 else float(g[-1].max())
