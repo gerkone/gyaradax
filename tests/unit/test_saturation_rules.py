@@ -11,7 +11,12 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from gyaradax.quasilinear.rules import RULES, RULES_WITH_FREQUENCY, ql_flux_per_species
+from gyaradax.quasilinear.rules import (
+    RULES,
+    RULES_WITH_FREQUENCY,
+    dlnpdr_tglf,
+    ql_flux_per_species,
+)
 from gyaradax.quasilinear.saturation import ql_flux
 
 NS, NKX, NKY = 8, 5, 6
@@ -334,3 +339,37 @@ class TestKineticIntegration:
             )
             assert per_sp.shape == (np.asarray(arr["fluxes_kxy_sp"]).shape[0], 3)
             assert np.isfinite(per_sp).all(), name
+
+
+class TestDlnpdr:
+    """TGLF's pressure-gradient normalization, tglf_multiscale_spectrum.f90:85-97."""
+
+    def test_adiabatic_counts_electrons_as_tglf_does(self):
+        # TGLF's species loop starts at 1, so adiabatic electrons still enter
+        # ptot with rlt_e = 0 and Te = Ti: (2*rln + rlt)/2, not rln + rlt
+        assert dlnpdr_tglf(8.0, 4.0, adiabatic=True) == pytest.approx(8.0)
+        assert dlnpdr_tglf(12.0, 2.0, adiabatic=True) == pytest.approx(8.0)
+
+    def test_kinetic_is_temperature_weighted(self):
+        # te_ti = 1 makes the two species weigh equally
+        got = dlnpdr_tglf(np.array([6.0, 4.0]), np.array([2.0, 2.0]), te_ti=1.0)
+        assert got == pytest.approx(7.0)
+        # hotter electrons (te_ti > 1 => ti_te < 1) tilt toward the electron term
+        hot_e = dlnpdr_tglf(np.array([12.0, 2.0]), np.array([1.0, 1.0]), te_ti=3.0)
+        assert hot_e == pytest.approx((3.0 + (1 / 3) * 13.0) / (1 + 1 / 3))
+
+    def test_clamped_into_the_tglf_window(self):
+        # floor bites for weak gradients, which our scans reach (rln can be 0)
+        assert dlnpdr_tglf(1.0, 0.0, adiabatic=True) == pytest.approx(4.0)
+        # and the rlnp_cutoff caps the steep end
+        assert dlnpdr_tglf(100.0, 50.0, adiabatic=True) == pytest.approx(18.0)
+
+    def test_sat2_scales_with_the_normalization(self):
+        """cnorm = 12/dlnpdr enters SAT2 linearly."""
+        spec = synthetic_spectrum()
+        q_off = float(call_rule(RULES["sat2"], spec))
+        q_on = float(RULES["sat2"](
+            spec["growth_rate"], spec["phi2"], spec["phi2_kxy"], spec["flux_kxy"],
+            spec["krho"], spec["kxrh"], spec["little_g"], spec["ds"], dlnpdr=6.0,
+        ))
+        assert q_on == pytest.approx(q_off * 12.0 / 6.0, rel=1e-10)
