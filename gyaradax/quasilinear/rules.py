@@ -45,6 +45,31 @@ from .saturation import k_perp_eff_squared, k_perp_squared, ql_flux
 _SAT2_AY = 1.0
 
 
+# TGLF clamps dlnpdr into [4, rlnp_cutoff]; rlnp_cutoff default 18 lives in
+# tglf_modules.f90
+_DLNPDR_FLOOR, _DLNPDR_CUTOFF = 4.0, 18.0
+
+
+def dlnpdr_tglf(rlt, rln, te_ti=1.0, adiabatic=False):
+    """TGLF's normalized pressure-gradient scale length for SAT2's cnorm.
+
+    tglf_multiscale_spectrum.f90:85-97 forms
+    rmaj*SUM_s as*taus*(rlns+rlts)/ptot, clamped into [4, 18]. TGLF's rlns
+    and rlts are a/L_x with rmaj = R/a, so the product is R/L; gyaradax's
+    rlt and rln are already R/L and the rmaj factor is 1 here.
+
+    Pure D, quasineutral: as = 1 for both species and taus is normalized to
+    the electron temperature. Adiabatic runs follow TGLF, whose species loop
+    runs from 1 and so still counts the electrons, with rlt_e = 0 and
+    Te = Ti -- giving rln + rlt/2, not rln + rlt.
+    """
+    rlt_i, rlt_e = (rlt, 0.0) if adiabatic else (rlt[0], rlt[1])
+    rln_i = rln if adiabatic else rln[0]
+    ti_te = 1.0 if adiabatic else 1.0 / te_ti
+    num = (rln_i + rlt_e) + ti_te * (rln_i + rlt_i)
+    return min(max(num / (1.0 + ti_te), _DLNPDR_FLOOR), _DLNPDR_CUTOFF)
+
+
 def _gated_gamma(growth_rate, gate_threshold, gate_sharpness):
     """Smooth stability gate x relu: exactly zero for stable modes."""
     gate = jax.nn.sigmoid(gate_sharpness * (growth_rate - gate_threshold))
@@ -201,6 +226,9 @@ RULES = {
 
 # rules whose signature accepts the optional per-ky mode frequency
 RULES_WITH_FREQUENCY = ()
+
+# rules taking TGLF's pressure-gradient normalization
+RULES_WITH_DLNPDR = ("sat2",)
 
 
 def ql_flux_per_species(

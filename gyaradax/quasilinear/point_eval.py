@@ -17,7 +17,7 @@ from gyaradax.operators.poisson import geom_tensors
 from gyaradax.operators.precompute import linear_precompute
 from gyaradax.solver.rk4 import default_state, gksolve
 
-from .rules import RULES
+from .rules import RULES, RULES_WITH_DLNPDR, dlnpdr_tglf
 from .saturation import ql_flux
 
 DF_SEED_AMPLITUDE = 1e-3
@@ -116,7 +116,9 @@ def ql_at_point(
         params, geom, grid_shape, n_steps_linear=n_steps_linear,
         early_stop=early_stop, early_stop_opts=early_stop_opts,
     )
-    q_i = RULES[rule](cn=cn, **spec)
+    extra = ({"dlnpdr": _dlnpdr_from_params(params)}
+             if rule in RULES_WITH_DLNPDR else {})
+    q_i = RULES[rule](cn=cn, **spec, **extra)
     q_i = jnp.where(jnp.isfinite(q_i), jnp.clip(q_i, 0.0, qi_clip), 0.0)
     # zero below noise floor so linear-transient residues don't feed TORAX gradients
     q_i = jnp.where(jnp.abs(q_i) < qi_tiny, 0.0, q_i)
@@ -147,7 +149,12 @@ def ql_rules_at_point(
         params, geom, grid_shape, n_steps_linear=n_steps_linear,
         early_stop=early_stop, early_stop_opts=early_stop_opts,
     )
-    return {r: RULES[r](cn=cn, **spec) for r in rules}
+    dlnpdr = _dlnpdr_from_params(params)
+    return {
+        r: RULES[r](cn=cn, **spec,
+                    **({"dlnpdr": dlnpdr} if r in RULES_WITH_DLNPDR else {}))
+        for r in rules
+    }
 
 
 def _linear_harvest(
@@ -206,6 +213,18 @@ def _linear_harvest(
         ds=jnp.mean(ints),
     )
     return spec, n_blocks, n_steps, sim_final.last_growth_rate
+
+
+def _dlnpdr_from_params(params):
+    """TGLF dlnpdr for the rules that want it; see rules.dlnpdr_tglf."""
+    adiabatic = bool(params.adiabatic_electrons)
+    tmp = np.atleast_1d(np.asarray(params.tmp, dtype=float))
+    te_ti = 1.0 if adiabatic or tmp.size < 2 else float(tmp[1] / tmp[0])
+    rlt = float(params.rlt) if adiabatic else np.atleast_1d(
+        np.asarray(params.rlt, dtype=float))
+    rln = float(params.rln) if adiabatic else np.atleast_1d(
+        np.asarray(params.rln, dtype=float))
+    return dlnpdr_tglf(rlt, rln, te_ti=te_ti, adiabatic=adiabatic)
 
 
 def nl_at_point(
