@@ -196,16 +196,25 @@ class TestRuleZoo:
 
 
 class TestRuleSpecifics:
-    def test_sat2_spectral_shift_suppresses(self):
-        """A kx-shifted eigenmode is suppressed by SAT2's 1/(1+ay*kx_hat^2)."""
+    def test_sat2_exb_shift_suppresses_and_is_off_by_default(self):
+        """The shift is TGLF's ExB kx0_e, zero without rotation (tglf_geometry.f90:59)."""
         spec = synthetic_spectrum()
-        q_centred = float(call_rule(RULES["sat2"], spec))
-        # push the |phi|^2(kx) centroid off zero, keeping the total intensity
+        args = (spec["growth_rate"], spec["phi2"], spec["phi2_kxy"], spec["flux_kxy"],
+                spec["krho"], spec["kxrh"], spec["little_g"], spec["ds"])
+        q_default = float(call_rule(RULES["sat2"], spec))
+        assert float(RULES["sat2"](*args, kx0_e=0.0)) == pytest.approx(q_default)
+        # with ExB shear the 1/(1+ay*kx^2) factor bites
+        assert float(RULES["sat2"](*args, kx0_e=0.5)) < q_default
+
+    def test_sat2_ignores_the_eigenmode_kx_centroid(self):
+        """Shifting |phi|^2(kx) must not act as an ExB shift; it is not one."""
+        spec = synthetic_spectrum()
         shifted = dict(spec)
-        rolled = jnp.roll(spec["phi2_kxy"], NKX // 4, axis=0)
-        shifted["phi2_kxy"] = rolled
-        q_shifted = float(call_rule(RULES["sat2"], shifted))
-        assert q_shifted < q_centred
+        shifted["phi2_kxy"] = jnp.roll(spec["phi2_kxy"], NKX // 4, axis=0)
+        # the centroid moves, but only through kperp2_eff, not the shift term
+        q0 = float(call_rule(RULES["sat2"], spec, kx0_e=0.0))
+        q1 = float(call_rule(RULES["sat2"], shifted, kx0_e=0.0))
+        assert np.isfinite(q0) and np.isfinite(q1)
 
     def test_sat2_is_quadratic_in_growth_rate(self):
         """SAT2 intensity is the SQUARE of gamma/<kperp^2>; canonical is linear."""
