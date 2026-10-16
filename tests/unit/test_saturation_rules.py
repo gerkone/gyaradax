@@ -13,7 +13,6 @@ import pytest
 
 from gyaradax.quasilinear.rules import (
     RULES,
-    RULES_WITH_FREQUENCY,
     dlnpdr_tglf,
     ql_flux_per_species,
 )
@@ -78,8 +77,6 @@ def synthetic_spectrum(seed=0, zonal_content=0.0):
 
 def call_rule(fn, spec, name=None, **overrides):
     kwargs = dict(overrides)
-    if name in RULES_WITH_FREQUENCY:
-        kwargs.setdefault("frequency", spec["frequency"])
     return fn(
         spec["growth_rate"],
         spec["phi2"],
@@ -250,8 +247,6 @@ def synthetic_species_fluxes(spec, seed=1):
 
 def call_per_species(rule, spec, flux_sp, name=None, **overrides):
     kwargs = dict(overrides)
-    if name in RULES_WITH_FREQUENCY:
-        kwargs.setdefault("frequency", spec["frequency"])
     return ql_flux_per_species(
         rule,
         spec["growth_rate"],
