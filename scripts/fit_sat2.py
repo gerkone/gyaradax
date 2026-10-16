@@ -87,7 +87,7 @@ def gamma_kymix(ky, gam, kymax, vzf, j):
     return out
 
 
-def predict(row, geo):
+def predict(row, geo, kx_width_model="tglf"):
     """Unscaled SAT2 flux: sum_ky W(ky) * intensity(ky). cn multiplies this."""
     ky = np.asarray(row["lin_ky"], float)
     gam = np.asarray(row["lin_gamma"], float)
@@ -112,7 +112,17 @@ def predict(row, geo):
 
     kycut = B0 * kymax
     gq = bg / gr
-    kxw = np.where(ky < kycut, kycut / gr, kycut / gr + B1 * (ky - kycut) * gq)
+    if kx_width_model == "measured":
+        kw = row.get("kx_width")
+        if kw is None:
+            return np.nan
+        kxw = np.asarray(kw, float)[m][o]
+        live = np.isfinite(kxw) & (kxw > 0)
+        if live.sum() < 3:
+            return np.nan
+        ky, gmix, w, kxw = ky[live], gmix[live], w[live], kxw[live]
+    else:
+        kxw = np.where(ky < kycut, kycut / gr, kycut / gr + B1 * (ky - kycut) * gq)
     d1 = (geo["bt0"] / bg) ** 4 / gr
     d2 = 1.0 / gq**2
     sgeo = np.where(ky < kycut, geo["sat_geo0"] * d1 * geo["sat_geo1"],
