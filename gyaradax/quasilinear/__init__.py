@@ -26,9 +26,7 @@ from .rules import (
     RULES,
     ql_flux_per_species,
     ql_flux_sat0,
-    ql_flux_sat1,
     ql_flux_sat2,
-    ql_flux_sat3,
 )
 from .data import (
     load_linear_outputs,
@@ -77,9 +75,7 @@ __all__ = [
     "RULES",
     "ql_flux_per_species",
     "ql_flux_sat0",
-    "ql_flux_sat1",
     "ql_flux_sat2",
-    "ql_flux_sat3",
     "k_perp_squared",
     "k_perp_eff_squared",
     "load_linear_outputs",
