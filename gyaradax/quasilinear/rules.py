@@ -21,15 +21,7 @@ identical to saturation.ql_flux.
 
   sat2           TGLF SAT2 on the full eigenmode; see ql_flux_sat2.
 
-  qualikiz       Q = C·Σ W·(ĝ/⟨k⊥²⟩)·S(ky),  S = 1/(1 + (ky/k0)³), k0 = 0.3.
-                 QuaLiKiz-style: the γ-linear mixing-length intensity of the
-                 canonical rule damped by an IMPOSED k_θ^-3 high-k envelope
-                 — QuaLiKiz prescribes one universal saturated spectral
-                 shape instead of letting the per-mode linear intensity set
-                 it. k0 is the ITG spectral peak k_θρ_s, a structural
-                 constant, not a fitted one.
-
-Structural constants (k0, sharpness, SAT2's ay) are fixed by construction
+Structural constants (SAT2's ay) are fixed by construction
 and documented at their definition — they are NOT calibrated; each rule
 exposes only cn.
 """
@@ -189,39 +181,10 @@ def ql_flux_sat2(
     return cn * jnp.sum(w * intensity * mask)
 
 
-@partial(jax.jit, static_argnames=("mask_zonal",))
-def ql_flux_qualikiz(
-    growth_rate,
-    phi2,
-    phi2_kxy,
-    flux_kxy,
-    krho,
-    kxrh,
-    little_g,
-    ds,
-    cn=1.0,
-    gate_threshold=0.0,
-    gate_sharpness=20.0,
-    eps=1e-30,
-    mask_zonal=True,
-    ky_peak=0.3,
-    spectral_exponent=3.0,
-):
-    """QuaLiKiz-style rule: Q = C·Σ W·(ĝ/⟨k⊥²⟩)·S(ky), S = 1/(1 + (ky/k0)^p)."""
-    ghat = _gated_gamma(growth_rate, gate_threshold, gate_sharpness)
-    safe_kperp2 = _safe_kperp2_eff(phi2, krho, kxrh, little_g, ds, eps)
-    w = _w_ky(flux_kxy, phi2_kxy, eps)
-    mask = _ky_mask(krho, mask_zonal, eps)
-    intensity = ghat / safe_kperp2
-    envelope = 1.0 / (1.0 + (jnp.abs(krho) / ky_peak) ** spectral_exponent)
-    return cn * jnp.sum(w * intensity * envelope * mask)
-
-
 RULES = {
     "canonical": ql_flux,
     "sat0": ql_flux_sat0,
     "sat2": ql_flux_sat2,
-    "qualikiz": ql_flux_qualikiz,
 }
 
 # rules whose signature accepts the optional per-ky mode frequency
