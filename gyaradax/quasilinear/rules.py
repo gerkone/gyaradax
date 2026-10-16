@@ -43,6 +43,10 @@ _SAT2_CZ2 = 1.05
 # get_zonal_mixing caps the peak search at 0.8*grad_r0/rho_ion; rho_ion is 1
 # in gyaradax units and grad_r0 ~ 1 for the circular flux surface
 _SAT2_KYCUT = 0.8
+
+# TGLF's kx_width model: b0 sets kycut, b1 the slope above it. grad_r0 and
+# Gq come from the geometry, not from constants -- see geom_sat2_factors.
+_SAT2_B0, _SAT2_B1 = 0.76, 1.22
 _CKY = 3.0
 _SQCKY = _CKY**0.5
 
@@ -120,6 +124,23 @@ def ql_flux_sat0(
     mask = _ky_mask(krho, mask_zonal, eps)
     intensity = (ghat / safe_kperp2) ** 2
     return cn * jnp.sum(w * jnp.abs(krho) * intensity * mask)
+
+
+def geom_sat2_factors(geom):
+    """SAT2's grad_r0 and Gq from a gyaradax geometry, not from constants.
+
+    grad_r0 = |grad r| at the outboard midplane = sqrt(g_eps_eps), which is
+    little_g[:, 2]; it comes out exactly 1 for circular, matching TGLF.
+    Gq = B_geo0 / grad_r0 with B_geo0 the midplane field. gyaradax normalises
+    B differently from TGLF (0.843 vs 0.826 at eps = 0.19), and Gq only
+    enters kx_width above kycut, where the intensity is already small.
+    """
+    lg = jnp.asarray(geom["little_g"])
+    lg = lg if lg.shape[-1] == 3 else lg.T
+    mid = lg.shape[0] // 2
+    grad_r0 = jnp.sqrt(jnp.abs(lg[mid, 2]))
+    b_geo0 = jnp.asarray(geom["bn"])[mid]
+    return grad_r0, b_geo0 / grad_r0
 
 
 def _zonal_mixing(ky, gamma, eps, kycut=_SAT2_KYCUT, kymin=0.0):
@@ -218,7 +239,7 @@ def _gamma_kymix(ky, gamma, kymax, vzf, jmax, etg_stiff, eps):
     return jnp.where(idx >= jmax + 2, mixed, g)
 
 
-@partial(jax.jit, static_argnames=("mask_zonal",))
+@partial(jax.jit, static_argnames=("mask_zonal", "kx_width_model"))
 def ql_flux_sat2(
     growth_rate,
     phi2,
@@ -233,6 +254,10 @@ def ql_flux_sat2(
     kx0_e=0.0,
     etg_stiff=1.0,
     kymin=0.0,
+    kthnorm=1.0,
+    grad_r0=1.0,
+    gq=1.0,
+    kx_width_model="measured",
     gate_threshold=0.0,
     gate_sharpness=20.0,
     eps=1e-30,
@@ -272,17 +297,32 @@ def ql_flux_sat2(
     ghat = _gated_gamma(growth_rate, gate_threshold, gate_sharpness)
     w = _w_ky(flux_kxy, phi2_kxy, eps)
     mask = _ky_mask(krho, mask_zonal, eps)
-    ky = jnp.abs(krho)
+    # SAT2's kycut and kymin are absolute thresholds in k_theta*rho, but
+    # gyaradax solves on krho = k_theta*rho / kthnorm, so the zonal-mixing
+    # logic has to run on the physical axis or the cutoffs land in the wrong
+    # place by kthnorm (0.7-6.2 over our scans)
+    ky = jnp.abs(krho) * kthnorm
 
     kymax, vzf, jmax = _zonal_mixing(ky, ghat, eps, kymin=kymin)
     gamma_eff = _gamma_kymix(ky, ghat, kymax, vzf, jmax, etg_stiff, eps)
     measure = 1.0 / kymax
 
-    # the kx width of |phi|^2(ky), measured; TGLF models it as kycut/grad_r0
-    p_kx = phi2_kxy / jnp.maximum(jnp.sum(phi2_kxy, axis=0, keepdims=True), eps)
-    kx_bar = jnp.sum(kxrh[:, None] * p_kx, axis=0)
-    sig2_kx = jnp.sum((kxrh[:, None] - kx_bar[None, :]) ** 2 * p_kx, axis=0)
-    kx_width = jnp.sqrt(jnp.maximum(sig2_kx, eps))
+    if kx_width_model == "tglf":
+        # TGLF's analytic model: flat below kycut, linear above. Use when no
+        # kx-resolved |phi|^2 is available; cn must be fitted for this mode.
+        kycut = _SAT2_B0 * kymax
+        kx_width = jnp.where(
+            ky < kycut,
+            kycut / grad_r0,
+            kycut / grad_r0 + _SAT2_B1 * (ky - kycut) * gq,
+        )
+    else:
+        # the measured kx width of |phi|^2(ky), which is what the full solve
+        # adds over TGLF's model
+        p_kx = phi2_kxy / jnp.maximum(jnp.sum(phi2_kxy, axis=0, keepdims=True), eps)
+        kx_bar = jnp.sum(kxrh[:, None] * p_kx, axis=0)
+        sig2_kx = jnp.sum((kxrh[:, None] - kx_bar[None, :]) ** 2 * p_kx, axis=0)
+        kx_width = jnp.sqrt(jnp.maximum(sig2_kx, eps))
 
     # TGLF's spectral shift is the ExB-driven radial offset kx0_e, not the
     # eigenmode's own kx centroid: tglf_geometry.f90:59-73 leaves kx0_e at 0
@@ -313,6 +353,10 @@ RULES = {
 
 # rules taking TGLF's pressure-gradient normalization
 RULES_WITH_DLNPDR = ("sat2",)
+
+# rules whose wavenumber thresholds are absolute in k_theta*rho and so need
+# the krho -> k_theta*rho conversion factor
+RULES_WITH_KTHNORM = ("sat2",)
 
 
 def ql_flux_per_species(
