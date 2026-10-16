@@ -36,6 +36,16 @@ from .saturation import k_perp_eff_squared, k_perp_squared, ql_flux
 # TGLF SAT2 spectral-shift weight, ay in tglf_multiscale_spectrum.f90
 _SAT2_AY = 1.0
 
+# zonal-mixing constants: cz2 = 1.05*|alpha_zf| with alpha_zf = -1, and the
+# Lorentzian mixing kernel's cky; etg_stiff is 1 unless ETG_FACTOR < 0
+_SAT2_CZ2 = 1.05
+
+# get_zonal_mixing caps the peak search at 0.8*grad_r0/rho_ion; rho_ion is 1
+# in gyaradax units and grad_r0 ~ 1 for the circular flux surface
+_SAT2_KYCUT = 0.8
+_CKY = 3.0
+_SQCKY = _CKY**0.5
+
 
 # TGLF clamps dlnpdr into [4, rlnp_cutoff]; rlnp_cutoff default 18 lives in
 # tglf_modules.f90
@@ -112,6 +122,102 @@ def ql_flux_sat0(
     return cn * jnp.sum(w * jnp.abs(krho) * intensity * mask)
 
 
+def _zonal_mixing(ky, gamma, eps, kycut=_SAT2_KYCUT, kymin=0.0):
+    """TGLF get_zonal_mixing: the low-k peak of gamma/ky, quadratically refined.
+
+    Returns (kymax, vzf, jmax). The search is capped at kycut so it cannot run
+    away to electron scales, and the three-point fit around the discrete peak
+    matters on coarse ky grids, which is why TGLF refines rather than taking
+    the bare argmax. kymin floors the peak: TGLF switches it on with
+    ALPHA_ZF < 0, which stops the lowest ky being picked as the maximum.
+    """
+    n = ky.shape[0]
+    ratio = jnp.where(ky > eps, gamma / jnp.maximum(ky, eps), 0.0)
+    nxt = jnp.concatenate([ky[1:], ky[-1:]])
+    inwin = (nxt >= kymin) & (ky <= kycut)
+    jmax = jnp.argmax(jnp.where(inwin, ratio, -jnp.inf))
+    j1 = jnp.max(jnp.where(inwin, jnp.arange(n), 0))
+    jm = jnp.clip(jmax, 1, n - 2)
+
+    f0, f1, f2 = ratio[jm - 1], ratio[jm], ratio[jm + 1]
+    k0, k2 = ky[jm - 1], ky[jm + 1]
+    dky = jnp.maximum(k2 - k0, eps)
+    x1 = (ky[jm] - k0) / dky
+    b = (f1 - f0 * (1.0 - x1 * x1) - f2 * x1 * x1) / jnp.maximum(x1 - x1 * x1, eps)
+    c = f2 - f0 - b
+    quad = lambda x: f0 + b * x + c * x * x
+
+    xmin = jnp.where(k0 < kymin, (kymin - k0) / dky, 0.0)
+    xmax = jnp.clip(-b / jnp.where(jnp.abs(c) > eps, 2.0 * c, eps), 0.0, 1.0)
+
+    # f0 >= f1 means the discrete peak is not a local maximum: fall back to f0,
+    # itself floored at kymin
+    lo_k = jnp.where(k0 < kymin, kymin, k0)
+    lo_g = jnp.where(k0 < kymin, quad(xmin) * kymin, f0 * k0)
+    # xmax <= xmin: the fitted peak sits below the floor
+    clamped = xmax <= xmin
+    ref_k = jnp.where(clamped, jnp.where(xmin > 0.0, kymin, k0), k0 + dky * xmax)
+    ref_g = jnp.where(
+        clamped,
+        jnp.where(xmin > 0.0, quad(xmin) * kymin, f0 * k0),
+        quad(xmax) * (k0 + dky * xmax),
+    )
+
+    refine = (jmax > 0) & (jmax < j1)
+    peak_ok = f0 < f1
+    # unrefined peak, also floored at kymin by linear interpolation off the grid
+    raw_k, raw_g = ky[jmax], gamma[jmax]
+    slope = (gamma[1] - gamma[0]) / jnp.maximum(ky[1] - ky[0], eps)
+    raw_g = jnp.where(raw_k < kymin, gamma[0] + slope * (kymin - ky[0]), raw_g)
+    raw_k = jnp.maximum(raw_k, kymin)
+
+    kymax = jnp.where(refine, jnp.where(peak_ok, ref_k, lo_k), raw_k)
+    gammamax = jnp.where(refine, jnp.where(peak_ok, ref_g, lo_g), raw_g)
+    kymax = jnp.maximum(kymax, eps)
+    return kymax, gammamax / kymax, jmax
+
+
+def _gamma_kymix(ky, gamma, kymax, vzf, jmax, etg_stiff, eps):
+    """TGLF's zonal-mixing growth rate: high-ky clamp then Lorentzian average.
+
+    Above kymax the growth rate is clamped to gammamax plus whatever exceeds
+    the zonal-flow mixing rate cz2*vzf*ky, then averaged over the high-ky
+    range with weight sqcky*ky0^2/(ky0^2 + cky*(ky-ky0)^2). This is what
+    flattens SAT2's spectrum above the peak; the raw gamma does not.
+    """
+    n = ky.shape[0]
+    idx = jnp.arange(n)
+    gammamax = vzf * kymax
+
+    clamped = gammamax + etg_stiff * jnp.maximum(gamma - _SAT2_CZ2 * vzf * ky, 0.0)
+    g = jnp.where(ky < kymax, gamma, clamped)
+
+    ky0 = ky[:, None]
+    ky1, ky2 = ky[None, :-1], ky[None, 1:]
+    g1, g2 = g[None, :-1], g[None, 1:]
+
+    a1 = jnp.arctan(_SQCKY * (ky1 / ky0 - 1.0))
+    a2 = jnp.arctan(_SQCKY * (ky2 / ky0 - 1.0))
+    mix1 = ky0 * (a2 - a1)
+    delta = (g2 - g1) / jnp.maximum(ky2 - ky1, eps)
+    mix2 = ky0 * mix1 + (ky0 * ky0 / (2.0 * _SQCKY)) * (
+        jnp.log(_CKY * (ky2 - ky0) ** 2 + ky0 * ky0)
+        - jnp.log(_CKY * (ky1 - ky0) ** 2 + ky0 * ky0)
+    )
+    terms = (g1 - ky1 * delta) * mix1 + delta * mix2
+    inner = (idx[None, :-1] >= jmax + 1) & (idx[None, :-1] <= n - 2)
+    gamma_ave = jnp.sum(jnp.where(inner, terms, 0.0), axis=1)
+
+    ky_lo = jnp.take(ky, jnp.minimum(jmax + 1, n - 1))
+    ky_hi = ky[-1]
+    mixnorm = ky[:] * (
+        jnp.arctan(_SQCKY * (ky_hi / jnp.maximum(ky, eps) - 1.0))
+        - jnp.arctan(_SQCKY * (ky_lo / jnp.maximum(ky, eps) - 1.0))
+    )
+    mixed = gamma_ave / jnp.where(jnp.abs(mixnorm) > eps, mixnorm, eps)
+    return jnp.where(idx >= jmax + 2, mixed, g)
+
+
 @partial(jax.jit, static_argnames=("mask_zonal",))
 def ql_flux_sat2(
     growth_rate,
@@ -125,6 +231,8 @@ def ql_flux_sat2(
     cn=1.0,
     dlnpdr=None,
     kx0_e=0.0,
+    etg_stiff=1.0,
+    kymin=0.0,
     gate_threshold=0.0,
     gate_sharpness=20.0,
     eps=1e-30,
@@ -144,12 +252,15 @@ def ql_flux_sat2(
     the eigenmode; a full linear solve measures all three, so they are taken
     from |phi|^2 here instead of from the CGYRO fits:
 
-      kx_width  -> kperp2_eff(ky), the |phi|^2-weighted <k_perp^2> including
-                   the kx centroid and width, which already carries the real
-                   metric and so subsumes sat_geo_factor
-      kx_width  -> the measured kx width of |phi|^2(ky)
-      kymax     -> the zonal-mixing peak, argmax of gamma/ky, as in
-                   get_zonal_mixing
+      kx_width  -> the measured kx width of |phi|^2(ky), replacing TGLF's
+                   kycut/grad_r0 below kycut and b1*(ky-kycut)*Gq above it
+      kymax     -> the zonal-mixing peak, the quadratically refined maximum
+                   of gamma/ky, as in get_zonal_mixing
+
+    gamma_eff is NOT the raw growth rate: it is TGLF's gamma_kymix, the rate
+    clamped above kymax and then Lorentzian-averaged over the high-ky range.
+    sat_geo_factor is dropped -- it rescales TGLF's s-alpha-like model
+    geometry onto the real flux surface, which the full solve already uses.
 
     `kx0_e` is TGLF's ExB spectral shift and defaults to 0, which is what
     TGLF itself uses without rotation; it is NOT the eigenmode kx centroid,
@@ -163,9 +274,8 @@ def ql_flux_sat2(
     mask = _ky_mask(krho, mask_zonal, eps)
     ky = jnp.abs(krho)
 
-    # zonal-mixing peak: the ky maximising gamma/ky (get_zonal_mixing)
-    ratio = jnp.where(ky > eps, ghat / jnp.maximum(ky, eps), 0.0)
-    kymax = jnp.maximum(ky[jnp.argmax(ratio)], eps)
+    kymax, vzf, jmax = _zonal_mixing(ky, ghat, eps, kymin=kymin)
+    gamma_eff = _gamma_kymix(ky, ghat, kymax, vzf, jmax, etg_stiff, eps)
     measure = 1.0 / kymax
 
     # the kx width of |phi|^2(ky), measured; TGLF models it as kycut/grad_r0
@@ -180,13 +290,17 @@ def ql_flux_sat2(
     # suppression is exactly 1. Our runs carry no ExB shear.
     kx_hat = kx0_e * ky / kx_width
 
-    kperp2 = _safe_kperp2_eff(phi2, krho, kxrh, little_g, ds, eps)
+    # SAT2 divides by kx_width*ky, NOT by <kperp^2>. Below kycut TGLF holds
+    # kx_width constant, so the denominator goes like ky and the intensity
+    # peaks where gamma/ky does; <kperp^2> ~ ky^2 would push the peak to the
+    # bottom of the grid instead.
+    denom = jnp.maximum(kx_width * ky, eps)
 
     cnorm = 1.0 if dlnpdr is None else 12.0 / jnp.maximum(dlnpdr, 4.0)
     intensity = (
         measure
         * cnorm
-        * ((ghat / kperp2) / (1.0 + _SAT2_AY * kx_hat**2)) ** 2
+        * ((gamma_eff / denom) / (1.0 + _SAT2_AY * kx_hat**2)) ** 2
     )
     return cn * jnp.sum(w * intensity * mask)
 
