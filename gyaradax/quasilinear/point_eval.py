@@ -106,6 +106,7 @@ def ql_at_point(
     *,
     cn,
     rule="canonical",
+    rule_options=None,
     n_steps_linear=2000,
     early_stop=True,
     early_stop_opts: Dict[str, Any] | None = None,
@@ -116,6 +117,8 @@ def ql_at_point(
     """Linear solve + saturation rule at one point -> (qi, qe, pfe) in GKW GB units.
 
     `rule` names an entry of quasilinear.rules.RULES; each has its own cn.
+    `rule_options` is forwarded to it, so rule-specific knobs need no
+    plumbing through the callers.
 
     Electromagnetic (params.nlapar) runs convert the mixed g to physical f
     for diagnostics and add the A_par flutter flux into the QL weight,
@@ -137,6 +140,8 @@ def ql_at_point(
     if rule in RULES_WITH_KTHNORM:
         extra["kthnorm"] = jnp.asarray(geom.get("kthnorm", 1.0), dtype=jnp.float64)
         extra["grad_r0"], extra["gq"] = geom_sat2_factors(geom)
+    # caller-supplied knobs win, so a rule's own options need no plumbing here
+    extra.update(dict(rule_options or {}))
 
     def _clean(q, lo=0.0):
         q = jnp.where(jnp.isfinite(q), jnp.clip(q, lo, qi_clip), 0.0)

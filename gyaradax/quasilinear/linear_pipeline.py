@@ -5,7 +5,7 @@ For each iteration_N pair (Lin + NL):
   2. load geometry from geom.dat
   3. (optional) warm-start df from FDS, or fresh gk_init
   4. run gyaradax linear solver for n_steps (or skip with linear_from_fds)
-  5. harvest γ, |φ|², per-(kx, ky) flux fields, geometry
+  5. harvest γ, |φ|², per-(kx, ky) flux fields, geometry for one run
   6. NL target Y comes from iteration_N/fluxes.dat (last 240 rows)
 
 No GKW diagnostic files are required for QL inputs — only input.dat,
@@ -268,91 +268,3 @@ def linear_run_blocked(
     out = _harvest(geometry, df, phi, state)
     out.update({"n_blocks": b + 1, "gamma_history": history, "df": df})
     return out
-
-
-def harvest(
-    triples,
-    ql_flux_fn,
-    loader=linear_from_fds,
-    max_workers=8,
-    n_average=240,
-    label="",
-    every=50,
-):
-    """Parallel I/O harvest of (X_QL, Y_NL, features) from (lin, nl, name) triples.
-
-    Most of `linear_from_fds`'s cost is FDS read + geom load + linear_precompute,
-    all I/O- or Python-bound. Threading parallelizes these; the JAX compute
-    serializes on the GPU but is fast enough not to bottleneck. ~2.7–10× wall
-    speedup vs serial depending on disk cache state.
-
-    Args:
-        triples: list of (lin_dir, nl_dir, name).
-        ql_flux_fn: callable(arr_dict) -> float, e.g. lambda arr: float(ql_flux(...)).
-        loader: callable(lin_dir) -> arr_dict. Default `linear_from_fds`; pass
-            `lambda d: linear_run(d, n_steps=1000)` to use gyaradax time-stepping
-            instead of the FDS file.
-        max_workers: pool size. 8 is a reasonable default.
-        n_average: tail-rows averaged for Y_NL from fluxes.dat.
-        label: printed in progress messages.
-        every: log progress every `every` completed sims (0 to silence).
-
-    Returns: (X, Y, F, names, n_skipped) in input order.
-    """
-    from concurrent.futures import ThreadPoolExecutor, as_completed
-
-    from .data import load_nonlinear_target, parse_input_dat, physics_features
-
-    def one(triple):
-        lin, nl, name = triple
-        try:
-            arr = loader(lin)
-            X = ql_flux_fn(arr)
-            Y = load_nonlinear_target(nl, n_average=n_average)
-            F = physics_features(parse_input_dat(f"{lin}/input.dat"))
-            return name, (X, Y, F)
-        except Exception:
-            return name, None
-
-    results_by_name = {}
-    t0 = time.perf_counter()
-    done = 0
-    skipped = 0
-    with ThreadPoolExecutor(max_workers=max_workers) as ex:
-        futures = [ex.submit(one, t) for t in triples]
-        for fut in as_completed(futures):
-            name, payload = fut.result()
-            results_by_name[name] = payload
-            done += 1
-            if payload is None:
-                skipped += 1
-            if every and done % every == 0:
-                rate = done / (time.perf_counter() - t0)
-                print(
-                    f"  [{label}] {done}/{len(triples)}  {time.perf_counter() - t0:.0f}s "
-                    f"({rate:.1f} sim/s)  skipped={skipped}",
-                    flush=True,
-                )
-
-    Xs, Ys, Fs, names = [], [], [], []
-    for _, _, name in triples:
-        r = results_by_name.get(name)
-        if r is None:
-            continue
-        Xs.append(r[0])
-        Ys.append(r[1])
-        Fs.append(r[2])
-        names.append(name)
-    return np.asarray(Xs), np.asarray(Ys), np.asarray(Fs), names, skipped
-
-
-def root_mse(y_true, y_pred):
-    """RMSE in linear space."""
-    return float(np.sqrt(np.mean((np.asarray(y_true) - np.asarray(y_pred)) ** 2)))
-
-
-def root_mse_log(y_true, y_pred, eps=1e-12):
-    """RMSE in log space."""
-    yt = np.maximum(np.asarray(y_true), eps)
-    yp = np.maximum(np.asarray(y_pred), eps)
-    return float(np.sqrt(np.mean((np.log(yt) - np.log(yp)) ** 2)))

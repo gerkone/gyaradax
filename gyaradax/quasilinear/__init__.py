@@ -1,113 +1,53 @@
-"""gyaradax.quasilinear — quasilinear transport model.
+"""Quasilinear transport: saturation rules and the single-point linear solve.
 
-JAX-native QL model built on gyaradax linear runs, calibrated against
-nonlinear gyaradax/GKW simulations.
+  rules / saturation            the saturation rules and their shared pieces
+  point_eval                    linear solve + rule at one operating point,
+                                the entry point the TORAX plugin calls
+  linear_pipeline               linear run from a GKW directory, and the
+                                harvest of one run's spectra
+  data                          GKW output readers
+  models                        bundled Cn calibration heads
 
-Public API:
-  ql_flux                          canonical saturation rule (γ/⟨k⊥²⟩ · W)
-  ql_flux_diagnostics              same + intermediate quantities
-  linear_from_fds                  load + compute QL inputs from a GKW _Lin dir
-  linear_run                       run gyaradax linearly (disable_per_ky_norm)
-  harvest                          parallel-IO harvest of (X, Y, features) from (Lin, NL) triples
-  fit_cn                           scalar amplitude calibration
-  fit_cn_parametric                affine C_n(ŝ, q, R/L_T, R/L_n) calibration
-  ParametricCn                     fitted parametric C_n with .predict(X, F)
-  fit_cn_polynomial                polynomial C_n(features) calibration (degree tunable)
-  PolynomialCn                     fitted polynomial C_n with .predict(X, F)
+Calibration data no longer comes from walking paired run directories: the
+summary parquets under /restricteddata/ukaea/gyrokinetics/preprocessed
+carry gamma(ky), the quasilinear weights and the spectra, so the campaign
+harvest, its storage layer and the Cn fitting heads that fed on it are gone.
 """
 
-from .saturation import (
-    ql_flux,
-    ql_flux_diagnostics,
-    k_perp_squared,
-    k_perp_eff_squared,
-)
+from .data import load_linear_outputs, parse_input_dat
+from .linear_pipeline import linear_from_fds, linear_run
+from .models import load_cn_payload, select_cn_head
+from .point_eval import ql_at_point, ql_rules_at_point
 from .rules import (
     RULES,
+    RULES_WITH_DLNPDR,
+    RULES_WITH_KTHNORM,
+    dlnpdr_tglf,
+    geom_sat2_factors,
     ql_flux_per_species,
     ql_flux_sat0,
     ql_flux_sat2,
 )
-from .data import (
-    load_linear_outputs,
-    load_nonlinear_target,
-    pair_sims,
-    parse_input_dat,
-    gradient_labels,
-    physics_features,
-    is_unstable,
-    growth_rate_max,
-    FEATURE_NAMES,
-)
-from .calibration import (
-    fit_cn,
-    fit_cn_heads,
-    fit_cn_log,
-    fit_cn_parametric,
-    fit_cn_polynomial,
-    fit_cn_polynomial_log,
-    ParametricCn,
-    PolynomialCn,
-    r2_score,
-    DEFAULT_PARAM_FEATURES,
-)
-# advanced calibration heads need scikit-learn, an optional dependency. keep the
-# package importable (ql_flux, parametric/polynomial heads) when it is absent.
-try:
-    from .calibration_advanced import (
-        fit_cn_ridge_polynomial,
-        fit_cn_gbm,
-        fit_cn_gp_log,
-        RidgePolynomialCn,
-        GBMCn,
-        GPLogCn,
-    )
-except ImportError:
-    fit_cn_ridge_polynomial = fit_cn_gbm = fit_cn_gp_log = None
-    RidgePolynomialCn = GBMCn = GPLogCn = None
-from .linear_pipeline import linear_from_fds, linear_run, harvest, root_mse, root_mse_log
-from .models import load_default_weights as load_default_cn_weights
-from .models import load_weights_from_name as load_cn_weights_from_name
+from .saturation import k_perp_eff_squared, k_perp_squared, ql_flux
 
 __all__ = [
-    "ql_flux",
-    "ql_flux_diagnostics",
     "RULES",
-    "ql_flux_per_species",
+    "RULES_WITH_DLNPDR",
+    "RULES_WITH_KTHNORM",
+    "ql_flux",
     "ql_flux_sat0",
     "ql_flux_sat2",
+    "ql_flux_per_species",
+    "dlnpdr_tglf",
+    "geom_sat2_factors",
     "k_perp_squared",
     "k_perp_eff_squared",
-    "load_linear_outputs",
-    "load_nonlinear_target",
-    "pair_sims",
-    "parse_input_dat",
-    "gradient_labels",
-    "physics_features",
-    "is_unstable",
-    "growth_rate_max",
-    "FEATURE_NAMES",
-    "fit_cn",
-    "fit_cn_heads",
-    "fit_cn_log",
-    "fit_cn_parametric",
-    "fit_cn_polynomial",
-    "fit_cn_polynomial_log",
-    "fit_cn_ridge_polynomial",
-    "fit_cn_gbm",
-    "fit_cn_gp_log",
-    "ParametricCn",
-    "PolynomialCn",
-    "RidgePolynomialCn",
-    "GBMCn",
-    "GPLogCn",
-    "r2_score",
-    "DEFAULT_PARAM_FEATURES",
+    "ql_at_point",
+    "ql_rules_at_point",
     "linear_from_fds",
     "linear_run",
-    "harvest",
-    "root_mse",
-    "root_mse_log",
-    "load_default_cn_weights",
-    "load_cn_weights_from_name",
+    "load_linear_outputs",
+    "parse_input_dat",
+    "load_cn_payload",
+    "select_cn_head",
 ]

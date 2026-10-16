@@ -258,6 +258,7 @@ def ql_flux_sat2(
     grad_r0=1.0,
     gq=1.0,
     kx_width_model="measured",
+    flux_exponent=1.0,
     gate_threshold=0.0,
     gate_sharpness=20.0,
     eps=1e-30,
@@ -293,6 +294,15 @@ def ql_flux_sat2(
 
     b2 is a pure constant and folds into cn. measure and 12/dlnpdr vary per
     run and do not, so they are kept; `dlnpdr` omitted drops that factor.
+
+    `flux_exponent` p returns cn*Q**p instead of cn*Q. SAT2's intensity is
+    quadratic in gamma, and on the GKW adiabatic scans that is too steep:
+    with p = 1 the rule is beaten by predicting a constant, while p = 0.58
+    takes the test median error from 61% to 13%. Note p acts on the SUMMED
+    flux, which is the form that was fitted; raising the per-mode intensity
+    instead is a different model and is untested. A rule linear in gamma
+    needs no exponent at all (its fitted p comes back at 1.05), so prefer
+    that over tuning this.
     """
     ghat = _gated_gamma(growth_rate, gate_threshold, gate_sharpness)
     w = _w_ky(flux_kxy, phi2_kxy, eps)
@@ -342,7 +352,10 @@ def ql_flux_sat2(
         * cnorm
         * ((gamma_eff / denom) / (1.0 + _SAT2_AY * kx_hat**2)) ** 2
     )
-    return cn * jnp.sum(w * intensity * mask)
+    q = jnp.sum(w * intensity * mask)
+    if flux_exponent == 1.0:
+        return cn * q
+    return cn * jnp.power(jnp.maximum(q, eps), flux_exponent)
 
 
 RULES = {
