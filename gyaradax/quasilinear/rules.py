@@ -124,6 +124,7 @@ def ql_flux_sat2(
     ds,
     cn=1.0,
     dlnpdr=None,
+    kx0_e=0.0,
     gate_threshold=0.0,
     gate_sharpness=20.0,
     eps=1e-30,
@@ -146,9 +147,13 @@ def ql_flux_sat2(
       kx_width  -> kperp2_eff(ky), the |phi|^2-weighted <k_perp^2> including
                    the kx centroid and width, which already carries the real
                    metric and so subsumes sat_geo_factor
-      kx_hat    -> kx centroid in units of the kx width, the shift TGLF fits
+      kx_width  -> the measured kx width of |phi|^2(ky)
       kymax     -> the zonal-mixing peak, argmax of gamma/ky, as in
                    get_zonal_mixing
+
+    `kx0_e` is TGLF's ExB spectral shift and defaults to 0, which is what
+    TGLF itself uses without rotation; it is NOT the eigenmode kx centroid,
+    whose effect already sits inside kperp2_eff.
 
     b2 is a pure constant and folds into cn. measure and 12/dlnpdr vary per
     run and do not, so they are kept; `dlnpdr` omitted drops that factor.
@@ -163,12 +168,17 @@ def ql_flux_sat2(
     kymax = jnp.maximum(ky[jnp.argmax(ratio)], eps)
     measure = 1.0 / kymax
 
-    # kx centroid and width of |phi|^2(kx) per ky: TGLF's spectral shift and
-    # kx_width, measured rather than fitted
+    # the kx width of |phi|^2(ky), measured; TGLF models it as kycut/grad_r0
     p_kx = phi2_kxy / jnp.maximum(jnp.sum(phi2_kxy, axis=0, keepdims=True), eps)
     kx_bar = jnp.sum(kxrh[:, None] * p_kx, axis=0)
     sig2_kx = jnp.sum((kxrh[:, None] - kx_bar[None, :]) ** 2 * p_kx, axis=0)
-    kx_hat = kx_bar / jnp.sqrt(jnp.maximum(sig2_kx, eps))
+    kx_width = jnp.sqrt(jnp.maximum(sig2_kx, eps))
+
+    # TGLF's spectral shift is the ExB-driven radial offset kx0_e, not the
+    # eigenmode's own kx centroid: tglf_geometry.f90:59-73 leaves kx0_e at 0
+    # and sets it only from vexb_shear_kx0, so at zero rotation the
+    # suppression is exactly 1. Our runs carry no ExB shear.
+    kx_hat = kx0_e * ky / kx_width
 
     kperp2 = _safe_kperp2_eff(phi2, krho, kxrh, little_g, ds, eps)
 
