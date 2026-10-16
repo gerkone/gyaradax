@@ -311,9 +311,6 @@ RULES = {
     "sat2": ql_flux_sat2,
 }
 
-# rules whose signature accepts the optional per-ky mode frequency
-RULES_WITH_FREQUENCY = ()
-
 # rules taking TGLF's pressure-gradient normalization
 RULES_WITH_DLNPDR = ("sat2",)
 

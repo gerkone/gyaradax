@@ -15,14 +15,24 @@ import numpy as np
 from gyaradax.integrals import calculate_fluxes, geom_tensors
 from gyaradax.solver import default_state, gksolve, linear_precompute
 
-from .rules import RULES, RULES_WITH_DLNPDR, dlnpdr_tglf
+from .rules import (
+    RULES,
+    RULES_WITH_DLNPDR,
+    dlnpdr_tglf,
+    ql_flux_per_species,
+)
 from .saturation import ql_flux
 
 DF_SEED_AMPLITUDE = 1e-3
 
 
-def initial_df(nvpar, nmu, ns, nkx, nky, amplitude=DF_SEED_AMPLITUDE) -> jnp.ndarray:
-    """Initial df: cosine in s, every non-zonal ky seeded (bypasses init_f's .item())."""
+def initial_df(
+    nvpar, nmu, ns, nkx, nky, amplitude=DF_SEED_AMPLITUDE, nsp=0
+) -> jnp.ndarray:
+    """Initial df: cosine in s, every non-zonal ky seeded (bypasses init_f's .item()).
+
+    nsp > 0 prepends a species axis for the kinetic 6D grid.
+    """
     s_grid = (jnp.arange(ns) + 0.5) / ns - 0.5
     seed_s = amplitude * (jnp.cos(2 * jnp.pi * s_grid) + 1.0)
     df = jnp.zeros((nvpar, nmu, ns, nkx, nky), dtype=jnp.complex128)
@@ -31,7 +41,10 @@ def initial_df(nvpar, nmu, ns, nkx, nky, amplitude=DF_SEED_AMPLITUDE) -> jnp.nda
         (nvpar, nmu, ns, nkx, nky),
     )
     ky_mask = jnp.arange(nky) > 0
-    return df + seed * ky_mask[None, None, None, None, :]
+    df = df + seed * ky_mask[None, None, None, None, :]
+    if nsp:
+        df = jnp.broadcast_to(df[None], (nsp,) + df.shape)
+    return df
 
 
 def linear_early_stop(
@@ -104,22 +117,36 @@ def ql_at_point(
 
     Electromagnetic (params.nlapar) runs convert the mixed g to physical f
     for diagnostics and add the A_par flutter flux into the QL weight,
-    matching the calibration X stage. qe = qi and pfe = 0 remain
-    placeholders until the kinetic-electron calibration lands.
+    matching the calibration X stage.
+
+    Kinetic runs take qe and pfe from ql_flux_per_species, which evaluates
+    the rule per (species, channel) against one shared saturated intensity.
+    Adiabatic runs have no electron channel, so qe = qi and pfe = 0.
 
     `return_diagnostics` appends a dict of traced per-call solver diagnostics
     (blocks and steps actually run, converged growth rates).
     """
-    spec, n_blocks, n_steps, gamma = _linear_harvest(
+    spec, n_blocks, n_steps, gamma, flux_kxy_sp = _linear_harvest(
         params, geom, grid_shape, n_steps_linear=n_steps_linear,
         early_stop=early_stop, early_stop_opts=early_stop_opts,
     )
     extra = ({"dlnpdr": _dlnpdr_from_params(params)}
              if rule in RULES_WITH_DLNPDR else {})
-    q_i = RULES[rule](cn=cn, **spec, **extra)
-    q_i = jnp.where(jnp.isfinite(q_i), jnp.clip(q_i, 0.0, qi_clip), 0.0)
-    # zero below noise floor so linear-transient residues don't feed TORAX gradients
-    q_i = jnp.where(jnp.abs(q_i) < qi_tiny, 0.0, q_i)
+
+    def _clean(q, lo=0.0):
+        q = jnp.where(jnp.isfinite(q), jnp.clip(q, lo, qi_clip), 0.0)
+        # zero below noise floor so linear transients don't feed TORAX gradients
+        return jnp.where(jnp.abs(q) < qi_tiny, 0.0, q)
+
+    if flux_kxy_sp is not None:
+        # one shared saturated intensity, species and channels differ only
+        # through their QL weights
+        rest = {k: v for k, v in spec.items() if k != "flux_kxy"}
+        f = ql_flux_per_species(rule, flux_kxy_sp=flux_kxy_sp, cn=cn, **rest, **extra)
+        q_i, q_e, pfe = _clean(f[0, 1]), _clean(f[1, 1]), _clean(f[1, 0], lo=-qi_clip)
+    else:
+        q_i = _clean(RULES[rule](cn=cn, **spec, **extra))
+        q_e, pfe = q_i, jnp.asarray(0.0)
     if return_diagnostics:
         diagnostics = {
             "n_blocks": n_blocks,
@@ -127,8 +154,8 @@ def ql_at_point(
             "gamma_max": jnp.max(gamma),
             "cn": jnp.asarray(cn),
         }
-        return q_i, q_i, jnp.asarray(0.0), diagnostics
-    return q_i, q_i, jnp.asarray(0.0)
+        return q_i, q_e, pfe, diagnostics
+    return q_i, q_e, pfe
 
 
 def ql_rules_at_point(
@@ -143,7 +170,7 @@ def ql_rules_at_point(
     early_stop_opts: Dict[str, Any] | None = None,
 ) -> Dict[str, jnp.ndarray]:
     """Several saturation rules on ONE linear solve -> {rule: Q_i}, for calibration."""
-    spec, _b, _s, _g = _linear_harvest(
+    spec, _b, _s, _g, _f = _linear_harvest(
         params, geom, grid_shape, n_steps_linear=n_steps_linear,
         early_stop=early_stop, early_stop_opts=early_stop_opts,
     )
@@ -153,6 +180,17 @@ def ql_rules_at_point(
                     **({"dlnpdr": dlnpdr} if r in RULES_WITH_DLNPDR else {}))
         for r in rules
     }
+
+
+def _species_geom(geom, params):
+    """geom with the per-species arrays from params, as calculate_fluxes_kinetic wants."""
+    out = dict(geom)
+    for key in ("mas", "signz", "tmp", "de", "vthrat", "rlt", "rln"):
+        if hasattr(params, key):
+            v = getattr(params, key)
+            if v is not None:
+                out[key] = jnp.atleast_1d(jnp.asarray(v, dtype=jnp.float64))
+    return out
 
 
 def _linear_harvest(
@@ -166,7 +204,9 @@ def _linear_harvest(
 ):
     """Linear solve -> the (gamma, spectra, geometry) kwargs every rule consumes."""
     nv, nmu, ns, nkx, nky = grid_shape
-    df = initial_df(nv, nmu, ns, nkx, nky)
+    kinetic = not bool(getattr(params, "adiabatic_electrons", True))
+    nsp = jnp.asarray(params.mas).size if kinetic else 0
+    df = initial_df(nv, nmu, ns, nkx, nky, nsp=nsp)
     sim_state = default_state(nky=nky)
     pre = linear_precompute(geom, params)
     opts = dict(early_stop_opts or {})
@@ -190,12 +230,23 @@ def _linear_harvest(
 
         _phi2, apar, _bpar = _compute_fields(df_final, geom, params, pre)
         diag_df = g_to_f(df_final, apar, params, pre)
-    _p, eflux_kxy, _v = calculate_fluxes(gt, diag_df, phi, reduce=False)
+    flux_kxy_sp = None
+    if kinetic:
+        from gyaradax.integrals import calculate_fluxes_kinetic
+
+        flux_kxy_sp = calculate_fluxes_kinetic(
+            _species_geom(geom, params), diag_df, phi, reduce=False
+        )
+        eflux_kxy = flux_kxy_sp[0, 1]
+    else:
+        _p, eflux_kxy, _v = calculate_fluxes(gt, diag_df, phi, reduce=False)
     if params.nlapar:
         _ep, em_eflux_kxy, _ev = calculate_em_fluxes(
             geom, diag_df, apar, params=params, bpar=None, pre=pre, reduce=False
         )
         eflux_kxy = eflux_kxy + em_eflux_kxy
+        if kinetic:
+            flux_kxy_sp = flux_kxy_sp.at[0, 1].set(eflux_kxy)
 
     ints = jnp.asarray(geom["ints"])
     phi2 = jnp.abs(phi) ** 2
@@ -210,7 +261,7 @@ def _linear_harvest(
         little_g=lg.T if lg.shape[0] != 3 else lg,
         ds=jnp.mean(ints),
     )
-    return spec, n_blocks, n_steps, sim_final.last_growth_rate
+    return spec, n_blocks, n_steps, sim_final.last_growth_rate, flux_kxy_sp
 
 
 def _dlnpdr_from_params(params):
