@@ -191,60 +191,34 @@ class TestRuleZoo:
 
 
 class TestRuleSpecifics:
-    def test_sat1_zonal_quench_reduces_flux(self):
-        """More zonal-shear content quenches sat1 below the canonical value."""
-        spec = synthetic_spectrum(zonal_content=50.0)
-        q_can = float(call_rule(ql_flux, spec))
-        q_sat1 = float(call_rule(RULES["sat1_zonal"], spec))
-        assert q_sat1 < q_can
-        # and with no zonal content sat1 reduces to canonical
-        spec0 = synthetic_spectrum(zonal_content=0.0)
-        spec0["phi2"] = spec0["phi2"].at[:, :, 0].set(0.0)
-        spec0["phi2_kxy"] = spec0["phi2_kxy"].at[:, 0].set(0.0)
-        assert float(call_rule(RULES["sat1_zonal"], spec0)) == pytest.approx(
-            float(call_rule(ql_flux, spec0)), rel=1e-6
-        )
-
-    def test_sat3_without_frequency_equals_sat0(self):
+    def test_sat2_spectral_shift_suppresses(self):
+        """A kx-shifted eigenmode is suppressed by SAT2's 1/(1+ay*kx_hat^2)."""
         spec = synthetic_spectrum()
-        q0 = float(call_rule(RULES["sat0_waltz"], spec))
-        q3 = float(RULES["sat3_regime"](
-            spec["growth_rate"], spec["phi2"], spec["phi2_kxy"], spec["flux_kxy"],
-            spec["krho"], spec["kxrh"], spec["little_g"], spec["ds"], frequency=None,
-        ))
-        assert q3 == pytest.approx(q0, rel=1e-12)
+        q_centred = float(call_rule(RULES["sat2"], spec))
+        # push the |phi|^2(kx) centroid off zero, keeping the total intensity
+        shifted = dict(spec)
+        rolled = jnp.roll(spec["phi2_kxy"], NKX // 4, axis=0)
+        shifted["phi2_kxy"] = rolled
+        q_shifted = float(call_rule(RULES["sat2"], shifted))
+        assert q_shifted < q_centred
 
-    def test_sat3_tem_branch_reduced(self):
-        """Electron-direction (omega<0) modes are down-weighted vs ion-direction."""
+    def test_sat2_is_quadratic_in_growth_rate(self):
+        """SAT2 intensity is the SQUARE of gamma/<kperp^2>; canonical is linear."""
         spec = synthetic_spectrum()
-        q_itg = float(RULES["sat3_regime"](
-            spec["growth_rate"], spec["phi2"], spec["phi2_kxy"], spec["flux_kxy"],
-            spec["krho"], spec["kxrh"], spec["little_g"], spec["ds"],
-            frequency=jnp.full_like(spec["krho"], 2.0),
-        ))
-        q_tem = float(RULES["sat3_regime"](
-            spec["growth_rate"], spec["phi2"], spec["phi2_kxy"], spec["flux_kxy"],
-            spec["krho"], spec["kxrh"], spec["little_g"], spec["ds"],
-            frequency=jnp.full_like(spec["krho"], -2.0),
-        ))
-        assert q_tem < q_itg
-        assert q_tem == pytest.approx(0.5 * q_itg, rel=1e-6)
-
-    def test_sat2_parallel_width_penalty(self):
-        """A parallel-extended |phi|^2(s) yields less sat2 flux than a localized one."""
-        spec_loc = synthetic_spectrum()
-        spec_broad = synthetic_spectrum()
-        broad = np.ones_like(np.asarray(spec_broad["phi2"]))
-        broad *= np.asarray(spec_broad["phi2"]).sum(axis=0, keepdims=True) / NS
-        spec_broad["phi2"] = jnp.asarray(broad)
-        q_loc = float(call_rule(RULES["sat2_spectral"], spec_loc))
-        q_broad = float(call_rule(RULES["sat2_spectral"], spec_broad))
-        assert q_broad < q_loc
+        doubled = dict(spec)
+        doubled["growth_rate"] = spec["growth_rate"] * 2.0
+        r_sat2 = float(call_rule(RULES["sat2"], doubled)) / float(
+            call_rule(RULES["sat2"], spec))
+        r_can = float(call_rule(ql_flux, doubled)) / float(call_rule(ql_flux, spec))
+        # the stability gate is not fully saturated at the smallest gamma, so
+        # both ratios sit slightly above their 4 and 2 asymptotes
+        assert 3.9 < r_sat2 < 4.3
+        assert 1.9 < r_can < 2.2
 
     def test_sat2_kperp_floor_no_blowup(self):
         spec = synthetic_spectrum()
         spec["phi2"] = jnp.zeros_like(spec["phi2"])
-        q = float(call_rule(RULES["sat2_spectral"], spec))
+        q = float(call_rule(RULES["sat2"], spec))
         assert np.isfinite(q)
 
 
