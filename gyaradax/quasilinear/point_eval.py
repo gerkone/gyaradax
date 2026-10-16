@@ -20,6 +20,8 @@ from gyaradax.solver.rk4 import default_state, gksolve
 from .rules import (
     RULES,
     RULES_WITH_DLNPDR,
+    RULES_WITH_KTHNORM,
+    geom_sat2_factors,
     dlnpdr_tglf,
     ql_flux_per_species,
 )
@@ -134,6 +136,9 @@ def ql_at_point(
     )
     extra = ({"dlnpdr": _dlnpdr_from_params(params)}
              if rule in RULES_WITH_DLNPDR else {})
+    if rule in RULES_WITH_KTHNORM:
+        extra["kthnorm"] = jnp.asarray(geom.get("kthnorm", 1.0), dtype=jnp.float64)
+        extra["grad_r0"], extra["gq"] = geom_sat2_factors(geom)
 
     def _clean(q, lo=0.0):
         q = jnp.where(jnp.isfinite(q), jnp.clip(q, lo, qi_clip), 0.0)
@@ -177,11 +182,16 @@ def ql_rules_at_point(
         early_stop=early_stop, early_stop_opts=early_stop_opts,
     )
     dlnpdr = _dlnpdr_from_params(params)
-    return {
-        r: RULES[r](cn=cn, **spec,
-                    **({"dlnpdr": dlnpdr} if r in RULES_WITH_DLNPDR else {}))
-        for r in rules
-    }
+    kth = jnp.asarray(geom.get("kthnorm", 1.0), dtype=jnp.float64)
+
+    def _extra(r):
+        e = {"dlnpdr": dlnpdr} if r in RULES_WITH_DLNPDR else {}
+        if r in RULES_WITH_KTHNORM:
+            e["kthnorm"] = kth
+            e["grad_r0"], e["gq"] = geom_sat2_factors(geom)
+        return e
+
+    return {r: RULES[r](cn=cn, **spec, **_extra(r)) for r in rules}
 
 
 def _species_geom(geom, params):
