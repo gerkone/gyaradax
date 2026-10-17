@@ -46,6 +46,23 @@ _SAT2_CZ2 = 1.05
 # (joint test RMSE 98.6 against 18.7) and 1.4 on adiabatic.
 _SAT2_KYMIN = 0.173 * 2.0**0.5
 
+# Fitted jointly on 295 base-adiabatic + 112 kinetic GKW/gyaradax runs
+# (2026-10-17), one (cn, exponent) per rule across both sets, chain-0
+# <kperp2> for the rules that use it. Test RMSE / median |rel|:
+#   sat2       adi 31.3 / 21.0%   kin 21.8 / 47.5%
+# Fitted at fixed eps = 0.19, collisionless, Qi only. The exponent in
+# particular is NOT validated against collisionality -- Staebler (NF 61
+# 116007) kept gamma^2 precisely because gamma^1 spoiled his collision
+# scans, and ours contains none.
+# Only sat2 takes an exponent; canonical and sat0 have no such parameter,
+# so theirs is an amplitude alone.
+CALIBRATION = {
+    "canonical": {"cn": None},
+    "sat0": {"cn": None},
+    "sat2": {"cn": 0.7351, "flux_exponent": 0.620},
+}
+_SAT2_FLUX_EXPONENT = CALIBRATION["sat2"]["flux_exponent"]
+
 # get_zonal_mixing caps the peak search at 0.8*grad_r0/rho_ion; rho_ion is 1
 # in gyaradax units and grad_r0 ~ 1 for the circular flux surface
 _SAT2_KYCUT = 0.8
@@ -273,7 +290,7 @@ def ql_flux_sat2(
     grad_r0=1.0,
     gq=1.0,
     kx_width_model="tglf",
-    flux_exponent=1.0,
+    flux_exponent=_SAT2_FLUX_EXPONENT,
     gate_threshold=0.0,
     gate_sharpness=20.0,
     eps=1e-30,
@@ -315,7 +332,9 @@ def ql_flux_sat2(
     b2 is a pure constant and folds into cn. measure and 12/dlnpdr vary per
     run and do not, so they are kept; `dlnpdr` omitted drops that factor.
 
-    `flux_exponent` p returns cn*Q**p instead of cn*Q. SAT2's intensity is
+    `flux_exponent` p returns cn*Q**p instead of cn*Q. It defaults to the
+    jointly fitted CALIBRATION value, not to 1; pass 1.0 for SAT2's own
+    form. SAT2's intensity is
     quadratic in gamma, and on the GKW adiabatic scans that is too steep:
     with p = 1 the rule is beaten by predicting a constant, while p = 0.58
     takes the test median error from 61% to 13%. Note p acts on the SUMMED
@@ -378,14 +397,18 @@ def ql_flux_sat2(
         * cnorm
         * ((gamma_eff / denom) / (1.0 + _SAT2_AY * kx_hat**2)) ** 2
     )
-    q = jnp.sum(w * intensity * mask)
-    # branch-free: flux_exponent arrives traced when it comes from the TORAX
-    # plugin's rule_options, so `if flux_exponent == 1.0` is a tracer bool.
-    # sign-preserving, because a per-species particle flux is legitimately
-    # negative (inward pinch) and ql_flux_per_species needs the rule to stay
-    # linear in flux at exponent 1 for its decomposition to sum.
-    return cn * jnp.sign(q) * jnp.power(jnp.maximum(jnp.abs(q), eps),
-                                        flux_exponent)
+    # the exponent goes on the per-mode INTENSITY, not on the summed flux.
+    # on the sum it fits marginally better (joint test RMSE 29.6/18.5
+    # against 31.3/21.8) but it destroys linearity in the flux, and
+    # ql_flux_per_species then sums to 1.85x the species-summed call --
+    # which would silently corrupt Qe and Gamma_e on any kinetic run.
+    # branch-free throughout: flux_exponent arrives traced from the TORAX
+    # plugin's rule_options, so a Python comparison on it is a tracer bool.
+    # the where keeps a stable mode at EXACTLY zero: eps**p is not zero,
+    # and a gated-off mode must contribute nothing at any exponent
+    shaped = jnp.where(intensity > 0.0,
+                       jnp.power(jnp.maximum(intensity, eps), flux_exponent), 0.0)
+    return cn * jnp.sum(w * shaped * mask)
 
 
 RULES = {

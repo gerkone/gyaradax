@@ -218,8 +218,10 @@ class TestRuleSpecifics:
         spec = synthetic_spectrum()
         doubled = dict(spec)
         doubled["growth_rate"] = spec["growth_rate"] * 2.0
-        r_sat2 = float(call_rule(RULES["sat2"], doubled)) / float(
-            call_rule(RULES["sat2"], spec))
+        # at the CALIBRATED exponent sat2 is gamma^(2p); the quadratic form
+        # is what flux_exponent=1 selects, so test that explicitly
+        r_sat2 = float(call_rule(RULES["sat2"], doubled, flux_exponent=1.0)) / float(
+            call_rule(RULES["sat2"], spec, flux_exponent=1.0))
         r_can = float(call_rule(ql_flux, doubled)) / float(call_rule(ql_flux, spec))
         # the stability gate is not fully saturated at the smallest gamma, so
         # both ratios sit above their 4 and 2 asymptotes; how far depends on
@@ -253,7 +255,7 @@ class TestRuleSpecifics:
         """The eps floor must not turn a stable spectrum into a tiny flux."""
         spec = synthetic_spectrum()
         spec["growth_rate"] = jnp.full_like(spec["growth_rate"], -1.0)
-        for p in (1.0, 0.648):
+        for p in (1.0, 0.620):
             q = float(call_rule(RULES["sat2"], spec, flux_exponent=p))
             assert q == 0.0, f"flux_exponent={p} gave {q}"
 
@@ -409,11 +411,14 @@ class TestDlnpdr:
         assert dlnpdr_tglf(100.0, 50.0, adiabatic=True) == pytest.approx(18.0)
 
     def test_sat2_scales_with_the_normalization(self):
-        """cnorm = 12/dlnpdr enters SAT2 linearly."""
+        """cnorm = 12/dlnpdr enters the intensity linearly, so the flux
+        scales with it raised to flux_exponent."""
         spec = synthetic_spectrum()
-        q_off = float(call_rule(RULES["sat2"], spec))
-        q_on = float(RULES["sat2"](
-            spec["growth_rate"], spec["phi2"], spec["phi2_kxy"], spec["flux_kxy"],
-            spec["krho"], spec["kxrh"], spec["little_g"], spec["ds"], dlnpdr=6.0,
-        ))
-        assert q_on == pytest.approx(q_off * 12.0 / 6.0, rel=1e-10)
+        for p in (1.0, 0.620):
+            q_off = float(call_rule(RULES["sat2"], spec, flux_exponent=p))
+            q_on = float(RULES["sat2"](
+                spec["growth_rate"], spec["phi2"], spec["phi2_kxy"],
+                spec["flux_kxy"], spec["krho"], spec["kxrh"], spec["little_g"],
+                spec["ds"], dlnpdr=6.0, flux_exponent=p,
+            ))
+            assert q_on == pytest.approx(q_off * (12.0 / 6.0) ** p, rel=1e-10)
