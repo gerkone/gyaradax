@@ -73,7 +73,9 @@ def dlnpdr_tglf(rlt, rln, te_ti=1.0, adiabatic=False):
     rln_i = rln if adiabatic else rln[0]
     ti_te = 1.0 if adiabatic else 1.0 / te_ti
     num = (rln_i + rlt_e) + ti_te * (rln_i + rlt_i)
-    return min(max(num / (1.0 + ti_te), _DLNPDR_FLOOR), _DLNPDR_CUTOFF)
+    # jnp.clip, not min/max: this runs inside the plugin's vmap over radii,
+    # where rlt/rln/te_ti are tracers and Python comparisons fail
+    return jnp.clip(num / (1.0 + ti_te), _DLNPDR_FLOOR, _DLNPDR_CUTOFF)
 
 
 def _gated_gamma(growth_rate, gate_threshold, gate_sharpness):
