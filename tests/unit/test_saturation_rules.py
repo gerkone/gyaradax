@@ -227,6 +227,45 @@ class TestRuleSpecifics:
         assert 3.9 < r_sat2 < 4.5
         assert 1.9 < r_can < 2.2
 
+    def test_rules_trace_under_vmap_with_rule_options(self):
+        """The TORAX plugin vmaps the rule over radii and passes rule_options
+        as ordinary kwargs, so no rule may branch on one of their VALUES.
+        Every tracer bug that reached the ITER run got through because the
+        tests only ever called the rules directly."""
+        import inspect
+
+        import jax
+        from gyaradax.quasilinear.rules import ql_flux_sat2
+
+        sig = set(inspect.signature(ql_flux_sat2).parameters)
+        spec = {k: v for k, v in synthetic_spectrum().items() if k in sig}
+        base = dict(cn=1.0, dlnpdr=8.0, kthnorm=3.8, grad_r0=1.0, gq=0.83)
+
+        def one(p):
+            return ql_flux_sat2(flux_exponent=p, **base, **spec)
+
+        out = np.asarray(jax.vmap(one)(jnp.array([0.648, 1.0, 0.5])))
+        assert out.shape == (3,) and np.all(np.isfinite(out))
+        # differentiable in the exponent, which q**p alone is not at q = 0
+        assert np.isfinite(float(jax.grad(one)(0.648)))
+
+    def test_sat2_zero_flux_stays_exactly_zero(self):
+        """The eps floor must not turn a stable spectrum into a tiny flux."""
+        spec = synthetic_spectrum()
+        spec["growth_rate"] = jnp.full_like(spec["growth_rate"], -1.0)
+        for p in (1.0, 0.648):
+            q = float(call_rule(RULES["sat2"], spec, flux_exponent=p))
+            assert q == 0.0, f"flux_exponent={p} gave {q}"
+
+    def test_sat2_preserves_the_sign_of_the_flux(self):
+        """A per-species particle flux can be negative (inward pinch); the
+        exponent must not clip it, or ql_flux_per_species stops summing."""
+        spec = dict(synthetic_spectrum())
+        spec["flux_kxy"] = -spec["flux_kxy"]
+        for p in (1.0, 0.648):
+            q = float(call_rule(RULES["sat2"], spec, flux_exponent=p))
+            assert q < 0.0, f"flux_exponent={p} gave {q}, sign lost"
+
     def test_sat2_kperp_floor_no_blowup(self):
         spec = synthetic_spectrum()
         spec["phi2"] = jnp.zeros_like(spec["phi2"])
