@@ -257,7 +257,7 @@ def ql_flux_sat2(
     kthnorm=1.0,
     grad_r0=1.0,
     gq=1.0,
-    kx_width_model="measured",
+    kx_width_model="tglf",
     flux_exponent=1.0,
     gate_threshold=0.0,
     gate_sharpness=20.0,
@@ -318,8 +318,10 @@ def ql_flux_sat2(
     measure = 1.0 / kymax
 
     if kx_width_model == "tglf":
-        # TGLF's analytic model: flat below kycut, linear above. Use when no
-        # kx-resolved |phi|^2 is available; cn must be fitted for this mode.
+        # TGLF's analytic model, and the default. SAT2's kx_width is a
+        # SATURATION length fitted to nonlinear runs -- it is independent of
+        # ky below kycut, which no linear mode width can be -- so measuring
+        # it from the eigenmode is substituting a different quantity.
         kycut = _SAT2_B0 * kymax
         kx_width = jnp.where(
             ky < kycut,
@@ -327,8 +329,11 @@ def ql_flux_sat2(
             kycut / grad_r0 + _SAT2_B1 * (ky - kycut) * gq,
         )
     else:
-        # the measured kx width of |phi|^2(ky), which is what the full solve
-        # adds over TGLF's model
+        # NOT RECOMMENDED. The measured width of |phi|^2 over all kx is set
+        # by the chain comb, not by the mode: every theta0 chain is
+        # unit-normalised, so the width tracks the chain spacing ~shat*ky and
+        # runs down to 1e-7, which (kx_width*ky)^-2 turns into a blow-up.
+        # On adiabatic this gives test RMSE 1.8e9 against 166 for "tglf".
         p_kx = phi2_kxy / jnp.maximum(jnp.sum(phi2_kxy, axis=0, keepdims=True), eps)
         kx_bar = jnp.sum(kxrh[:, None] * p_kx, axis=0)
         sig2_kx = jnp.sum((kxrh[:, None] - kx_bar[None, :]) ** 2 * p_kx, axis=0)
