@@ -40,6 +40,12 @@ _SAT2_AY = 1.0
 # Lorentzian mixing kernel's cky; etg_stiff is 1 unless ETG_FACTOR < 0
 _SAT2_CZ2 = 1.05
 
+# TGLF's kymin floor, enabled there by ALPHA_ZF < 0. It stops the lowest ky
+# being picked as the gamma/ky peak, which on our 32-point ky grids is a
+# real pathology: defaulting it off cost a factor 5.3 on the kinetic set
+# (joint test RMSE 98.6 against 18.7) and 1.4 on adiabatic.
+_SAT2_KYMIN = 0.173 * 2.0**0.5
+
 # get_zonal_mixing caps the peak search at 0.8*grad_r0/rho_ion; rho_ion is 1
 # in gyaradax units and grad_r0 ~ 1 for the circular flux surface
 _SAT2_KYCUT = 0.8
@@ -95,10 +101,15 @@ def _ky_mask(krho, mask_zonal, eps):
     return jnp.ones_like(krho)
 
 
-def _safe_kperp2_eff(phi2, krho, kxrh, little_g, ds, eps):
-    """Eigenmode-weighted ⟨k⊥²⟩(ky) with the canonical geometric floor."""
-    k_perp2 = k_perp_squared(krho, kxrh, little_g)
-    kperp2_eff = k_perp_eff_squared(phi2, k_perp2, ds)
+def _safe_kperp2_eff(phi2, krho, kxrh, little_g, ds, eps, kperp2_eff=None):
+    """Eigenmode-weighted ⟨k⊥²⟩(ky) with the canonical geometric floor.
+
+    `kperp2_eff` supplied skips the internal all-chain average, which is
+    contaminated by the chain comb (it scales with ikxspace).
+    """
+    if kperp2_eff is None:
+        kperp2_eff = k_perp_eff_squared(
+            phi2, k_perp_squared(krho, kxrh, little_g), ds)
     g_zz_min = jnp.min(little_g[0])
     return jnp.maximum(kperp2_eff, jnp.maximum(krho**2 * g_zz_min, eps))
 
@@ -118,10 +129,12 @@ def ql_flux_sat0(
     gate_sharpness=20.0,
     eps=1e-30,
     mask_zonal=True,
+    kperp2_eff=None,
 ):
     """SAT0-style Waltz mixing rule: Q = C·Σ W·ky·(ĝ/⟨k⊥²⟩)²."""
     ghat = _gated_gamma(growth_rate, gate_threshold, gate_sharpness)
-    safe_kperp2 = _safe_kperp2_eff(phi2, krho, kxrh, little_g, ds, eps)
+    safe_kperp2 = _safe_kperp2_eff(phi2, krho, kxrh, little_g, ds, eps,
+                                   kperp2_eff=kperp2_eff)
     w = _w_ky(flux_kxy, phi2_kxy, eps)
     mask = _ky_mask(krho, mask_zonal, eps)
     intensity = (ghat / safe_kperp2) ** 2
@@ -255,7 +268,7 @@ def ql_flux_sat2(
     dlnpdr=None,
     kx0_e=0.0,
     etg_stiff=1.0,
-    kymin=0.0,
+    kymin=None,
     kthnorm=1.0,
     grad_r0=1.0,
     gq=1.0,
@@ -290,6 +303,11 @@ def ql_flux_sat2(
     sat_geo_factor is dropped -- it rescales TGLF's s-alpha-like model
     geometry onto the real flux surface, which the full solve already uses.
 
+    `kymin` defaults to TGLF's floor 0.173*sqrt(2)*grad_r0, which TGLF
+    itself enables with ALPHA_ZF < 0. Pass 0.0 to disable it. Our ky grids
+    are coarse enough that without it the gamma/ky peak lands on the lowest
+    ky and the rule degrades badly -- see the constant's definition.
+
     `kx0_e` is TGLF's ExB spectral shift and defaults to 0, which is what
     TGLF itself uses without rotation; it is NOT the eigenmode kx centroid,
     whose effect already sits inside kperp2_eff.
@@ -315,7 +333,8 @@ def ql_flux_sat2(
     # place by kthnorm (0.7-6.2 over our scans)
     ky = jnp.abs(krho) * kthnorm
 
-    kymax, vzf, jmax = _zonal_mixing(ky, ghat, eps, kymin=kymin)
+    ky_floor = _SAT2_KYMIN * grad_r0 if kymin is None else kymin
+    kymax, vzf, jmax = _zonal_mixing(ky, ghat, eps, kymin=ky_floor)
     gamma_eff = _gamma_kymix(ky, ghat, kymax, vzf, jmax, etg_stiff, eps)
     measure = 1.0 / kymax
 

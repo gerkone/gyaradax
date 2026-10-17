@@ -65,6 +65,7 @@ def ql_flux(
     eps=1e-30,
     mask_zonal=True,
     kx_ratio_sum=False,
+    kperp2_eff=None,
 ):
     """Compute Q_QL from a gyaradax linear-run end-state.
 
@@ -84,8 +85,12 @@ def ql_flux(
 
     Returns: scalar Q_QL.
     """
-    k_perp2 = k_perp_squared(krho, kxrh, little_g)
-    kperp2_eff = k_perp_eff_squared(phi2, k_perp2, ds)
+    if kperp2_eff is None:
+        # all-chain by default. every theta0 chain is unit-normalised, so
+        # this weights the large-kx chains equally with the physical
+        # theta0 = 0 mode and then scales with ikxspace; pass kperp2_eff
+        # from table_loader.kperp2_eff(chain0=True) to avoid that.
+        kperp2_eff = k_perp_eff_squared(phi2, k_perp_squared(krho, kxrh, little_g), ds)
 
     # geometric floor keeps γ/<k_⊥²> bounded for broad eigenmodes
     g_zz_min = jnp.min(little_g[0])
