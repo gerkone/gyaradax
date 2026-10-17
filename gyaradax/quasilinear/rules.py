@@ -360,9 +360,13 @@ def ql_flux_sat2(
         * ((gamma_eff / denom) / (1.0 + _SAT2_AY * kx_hat**2)) ** 2
     )
     q = jnp.sum(w * intensity * mask)
-    if flux_exponent == 1.0:
-        return cn * q
-    return cn * jnp.power(jnp.maximum(q, eps), flux_exponent)
+    # branch-free: flux_exponent arrives traced when it comes from the TORAX
+    # plugin's rule_options, so `if flux_exponent == 1.0` is a tracer bool.
+    # sign-preserving, because a per-species particle flux is legitimately
+    # negative (inward pinch) and ql_flux_per_species needs the rule to stay
+    # linear in flux at exponent 1 for its decomposition to sum.
+    return cn * jnp.sign(q) * jnp.power(jnp.maximum(jnp.abs(q), eps),
+                                        flux_exponent)
 
 
 RULES = {
