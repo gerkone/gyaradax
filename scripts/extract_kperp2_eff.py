@@ -29,6 +29,10 @@ def kperp2_eff_for(lin_path, q, shat, eps, nmod, nx, ns, geom_cache):
 
     krho = np.loadtxt(os.path.join(lin_path, "krho"), ndmin=2)
     kxrh = np.loadtxt(os.path.join(lin_path, "kxrh"), ndmin=2)
+    # GKW's krho file is k_theta*rho, but k_perp_squared pairs little_g with
+    # gyaradax's INTERNAL krho = k_theta*rho / kthnorm -- g_zz carries the
+    # kthnorm^2 itself. Feeding the file's axis straight in double-counts it
+    # by g_zz, which runs 0.5 to 38 over these scans.
     ky = krho[:, 0]                       # (nmod,), constant along x
     kx = kxrh[0, :]                       # (nx,), identical for every ky row
 
@@ -44,12 +48,14 @@ def kperp2_eff_for(lin_path, q, shat, eps, nmod, nx, ns, geom_cache):
                                         nky=nmod, nvpar=32, nmu=8, ikxspace=5,
                                         krhomax=float(np.nanmax(ky)), topology=topo)
         lg = np.asarray(g["little_g"])
-        geom_cache[key] = (lg if lg.shape[0] == 3 else lg.T)   # want (3, ns)
-    lg = geom_cache[key]
+        geom_cache[key] = ((lg if lg.shape[0] == 3 else lg.T),
+                           float(np.asarray(g["kthnorm"])))
+    lg, kthnorm = geom_cache[key]
+    ky_int = ky / kthnorm
 
     # k_perp^2(s,kx,ky) = ky^2 g_zz + 2 ky kx g_ez + kx^2 g_ee
-    kp2 = (ky[None, None, :] ** 2 * lg[0][:, None, None]
-           + 2.0 * ky[None, None, :] * kx[None, :, None] * lg[1][:, None, None]
+    kp2 = (ky_int[None, None, :] ** 2 * lg[0][:, None, None]
+           + 2.0 * ky_int[None, None, :] * kx[None, :, None] * lg[1][:, None, None]
            + kx[None, :, None] ** 2 * lg[2][:, None, None])
     norm = phi2.sum(axis=(0, 1))
     eff = np.where(norm > 0, (kp2 * phi2).sum(axis=(0, 1)) / np.maximum(norm, 1e-300), np.nan)

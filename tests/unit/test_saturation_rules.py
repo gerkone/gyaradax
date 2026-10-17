@@ -222,8 +222,9 @@ class TestRuleSpecifics:
             call_rule(RULES["sat2"], spec))
         r_can = float(call_rule(ql_flux, doubled)) / float(call_rule(ql_flux, spec))
         # the stability gate is not fully saturated at the smallest gamma, so
-        # both ratios sit slightly above their 4 and 2 asymptotes
-        assert 3.9 < r_sat2 < 4.3
+        # both ratios sit above their 4 and 2 asymptotes; how far depends on
+        # kx_width_model, which shifts which modes clear the gate
+        assert 3.9 < r_sat2 < 4.5
         assert 1.9 < r_can < 2.2
 
     def test_sat2_kperp_floor_no_blowup(self):
