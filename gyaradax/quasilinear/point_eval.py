@@ -281,13 +281,16 @@ def _linear_harvest(
 
 def _dlnpdr_from_params(params):
     """TGLF dlnpdr for the rules that want it; see rules.dlnpdr_tglf."""
+    # traced under the TORAX plugin's vmap over radii, so everything here
+    # stays in jnp: no np.asarray, no float(), no branching on a value.
+    # adiabatic_electrons and the array shapes are static, so they may.
     adiabatic = bool(params.adiabatic_electrons)
-    tmp = np.atleast_1d(np.asarray(params.tmp, dtype=float))
-    te_ti = 1.0 if adiabatic or tmp.size < 2 else float(tmp[1] / tmp[0])
-    rlt = float(params.rlt) if adiabatic else np.atleast_1d(
-        np.asarray(params.rlt, dtype=float))
-    rln = float(params.rln) if adiabatic else np.atleast_1d(
-        np.asarray(params.rln, dtype=float))
+    tmp = jnp.atleast_1d(jnp.asarray(params.tmp, dtype=jnp.float64))
+    te_ti = 1.0 if adiabatic or tmp.shape[0] < 2 else tmp[1] / tmp[0]
+    rlt = jnp.atleast_1d(jnp.asarray(params.rlt, dtype=jnp.float64))
+    rln = jnp.atleast_1d(jnp.asarray(params.rln, dtype=jnp.float64))
+    if adiabatic:
+        rlt, rln = rlt[0], rln[0]
     return dlnpdr_tglf(rlt, rln, te_ti=te_ti, adiabatic=adiabatic)
 
 
