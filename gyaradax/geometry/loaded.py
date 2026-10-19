@@ -107,10 +107,7 @@ class LoadedGKWGeometryModel:
             vpgr = vpgr[0]
         geometry["vpgr"] = jnp.array(vpgr, dtype=jnp.float64)
         geometry["vpgr_rms"] = jnp.array(float(np.sqrt(np.mean(vpgr**2))), dtype=jnp.float64)
-        if len(vpgr) > 1:
-            geometry["dvp"] = jnp.array(float(np.mean(np.diff(vpgr))), dtype=jnp.float64)
-        else:
-            geometry["dvp"] = jnp.array(1.0, dtype=jnp.float64)
+        geometry["dvp"] = float(np.mean(np.diff(vpgr))) if len(vpgr) > 1 else 1.0
 
         if os.path.exists(os.path.join(directory, "intmu.dat")):
             intmu = np.loadtxt(os.path.join(directory, "intmu.dat"))
@@ -133,10 +130,7 @@ class LoadedGKWGeometryModel:
         ints[0] = ints[1]
         geometry["ints"] = jnp.array(ints, dtype=jnp.float64)
         geometry["sgrid"] = jnp.array(sgrid, dtype=jnp.float64)
-        if len(sgrid) > 1:
-            geometry["sgr_dist"] = jnp.array(float(np.abs(sgrid[1] - sgrid[0])), dtype=jnp.float64)
-        else:
-            geometry["sgr_dist"] = jnp.array(1.0, dtype=jnp.float64)
+        geometry["sgr_dist"] = float(np.abs(sgrid[1] - sgrid[0])) if len(sgrid) > 1 else 1.0
 
         geometry["Rref"] = jnp.array(jnp.abs(geom["Rref"]), dtype=jnp.float64)
         _add_loaded_species_metadata(geometry, input_data)

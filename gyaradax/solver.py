@@ -508,7 +508,6 @@ def gkstep_single(
     return next_df, (phi, (z, z, substage_dt_est)), next_state
 
 
-@functools.partial(jax.jit, static_argnames=("n_steps", "return_dt_info"))
 def gksolve(
     df: jnp.ndarray,
     geometry: Dict[str, jnp.ndarray],
@@ -535,7 +534,24 @@ def gksolve(
     """
     if pre is None:
         pre = linear_precompute(geometry, params)
+    return _gksolve(
+        df, geometry, params, state, n_steps=n_steps, pre=pre, return_dt_info=return_dt_info
+    )
 
+
+@functools.partial(jax.jit, static_argnames=("n_steps", "return_dt_info"))
+def _gksolve(
+    df: jnp.ndarray,
+    geometry: Dict[str, jnp.ndarray],
+    params: GKParams,
+    state: GKState,
+    n_steps: int,
+    pre: GKPre,
+    return_dt_info: bool,
+) -> (
+    Tuple[jnp.ndarray, Tuple[jnp.ndarray, Any], GKState]
+    | Tuple[jnp.ndarray, Tuple[jnp.ndarray, Any], GKState, Dict[str, Any]]
+):
     # ensure multi-species arrays are present for downstream flux calculations
     if not params.adiabatic_electrons:
         geometry = dict(geometry)
