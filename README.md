@@ -54,18 +54,21 @@ prints the target architectures, jaxlib and CUDA toolkit versions, and whether c
 
 ## Structure
 
-- **`solver.py`**: RK4 integrator and the multi-step driver `gksolve`.
+- **`core/`**: Configuration and state pytrees (`params.py`, `state.py`), constants, JAX / XLA runtime setup.
+- **`operators/`**: Static coefficients (`precompute.py`: stencils, species terms, EM factors), FD stencils,
+  field solves (`poisson.py` phi, `ampere.py` A∥ / B∥, `fields.py` g↔f) and the Fokker-Planck collision operator.
 - **`backends/`**: Linear RHS (Terms I-XI) and nonlinear bracket, JAX and CUDA. See [CUDA build instructions](#cuda-backend).
-- **`fields.py`, `integrals.py`**: Field solves (phi, A∥, B∥) and flux integrals.
-- **`precompute.py`**: Static coefficients (stencils, species terms, EM factors).
-- **`cfl.py`**: Adaptive timestep.
-- **`collisions.py`**: Linearized Fokker-Planck collision operator.
+- **`solver/`**: RK4 integrator and `gksolve` (`rk4.py`), adaptive timestep (`cfl.py`), simulation runtime
+  (`driver.py`: `gk_init`, `gk_run`, `gksimulate`) and the linear eigenvalue solver (`eigenvalue.py`).
+- **`diagnostics/`**: Flux integrals (`fluxes.py`), spectra and growth rates (`diag.py`), telemetry, plotting.
+- **`io/`**: GKW runs (`gkw.py`: dumps, input.dat / geom.dat, YAML conversion) and run directories (`rundir.py`).
 - **`geometry/`**: Geometry models (circular, s-alpha, Miller, GKW geom.dat) and metric tensors.
+- **`quasilinear/`**: Quasilinear transport.
 - **`sharding.py`**: Multi-GPU velocity-space sharding.
-- **`simulate.py`, `cli.py`**: Simulation runtime and the `gyaradax` command.
-- **`eigenvalue.py`, `quasilinear/`**: Linear eigenvalue solver and quasilinear transport.
-- **`params.py`, `state.py`**: Configuration and state pytrees.
-- **`diag.py`, `plot_utils.py`**: Diagnostics and visualization.
+- **`cli.py`**: The `gyaradax` command.
+
+The pre-subpackage module paths (`gyaradax.params`, `gyaradax.simulate`, `gyaradax.integrals`,
+`gyaradax.utils`, ...) still import and resolve to the modules above.
 
 ## Running Simulations
 
@@ -124,7 +127,7 @@ the auto-detection table, multi-GPU guidance and every flag.
 ### Usage
 #### Run a simulation
 ```python
-from gyaradax.simulate import gk_from_config, gksimulate
+from gyaradax.solver.driver import gk_from_config, gksimulate
 
 # load yaml and run with IO/checkpointing
 df, geometry, params, state, pre = gk_from_config("configs/my_sim.yaml")
@@ -137,7 +140,7 @@ df, phi, fluxes, state = gksimulate(
 #### Resume from GKW checkpoints
 `gyaradax` can resume from GKW binary `K` files. The simplest way is `gk_from_gkw_dir`, which loads geometry, params, and the last K-file automatically:
 ```python
-from gyaradax.simulate import gk_from_gkw_dir, gksimulate
+from gyaradax.solver.driver import gk_from_gkw_dir, gksimulate
 
 # loads input.dat, geometry, and resumes from the last K-file
 df, geometry, params, state, pre = gk_from_gkw_dir("/path/to/gkw/run/")

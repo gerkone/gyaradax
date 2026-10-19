@@ -1,6 +1,6 @@
 """Tests for the eigenvalue formulation of the linear solve (issue #5).
 
-Validates that gyaradax/eigenvalue.py finds eigenvalues of the EXACT same
+Validates that gyaradax/solver/eigenvalue.py finds eigenvalues of the EXACT same
 operator the IVP (gksolve) integrates, for ES (adiabatic + kinetic), EM
 (apar, apar+bpar) and collisional cases.  JAX backend only; GPU required
 (same as the rest of the suite).
@@ -23,16 +23,16 @@ import numpy as np
 import pytest
 
 from gyaradax.backends import create_ops
-from gyaradax.cfl import estimate_linear_timestep
-from gyaradax.eigenvalue import (
+from gyaradax.solver.cfl import estimate_linear_timestep
+from gyaradax.solver.eigenvalue import (
     _build_rhs_matvec,
     eigensolve_linear,
 )
-from gyaradax.fields import _compute_fields
+from gyaradax.operators.fields import _compute_fields
 from gyaradax.geometry import compute_geometry, compute_geometry_from_input
-from gyaradax.params import GKParams, gkparams_from_input_and_geometry
-from gyaradax.precompute import linear_precompute
-from gyaradax.solver import default_state, gkstep_single, gksolve, init_f
+from gyaradax.core.params import GKParams, gkparams_from_input_and_geometry
+from gyaradax.operators.precompute import linear_precompute
+from gyaradax.solver.rk4 import default_state, gkstep_single, gksolve, init_f
 
 # ── case setups ──────────────────────────────────────────────────────────────
 
@@ -311,7 +311,9 @@ class TestEMAparBpar:
 
 class TestCollisions:
     def test_dominant_matches_ivp(self):
-        geom, params, nsp = _es_adiabatic_case(collisions=True, coll_freq=0.1)
+        geom, params, nsp = _es_adiabatic_case(
+            collisions=True, coll_freq=0.1, coll_freq_override=True, coll_mass_conserve=True
+        )
         assert params.collisions and params.coll_freq > 0
         pre, gamma, lam, eigvals, _ = _run_case(geom, params, nsp, iky=1)
         _assert_eig_matches_ivp(eigvals[0], gamma[1], lam[1])
@@ -330,7 +332,9 @@ class TestCollisions:
             n_steps_per_matvec=25,
             ky_select=1,
         )
-        geom_c, params_c, _ = _es_adiabatic_case(collisions=True, coll_freq=0.5)
+        geom_c, params_c, _ = _es_adiabatic_case(
+            collisions=True, coll_freq=0.5, coll_freq_override=True, coll_mass_conserve=True
+        )
         pre_c = linear_precompute(geom_c, params_c)
         ev1, _ = eigensolve_linear(
             geom_c,

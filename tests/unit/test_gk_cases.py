@@ -13,12 +13,12 @@ from dataclasses import replace
 from conftest import ALL_BACKENDS  # type: ignore[import-not-found]
 
 from gyaradax.geometry import compute_geometry, compute_geometry_from_input
-from gyaradax.params import gkparams_from_input_and_geometry
-from gyaradax.params import GKParams
-from gyaradax.precompute import linear_precompute
-from gyaradax.solver import init_f, default_state
-from gyaradax.simulate import gk_run
-from gyaradax.integrals import calculate_phi
+from gyaradax.core.params import gkparams_from_input_and_geometry
+from gyaradax.core.params import GKParams
+from gyaradax.operators.precompute import linear_precompute
+from gyaradax.solver.rk4 import init_f, default_state
+from gyaradax.solver.driver import gk_run
+from gyaradax.operators.poisson import calculate_phi
 
 
 GKW_CASES_DIR = os.path.join(os.path.dirname(__file__), "..", "data", "gkw_cases")
@@ -102,8 +102,8 @@ def test_adiabat_collisions_weak_1step_parity():
     With normalization disabled in both codes the comparison is a clean
     stencil-for-stencil match.
     """
-    from gyaradax.utils import load_gkw_dump
-    from gyaradax.params import gkparams_from_input_and_geometry
+    from gyaradax.io.gkw import load_gkw_dump
+    from gyaradax.core.params import gkparams_from_input_and_geometry
 
     case_dir = os.path.join(GKW_CASES_DIR, "adiabat_collisions_weak_1step")
     input_dat = os.path.join(case_dir, "input.dat")
@@ -140,6 +140,38 @@ def test_adiabat_collisions_weak_1step_parity():
     den = np.linalg.norm(df_gkw_np.ravel())
     rel_l2 = num / den
     assert rel_l2 < 1e-4, f"1-step rel L2 error {rel_l2:.4e} > 1e-4"
+
+
+@pytest.mark.parametrize("case", ["coll", "coll_mc"])
+def test_kinetic_collisions_1step_parity(case):
+    """Collision increment of one step matches GKW for ions and kinetic electrons.
+
+    Two kinetic species with Te != Ti, all three terms, freq_override=False
+    (rref, nref, tref), mass_conserve off ("coll") and on ("coll_mc"). The
+    increment is the 1-step df with collisions minus the one without, so the
+    baseline operator cancels and only the collision operator is compared.
+    """
+    from gyaradax.io.gkw import load_gkw_dump
+    from gyaradax.solver.driver import gk_init
+
+    root = os.path.join(GKW_CASES_DIR, "kinetic_collisions_1step")
+    res = (16, 8, 16, 1, 1)
+    out = {}
+    for name in ("nocoll", case):
+        input_dat = os.path.join(root, name, "input.dat")
+        geom = compute_geometry_from_input(input_dat)
+        params = gkparams_from_input_and_geometry(input_dat, geom)
+        params = replace(params, non_linear=False, naverage=10**7, mixed_precision=False)
+        df0, geom, state = gk_init(geom, params, n_species=2)
+        pre = linear_precompute(geom, params)
+        df, _, _, _ = gk_run(df0, geom, params, state, 1, pre=pre)
+        gkw, _ = load_gkw_dump(os.path.join(root, name, "FDS"), res, n_species=2)
+        out[name] = (np.asarray(df), np.asarray(gkw))
+    d_gy = out[case][0] - out["nocoll"][0]
+    d_gkw = out[case][1] - out["nocoll"][1]
+    for sp in range(2):
+        rel = np.linalg.norm(d_gy[sp] - d_gkw[sp]) / np.linalg.norm(d_gkw[sp])
+        assert rel < 1e-6, f"species {sp}: collision increment rel L2 {rel:.3e}"
 
 
 @pytest.mark.parametrize("backend, use_z2z, mixed_precision", ALL_BACKENDS)

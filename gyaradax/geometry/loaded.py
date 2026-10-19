@@ -1,7 +1,7 @@
 """Loaded/reference GKW geometry model.
 
 This module contains the file-backed geometry construction used by
-``gyaradax.utils.load_geometry``.  It intentionally reads GKW reference/output
+``gyaradax.io.gkw.load_geometry``.  It intentionally reads GKW reference/output
 files directly and does not route through analytic ``compute_geometry``.
 """
 
@@ -14,12 +14,12 @@ import jax.numpy as jnp
 import numpy as np
 
 from gyaradax.geometry.topology import (
+    connection_flip,
     _build_mode_connectivity,
     _build_parallel_shift_maps,
     _build_pos_par_grid_classes,
 )
-from gyaradax.gkw_input import as_int, species_blocks
-from gyaradax.utils import load_geom_dat_file, parse_input_dat
+from gyaradax.io.gkw import as_int, load_geom_dat_file, parse_input_dat, species_blocks
 
 
 def _add_loaded_species_metadata(geometry: dict[str, Any], input_data: dict[str, Any]) -> None:
@@ -135,7 +135,10 @@ class LoadedGKWGeometryModel:
         geometry["Rref"] = jnp.array(jnp.abs(geom["Rref"]), dtype=jnp.float64)
         _add_loaded_species_metadata(geometry, input_data)
         geometry["d2X"] = jnp.array(1.0, dtype=jnp.float64)
-        geometry["signB"] = jnp.array(1.0, dtype=jnp.float64)
+        geom_nml = input_data.get("geom", {})
+        sign_b = float(geom_nml.get("signb", 1.0))
+        sign_j = float(geom_nml.get("signj", 1.0))
+        geometry["signB"] = jnp.array(sign_b, dtype=jnp.float64)
 
         geometry["bn"] = jnp.array(geom["bn"], dtype=jnp.float64)
         geometry["ffun"] = jnp.array(geom["F"], dtype=jnp.float64)
@@ -171,8 +174,11 @@ class LoadedGKWGeometryModel:
         mode_label_path = os.path.join(directory, "mode_label")
         if os.path.exists(mode_label_path):
             mode_label = np.atleast_1d(np.loadtxt(mode_label_path))
+            flip = connection_flip(
+                geom_nml.get("q", 1.0), geom_nml.get("shat", 1.0), geom_nml.get("eps", 1.0), sign_b, sign_j
+            )
             mode_label_kxky, ixplus, ixminus, ixzero, iyzero, iyzero_bc = _build_mode_connectivity(
-                mode_label, kxrh, np.asarray(geometry["krho"])
+                mode_label, kxrh, np.asarray(geometry["krho"]), flip=flip
             )
             pos_classes = _build_pos_par_grid_classes(ixplus, ixminus, len(sgrid))
             s_shift, kx_shift, valid_shift = _build_parallel_shift_maps(

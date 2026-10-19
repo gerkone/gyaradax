@@ -30,6 +30,7 @@ from gyaradax.geometry.spec import (
 )
 from gyaradax.geometry.tensors import _calc_geom_tensors
 from gyaradax.geometry.topology import (
+    connection_flip,
     _build_mode_connectivity,
     _build_parallel_shift_maps,
     _build_pos_par_grid_classes,
@@ -67,6 +68,7 @@ def compute_geometry(
     krhomax: float = 1.4,
     ikxspace: int = 5,
     signB: float = 1.0,
+    signJ: float = 1.0,
     Rref: float = 100.0,
     geom_type: str = "circ",
     **miller_params: Any,
@@ -99,6 +101,7 @@ def compute_geometry(
         krhomax=krhomax,
         ikxspace=ikxspace,
         signB=signB,
+        signJ=signJ,
         Rref=Rref,
         geom_type=geom_type,
         **miller_params,
@@ -135,9 +138,9 @@ def _compute_geometry_impl(
     krhomax = spec.krhomax
     ikxspace = spec.ikxspace
     signB = spec.signB
+    signJ = spec.signJ
     miller_params = dict(spec.model_params)
 
-    signJ = 1.0
     sgrid = _parallel_grid(ns, nperiod)
 
     cg = model.continuous_geometry(
@@ -181,17 +184,19 @@ def _compute_geometry_impl(
         kxrh_np = np.asarray(jax.lax.stop_gradient(kxrh))
         krho_np = np.asarray(jax.lax.stop_gradient(krho))
         nkx_actual = len(kxrh_np)
+        flip = connection_flip(*(np.asarray(jax.lax.stop_gradient(v)) for v in (q, shat, eps)), signB, signJ)
         ml = _build_mode_label(nkx_actual, nky, ikxspace, nperiod)
-        ml_kxky, ixp, ixm, ixz, iyz, iyz_bc = _build_mode_connectivity(ml, kxrh_np, krho_np)
+        ml_kxky, ixp, ixm, ixz, iyz, iyz_bc = _build_mode_connectivity(ml, kxrh_np, krho_np, flip=flip)
         pos = _build_pos_par_grid_classes(ixp, ixm, ns)
         ss, ks, vs = _build_parallel_shift_maps(ixp, ixm, iyz_bc, ns, max_shift=4)
     else:
         # prebuilt topology (jit/AD-safe path; see build_topology)
-        ml_kxky = topology["mode_label"]
-        ixp, ixm = topology["ixplus"], topology["ixminus"]
-        ixz, iyz = topology["ixzero"], topology["iyzero"]
-        pos = topology["pos_par_grid_class"]
-        ss, ks, vs = topology["s_shift"], topology["kx_shift"], topology["valid_shift"]
+        topo = _oriented_topology(topology, q, shat, eps, signB, signJ)
+        ml_kxky = topo["mode_label"]
+        ixp, ixm = topo["ixplus"], topo["ixminus"]
+        ixz, iyz = topo["ixzero"], topo["iyzero"]
+        pos = topo["pos_par_grid_class"]
+        ss, ks, vs = topo["s_shift"], topo["kx_shift"], topo["valid_shift"]
 
     return assemble_geometry_dict(
         spec=spec,
@@ -221,15 +226,44 @@ register_circular_geometry_models(_compute_geometry_impl)
 register_miller_geometry_model(_compute_geometry_impl)
 
 
-def build_topology(nkx, nky, ikxspace, ns, max_shift=4, nperiod=1):
+_FLIP_KEYS = ("ixplus", "ixminus", "pos_par_grid_class", "s_shift", "kx_shift", "valid_shift")
+
+
+def _oriented_topology(topology, q, shat, eps, signB, signJ):
+    """The prebuilt topology for the field-line direction of (q, shat, eps), traced or not."""
+    try:
+        flip = connection_flip(q, shat, eps, signB, signJ)
+    except (TypeError, jax.errors.ConcretizationTypeError, jax.errors.TracerBoolConversionError):
+        flip = None
+    if topology.get("flip") is not None:
+        if flip is not None and bool(topology["flip"]) != flip:
+            raise ValueError(
+                "prebuilt topology has flip=%s but signB*signJ*q*shat/eps gives flip=%s; "
+                "build it with build_topology(..., flip=None) or flip=connection_flip(...)"
+                % (topology["flip"], flip)
+            )
+        return topology
+    if flip is not None:
+        return {**topology, **topology["flipped"]} if flip else topology
+    # traced (q, shat, eps): pick the orientation per call
+    flip_t = signB * signJ * jnp.sign(q * shat * eps) < 0
+    return {
+        **topology,
+        **{k: jnp.where(flip_t, topology["flipped"][k], topology[k]) for k in _FLIP_KEYS},
+    }
+
+
+def build_topology(nkx, nky, ikxspace, ns, max_shift=4, nperiod=1, flip=None):
     """Build the discrete-topology pytree for a (nkx, nky, ikxspace, ns) grid.
 
-    Topology depends only on grid shape and nperiod, not on (q, shat, eps,
-    miller): the twist-shift stride is an integer number of kx cells by
-    construction, since the radial grid spacing is defined as the one-turn
-    shift divided by ikxspace. The centered kx grid puts zero at index
-    (nkx-1)//2 and the ky grid starts at zero, so ixzero/iyzero follow from
-    the shape alone.
+    Topology depends only on grid shape, nperiod and the direction of the field
+    line in kx (``flip``, see ``connection_flip``: the sign of signB signJ q shat;
+    ``None`` keeps both orientations and picks one from (q, shat, eps) at use, also when traced),
+    not on the values of (q, shat, eps, miller): the twist-shift stride is an
+    integer number of kx cells by construction, since the radial grid spacing is
+    defined as the one-turn shift divided by ikxspace. The centered kx grid puts
+    zero at index (nkx-1)//2 and the ky grid starts at zero, so ixzero/iyzero
+    follow from the shape alone.
 
     Returns a dict of jnp.int32/bool/int8 arrays plus concrete python ints.
     Safe to close over inside ``@jax.jit``.
@@ -241,25 +275,35 @@ def build_topology(nkx, nky, ikxspace, ns, max_shift=4, nperiod=1):
     nkx_actual = kxrh_surrogate.shape[0]
 
     ml = _build_mode_label(nkx_actual, nky, ikxspace, nperiod)
-    ml_kxky, ixp, ixm, ixz, iyz, iyz_bc = _build_mode_connectivity(
-        ml, kxrh_surrogate, krho_surrogate
-    )
-    pos = _build_pos_par_grid_classes(ixp, ixm, ns)
-    ss, ks, vs = _build_parallel_shift_maps(ixp, ixm, iyz_bc, ns, max_shift=max_shift)
 
-    return {
-        "mode_label": _i32(ml_kxky),
-        "ixplus": _i32(ixp),
-        "ixminus": _i32(ixm),
-        "ixzero": _i32(ixz),
-        "iyzero": _i32(iyz),
-        "iyzero_bc": int(iyz_bc),
-        "pos_par_grid_class": jnp.array(pos, dtype=jnp.int8),
-        "s_shift": _i32(ss),
-        "kx_shift": _i32(ks),
-        "valid_shift": jnp.array(vs, dtype=jnp.bool_),
-        "nkx_actual": int(nkx_actual),
-    }
+    def oriented(f):
+        ml_kxky, ixp, ixm, ixz, iyz, iyz_bc = _build_mode_connectivity(
+            ml, kxrh_surrogate, krho_surrogate, flip=f
+        )
+        pos = _build_pos_par_grid_classes(ixp, ixm, ns)
+        ss, ks, vs = _build_parallel_shift_maps(ixp, ixm, iyz_bc, ns, max_shift=max_shift)
+        return {
+            "mode_label": _i32(ml_kxky),
+            "ixplus": _i32(ixp),
+            "ixminus": _i32(ixm),
+            "ixzero": _i32(ixz),
+            "iyzero": _i32(iyz),
+            "iyzero_bc": int(iyz_bc),
+            "pos_par_grid_class": jnp.array(pos, dtype=jnp.int8),
+            "s_shift": _i32(ss),
+            "kx_shift": _i32(ks),
+            "valid_shift": jnp.array(vs, dtype=jnp.bool_),
+            "nkx_actual": int(nkx_actual),
+            "flip": bool(f),
+        }
+
+    if flip is not None:
+        return oriented(flip)
+    topology = oriented(False)
+    flipped = oriented(True)
+    topology["flip"] = None
+    topology["flipped"] = {k: flipped[k] for k in _FLIP_KEYS}
+    return topology
 
 
 def compute_continuous_geometry(
@@ -327,7 +371,7 @@ def geometry_spec_from_input_dat(input_dat_path: str) -> GeometrySpec:
     Preserves the historical ``compute_geometry_from_input`` defaults,
     including absent ``geom_type`` -> ``s-alpha``.
     """
-    from gyaradax.utils import parse_input_dat
+    from gyaradax.io.gkw import parse_input_dat
 
     inp = parse_input_dat(input_dat_path)
     geom_sec = inp.get("geom", {})
@@ -398,6 +442,8 @@ def geometry_spec_from_input_dat(input_dat_path: str) -> GeometrySpec:
         kxmax=kxmax,
         krhomax=krhomax,
         ikxspace=ikxspace,
+        signB=float(geom_sec.get("signb", 1.0)),
+        signJ=float(geom_sec.get("signj", 1.0)),
         geom_type=geom_type,
         **miller_params,
     )
@@ -427,7 +473,7 @@ def geometry_from_geom_dat_and_input(input_dat_path: str) -> Dict[str, Any]:
     Use this for geometry types not supported by the analytic models
     (e.g. slab_periodic) when reference/geom.dat is available.
     """
-    from gyaradax.utils import parse_input_dat, load_geom_dat_file
+    from gyaradax.io.gkw import parse_input_dat, load_geom_dat_file
 
     data_dir = os.path.dirname(input_dat_path)
     ref_dir = os.path.join(data_dir, "reference")
@@ -453,7 +499,8 @@ def geometry_from_geom_dat_and_input(input_dat_path: str) -> Dict[str, Any]:
     nperiod = int(grid_sec.get("nperiod", 1))
     krhomax = float(mode_sec.get("krhomax", 1.4))
     ikxspace = int(mode_sec.get("ikxspace", 5))
-    signB = 1.0
+    signB = float(geom_sec.get("signb", 1.0))
+    signJ = float(geom_sec.get("signj", 1.0))
     Rref = 100.0
 
     kxrh_path = os.path.join(data_dir, "kxrh")
@@ -479,7 +526,9 @@ def geometry_from_geom_dat_and_input(input_dat_path: str) -> Dict[str, Any]:
 
     nkx_actual = len(kxrh)
     ml = _build_mode_label(nkx_actual, nky, ikxspace, nperiod)
-    ml_kxky, ixp, ixm, ixz, iyz, iyz_bc = _build_mode_connectivity(ml, kxrh, krho)
+    ml_kxky, ixp, ixm, ixz, iyz, iyz_bc = _build_mode_connectivity(
+        ml, kxrh, krho, flip=connection_flip(q, shat, eps, signB, signJ)
+    )
     pos = _build_pos_par_grid_classes(ixp, ixm, ns)
     ss, ks, vs = _build_parallel_shift_maps(ixp, ixm, iyz_bc, ns, max_shift=4)
 
@@ -492,7 +541,8 @@ def geometry_from_geom_dat_and_input(input_dat_path: str) -> Dict[str, Any]:
 
     g_zz = np.asarray(gd.get("g_zeta_zeta", np.ones(ns)))
     g_ez = np.asarray(gd.get("g_eps_zeta", np.zeros(ns)))
-    little_g = np.stack([g_zz, g_ez, np.ones(ns)], axis=-1)
+    g_ee = np.asarray(gd.get("g_eps_eps", np.ones(ns)))
+    little_g = np.stack([g_zz, g_ez, g_ee], axis=-1)
 
     d_eps = np.asarray(gd.get("D_eps", np.zeros(ns)))
     d_zeta = np.asarray(gd.get("D_zeta", np.zeros(ns)))

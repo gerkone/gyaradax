@@ -61,6 +61,10 @@ _PARITY_CONFIGS = [
 ]
 
 
+# s-alpha keys that now follow gkw's finite_epsilon = .false. branch (numerical G, H without
+# 1 / B, R = 1); checked against gkw in tests/unit/test_gkw_geometry_parity.py
+_SALPHA_GKW_KEYS = frozenset({"gfun", "hfun", "ifun", "rfun", "jfun", "kfun"})
+
 # deliberately diverged from the snapshot; see test_parity_with_pre_refactor
 _CONNECTIVITY_KEYS = frozenset(
     {"mode_label", "ixplus", "ixminus", "pos_par_grid_class",
@@ -91,7 +95,7 @@ def test_parity_with_pre_refactor(geom_type, q, shat, eps, ns, nkx, nky, ikxspac
     # (New keys may be added; we don't check those.)
     for k in old:
         assert k in new, f"key {k!r} present in OLD but missing in NEW"
-        if k in _CONNECTIVITY_KEYS:
+        if k in _CONNECTIVITY_KEYS or (geom_type == "s-alpha" and k in _SALPHA_GKW_KEYS):
             continue
         a = np.asarray(old[k]); b = np.asarray(new[k])
         if np.issubdtype(a.dtype, np.floating):
@@ -142,3 +146,18 @@ def test_compute_continuous_geometry_is_jit_able():
             assert np.allclose(a, b, atol=1e-12), f"jit mismatch on key {k}"
         else:
             assert np.array_equal(a, b), f"jit mismatch (int/bool) on key {k}"
+
+
+@pytest.mark.parametrize("shat", [0.8, -0.8])
+def test_prebuilt_topology_follows_traced_shear(shat):
+    """Under jit, a both-orientation topology connects kx as the concrete topology=None path does."""
+    ns, nkx, nky, ikxspace = 16, 43, 16, 5
+    topo = build_topology(nkx, nky, ikxspace, ns)
+    kw = dict(ns=ns, nkx=nkx, nky=nky, nvpar=16, nmu=4, vpar_max=3.0, nperiod=1, kxmax=1.0,
+              krhomax=1.4, ikxspace=ikxspace, signB=1.0, Rref=100.0, geom_type="circ")
+    ref = compute_continuous_geometry(q=1.4, shat=shat, eps=0.18, **kw)
+    got = jax.jit(lambda s: compute_continuous_geometry(q=1.4, shat=s, eps=0.18, topology=topo, **kw))(
+        jnp.array(shat)
+    )
+    for k in ("ixplus", "ixminus", "pos_par_grid_class", "s_shift", "kx_shift", "valid_shift"):
+        assert np.array_equal(np.asarray(got[k]), np.asarray(ref[k])), k

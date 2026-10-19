@@ -12,13 +12,18 @@ import jax
 import jax.numpy as jnp
 from jax.sharding import PartitionSpec
 
+import gyaradax.operators.stencils as stencils
 import gyaradax.sharding as sharding
-import gyaradax.stencils as stencils
 from gyaradax.backends.ops import SolverOps, em_chi_correction
-from gyaradax.collisions import CONSERVATION_KEYS, collision_term, collisions_on
-from gyaradax.params import GKParams
-from gyaradax.state import GKPre
-from gyaradax.utils import pack_half_spectrum, unpack_half_spectrum
+from gyaradax.core.params import GKParams
+from gyaradax.core.state import GKPre
+from gyaradax.operators.collisions import (
+    CONSERVATION_KEYS,
+    STENCIL_KEYS,
+    collision_term,
+    collisions_on,
+)
+from gyaradax.operators.precompute import pack_half_spectrum, unpack_half_spectrum
 
 
 # budget for one full-batch real-space bracket intermediate before the bracket is looped
@@ -552,7 +557,7 @@ class JAXOps(SolverOps):
                 sp_arrays["bpar_chi_factor"] = pre["bpar_chi_factor"]
             # per-species collision stencil shape (nsp, 9, nv, nmu, ns); axis 0 mapped
             if collisions_on(params, pre):
-                for key in ("coll_stencil", *CONSERVATION_KEYS):
+                for key in (*STENCIL_KEYS, *CONSERVATION_KEYS):
                     if key in pre:
                         sp_arrays[key] = pre[key]
             sp_in_axes = {k: 0 for k in sp_arrays}

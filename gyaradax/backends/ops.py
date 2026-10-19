@@ -9,8 +9,8 @@ from typing import Dict
 
 import jax.numpy as jnp
 
-from gyaradax.fields import _compute_fields, g_to_f
-from gyaradax.state import GKPre
+from gyaradax.core.state import GKPre
+from gyaradax.operators.fields import _compute_fields, g_to_f
 
 
 def em_chi_correction(ndim: int, pre, apar=None, bpar=None):

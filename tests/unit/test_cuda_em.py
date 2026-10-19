@@ -15,9 +15,9 @@ import pytest
 from conftest import HAS_CUDA, noisy_case, rel_l2  # type: ignore[import-not-found]
 
 from gyaradax.backends import create_ops
-from gyaradax.fields import _compute_fields, g_to_f
-from gyaradax.precompute import linear_precompute
-from gyaradax.solver import gksolve
+from gyaradax.operators.fields import _compute_fields, g_to_f
+from gyaradax.operators.precompute import linear_precompute
+from gyaradax.solver.rk4 import gksolve
 
 pytestmark = pytest.mark.skipif(not HAS_CUDA, reason="CUDA not available")
 
@@ -30,6 +30,9 @@ TILED_GRID = dict(nvpar=8, nmu=2, ns=32, nkx=11, nky=40)
 NKY23_GRID = dict(SMALL_GRID, nky=23)
 GRIDS = {"small": SMALL_GRID, "pow2": POW2_GRID, "tiled": TILED_GRID, "nky23": NKY23_GRID}
 
+# freq_override collisions with zero-flux velocity boundaries
+_OLD_COLL = dict(coll_freq=0.05, coll_freq_override=True, coll_mass_conserve=True)
+
 CASES = {
     "kinetic_es": ("nl_em_waltz_b01.yaml", dict(nlapar=False, beta=0.0)),
     "kinetic_apar": ("nl_em_waltz_b01.yaml", dict()),
@@ -38,11 +41,11 @@ CASES = {
     "kinetic_apar_dpc": ("nl_em_waltz_b01.yaml", dict(disp_par_conserve=1)),
     "kinetic_apar_dpc3": ("nl_em_waltz_b01.yaml", dict(disp_par_conserve=3)),
     "adiabatic_apar": ("iteration_13.yaml", dict(non_linear=True, nlapar=True, beta=0.002)),
-    "adiabatic_collisions": ("iteration_13.yaml", dict(collisions=True, coll_freq=0.05)),
+    "adiabatic_collisions": ("iteration_13.yaml", dict(collisions=True, **_OLD_COLL)),
     "adiabatic_collisions_cons": (
         "iteration_13.yaml",
         dict(
-            collisions=True, coll_freq=0.05, coll_mom_conservation=True, coll_ene_conservation=True
+            collisions=True, **_OLD_COLL, coll_mom_conservation=True, coll_ene_conservation=True
         ),
     ),
 }

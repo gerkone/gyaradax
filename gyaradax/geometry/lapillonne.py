@@ -127,7 +127,15 @@ def _circular_geometry(theta, q, shat, eps, signB=1.0, signJ=1.0, geom_type="cir
         dRdpsi, dRds = _psi_theta_to_psi_s(jnp.cos(theta), -eps * jnp.sin(theta), theta, eps)
         dZdpsi, dZds = _psi_theta_to_psi_s(jnp.sin(theta), eps * jnp.cos(theta), theta, eps)
 
-    gfun = ffun * dBds / bn if finite_epsilon else ffun * bn * dBds
+    if finite_epsilon:
+        gfun = ffun * dBds / bn
+    elif ns > 1:
+        # gkw logbderiv: fourth-order periodic derivative of B along s, not the analytic one
+        ds = theta[1] / (2 * jnp.pi) - theta[0] / (2 * jnp.pi)
+        dbn = (jnp.roll(bn, 2) - 8 * jnp.roll(bn, 1) + 8 * jnp.roll(bn, -1) - jnp.roll(bn, -2)) / (12 * ds)
+        gfun = ffun * dbn / bn
+    else:
+        gfun = jnp.zeros(ns)
 
     return {
         "bn": bn,

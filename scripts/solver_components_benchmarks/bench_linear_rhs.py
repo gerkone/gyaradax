@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """C3: linear_rhs — full linear operator (all terms, all species).
 
-Architecture: solver.py delegates full implementation and shape dispatch (5D/6D)
+Architecture: solver/rk4.py delegates full implementation and shape dispatch (5D/6D)
 to backend. Backend (JAX/CUDA) handles Terms I, II, IV, V, VII, VIII + dissipation.
 """
 
@@ -17,7 +17,7 @@ _early, _ = _p.parse_known_args()
 configure_runtime_env(device=_early.device)
 
 import jax
-from gyaradax.jax_config import enable_x64
+from gyaradax.core.jax_config import enable_x64
 
 enable_x64()
 

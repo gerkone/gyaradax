@@ -12,7 +12,7 @@ from typing import Any
 import pytest
 
 from gyaradax.backends._jax import JAXOps
-from gyaradax.state import GKPre
+from gyaradax.core.state import GKPre
 
 
 def _fail_cuda_import() -> None:

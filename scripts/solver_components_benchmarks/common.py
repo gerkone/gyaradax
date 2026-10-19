@@ -81,11 +81,11 @@ def load_setup(config_path: str = "configs/iteration_13.yaml", mixed_precision: 
     pre  : GKPre  (linear_precompute output)
     """
     from gyaradax import load_config, load_geometry
-    from gyaradax.params import gkparams_from_config
+    from gyaradax.core.params import gkparams_from_config
     from gyaradax.geometry import compute_geometry_from_config
-    from gyaradax.fields import _compute_phi
-    from gyaradax.precompute import linear_precompute
-    from gyaradax.utils import load_gkw_k_dump, read_gkw_dump_time, K_files
+    from gyaradax.operators.fields import _compute_phi
+    from gyaradax.operators.precompute import linear_precompute
+    from gyaradax.io.gkw import load_gkw_k_dump, read_gkw_dump_time, K_files
 
     cfg = load_config(config_path)
     params = gkparams_from_config(cfg, mixed_precision=mixed_precision)
@@ -112,7 +112,7 @@ def load_setup(config_path: str = "configs/iteration_13.yaml", mixed_precision: 
         df = load_gkw_k_dump(k_path, shape, n_species=n_species)
         read_gkw_dump_time(k_path + ".dat") if os.path.exists(k_path + ".dat") else 0.0
     else:
-        from gyaradax.simulate import gk_init
+        from gyaradax.solver.driver import gk_init
 
         df, geom, _ = gk_init(geom, params, n_species=n_species)
 

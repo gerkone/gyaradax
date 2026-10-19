@@ -45,20 +45,20 @@ configure_runtime_env(
     preallocate=_runtime_args.preallocate,
 )
 
-from gyaradax.jax_config import enable_x64
+from gyaradax.core.jax_config import enable_x64
 
 enable_x64()
 
 import jax.numpy as jnp
 
 from gyaradax import load_geometry
-from gyaradax.fields import _compute_fields, g_to_f
-from gyaradax.integrals import calculate_em_fluxes, get_integrals
-from gyaradax.params import gkparams_from_input_and_geometry
-from gyaradax.precompute import linear_precompute
-from gyaradax.simulate import gk_run
-from gyaradax.solver import default_state, init_f
-from gyaradax.utils import load_gkw_dump, parse_input_dat
+from gyaradax.operators.fields import _compute_fields, g_to_f
+from gyaradax.diagnostics.fluxes import calculate_em_fluxes, get_integrals
+from gyaradax.core.params import gkparams_from_input_and_geometry
+from gyaradax.operators.precompute import linear_precompute
+from gyaradax.solver.driver import gk_run
+from gyaradax.solver.rk4 import default_state, init_f
+from gyaradax.io.gkw import load_gkw_dump, parse_input_dat
 
 
 def _as_flat_real_array(x: Any) -> np.ndarray:

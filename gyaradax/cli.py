@@ -25,7 +25,7 @@ from typing import Any, Sequence, TypedDict, cast
 
 from omegaconf import OmegaConf
 
-from gyaradax.runtime_config import append_xla_flags, configure_runtime_env
+from gyaradax.core.runtime_config import append_xla_flags, configure_runtime_env
 
 _MULTI_GPU_XLA_FLAGS = (
     "--xla_gpu_enable_latency_hiding_scheduler=true",
@@ -286,7 +286,7 @@ def _has_geom_dat(data_dir: str | None) -> bool:
 
 def _find_k_file(data_dir: str | None, resume_from: str | None = None) -> str | None:
     """Return a K-dump to resume from, or None to cold-start."""
-    from gyaradax.utils import K_files
+    from gyaradax.io.gkw import K_files
 
     if not data_dir:
         return None
@@ -315,16 +315,16 @@ def _setup_run(config_path: str, args: argparse.Namespace, run_dir: str | None =
 
     from gyaradax import load_config, sharding as _sharding
     from gyaradax.geometry import compute_geometry_from_config
-    from gyaradax.params import gkparams_from_config
-    from gyaradax.precompute import linear_precompute
-    from gyaradax.simulate import (
+    from gyaradax.core.params import gkparams_from_config
+    from gyaradax.operators.precompute import linear_precompute
+    from gyaradax.solver.driver import (
         _compute_phi_for_init,
         _ensure_species_arrays,
         gk_init,
     )
-    from gyaradax.solver import mode_amplitude
-    from gyaradax.state import GKState
-    from gyaradax.utils import (
+    from gyaradax.solver.rk4 import mode_amplitude
+    from gyaradax.core.state import GKState
+    from gyaradax.io.gkw import (
         load_geometry,
         load_gkw_k_dump,
         read_gkw_dump_dtim,
@@ -573,8 +573,8 @@ def _write_run_record(setup: RunSetup) -> None:
     """config.yaml and geometry.pkl for the run, and one line per invocation in run_info.jsonl."""
     import socket
 
-    from gyaradax.telemetry import _git_revision
-    from gyaradax.utils import save_run_metadata
+    from gyaradax.diagnostics.telemetry import _git_revision
+    from gyaradax.io.rundir import save_run_metadata
 
     out = setup["output_dir"]
     save_run_metadata(out, setup["effective_config"], setup["geometry"])
@@ -610,7 +610,7 @@ def _describe(setup: RunSetup, config_path: str) -> None:
     """Print a one-screen summary of what is about to run."""
     import jax
 
-    from gyaradax.utils import print_params
+    from gyaradax.io.rundir import print_params
 
     params = setup["params"]
     mode = "adiabatic" if params.adiabatic_electrons else "kinetic"
@@ -685,7 +685,7 @@ def _run_telemetry(setup: RunSetup) -> Any:
         return None
     import jax
 
-    from gyaradax.telemetry import RunTelemetry
+    from gyaradax.diagnostics.telemetry import RunTelemetry
 
     params = setup["params"]
     mesh = setup["mesh"]
@@ -743,7 +743,7 @@ def _nothing_to_run(setup: RunSetup) -> None:
 def _run_single(args: argparse.Namespace, config_path: str, run_dir: str | None) -> int:
     import jax
 
-    from gyaradax.simulate import gksimulate
+    from gyaradax.solver.driver import gksimulate
 
     setup = _setup_run(config_path, args, run_dir=run_dir)
     _describe(setup, config_path)
@@ -818,7 +818,7 @@ def _run_batched(args: argparse.Namespace, run_dirs: list[str | None]) -> int:
     import jax
     import jax.numpy as jnp
 
-    from gyaradax.simulate import gksimulate_batched
+    from gyaradax.solver.driver import gksimulate_batched
 
     def member_args(path: str) -> argparse.Namespace:
         # --output-dir names the parent of the members' run directories
@@ -896,8 +896,8 @@ def _cmd_bench(args: argparse.Namespace) -> int:
     import jax
     import numpy as np
 
-    from gyaradax.solver import gksolve
-    from gyaradax.telemetry import device_memory, profile_block
+    from gyaradax.solver.rk4 import gksolve
+    from gyaradax.diagnostics.telemetry import device_memory, profile_block
 
     args.from_scratch = True
     setup = _setup_run(args.configs[0], args)
@@ -945,7 +945,7 @@ def _cmd_bench(args: argparse.Namespace) -> int:
 
 def _cmd_convert(args: argparse.Namespace) -> int:
     """Write a gyaradax YAML config for a GKW run directory."""
-    from gyaradax.utils import gkw_to_yaml
+    from gyaradax.io.gkw import gkw_to_yaml
 
     try:
         gkw_to_yaml(args.gkw_dir, args.output)

@@ -10,11 +10,17 @@ from __future__ import annotations
 import numpy as np
 
 
-def _build_mode_connectivity(mode_label, kxrh, krho):
+def connection_flip(q, shat, eps, signB=1.0, signJ=1.0) -> bool:
+    """Whether a field line runs towards lower kx: signB signJ q shat / eps < 0 (GKW mode.f90)."""
+    return bool(np.sign(float(signB) * float(signJ) * float(q) * float(shat) * float(eps)) < 0)
+
+
+def _build_mode_connectivity(mode_label, kxrh, krho, flip=False):
     """Build spectral parallel-boundary connectivity from mode labels.
 
     Returns (mode_label_kxky, ixplus, ixminus, ixzero, iyzero, iyzero_bc).
-    `ixplus`/`ixminus` use -1 to mark open boundaries. `iyzero_bc` is -1
+    `ixplus`/`ixminus` use -1 to mark open boundaries; ``flip`` (see
+    ``connection_flip``) swaps them for the finite-ky chains. `iyzero_bc` is -1
     when ky=0 is absent so the periodic zonal treatment never applies to
     a non-zonal mode.
     """
@@ -55,8 +61,9 @@ def _build_mode_connectivity(mode_label, kxrh, krho):
             if chain.size <= 1:
                 continue
             chain = np.sort(chain)
-            ixplus[chain[:-1], iy] = chain[1:]
-            ixminus[chain[1:], iy] = chain[:-1]
+            up, down = (ixminus, ixplus) if flip else (ixplus, ixminus)
+            up[chain[:-1], iy] = chain[1:]
+            down[chain[1:], iy] = chain[:-1]
 
     iyzero_bc = iyzero if ky_is_truly_zonal else -1
     return mode_label_kxky, ixplus, ixminus, ixzero, iyzero, iyzero_bc

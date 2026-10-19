@@ -1,0 +1,61 @@
+# collisional kinetic run from the ranges_v1 campaign (rv1_056): q_i ~ 3.6, steady from t ~ 120
+run:
+  name: kinetic_collisions_example
+solver:
+  dt: 0.004
+  naverage: 40
+  disp_par: 1.0
+  disp_vp: 0.2
+  disp_x: 0.1
+  disp_y: 0.1
+  idisp: 2
+  non_linear: true
+  adaptive_dt: true
+  finit: noise
+  # ~t 150 (dt ~ 2.1e-3); checkpoint every 1000 steps
+  n_steps: 72000
+  dump_interval: 25
+physics:
+  rlt: [9.0944, 6.573]
+  rln: [1.9104, 1.9104]
+  mas: [1.0, 0.000272]
+  tmp: [1.0, 0.62438]
+  de: [1.0, 1.0]
+  signz: [1.0, -1.0]
+  dgrid: 1.0
+  tgrid: 1.0
+geometry:
+  geometry_model: circ
+  shat: 3.0181
+  q: 3.4761
+  eps: 0.065231
+  Rref: 100.0
+  d2X: 1.0
+  signB: 1.0
+  dvp: 0.1875
+  sgr_dist: 0.05555555555555555
+grid:
+  nvpar: 32
+  nmu: 12
+  ns: 18
+  nkx: 192
+  nky: 32
+  adiabatic_electrons: false
+  vpar_max: 3.0
+  nperiod: 1
+  krhomax: 1.5
+  ikxspace: 17
+collisions:
+  enabled: true
+  pitch_angle: true
+  en_scatter: true
+  friction: true
+  # frequencies from rref / nref / tref with gkw coulomb logs
+  freq_override: false
+  # major radius [m], density [1e19 m^-3], temperature [keV]
+  rref: 6.229
+  nref: 10.0
+  tref: 11.989
+  mass_conserve: false
+  mom_conservation: false
+  ene_conservation: false

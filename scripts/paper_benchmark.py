@@ -37,15 +37,15 @@ import jax
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from gyaradax.jax_config import enable_x64
+from gyaradax.core.jax_config import enable_x64
 
 enable_x64()
 
 from gyaradax import load_geometry, GKParams, gk_init, gksolve
-from gyaradax.fields import _compute_phi
-from gyaradax.precompute import linear_precompute
+from gyaradax.operators.fields import _compute_phi
+from gyaradax.operators.precompute import linear_precompute
 from gyaradax.backends import create_ops
-from gyaradax.params import gkparams_from_config, load_config
+from gyaradax.core.params import gkparams_from_config, load_config
 
 # ---------------------------------------------------------------------------
 # GKW reference parsing

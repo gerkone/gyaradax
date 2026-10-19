@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """C4: nonlinear_term_iii — FFT Poisson bracket (ExB nonlinearity).
 
-Architecture: solver.py delegates full implementation and shape dispatch (5D/6D)
+Architecture: solver/rk4.py delegates full implementation and shape dispatch (5D/6D)
 to backend. Backend (JAX/CUDA) handles pseudospectral ExB bracket via FFT.
 """
 
@@ -17,7 +17,7 @@ _early, _ = _p.parse_known_args()
 configure_runtime_env(device=_early.device)
 
 import jax
-from gyaradax.jax_config import enable_x64
+from gyaradax.core.jax_config import enable_x64
 
 enable_x64()
 

@@ -44,6 +44,7 @@ class GeometrySpec:
     krhomax: float = 1.4
     ikxspace: int = 5
     signB: float = 1.0
+    signJ: float = 1.0
     Rref: float = 100.0
     model_params: Mapping[str, Any] = field(default_factory=dict)
 
@@ -69,10 +70,14 @@ class GeometrySpec:
             "krhomax": self.krhomax,
             "ikxspace": self.ikxspace,
             "signB": self.signB,
+            "signJ": self.signJ,
             "Rref": self.Rref,
             "geom_type": self.model,
             **dict(self.model_params),
         }
+
+
+MILLER_KEYS = ("kappa", "delta", "square", "skappa", "sdelta", "ssquare", "Zmil", "dRmil", "dZmil")
 
 
 def geometry_spec_from_compute_kwargs(
@@ -91,6 +96,7 @@ def geometry_spec_from_compute_kwargs(
     krhomax: float = 1.4,
     ikxspace: int = 5,
     signB: float = 1.0,
+    signJ: float = 1.0,
     Rref: float = 100.0,
     geom_type: str = "circ",
     **model_params: Any,
@@ -112,6 +118,7 @@ def geometry_spec_from_compute_kwargs(
         krhomax=krhomax,
         ikxspace=ikxspace,
         signB=signB,
+        signJ=signJ,
         Rref=Rref,
         model_params=model_params,
     )
@@ -138,6 +145,7 @@ def geometry_spec_from_config(cfg: Any) -> GeometrySpec:
         ("eps", gc),
         ("kxmax", gc),
         ("signB", gc),
+        ("signJ", gc),
         ("Rref", gc),
         ("ns", gr),
         ("nkx", gr),
@@ -156,4 +164,9 @@ def geometry_spec_from_config(cfg: Any) -> GeometrySpec:
     gm = _section_get(gc, "geometry_model", None)
     if gm is not None:
         kwargs["geom_type"] = str(gm)
+    if kwargs.get("geom_type") == "miller":
+        for key in MILLER_KEYS:
+            val = _section_get(gc, key, None)
+            if val is not None:
+                kwargs[key] = float(val)
     return geometry_spec_from_compute_kwargs(**kwargs)

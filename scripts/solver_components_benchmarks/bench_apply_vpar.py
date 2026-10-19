@@ -13,7 +13,7 @@ _early, _ = _p.parse_known_args()
 configure_runtime_env(device=_early.device)
 
 import jax
-from gyaradax.jax_config import enable_x64
+from gyaradax.core.jax_config import enable_x64
 
 enable_x64()
 
@@ -27,7 +27,7 @@ from common import (
     BASELINES_DIR,
 )
 from gyaradax.backends import create_ops
-import gyaradax.stencils as stencils
+import gyaradax.operators.stencils as stencils
 
 # Internal definition removed; using production _apply_vpar_fn instead.
 
