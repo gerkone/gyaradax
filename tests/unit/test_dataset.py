@@ -67,7 +67,7 @@ def test_run_writes_preprocessed_trajectory(tmp_path, kind):
 
     # the last frame is the bf16 real-space transform of the final state
     with np.load(os.path.join(run, "step_000004.npz")) as ck:
-        want_df, want_phi = ds.df_frame_bits(ck["df"]), ds._to_bf16_bits(ds.phi_to_real(ck["phi"]))
+        want_df, want_phi = ds.df_frame_bits(ck["df"]), ds._to_bf16_bits(ds.phi_to_reim(ck["phi"]))
     got_df = ds.read_frame(ds.frame_path(traj, "timestep", 1, "zstd16"), meta["df_shape"])
     got_phi = ds.read_frame(ds.frame_path(traj, "poten", 1, "zstd16"), meta["phi_shape"])
     np.testing.assert_array_equal(got_df.view(np.uint32).ravel() >> 16, want_df)
@@ -87,6 +87,32 @@ def test_run_writes_preprocessed_trajectory(tmp_path, kind):
     phis = [ds.read_frame(ds.frame_path(traj, "poten", i, "zstd16"), meta["phi_shape"]) for i in (1, 2)]
     np.testing.assert_allclose(meta["phi_mean"], np.mean(phis, axis=0), rtol=1e-3, atol=1e-6)
     assert meta["phi_mean"].dtype == np.float32
+
+
+def test_reim_phi_frames_keep_every_ky_mode():
+    rng = np.random.default_rng(0)
+    phi = rng.standard_normal((3, 7, 6)) + 1j * rng.standard_normal((3, 7, 6))
+    frame = ds.phi_to_reim(phi)
+    assert frame.shape == (2, 7, 3, 6)
+    np.testing.assert_allclose(ds.reim_to_phi(frame), phi, atol=1e-6)
+    # the real frame keeps ky <= nky / 2 only
+    real = np.moveaxis(np.fft.fftshift(np.fft.rfftn(ds.phi_to_real(phi), axes=(0, 2), norm="forward"), axes=0), 1, 0)
+    np.testing.assert_allclose(real[..., 1:3], phi[..., 1:3], atol=1e-6)
+    assert real.shape[-1] == 4
+
+
+def test_writer_keeps_the_real_phi_layout_of_older_trajectories(tmp_path, monkeypatch):
+    static = {"phi_shape": (2, 6, 3, 5), "phi_layout": "reim", "phi_convention": "ifftn", "axis_order": "reim"}
+    monkeypatch.setattr(ds, "_static_metadata", lambda *args: dict(static))
+    config = tmp_path / "config.yaml"
+    config.write_text("run: {}\n")
+    root = str(tmp_path / "data")
+    ds._claim(ds.trajectory_path(root, "old"), str(tmp_path))
+    ds.write_metadata(ds.trajectory_path(root, "old"), {"phi_shape": (6, 3, 5), "axis_order": "real"})
+    old = ds.DatasetWriter(root, "old", {}, None, str(config))
+    assert old.phi_layout == "real" and old.static["phi_shape"] == (6, 3, 5)
+    assert "phi_layout" not in old.static and old.static["axis_order"] == "real"
+    assert ds.DatasetWriter(root, "new", {}, None, str(config)).phi_layout == "reim"
 
 
 def test_writer_refuses_trajectories_of_other_runs(tmp_path):
@@ -176,3 +202,54 @@ def test_f32_resume_dump_extends_the_trajectory_on_the_same_grid(tmp_path):
     # the original run directory no longer owns the trajectory
     with pytest.raises(FileExistsError, match="belongs to the run"):
         main(["run", run, "--t-end", "0.1"])
+
+
+def test_attach_linear_adds_only_the_linear_keys_and_files(tmp_path):
+    rng = np.random.default_rng(0)
+    df_shape, phi_shape, nky = (2, 2, 4, 2, 3, 6, 5), (6, 3, 5), 5
+    traj, staged = tmp_path / "iteration_1_ifft_realpotens", tmp_path / "staged"
+    (traj / "data").mkdir(parents=True)
+    frame = traj / "data" / "timestep_00000.zstd16.bin"
+    frame.write_bytes(b"frame")
+    meta = {"df_shape": df_shape, "phi_shape": phi_shape, "timesteps": np.arange(3.0), "flux": 1.0}
+    original = {}
+    for name in ("metadata.pkl", "metadata_light.pkl"):
+        original[name] = pickle.dumps({**meta, "name": name})
+        (traj / name).write_bytes(original[name])
+    spec = rng.standard_normal(df_shape[1:]) + 1j * rng.standard_normal(df_shape[1:])
+    phi = rng.standard_normal((3, 6, 5)) + 1j * rng.standard_normal((3, 6, 5))
+    frames = ds.linear_frames(spec, phi)
+    ds.write_linear_frames(str(staged / "data"), frames)
+    flux_ky = rng.standard_normal((2, 3, nky))
+    phi2 = rng.uniform(1, 2, nky)
+    gate = {
+        "t": 30.0, "ky": list(range(nky)), "gamma": [0.1] * nky, "gamma_std": [0.0] * nky,
+        "omega": [0.2] * nky, "omega_std": [0.0] * nky, "settled": True, "peak_ky": 2.0,
+        "gamma_max": 0.1, "decision": "unstable", "dt": 0.01,
+        "mode_fluxes": {"flux": flux_ky.sum(-1).tolist(), "flux_ky": flux_ky.tolist(),
+                        "phi2_ky": phi2.tolist(), "weight_ky_allkx": (flux_ky / phi2).tolist(),
+                        "flux_ky_chain0": (flux_ky / 2).tolist(), "phi2_ky_chain0": phi2.tolist(),
+                        "weight_ky": (flux_ky / 2 / phi2).tolist()},
+    }  # fmt: skip
+
+    entries = ds.attach_linear(str(traj), str(staged), gate, 30.5, "20260101")
+    again = ds.attach_linear(str(traj), str(staged), gate, 30.5, "20260101")
+    assert sorted(entries) == sorted(again) and all(k.startswith("linear_") for k in entries)
+    for name in ("metadata.pkl", "metadata_light.pkl"):
+        with open(traj / name, "rb") as fh:
+            doc = pickle.load(fh)
+        assert (traj / f"{name}.bak-linear-20260101").read_bytes() == original[name]
+        assert set(doc) == set(meta) | {"name"} | set(entries)
+        assert doc["timesteps"].tolist() == [0.0, 1.0, 2.0] and doc["name"] == name
+        assert doc["linear_flux_ky"].shape == (6, nky) and doc["linear_dt"] == 0.01
+        np.testing.assert_allclose(doc["linear_flux_ky"].sum(-1), doc["linear_flux"])
+        np.testing.assert_allclose(doc["linear_weight_ky_allkx"] * phi2, doc["linear_flux_ky"])
+        np.testing.assert_allclose(doc["linear_weight_ky"] * phi2, doc["linear_flux_ky_chain0"])
+    assert frame.read_bytes() == b"frame"
+    k = np.fromfile(traj / "data" / "linear_k.bin", np.float32).reshape(df_shape)
+    np.testing.assert_array_equal(k[0] + 1j * k[1], spec.astype(np.complex64))
+    real = np.fromfile(traj / "data" / "linear.bin", np.float32).reshape(df_shape)
+    np.testing.assert_allclose(real, ds.df_to_real(spec), atol=1e-5)
+    assert sorted(os.listdir(traj / "data")) == [
+        "linear.bin", "linear_k.bin", "linear_poten.bin", "timestep_00000.zstd16.bin"
+    ]  # fmt: skip
