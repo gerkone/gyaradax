@@ -66,7 +66,7 @@ def test_run_writes_preprocessed_trajectory(tmp_path, kind):
 
     # the last frame is the bf16 real-space transform of the final state
     with np.load(os.path.join(run, "step_000004.npz")) as ck:
-        want_df, want_phi = ds.df_frame_bits(ck["df"]), ds._to_bf16_bits(ds.phi_to_real(ck["phi"]))
+        want_df, want_phi = ds.df_frame_bits(ck["df"]), ds._to_bf16_bits(ds.phi_to_reim(ck["phi"]))
     got_df = ds.read_frame(ds.frame_path(traj, "timestep", 1, "zstd16"), meta["df_shape"])
     got_phi = ds.read_frame(ds.frame_path(traj, "poten", 1, "zstd16"), meta["phi_shape"])
     np.testing.assert_array_equal(got_df.view(np.uint32).ravel() >> 16, want_df)
@@ -86,6 +86,32 @@ def test_run_writes_preprocessed_trajectory(tmp_path, kind):
     phis = [ds.read_frame(ds.frame_path(traj, "poten", i, "zstd16"), meta["phi_shape"]) for i in (1, 2)]
     np.testing.assert_allclose(meta["phi_mean"], np.mean(phis, axis=0), rtol=1e-3, atol=1e-6)
     assert meta["phi_mean"].dtype == np.float32
+
+
+def test_reim_phi_frames_keep_every_ky_mode():
+    rng = np.random.default_rng(0)
+    phi = rng.standard_normal((3, 7, 6)) + 1j * rng.standard_normal((3, 7, 6))
+    frame = ds.phi_to_reim(phi)
+    assert frame.shape == (2, 7, 3, 6)
+    np.testing.assert_allclose(ds.reim_to_phi(frame), phi, atol=1e-6)
+    # the real frame keeps ky <= nky / 2 only
+    real = np.moveaxis(np.fft.fftshift(np.fft.rfftn(ds.phi_to_real(phi), axes=(0, 2), norm="forward"), axes=0), 1, 0)
+    np.testing.assert_allclose(real[..., 1:3], phi[..., 1:3], atol=1e-6)
+    assert real.shape[-1] == 4
+
+
+def test_writer_keeps_the_real_phi_layout_of_older_trajectories(tmp_path, monkeypatch):
+    static = {"phi_shape": (2, 6, 3, 5), "phi_layout": "reim", "phi_convention": "ifftn", "axis_order": "reim"}
+    monkeypatch.setattr(ds, "_static_metadata", lambda *args: dict(static))
+    config = tmp_path / "config.yaml"
+    config.write_text("run: {}\n")
+    root = str(tmp_path / "data")
+    ds._claim(ds.trajectory_path(root, "old"), str(tmp_path))
+    ds.write_metadata(ds.trajectory_path(root, "old"), {"phi_shape": (6, 3, 5), "axis_order": "real"})
+    old = ds.DatasetWriter(root, "old", {}, None, str(config))
+    assert old.phi_layout == "real" and old.static["phi_shape"] == (6, 3, 5)
+    assert "phi_layout" not in old.static and old.static["axis_order"] == "real"
+    assert ds.DatasetWriter(root, "new", {}, None, str(config)).phi_layout == "reim"
 
 
 def test_writer_refuses_trajectories_of_other_runs(tmp_path):

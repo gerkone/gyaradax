@@ -4,7 +4,9 @@ A trajectory lives in ``<root>/<name>_ifft_realpotens/``::
 
     data/timestep_NNNNN.<bits>.bin   df in real space, (re/im, species, vpar, mu, s, x, y);
                                      adiabatic runs have no species axis
-    data/poten_NNNNN.<bits>.bin      phi in real space, (x, s, y)
+    data/poten_NNNNN.<bits>.bin      phi in real space, (re/im, x, s, y), every ky mode
+                                     (``phi_layout: reim``); trajectories written before keep the
+                                     real (x, s, y) frame of ky <= nky / 2 (no ``phi_layout``)
     metadata.pkl                     everything below, including the statistics
     metadata_light.pkl               the same without the per-element df / phi moments
     config.yaml                      the run's effective config
@@ -188,6 +190,27 @@ def phi_to_real(phi) -> np.ndarray:
     return real.astype(np.float32)
 
 
+def phi_to_reim(phi) -> np.ndarray:
+    """``(re/im, x, s, y)`` float32 of a spectral phi ``(s, kx, ky)``, every ky mode (neugk ``phi_c``)."""
+    spec = np.moveaxis(np.asarray(phi), 0, 1).astype(np.complex128)
+    phys = np.fft.ifftn(np.fft.ifftshift(spec, axes=0), axes=(0, 2), norm="forward")
+    return np.stack([phys.real, phys.imag]).astype(np.float32)
+
+
+def reim_to_phi(frame) -> np.ndarray:
+    """Spectral phi ``(s, kx, ky)`` of a ``(re/im, x, s, y)`` frame (inverse of ``phi_to_reim``)."""
+    x = np.asarray(frame, np.float64)
+    spec = np.fft.fftshift(np.fft.fftn(x[0] + 1j * x[1], axes=(0, 2), norm="forward"), axes=0)
+    return np.moveaxis(spec, 1, 0)
+
+
+PHI_FRAMES = {"reim": phi_to_reim, "real": phi_to_real}
+
+
+def phi_layout(meta: dict) -> str:
+    return meta.get("phi_layout", "real")
+
+
 class RunningStats:
     """Elementwise running mean / var / min / max with the neugk prior (count 1e-4, variance 1)."""
 
@@ -260,11 +283,13 @@ def _static_metadata(geometry: dict, params: Any, config_path: str) -> dict:
         "ds": float(geom["ints"][0]),
         "resolution": resolution,
         "df_shape": df_shape,
-        "phi_shape": (resolution[3], resolution[2], resolution[4]),
+        "phi_shape": (2, resolution[3], resolution[2], resolution[4]),
+        "phi_layout": "reim",
+        "phi_convention": "ifftn(ifftshift(spec, axes=kx), axes=(kx, ky), norm='forward')",
         "axis_order": (
-            "df: (re/im, species, vpar, mu, s, x, y); phi: (x, s, y); x, y real space"
+            "df: (re/im, species, vpar, mu, s, x, y); phi: (re/im, x, s, y); x, y real space"
             if kinetic
-            else "df: (re/im, vpar, mu, s, x, y); phi: (x, s, y); x, y real space"
+            else "df: (re/im, vpar, mu, s, x, y); phi: (re/im, x, s, y); x, y real space"
         ),
         "channel_layout": "reim_species" if kinetic else "reim",
         "quantization": "bf16",
@@ -319,6 +344,13 @@ class DatasetWriter:
         self.static = _static_metadata(geometry, params, os.path.join(self.path, "config.yaml"))
         self.series: dict[str, list] = {k: [] for k in SERIES_KEYS}
         old = load_metadata(self.path)
+        if old is not None and phi_layout(old) == "real":
+            # an existing trajectory of real phi frames stays real
+            self.static.pop("phi_layout")
+            self.static.pop("phi_convention")
+            self.static["phi_shape"] = tuple(int(n) for n in old["phi_shape"])
+            self.static["axis_order"] = old["axis_order"]
+        self.phi_layout = phi_layout(self.static)
         if old is not None and len(old.get("timesteps", ())):
             keep = int(np.sum(np.asarray(old["solver_steps"]) <= start_step))
             for k in self.series:
@@ -339,7 +371,7 @@ class DatasetWriter:
         idx = self.n_frames
         frame = df_frame(df)
         _write_frame(frame_path(self.path, "timestep", idx, self.bits), np.asarray(frame).view(np.uint16).ravel(), self.bits)
-        phi_real = phi_to_real(phi)
+        phi_real = PHI_FRAMES[self.phi_layout](phi)
         phi_frame = np.asarray(jnp.asarray(phi_real).astype(jnp.bfloat16))
         _write_frame(frame_path(self.path, "poten", idx, self.bits), phi_frame.view(np.uint16).ravel(), self.bits)
         loss = quantization_loss(df, frame, phi_real, phi_frame, integrals)
