@@ -88,6 +88,8 @@ class GKParams:
     cfl_safety: float = 0.95
     fac_dtim_est: float = 0.95
     fac_dtim_nl: float = 1.0
+    # linear dt cap dt_eig_cfl / max|lambda| of the zonal and first ky blocks (0 = off)
+    dt_eig_cfl: float = 0.0
     spectral_radius: bool = True
     mixed_precision: bool = True
     backend: str = "jax"
@@ -220,6 +222,7 @@ class GKParams:
         "cfl_safety",
         "fac_dtim_est",
         "fac_dtim_nl",
+        "dt_eig_cfl",
         "spectral_radius",
         "amp_init",
         "dvp",
@@ -520,6 +523,7 @@ def gkparams_from_config(config: Any, **overrides: Any) -> GKParams:
         "cfl_safety": cfl_safety,
         "fac_dtim_est": float(getattr(solver_cfg, "fac_dtim_est", 0.95)),
         "fac_dtim_nl": fac_dtim_nl,
+        "dt_eig_cfl": float(getattr(solver_cfg, "dt_eig_cfl", 0.0) or 0.0),
         "spectral_radius": bool(getattr(solver_cfg, "spectral_radius", True)),
         "backend": str(getattr(solver_cfg, "backend", "jax")),
         "nlapar": bool(getattr(solver_cfg, "nlapar", False)),

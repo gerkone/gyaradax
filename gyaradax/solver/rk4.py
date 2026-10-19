@@ -589,6 +589,10 @@ def gksolve(
     return final_df, (phi, fluxes), final_state
 
 
+# smallest adaptive time step before a time-mode run stops as diverged (gkw dt_min)
+DT_MIN = 2.0e-5
+
+
 @functools.partial(jax.jit, static_argnames=("max_steps",))
 def gksolve_until(
     df: jnp.ndarray,
@@ -619,8 +623,9 @@ def gksolve_until(
     history = jnp.full((3, max_steps), jnp.nan, dtype=jnp.float64)
 
     def _cond(carry):
-        _, curr_state, _, i, _ = carry
-        return jnp.logical_and(i < max_steps, curr_state.time < t_end)
+        _, curr_state, curr_dt, i, _ = carry
+        running = jnp.logical_and(i < max_steps, curr_state.time < t_end)
+        return jnp.logical_and(running, curr_dt >= DT_MIN)
 
     def _body(carry):
         curr_df, curr_state, curr_dt, i, hist = carry

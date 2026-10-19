@@ -28,6 +28,7 @@ from gyaradax.operators.fields import _compute_fields, g_to_f
 from gyaradax.operators.poisson import calculate_phi
 from gyaradax.operators.precompute import linear_precompute
 from gyaradax.solver.rk4 import (
+    DT_MIN,
     gksolve,
     gksolve_until,
     init_f,
@@ -648,8 +649,6 @@ def _simulate(
             _share_profile_summary(runs)
         if frames is not None:
             block_steps = int(view(current_state, 0).step) - block_start_step
-            if block_steps == 0 and float(view(current_state, 0).time) < t_target:
-                raise RuntimeError(f"time step collapsed at t = {block_start_time[0]:.6f}; no frame reached")
 
         for i, run in enumerate(runs):
             if not alive[i]:
@@ -658,9 +657,11 @@ def _simulate(
             d, st = view(current_df, i), view(current_state, i)
             dt_i = view(dt_info, i) if frames is None else _steps_taken(view(dt_info, i))
             # every step after the first NaN is wasted; keep the last good snapshot
-            if stop_on_nan and not bool(jnp.isfinite(d).all()):
+            collapsed = frames is not None and float(st.time) < t_target
+            if collapsed or (stop_on_nan and not bool(jnp.isfinite(d).all())):
+                cause = f"time step below dt_min {DT_MIN:g}" if collapsed else "non-finite df"
                 msg = (
-                    f"non-finite df at step {int(st.step)} (t={float(st.time):.4f}); "
+                    f"{cause} at step {int(st.step)} (t={float(st.time):.4f}); "
                     f"stopping after {int(st.step) - start_step} steps"
                 )
                 tag = f" ({run['label']})" if run["label"] else ""

@@ -717,6 +717,20 @@ def _setup_run(config_path: str, args: argparse.Namespace, run_dir: str | None =
     else:
         pre = linear_precompute(geometry, params)
 
+    if params.dt_eig_cfl > 0:
+        import jax.numpy as jnp
+
+        from gyaradax.solver.cfl import estimate_linear_timestep
+        from gyaradax.solver.eig_dt import eig_dt_cap
+
+        dt_est = float(estimate_linear_timestep(pre, params=params))
+        cap = eig_dt_cap(geometry, params)
+        pre._items["dt_eig_cap"] = jnp.asarray(cap["dt_cap"], dtype=jnp.float64)
+        blocks = ", ".join(f"ky {k}: {abs(complex(*v)):.4g}" for k, v in cap["blocks"].items())
+        print(f"  eigenvalue dt cap: max|lambda| {cap['lam_max']:.4g} ({blocks}) -> dt <= "
+              f"{cap['dt_cap']:.4e} ({cap['dt_cap'] / dt_est:.2f}x the estimate {dt_est:.4e}; "
+              f"dt_eig_cfl {params.dt_eig_cfl:g}, {cap['seconds']:.0f} s)", flush=True)
+
     if not (params.adaptive_dt and params.non_linear):
         from gyaradax.cfl import estimate_linear_timestep
 

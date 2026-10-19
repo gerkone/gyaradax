@@ -147,7 +147,11 @@ def estimate_linear_timestep(
     if params is not None:
         fac_dtim_est = float(getattr(params, "fac_dtim_est", fac_dtim_est))
     fac = jnp.asarray(fac_dtim_est, dtype=jnp.float64)
-    return jnp.where(tmax > EPS, fac / tmax, jnp.asarray(1e10, dtype=jnp.float64))
+    dt = jnp.where(tmax > EPS, fac / tmax, jnp.asarray(1e10, dtype=jnp.float64))
+    # measured cap from the operator's spectral radius (solver.dt_eig_cfl)
+    if "dt_eig_cap" in pre:
+        dt = jnp.minimum(dt, jnp.asarray(pre["dt_eig_cap"], dtype=jnp.float64))
+    return dt
 
 
 def estimate_timestep(
