@@ -39,6 +39,8 @@ _has_bracket_v6 = False
 _has_linear_es = False
 _has_collision_rhs = False
 _fused_fallback_logged = False
+_has_linear_ds = False
+_ds_fallback_logged = False
 
 
 def _cuda_zero_mode_index(pre: GKPre, key: str, size: int) -> np.int32:
@@ -49,7 +51,7 @@ def _cuda_zero_mode_index(pre: GKPre, key: str, size: int) -> np.int32:
 
 
 def _register_ffi():
-    global _ffi_registered, _has_bracket_v6, _has_linear_es, _has_collision_rhs
+    global _ffi_registered, _has_bracket_v6, _has_linear_es, _has_collision_rhs, _has_linear_ds
     if _ffi_registered:
         return True
 
@@ -73,11 +75,18 @@ def _register_ffi():
         if hasattr(_lib, name):
             targets[name] = getattr(_lib, name)
     _has_bracket_v6 = "cufft_bracket_v6_fp32_ffi" in targets
-    for name in ("linear_rhs_es_ffi", "linear_rhs_es_rk_ffi", "collision_rhs_ffi"):
+    for name in (
+        "linear_rhs_es_ffi",
+        "linear_rhs_es_rk_ffi",
+        "collision_rhs_ffi",
+        "linear_rhs_ds_ffi",
+        "linear_rhs_ds_rk_ffi",
+    ):
         if hasattr(_lib, name):
             targets[name] = getattr(_lib, name)
     _has_linear_es = "linear_rhs_es_rk_ffi" in targets
     _has_collision_rhs = "collision_rhs_ffi" in targets
+    _has_linear_ds = "linear_rhs_ds_rk_ffi" in targets
 
     for name, symbol in targets.items():
         try:
@@ -362,6 +371,72 @@ class CUDAOps(SolverOps):
             return kernel(*args)
         return sharding.velocity_map(kernel, self.mesh, args, axes, PartitionSpec(*vel))
 
+    def _ds_unsupported(self, df, pre, has_em, has_dpc) -> Optional[str]:
+        """Why the double-single kernel cannot run this call, or None if it can."""
+        if not _has_linear_ds:
+            return "the CUDA library has no linear_rhs_ds kernel (rebuild it)"
+        if "ds_bessel" not in pre:
+            return "linear_precompute ran without linear_arith='ds'"
+        if has_em:
+            return "electromagnetic runs are not supported"
+        if has_dpc:
+            return "conservative parallel dissipation is not supported"
+        if self.mesh is not None:
+            return "sharded runs are not supported"
+        nv, ns, nky = df.shape[-5], df.shape[-3], df.shape[-1]
+        if ns * nky > 576 or nv % 8 != 0:
+            return f"needs ns * nky <= 576 and nv % 8 == 0 (ns={ns}, nky={nky}, nv={nv})"
+        if df.size >= 2**31:
+            return "grid exceeds 32-bit indexing"
+        return None
+
+    def _use_ds(self, df, params, pre, has_em, has_dpc) -> bool:
+        global _ds_fallback_logged
+        if params.linear_arith != "ds":
+            return False
+        reason = self._ds_unsupported(df, pre, has_em, has_dpc)
+        if reason is not None and not _ds_fallback_logged:
+            log.warning("linear_arith='ds' falls back to fp64: %s", reason)
+            _ds_fallback_logged = True
+        return reason is None
+
+    def _ds_call(self, df, phi, pre, with_collisions):
+        """Positional table arguments and size attributes of the double-single kernels."""
+        kinetic = df.ndim == 6
+        nsp = df.shape[0] if kinetic else 1
+        nv, nmu, ns, nkx, nky = df.shape[-5:]
+        n_class = int(pre["ds_s_t7_tab"].shape[-3])
+        par_class = jnp.broadcast_to(pre["par_stencil_class"], (ns, nkx, nky)).astype(jnp.int32)
+        args = (
+            df.astype(jnp.complex128),
+            phi.astype(jnp.complex128),
+            pre["ds_bessel"],
+            pre["ds_s_upar_tab"],
+            pre["ds_s_t7_tab"],
+            par_class,
+            self._pack_shift_maps().reshape(9, ns, nkx, nky, 2),
+            pre["ds_wvp"],
+            pre["ds_drift_x"],
+            pre["ds_drift_y"],
+            pre["ds_drive_a"],
+            pre["ds_drive_b"],
+            pre["ds_hyper"],
+            pre["ds_kx_vals"],
+            pre["ds_ky_vals"],
+            pre["ds_coll_stencil"] if with_collisions else jnp.zeros((1, 2), jnp.float32),
+        )
+        attrs = dict(
+            nsp=np.int32(nsp),
+            nv=np.int32(nv),
+            nmu=np.int32(nmu),
+            ns=np.int32(ns),
+            nkx=np.int32(nkx),
+            nky=np.int32(nky),
+            n_class=np.int32(n_class),
+            has_coll=np.int32(with_collisions),
+        )
+        return args, attrs
+
     def _es_ok(self, df, pre, has_em, has_dpc) -> bool:
         """Whether the fused electrostatic kernel can run this call; warns once when it cannot."""
         global _fused_fallback_logged
@@ -505,11 +580,12 @@ class CUDAOps(SolverOps):
         return collision_term(f, params, pre, self.mesh)
 
     def supports_rk_fused(self, dg, params, pre) -> bool:
-        return (
-            bool(params.fused_linear)
-            and not (params.nlapar or params.nlbpar)
-            and self._es_ok(dg, pre, False, "s_disp_par_tab" in pre)
-        )
+        if not params.fused_linear or params.nlapar or params.nlbpar:
+            return False
+        has_dpc = "s_disp_par_tab" in pre
+        if params.linear_arith == "ds":
+            return self._use_ds(dg, params, pre, False, has_dpc)
+        return self._es_ok(dg, pre, False, has_dpc)
 
     def rk_stage(self, dg, phi, params, pre, prev, acc, extra, c_acc, c_stage, want_stage):
         """One fused RK4 stage: (acc + c_acc k, prev + c_stage k), k = linear RHS of dg + extra."""
@@ -517,10 +593,14 @@ class CUDAOps(SolverOps):
         if collisions_on(params, pre) and not fuse:
             coll = self._collisions(dg, params, pre)
             extra = coll if extra is None else extra + coll
-        args, attrs = self._es_call(dg, phi, pre, params, fuse)
+        ds = params.linear_arith == "ds"
+        if ds:
+            args, attrs = self._ds_call(dg, phi, pre, fuse)
+        else:
+            args, attrs = self._es_call(dg, phi, pre, params, fuse)
         coef = jnp.stack([jnp.asarray(c_acc, jnp.float64), jnp.asarray(c_stage, jnp.float64)])
         acc_out, stage_out = ffi.ffi_call(
-            "linear_rhs_es_rk_ffi",
+            "linear_rhs_ds_rk_ffi" if ds else "linear_rhs_es_rk_ffi",
             (
                 jax.ShapeDtypeStruct(dg.shape, jnp.complex128),
                 jax.ShapeDtypeStruct(dg.shape if want_stage else (1,), jnp.complex128),
@@ -643,7 +723,15 @@ class CUDAOps(SolverOps):
             bpar is not None and "bpar_chi_factor" in pre
         )
         coll_done = False
-        if params.fused_linear and self._es_ok(df, pre, has_em, dproj is not None):
+        if self._use_ds(df, params, pre, has_em, dproj is not None):
+            coll_done = bool(params.fused_linear) and self._fuse_collisions(params, pre)
+            args, attrs = self._ds_call(df, phi, pre, coll_done)
+            rhs = ffi.ffi_call(
+                "linear_rhs_ds_ffi",
+                jax.ShapeDtypeStruct(df.shape, jnp.complex128),
+                vmap_method="sequential",
+            )(*args, **attrs)
+        elif params.fused_linear and self._es_ok(df, pre, has_em, dproj is not None):
             coll_done = self._fuse_collisions(params, pre)
             rhs = self._linear_rhs_es(df, phi, pre, params, coll_done)
         else:
