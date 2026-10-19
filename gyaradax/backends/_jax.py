@@ -9,6 +9,7 @@ import math
 from typing import Any, Dict, Tuple
 
 import jax
+import numpy as np
 import jax.numpy as jnp
 from jax.sharding import PartitionSpec
 
@@ -36,6 +37,41 @@ def _nl_v_chunks(nv: int, planes_per_v: int, plane_bytes: int) -> int:
         if nv % n == 0 and (nv // n) * planes_per_v * plane_bytes <= _NL_CHUNK_BYTES:
             return n
     return nv
+
+
+def _par_tap_range() -> tuple[int, int]:
+    """[lo, hi) of the parallel-stencil taps the stencil constants can make nonzero."""
+    nz = np.zeros(9, dtype=bool)
+    seen = False
+    for name in ("D1_IPW_POS", "D1_IPW_NEG", "D4_IPW_POS", "D4_IPW_NEG"):
+        t = getattr(stencils, name, None)
+        if t is None:
+            continue
+        a = np.asarray(t)
+        if a.shape[-1] != 9:
+            return 0, 9
+        nz |= (np.abs(a).reshape(-1, 9) != 0.0).any(axis=0)
+        seen = True
+    if not seen or not nz.any():
+        return 0, 9
+    idx = np.flatnonzero(nz)
+    return int(idx[0]), int(idx[-1]) + 1
+
+
+_PAR_TAP_LO, _PAR_TAP_HI = _par_tap_range()
+
+
+def _is_exact_zero(c) -> bool:
+    try:
+        return bool(np.all(np.asarray(c) == 0.0))
+    except Exception:
+        return False
+
+
+def _mul_real(coeff: jnp.ndarray, z: jnp.ndarray) -> jnp.ndarray:
+    if not jnp.iscomplexobj(z):
+        return coeff * z
+    return jax.lax.complex(coeff * z.real, coeff * z.imag)
 
 
 class _StencilTable:
@@ -67,11 +103,13 @@ class JAXOps(SolverOps):
         nv = field.shape[0]
         out = jnp.zeros_like(field)
         for c, s in zip(coeffs, (-2, -1, 0, 1, 2)):
+            if _is_exact_zero(c):
+                continue
             idx = jnp.clip(jnp.arange(nv, dtype=jnp.int32) + s, 0, nv - 1)
             valid = jnp.logical_and(jnp.arange(nv) + s >= 0, jnp.arange(nv) + s < nv)
-            valid_mask = valid[:, None, None, None, None]
             shifted = jnp.take(field, idx, axis=0)
-            out = out + c * jnp.where(valid_mask, shifted, 0.0)
+            masked = jnp.where(valid[:, None, None, None, None], shifted, 0.0)
+            out = out + _mul_real(c, masked)
         return out
 
     def _apply_vpar_dual(
@@ -82,12 +120,18 @@ class JAXOps(SolverOps):
         out_d1 = jnp.zeros_like(field)
         out_d4 = jnp.zeros_like(field)
         for c1, c4, s in zip(coeffs_d1, coeffs_d4, (-2, -1, 0, 1, 2)):
+            z1, z4 = _is_exact_zero(c1), _is_exact_zero(c4)
+            if z1 and z4:
+                continue
             idx = jnp.clip(jnp.arange(nv, dtype=jnp.int32) + s, 0, nv - 1)
             valid = jnp.logical_and(jnp.arange(nv) + s >= 0, jnp.arange(nv) + s < nv)
-            valid_mask = valid[:, None, None, None, None]
-            shifted = jnp.take(field, idx, axis=0)
-            out_d1 = out_d1 + c1 * jnp.where(valid_mask, shifted, 0.0)
-            out_d4 = out_d4 + c4 * jnp.where(valid_mask, shifted, 0.0)
+            shifted = jnp.where(
+                valid[:, None, None, None, None], jnp.take(field, idx, axis=0), 0.0
+            )
+            if not z1:
+                out_d1 = out_d1 + _mul_real(c1, shifted)
+            if not z4:
+                out_d4 = out_d4 + _mul_real(c4, shifted)
         return out_d1, out_d4
 
     def _vpar_dual_sharded(self, df: jnp.ndarray) -> Tuple[jnp.ndarray, jnp.ndarray]:
@@ -118,13 +162,14 @@ class JAXOps(SolverOps):
         out = jnp.zeros_like(field)
         nky = field.shape[-1]
         ky_idx = jnp.reshape(jnp.arange(nky, dtype=jnp.int32), (1, 1, -1))
-        for i in range(9):
+        lo, hi = _PAR_TAP_LO, _PAR_TAP_HI
+        for i in range(lo, hi):
             s_map = self.pre["s_shift"][i]
             kx_map = self.pre["kx_shift"][i]
             valid = self.pre["valid_shift"][i]
             valid_mask = valid[None, None, :, :, :]
             shifted = jnp.where(valid_mask, field[:, :, s_map, kx_map, ky_idx], 0.0)
-            out = out + coeffs[i] * shifted
+            out = out + _mul_real(coeffs[i], shifted)
         return out
 
     def _apply_parallel_dual(
@@ -139,15 +184,16 @@ class JAXOps(SolverOps):
         out2 = jnp.zeros_like(field2)
         nky = field1.shape[-1]
         ky_idx = jnp.reshape(jnp.arange(nky, dtype=jnp.int32), (1, 1, -1))
-        for i in range(9):
+        lo, hi = _PAR_TAP_LO, _PAR_TAP_HI
+        for i in range(lo, hi):
             s_map = self.pre["s_shift"][i]
             kx_map = self.pre["kx_shift"][i]
             valid = self.pre["valid_shift"][i]
             valid_mask = valid[None, None, :, :, :]
             shifted1 = jnp.where(valid_mask, field1[:, :, s_map, kx_map, ky_idx], 0.0)
             shifted2 = jnp.where(valid_mask, field2[:, :, s_map, kx_map, ky_idx], 0.0)
-            out1 = out1 + coeffs1[i] * shifted1
-            out2 = out2 + coeffs2[i] * shifted2
+            out1 = out1 + _mul_real(coeffs1[i], shifted1)
+            out2 = out2 + _mul_real(coeffs2[i], shifted2)
         return out1, out2
 
     def _nonlinear_term_iii_core(

@@ -355,6 +355,8 @@ def _setup_run(config_path: str, args: argparse.Namespace, run_dir: str | None =
     backend = args.backend
     if backend:
         overrides["backend"] = backend
+    if args.fused_linear:
+        overrides["fused_linear"] = True
     sp, vp, mu = _mesh_request(args, facts)
     overrides["n_gpus_sp"], overrides["n_gpus_vp"], overrides["n_gpus_mu"] = sp, vp, mu
     params = gkparams_from_config(cfg, **overrides)
@@ -556,6 +558,7 @@ def _effective_config(
         ("solver.backend", params.backend),
         ("solver.mixed_precision", bool(params.mixed_precision)),
         ("solver.use_z2z", bool(params.use_z2z)),
+        ("solver.fused_linear", bool(params.fused_linear)),
         ("solver.dt", float(params.dt)),
         ("solver.n_steps", int(target_step)),
         ("run.block_size", int(block_size)),
@@ -699,6 +702,7 @@ def _run_telemetry(setup: RunSetup) -> Any:
             "backend": params.backend,
             "bracket": _bracket_name(params),
             "mixed_precision": bool(params.mixed_precision),
+            "fused_linear": bool(params.fused_linear),
             "mesh": [params.n_gpus_sp, params.n_gpus_vp, params.n_gpus_mu],
             "start_step": setup["start_step"],
             "n_steps": setup["n_steps"],
@@ -1058,6 +1062,10 @@ def _add_common(p: argparse.ArgumentParser) -> None:
     prec = p.add_mutually_exclusive_group()
     prec.add_argument("--mp", action="store_true", help="mixed precision (FP32 nonlinear FFTs)")
     prec.add_argument("--dp", action="store_true", help="full FP64")
+    p.add_argument(
+        "--fused-linear", action="store_true",
+        help="CUDA: fused electrostatic linear kernel (collisions, rk4 stages, field moments)",
+    )
     p.add_argument("--z2z", action="store_true", default=None, help="Z2Z FFT for the nonlinear term")
     p.add_argument("--no-z2z", dest="z2z", action="store_false", help="R2C FFT for the nonlinear term")
     p.add_argument("--device", type=int, default=None, help="pin to a single GPU index")
