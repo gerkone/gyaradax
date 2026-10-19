@@ -5,7 +5,7 @@ adiabatic and kinetic electrons, nonlinear ExB advection, adaptive CFL,
 electromagnetic A_parallel (shear Alfvén via Ampere's law, mixed variable g)
 and B_parallel (magnetic compression via coupled Poisson-Bpar solve),
 linearized Fokker-Planck collision operator (pitch-angle, energy, friction;
-adiabatic + single ion MVP), and an optional CUDA backend for fused
+multi-species, GKW defaults), and an optional CUDA backend for fused
 stencil and cuFFT kernels (electrostatic and electromagnetic).
 
 ## File map
@@ -143,12 +143,14 @@ SolverOps interface: `linear_rhs()`, `linear_rhs_from_g()`, `nonlinear_term_iii(
 - **Terms I-VIII**: GKW numbering for the gyrokinetic equation RHS.
   Term VI (neoclassical/rotation) is not implemented.
   `drive_scale` controls Terms V and VIII jointly -- do NOT set to 0.
-- **Collisions**: Enabled by `collisions=True, coll_freq>0` in GKParams.
+- **Collisions**: Enabled by `collisions=True` in GKParams (YAML `collisions:` section).
   Linearized Fokker-Planck via 9-point `(vpar, mu)` stencil precomputed
   in `gyaradax/operators/collisions.py` and applied as an additive RHS in
-  `_linear_rhs_core`. MVP scope: adiabatic electrons + 1 kinetic ion,
-  `freq_override=True` only, `mass_conserve=True`, no momentum/energy
-  conservation corrections. Kinetic-electron path raises clearly.
+  `_linear_rhs_core`. Adiabatic or kinetic electrons, all species pairs
+  (test-particle inter-species terms). Frequencies from `rref/nref/tref`
+  with GKW Coulomb logs (`freq_override=False`, default) or from `coll_freq`
+  (`freq_override=True`). Defaults follow GKW: `mass_conserve=False`, no
+  momentum/energy conservation (optional Xu corrections on self-collisions).
   Flags `coll_pitch_angle`, `coll_en_scatter`, `coll_friction` toggle
   the three pieces independently.
 - **Electromagnetic (A_parallel)**: Enabled by `nlapar=True, beta>0` in GKParams.

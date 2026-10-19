@@ -293,6 +293,8 @@ def test_collisions_sharded_matches_single_device(backend, axis, conserve):
         "backend": backend,
         "collisions": True,
         "coll_freq": 0.05,
+        "coll_freq_override": True,
+        "coll_mass_conserve": True,
         "coll_mom_conservation": conserve,
         "coll_ene_conservation": conserve,
     }

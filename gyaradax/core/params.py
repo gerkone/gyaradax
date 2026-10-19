@@ -122,14 +122,13 @@ class GKParams:
     coll_en_scatter: bool = True
     coll_friction: bool = True
     coll_freq: float = 0.0
-    coll_freq_override: bool = True
-    coll_mass_conserve: bool = True
+    coll_freq_override: bool = False
+    coll_mass_conserve: bool = False
     # references for Coulomb log: Rref [m], Tref [keV], Nref [1e19 m^-3]
     coll_rref: float = 1.0
     coll_tref: float = 1.0
     coll_nref: float = 1.0
-    # full species-pair collision backgrounds (incl. adiabatic species).
-    # default None falls back to self-collision only.
+    # collision backgrounds incl. adiabatic species; none uses the kinetic species
     coll_bg_mas: Any = None
     coll_bg_signz: Any = None
     coll_bg_tmp: Any = None
@@ -297,8 +296,8 @@ def gkparams_from_runtime(runtime: Dict[str, Any], **overrides: Any) -> GKParams
         "coll_en_scatter": bool(runtime.get("coll_en_scatter", True)),
         "coll_friction": bool(runtime.get("coll_friction", True)),
         "coll_freq": float(runtime.get("coll_freq", 0.0)),
-        "coll_freq_override": bool(runtime.get("coll_freq_override", True)),
-        "coll_mass_conserve": bool(runtime.get("coll_mass_conserve", True)),
+        "coll_freq_override": bool(runtime.get("coll_freq_override", False)),
+        "coll_mass_conserve": bool(runtime.get("coll_mass_conserve", False)),
         "coll_mom_conservation": bool(runtime.get("coll_mom_conservation", False)),
         "coll_ene_conservation": bool(runtime.get("coll_ene_conservation", False)),
         "coll_rref": float(runtime.get("coll_rref", 1.0)),
@@ -550,14 +549,22 @@ def gkparams_from_config(config: Any, **overrides: Any) -> GKParams:
                 "coll_en_scatter": bool(getattr(coll_cfg, "en_scatter", True)),
                 "coll_friction": bool(getattr(coll_cfg, "friction", True)),
                 "coll_freq": float(getattr(coll_cfg, "freq", 0.0)),
-                "coll_freq_override": bool(getattr(coll_cfg, "freq_override", True)),
-                "coll_mass_conserve": bool(getattr(coll_cfg, "mass_conserve", True)),
+                "coll_freq_override": bool(getattr(coll_cfg, "freq_override", False)),
+                "coll_mass_conserve": bool(getattr(coll_cfg, "mass_conserve", False)),
                 "coll_mom_conservation": bool(getattr(coll_cfg, "mom_conservation", False)),
                 "coll_ene_conservation": bool(getattr(coll_cfg, "ene_conservation", False)),
+                "coll_rref": float(getattr(coll_cfg, "rref", 1.0)),
+                "coll_nref": float(getattr(coll_cfg, "nref", 1.0)),
+                "coll_tref": float(getattr(coll_cfg, "tref", 1.0)),
             }
         )
-        if not params_dict["coll_freq_override"]:
-            raise NotImplementedError("collisions: only freq_override=True is supported in MVP")
+        if params_dict["collisions"]:
+            if params_dict["coll_freq_override"] and params_dict["coll_freq"] <= 0.0:
+                raise ValueError("collisions: freq_override: true needs freq > 0")
+            if not params_dict["coll_freq_override"] and params_dict["coll_freq"] > 0.0:
+                raise ValueError("collisions: freq is used only with freq_override: true")
+            if min(params_dict[k] for k in ("coll_rref", "coll_nref", "coll_tref")) <= 0.0:
+                raise ValueError("collisions: rref, nref and tref must be positive")
 
     # physics scalars (may be arrays for multi-species kinetic configs)
     _SPECIES_PARAMS = {"rlt", "rln", "mas", "tmp", "de", "signz", "vthrat"}

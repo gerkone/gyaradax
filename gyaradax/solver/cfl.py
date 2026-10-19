@@ -129,7 +129,9 @@ def estimate_linear_timestep(
     # ideriv=2: collision 2nd-derivative; kept undivided in the RK4 max (matdat.F90:1498)
     tmax2 = jnp.asarray(0.0, dtype=jnp.float64)
     if "coll_stencil" in pre:
-        tmax2 = jnp.max(jnp.abs(pre["coll_stencil"][0]))
+        st = pre["coll_stencil"]
+        # diagonal coefficient: (9, ...) adiabatic, (nsp, 9, ...) kinetic
+        tmax2 = jnp.max(jnp.abs(st[0] if st.ndim == 4 else st[:, 0]))
 
     # field CFL: ES mode frequency (time_est_field), kinetic only
     tmax1 = jnp.maximum(tmax1, jnp.asarray(pre.get("tmax_field", 0.0), dtype=jnp.float64))
