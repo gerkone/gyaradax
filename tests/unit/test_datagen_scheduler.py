@@ -2,32 +2,23 @@
 
 import contextlib
 import glob
-import importlib.util
 import json
 import os
 import signal
 import socket
+import sqlite3
 import subprocess
 import sys
 import time
 import zipfile
+from pathlib import Path
 
 import pytest
 import yaml
 
-ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-SCRIPT = os.path.join(ROOT, "gyaradax", "datagen", "scheduler.py")
+from gyaradax.datagen import scheduler as gs
 
-
-def _load():
-    spec = importlib.util.spec_from_file_location("gpu_scheduler", SCRIPT)
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-gs = _load()
+SCRIPT = gs.__file__
 
 # mimics the run-directory behaviour of `gyaradax run`
 FAKE_GYARADAX = r"""
@@ -189,52 +180,31 @@ class Campaign:
         self.pool_path = str(root / "pool.yaml")
         self.jobs_path = str(root / "jobs.yaml")
         self.state_path = str(root / "state" / "state.json")
-        self.fake = str(root / "fake_gyaradax.py")
-        with open(self.fake, "w") as fh:
-            fh.write(FAKE_GYARADAX)
+        self.fake = root / "fake_gyaradax.py"
+        self.fake.write_text(FAKE_GYARADAX)
         self.entries = []
         self.logs = []
 
     def pool(self, *slots, hosts=None):
         doc = {"defaults": {"python": sys.executable}, "slots": list(slots)}
-        if hosts:
-            doc["hosts"] = hosts
-        with open(self.pool_path, "w") as fh:
-            yaml.safe_dump(doc, fh)
+        Path(self.pool_path).write_text(yaml.safe_dump({**doc, **({"hosts": hosts} if hosts else {})}))
 
     def slurm(self, **target):
-        with open(self.pool_path, "w") as fh:
-            yaml.safe_dump({"slurm": {"python": sys.executable, **target}}, fh)
+        Path(self.pool_path).write_text(yaml.safe_dump({"slurm": {"python": sys.executable, **target}}))
 
     def add_job(self, name, steps=5, step_time=0.05, **job):
-        cfg = {
-            "steps": steps,
-            "step_time": step_time,
-            **{k: job.pop(k) for k in FAKE_KEYS if k in job},
-        }
-        cfg_path = self.root / "configs" / f"{name}.yaml"
-        cfg_path.parent.mkdir(exist_ok=True)
-        cfg_path.write_text(yaml.safe_dump(cfg))
-        self.entries.append(
-            {"name": name, "config": f"configs/{name}.yaml", "output_dir": f"runs/{name}", **job}
-        )
-        with open(self.jobs_path, "w") as fh:
-            yaml.safe_dump({"jobs": self.entries}, fh)
+        cfg = {"steps": steps, "step_time": step_time, **{k: job.pop(k) for k in FAKE_KEYS if k in job}}
+        (self.root / "configs").mkdir(exist_ok=True)
+        (self.root / "configs" / f"{name}.yaml").write_text(yaml.safe_dump(cfg))
+        entry = {"name": name, "config": f"configs/{name}.yaml", "output_dir": f"runs/{name}"}
+        self.entries.append({**entry, **job})
+        Path(self.jobs_path).write_text(yaml.safe_dump({"jobs": self.entries}))
 
-    def scheduler(self, **kw):
-        opts = dict(
-            heartbeat=0.2,
-            heartbeat_timeout=2.0,
-            grace=1.0,
-            start_timeout=15.0,
-            max_retries=2,
-            slot_backoff=60.0,
-            program=[sys.executable, self.fake],
-            log=self.logs.append,
-        )
-        executor = kw.pop("executor", None) or gs.LocalExecutor()
-        opts.update(kw)
-        return gs.Scheduler(self.pool_path, self.jobs_path, self.state_path, executor, **opts)
+    def scheduler(self, executor=None, **kw):
+        opts = dict(heartbeat=0.2, heartbeat_timeout=2.0, grace=1.0, start_timeout=15.0, max_retries=2,
+                    slot_backoff=60.0, program=[sys.executable, str(self.fake)], log=self.logs.append)
+        executor = executor or gs.LocalExecutor()
+        return gs.Scheduler(self.pool_path, self.jobs_path, self.state_path, executor, **{**opts, **kw})
 
     def run_dir(self, name):
         return str(self.root / "runs" / name)
@@ -243,21 +213,12 @@ class Campaign:
         return gs.run_legs(self.run_dir(name))
 
     def drive(self, sched, until, timeout=30.0):
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            sched.poll()
-            if until():
-                return
-            time.sleep(0.1)
-        states = {n: (j.state, j.note) for n, j in sched.jobs.items()}
-        raise AssertionError(f"condition not reached; jobs {states}; log {self.logs[-10:]}")
+        drive(sched, until, timeout, self.logs)
 
     def cleanup(self):
         for pid_file in glob.glob(str(self.root / "runs" / "*" / ".sched" / "pid")):
-            with open(pid_file) as fh:
-                pid = int(fh.read().split()[0])
             with contextlib.suppress(OSError):
-                os.killpg(pid, signal.SIGKILL)
+                os.killpg(int(Path(pid_file).read_text().split()[0]), signal.SIGKILL)
 
 
 @pytest.fixture
@@ -267,16 +228,40 @@ def camp(tmp_path):
     c.cleanup()
 
 
-def _read_bytes(path):
-    try:
-        with open(path, "rb") as fh:
-            return fh.read()
-    except OSError:
-        return None
+def drive(sched, until, timeout=30.0, logs=()):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        sched.poll()
+        if until():
+            return
+        time.sleep(0.1)
+    states = {n: (j.state, j.note) for n, j in sched.jobs.items()}
+    raise AssertionError(f"condition not reached; jobs {states}; log {list(logs)[-10:]}")
 
 
 def done(sched, *names):
     return lambda: all(sched.jobs[n].state == "done" for n in (names or sched.jobs))
+
+
+def snapshot_at(run_dir, step):
+    return lambda: max(gs.snapshot_steps(run_dir) or [0]) >= step
+
+
+def write_run(run_dir, config=None, snapshot=None):
+    os.makedirs(run_dir, exist_ok=True)
+    with open(os.path.join(run_dir, "run_info.jsonl"), "w") as fh:
+        fh.write(json.dumps({"start_step": 0, "target_step": 30}) + "\n")
+    if config is not None:
+        with open(os.path.join(run_dir, "config.yaml"), "w") as fh:
+            fh.write(config)
+    if snapshot is not None:
+        with zipfile.ZipFile(os.path.join(run_dir, f"step_{snapshot:06d}.npz"), "w") as zf:
+            zf.writestr("df.npy", b"df")
+
+
+def sql(db, query):
+    with contextlib.closing(sqlite3.connect(db)) as con:
+        return con.execute(query).fetchall()
 
 
 def test_lpt_puts_longest_jobs_on_fastest_slots(camp):
@@ -285,15 +270,11 @@ def test_lpt_puts_longest_jobs_on_fastest_slots(camp):
         camp.add_job(name, cost=cost, steps=3)
     sched = camp.scheduler()
     sched.poll()
-    assert {n: sched.jobs[n].slot for n in ("long", "medium", "short")} == {
-        "long": "fast:1",
-        "medium": "mid:2",
-        "short": "slow:0",
-    }
+    placed = {n: sched.jobs[n].slot for n in ("long", "medium", "short")}
+    assert placed == {"long": "fast:1", "medium": "mid:2", "short": "slow:0"}
     assert sched.jobs["tiny"].state == "pending"
     camp.drive(sched, done(sched))
-    assert camp.legs("long")[0]["gpus"] == "1"
-    assert camp.legs("long")[0]["prealloc"] == "false"
+    assert camp.legs("long")[0]["gpus"] == "1" and camp.legs("long")[0]["prealloc"] == "false"
     assert len(camp.legs("tiny")) == 1
 
 
@@ -306,8 +287,7 @@ def test_completion_frees_the_slot_and_new_jobs_are_picked_up(camp):
     assert job.slot is None and job.history[-1]["exit"] == 0 and job.failures == 0
     with open(camp.state_path) as fh:
         doc = json.load(fh)
-    assert doc["jobs"]["one"]["state"] == "done"
-    assert "one" in gs.format_status(doc, time.time())
+    assert doc["jobs"]["one"]["state"] == "done" and "one" in gs.format_status(doc, time.time())
 
     camp.add_job("two", steps=2)
     camp.drive(sched, done(sched, "two"))
@@ -320,62 +300,66 @@ def test_slot_added_at_runtime_gets_a_job(camp):
     camp.add_job("first", steps=60, cost=2)
     camp.add_job("second", steps=3, cost=1)
     sched = camp.scheduler()
-    sched.poll()
-    assert sched.jobs["first"].slot == "a:0"
-    assert sched.jobs["second"].state == "pending"
-    sched.poll()
-    assert sched.jobs["second"].state == "pending"
+    for _ in range(2):
+        sched.poll()
+        assert sched.jobs["first"].slot == "a:0" and sched.jobs["second"].state == "pending"
 
     camp.pool(slot("a", 0), slot("b", 5))
     sched.poll()
     assert sched.jobs["second"].slot == "b:5"
     camp.drive(sched, done(sched, "second"))
     assert camp.legs("second")[0]["gpus"] == "5"
-    assert sched.jobs["first"].state in ("starting", "running")
-    assert sched.jobs["first"].attempts == 1 and sched.jobs["first"].slot == "a:0"
+    first = sched.jobs["first"]
+    assert first.state in ("starting", "running") and first.attempts == 1 and first.slot == "a:0"
 
 
-def test_removed_slot_preempts_and_the_job_resumes_elsewhere(camp):
+@pytest.mark.parametrize(
+    "hosts, note",
+    [(None, "slot removed"), ({"a": "off"}, "slot removed"), ({"a": "kill"}, "host a killed")],
+    ids=["removed", "host-off", "host-kill"],
+)
+def test_lost_slot_moves_the_job_elsewhere_and_it_resumes_from_its_snapshot(camp, hosts, note):
     camp.pool(slot("a", 0, speed=2), slot("b", 1))
     camp.add_job("long", steps=1000, step_time=0.04, args=["--n-steps", "40"])
-    sched = camp.scheduler()
+    sched = camp.scheduler(grace=60.0)
     sched.poll()
-    assert sched.jobs["long"].slot == "a:0"
+    job = sched.jobs["long"]
+    assert job.slot == "a:0"
     run_dir = camp.run_dir("long")
-    camp.drive(sched, lambda: max(gs.snapshot_steps(run_dir) or [0]) >= 5)
+    camp.drive(sched, snapshot_at(run_dir, 5))
 
-    camp.pool(slot("b", 1))
+    camp.pool(*([slot("a", 0, speed=2)] if hosts else []), slot("b", 1), hosts=hosts)
+    started = time.time()
     sched.poll()
-    assert sched.jobs["long"].state in ("stopping", "pending", "starting")
+    assert job.state in ("stopping", "pending", "starting")
+    camp.drive(sched, lambda: job.state in ("starting", "running") and job.slot == "b:1")
+    assert time.time() - started < 10.0
     camp.drive(sched, done(sched, "long"))
 
     first, second = camp.legs("long")
     assert first["gpus"] == "0" and second["gpus"] == "1"
-    assert second["argv"][:2] == ["run", run_dir]
-    assert "--n-steps" not in second["argv"]
+    assert second["argv"][:2] == ["run", run_dir] and "--n-steps" not in second["argv"]
     assert second["start_step"] >= 5 and second["target_step"] == first["target_step"] == 40
     assert max(gs.snapshot_steps(run_dir)) == 40
-    stop = sched.jobs["long"].history[0]
-    assert (
-        stop["exit"] == 75
-        and stop["note"].startswith("slot removed")
-        and stop["result"] == "pending"
-    )
-    assert sched.jobs["long"].failures == 0
+    stop = job.history[0]
+    assert stop["note"].startswith(note) and stop["result"] == "pending" and job.failures == 0
+    # removal and off stop with SIGTERM and a snapshot (exit 75), kill with SIGKILL
+    assert (stop["exit"] == 75) == (note == "slot removed")
 
 
 def test_cancel_escalates_to_sigkill_and_resume_requeues(camp):
     camp.pool(slot("a", 0))
     camp.add_job("stubborn", steps=50, step_time=0.05, ignore_term=True)
     sched = camp.scheduler()
-    camp.drive(sched, lambda: max(gs.snapshot_steps(camp.run_dir("stubborn")) or [0]) >= 3)
+    camp.drive(sched, snapshot_at(camp.run_dir("stubborn"), 3))
     pid = sched.jobs["stubborn"].pid
 
     assert gs.main(["cancel", "stubborn", "--state", camp.state_path]) == 0
     camp.drive(sched, lambda: sched.jobs["stubborn"].state == "cancelled")
     entry = sched.jobs["stubborn"].history[-1]
     assert entry["exit"] is None and "killed" in entry["note"]
-    assert not (_read_bytes(f"/proc/{pid}/cmdline") or b"")
+    with contextlib.suppress(OSError):
+        assert not open(f"/proc/{pid}/cmdline", "rb").read()
     for _ in range(3):
         sched.poll()
     assert sched.jobs["stubborn"].state == "cancelled"
@@ -404,36 +388,29 @@ def test_lost_process_counts_as_failure_until_retries_run_out(camp):
     camp.pool(slot("a", 0))
     camp.add_job("doomed", steps=10_000)
     sched = camp.scheduler(max_retries=1, heartbeat_timeout=1.0)
+    jobs = sched.jobs
     for attempt in (1, 2):
         camp.drive(
-            sched,
-            lambda: sched.jobs["doomed"].state == "running"
-            and sched.jobs["doomed"].attempts == attempt,
+            sched, lambda: jobs["doomed"].state == "running" and jobs["doomed"].attempts == attempt
         )
-        os.killpg(sched.jobs["doomed"].pid, signal.SIGKILL)
-        camp.drive(sched, lambda: sched.jobs["doomed"].state != "running")
-    job = sched.jobs["doomed"]
-    assert job.state == "failed" and job.failures == 2
-    assert all(h["note"].startswith("lost") for h in job.history)
+        os.killpg(jobs["doomed"].pid, signal.SIGKILL)
+        camp.drive(sched, lambda: jobs["doomed"].state != "running")
+    assert jobs["doomed"].state == "failed" and jobs["doomed"].failures == 2
+    assert all(h["note"].startswith("lost") for h in jobs["doomed"].history)
 
 
-def test_divergence_is_not_retried(camp):
+@pytest.mark.parametrize(
+    "fake, state", [({"diverge_at": 3}, "diverged"), ({"linear_reject": True}, "rejected")]
+)
+def test_divergence_and_linear_check_rejection_are_not_retried(camp, fake, state):
     camp.pool(slot("a", 0))
-    camp.add_job("nan", steps=10, diverge_at=3)
+    camp.add_job("x", steps=10, **fake)
     sched = camp.scheduler()
-    camp.drive(sched, lambda: sched.jobs["nan"].state == "diverged")
-    assert sched.jobs["nan"].attempts == 1
-
-
-def test_linear_check_rejection_is_not_retried(camp):
-    camp.pool(slot("a", 0))
-    camp.add_job("off", steps=10, linear_reject=True)
-    sched = camp.scheduler()
-    camp.drive(sched, lambda: sched.jobs["off"].state == "rejected")
-    assert sched.jobs["off"].attempts == 1 and sched.jobs["off"].failures == 0
-    assert gs.main(["resume", "off", "--state", camp.state_path]) == 0
+    camp.drive(sched, lambda: sched.jobs["x"].state == state)
+    assert sched.jobs["x"].attempts == 1 and sched.jobs["x"].failures == 0
+    assert gs.main(["resume", "x", "--state", camp.state_path]) == 0
     sched.poll()
-    assert sched.jobs["off"].state in ("starting", "running", "rejected")
+    assert sched.jobs["x"].state in ("starting", "running", state)
 
 
 GATE = {
@@ -452,8 +429,6 @@ SATURATED = {
 
 
 def test_outcome_exits_end_jobs_without_retries_and_fill_the_outcome_table(camp):
-    import sqlite3
-
     camp.pool(slot("a", 0), slot("b", 1))
     decayed = {**SATURATED, "class": "decayed", "label": "decayed", "stopped": "decayed"}
     banded = {**SATURATED, "class": "banded", "label": "banded", "stopped": "banded", "banded": True}
@@ -486,65 +461,45 @@ def test_outcome_exits_end_jobs_without_retries_and_fill_the_outcome_table(camp)
     assert sched.jobs["decay"].state == "decayed"
     assert "stopped by hand as stable" in sched.jobs["decay"].note
 
-    con = sqlite3.connect(sched.db_path)
-    try:
-        rows = {r[0]: r[1:] for r in con.execute("SELECT name, state, outcome, banded FROM runs")}
-        assert rows["turb"] == ("done", "saturated", 1) and rows["stable"] == ("stable", None, None)
-        out = con.execute(
-            "SELECT gate, settled, gamma_max, peak_ky, rlt_i, rlt_e, temp_ratio, q, shat, eps, "
-            "json_extract(grid, '$.nkx'), json_extract(gamma, '$[1]') FROM outcomes "
-            "WHERE name = 'stable'"
-        ).fetchone()
-        assert out == ("stable", 1, -0.03, 0.35, 5.0, 4.0, 1.2, 1.4, 0.8, 0.12, 192, -0.03)
-        turb = con.execute(
-            "SELECT class, qi, qi_err, qe, qe_err, gi, avg_t0, avg_t1, banded, banded_t, "
-            "nyq_zonal, q_drift, gpu_hours > 0 FROM outcomes WHERE name = 'turb'"
-        ).fetchone()
-        assert turb == ("saturated", 3.2, 0.4, 1.1, 0.2, 0.5, 105.0, 150.0, 1, 90.0, 0.01, 0.05, 1)
-        assert con.execute(
-            "SELECT gamma_max_lowky, peak_ky_lowky, low_ky FROM outcomes WHERE name = 'stable'"
-        ).fetchone() == (-0.04, 0.2, 1.0)
-        assert con.execute("SELECT class FROM outcomes WHERE name = 'band'").fetchone() == (
-            "banded",
-        )
-    finally:
-        con.close()
+    rows = {r[0]: r[1:] for r in sql(sched.db_path, "SELECT name, state, outcome, banded FROM runs")}
+    assert rows["turb"] == ("done", "saturated", 1) and rows["stable"] == ("stable", None, None)
+    stable = sql(
+        sched.db_path,
+        "SELECT gate, settled, gamma_max, peak_ky, rlt_i, rlt_e, temp_ratio, q, shat, eps, "
+        "json_extract(grid, '$.nkx'), json_extract(gamma, '$[1]'), gamma_max_lowky, "
+        "peak_ky_lowky, low_ky FROM outcomes WHERE name = 'stable'",
+    )
+    assert stable == [
+        ("stable", 1, -0.03, 0.35, 5.0, 4.0, 1.2, 1.4, 0.8, 0.12, 192, -0.03, -0.04, 0.2, 1.0)
+    ]
+    turb = sql(
+        sched.db_path,
+        "SELECT class, qi, qi_err, qe, qe_err, gi, avg_t0, avg_t1, banded, banded_t, "
+        "nyq_zonal, q_drift, gpu_hours > 0 FROM outcomes WHERE name = 'turb'",
+    )
+    assert turb == [("saturated", 3.2, 0.4, 1.1, 0.2, 0.5, 105.0, 150.0, 1, 90.0, 0.01, 0.05, 1)]
+    assert sql(sched.db_path, "SELECT class FROM outcomes WHERE name = 'band'") == [("banded",)]
     with open(camp.state_path) as fh:
         status = gs.format_status(json.load(fh), time.time())
     assert "OUTCOME" in status and "saturated t 150.0 Qi 3.2±0.4" in status
     assert "jobs: 1 banded, 1 decayed, 1 stable, 1 done" in status
 
 
-def test_restart_reattaches_to_the_running_job(camp):
+@pytest.mark.parametrize("keep_state", [True, False], ids=["state", "sched-files"])
+def test_restart_reattaches_to_the_running_job(camp, keep_state):
     camp.pool(slot("a", 0))
     camp.add_job("long", steps=80, step_time=0.05, cost=2)
     first = camp.scheduler()
     camp.drive(first, lambda: first.jobs["long"].state == "running")
     launch, pid = first.jobs["long"].launch_id, first.jobs["long"].pid
+    if not keep_state:
+        os.remove(camp.state_path)
 
     camp.add_job("other", steps=2, cost=1)
-    second = camp.scheduler()
-    second.poll()
-    assert second.jobs["long"].state == "running"
-    assert (second.jobs["long"].launch_id, second.jobs["long"].pid) == (launch, pid)
-    assert second.jobs["other"].state == "pending"
-    camp.drive(second, done(second))
-    assert len(camp.legs("long")) == 1
-
-
-def test_restart_without_state_adopts_the_run_from_its_sched_files(camp):
-    camp.pool(slot("a", 0))
-    camp.add_job("long", steps=80, step_time=0.05, cost=2)
-    camp.add_job("other", steps=2, cost=1)
-    first = camp.scheduler()
-    camp.drive(first, lambda: first.jobs["long"].state == "running")
-    launch = first.jobs["long"].launch_id
-    os.remove(camp.state_path)
-
     second = camp.scheduler()
     second.poll()
     job = second.jobs["long"]
-    assert job.state == "running" and job.launch_id == launch and job.slot == "a:0"
+    assert (job.state, job.launch_id, job.pid, job.slot) == ("running", launch, pid, "a:0")
     assert second.jobs["other"].state == "pending"
     camp.drive(second, done(second))
     assert len(camp.legs("long")) == 1
@@ -561,9 +516,9 @@ def test_multi_gpu_jobs_only_go_to_slots_with_enough_gpus(camp):
     assert sched.jobs["small"].slot == "one:0" and sched.jobs["small2"].slot == "two:0"
     camp.drive(sched, done(sched))
     leg = camp.legs("big")[0]
-    assert leg["gpus"] == "2,3"
     argv = leg["argv"]
-    assert argv[argv.index("--n-gpus") + 1] == "2" and argv[argv.index("--backend") + 1] == "auto"
+    assert leg["gpus"] == "2,3" and argv[argv.index("--n-gpus") + 1] == "2"
+    assert argv[argv.index("--backend") + 1] == "auto"
 
 
 def test_small_jobs_leave_the_pair_to_a_waiting_multi_gpu_job(camp):
@@ -599,50 +554,10 @@ def test_drained_slot_finishes_its_job_then_gets_nothing(camp):
     for _ in range(3):
         sched.poll()
         time.sleep(0.05)
-    assert sched.jobs["second"].state == "pending"
-    assert len(camp.legs("first")) == 1
+    assert sched.jobs["second"].state == "pending" and len(camp.legs("first")) == 1
 
     camp.pool(slot("a", 0))
     camp.drive(sched, done(sched, "second"))
-
-
-def test_host_switched_off_at_runtime_moves_its_job_elsewhere(camp):
-    camp.pool(slot("a", 0, speed=2), slot("b", 1))
-    camp.add_job("long", steps=1000, step_time=0.04, args=["--n-steps", "40"])
-    sched = camp.scheduler()
-    sched.poll()
-    assert sched.jobs["long"].slot == "a:0"
-    run_dir = camp.run_dir("long")
-    camp.drive(sched, lambda: max(gs.snapshot_steps(run_dir) or [0]) >= 5)
-
-    camp.pool(slot("a", 0, speed=2), slot("b", 1), hosts={"a": "off"})
-    camp.drive(sched, done(sched, "long"))
-    first, second = camp.legs("long")
-    assert first["gpus"] == "0" and second["gpus"] == "1"
-    assert sched.jobs["long"].failures == 0
-
-
-def test_killed_host_stops_its_job_at_once_and_it_resumes_from_its_snapshot(camp):
-    camp.pool(slot("a", 0, speed=2), slot("b", 1))
-    camp.add_job("long", steps=1000, step_time=0.04, args=["--n-steps", "60"])
-    sched = camp.scheduler(grace=60.0)
-    sched.poll()
-    run_dir = camp.run_dir("long")
-    camp.drive(sched, lambda: max(gs.snapshot_steps(run_dir) or [0]) >= 5)
-
-    camp.pool(slot("a", 0, speed=2), slot("b", 1), hosts={"a": "kill"})
-    started = time.time()
-    job = sched.jobs["long"]
-    camp.drive(sched, lambda: job.state in ("starting", "running") and job.slot == "b:1")
-    assert time.time() - started < 10.0
-    camp.drive(sched, done(sched, "long"))
-    first, second = camp.legs("long")
-    assert first["gpus"] == "0" and second["gpus"] == "1"
-    assert second["start_step"] >= 5
-    stop = sched.jobs["long"].history[0]
-    assert stop["exit"] != 75 and stop["note"].startswith("host a killed")
-    assert stop["result"] == "pending"
-    assert sched.jobs["long"].failures == 0
 
 
 def test_busy_gpus_get_no_jobs_until_they_are_free(camp):
@@ -683,13 +598,12 @@ def test_unreadable_pool_keeps_the_previous_one(camp):
         with open(camp.pool_path, "w") as fh:
             fh.write(text)
         sched.poll()
-        assert sched.jobs["long"].state == "running"
-        assert list(sched.pool) == ["a:0"]
+        assert sched.jobs["long"].state == "running" and list(sched.pool) == ["a:0"]
     assert any("unreadable" in line for line in camp.logs)
     camp.drive(sched, done(sched))
 
 
-def test_dry_run_prints_commands_and_runs_nothing(camp, tmp_path):
+def test_dry_run_prints_commands_and_runs_nothing(camp):
     class Refuse(gs.LocalExecutor):
         def run(self, host, command):
             raise AssertionError("dry run executed a command")
@@ -698,58 +612,41 @@ def test_dry_run_prints_commands_and_runs_nothing(camp, tmp_path):
     camp.add_job("x", steps=2, args=["--backend", "cuda"])
     sched = camp.scheduler(dry_run=True, executor=Refuse())
     sched.run(poll=0.1)
-    lines = [line for line in camp.logs if line.startswith("[dry-run]")]
-    assert len(lines) == 1
-    assert (
-        "CUDA_VISIBLE_DEVICES=3" in lines[0] and "XLA_PYTHON_CLIENT_PREALLOCATE=false" in lines[0]
-    )
-    assert "--backend cuda" in lines[0] and " wrap " in lines[0]
-    assert not os.path.exists(camp.state_path)
-    assert not os.path.exists(camp.run_dir("x"))
+    (line,) = [line for line in camp.logs if line.startswith("[dry-run]")]
+    for part in ("CUDA_VISIBLE_DEVICES=3", "XLA_PYTHON_CLIENT_PREALLOCATE=false", "--backend cuda"):
+        assert part in line
+    assert " wrap " in line
+    assert not os.path.exists(camp.state_path) and not os.path.exists(camp.run_dir("x"))
 
 
 def test_pool_validation(tmp_path):
     path = tmp_path / "pool.yaml"
-    path.write_text(
-        yaml.safe_dump(
-            {
-                "slots": [
-                    {"host": "lizard", "gpus": [0, 1]},
-                    {"host": "lizard", "gpus": [1, 2]},
-                    {"host": "lizard", "gpus": [1]},
-                    {"host": "shark", "gpus": [0], "speed": 2, "env": {"BAD-NAME": 1}},
-                    {"gpus": [0]},
-                    {"host": "shark", "gpus": [1], "drain": True, "name": "s1"},
-                ]
-            }
-        )
-    )
+    slots = [
+        {"host": "lizard", "gpus": [0, 1]},
+        {"host": "lizard", "gpus": [1, 2]},
+        {"host": "lizard", "gpus": [1]},
+        {"host": "shark", "gpus": [0], "speed": 2, "env": {"BAD-NAME": 1}},
+        {"gpus": [0]},
+        {"host": "shark", "gpus": [1], "drain": True, "name": "s1"},
+    ]
+    path.write_text(yaml.safe_dump({"slots": slots}))
     slots, problems = gs.load_pool(str(path))
     assert list(slots) == ["lizard:0,1", "s1"]
     assert slots["s1"].drain and slots["lizard:0,1"].python == gs.DEFAULT_PYTHON
-    assert len(problems) == 4
-    assert any("must be one of" in p for p in problems)
+    assert len(problems) == 4 and any("must be one of" in p for p in problems)
     path.write_text("")
     with pytest.raises(ValueError):
         gs.load_pool(str(path))
 
-
-def test_host_switches(tmp_path):
-    path = tmp_path / "pool.yaml"
-    path.write_text(
-        yaml.safe_dump(
-            {
-                "hosts": {"shark": "drain", "coyote": "off", "lizard": "maybe"},
-                "slots": [
-                    {"host": "shark", "gpus": [0]},
-                    {"host": "shark.local", "gpus": [1]},
-                    {"host": "coyote", "gpus": [0]},
-                    {"host": "lizard", "gpus": [0], "busy_mib": 1500},
-                    {"host": "scorpion", "gpus": [0], "busy_mib": -1},
-                ]
-            }
-        )
-    )
+    slots = [
+        {"host": "shark", "gpus": [0]},
+        {"host": "shark.local", "gpus": [1]},
+        {"host": "coyote", "gpus": [0]},
+        {"host": "lizard", "gpus": [0], "busy_mib": 1500},
+        {"host": "scorpion", "gpus": [0], "busy_mib": -1},
+    ]
+    hosts = {"shark": "drain", "coyote": "off", "lizard": "maybe"}
+    path.write_text(yaml.safe_dump({"hosts": hosts, "slots": slots}))
     slots, problems = gs.load_pool(str(path))
     assert list(slots) == ["shark:0", "shark.local:1", "lizard:0"]
     assert slots["shark:0"].drain and slots["shark.local:1"].drain
@@ -761,35 +658,22 @@ def test_host_switches(tmp_path):
 
 def test_job_validation(tmp_path):
     path = tmp_path / "jobs.yaml"
-    path.write_text(
-        yaml.safe_dump(
-            {
-                "workdir": "repo",
-                "defaults": {"args": ["--backend", "cuda"]},
-                "jobs": [
-                    {
-                        "name": "a",
-                        "config": "configs/a.yaml",
-                        "output_dir": "/abs/a",
-                        "args": "--n-steps 20",
-                    },
-                    {"name": "b", "run_dir": "runs/b", "cost": 5, "gpus": 2},
-                    {"name": "c", "config": "x.yaml"},
-                    {"name": "d", "config": "x.yaml", "output_dir": "o", "args": ["--device", "1"]},
-                    {"name": "a", "run_dir": "r"},
-                ],
-            }
-        )
-    )
+    jobs = [
+        {"name": "a", "config": "configs/a.yaml", "output_dir": "/abs/a", "args": "--n-steps 20"},
+        {"name": "b", "run_dir": "runs/b", "cost": 5, "gpus": 2},
+        {"name": "c", "config": "x.yaml"},
+        {"name": "d", "config": "x.yaml", "output_dir": "o", "args": ["--device", "1"]},
+        {"name": "a", "run_dir": "r"},
+    ]
+    doc = {"workdir": "repo", "defaults": {"args": ["--backend", "cuda"]}, "jobs": jobs}
+    path.write_text(yaml.safe_dump(doc))
     specs, problems = gs.load_jobs(str(path))
-    assert [s.name for s in specs] == ["a", "b"]
+    assert [s.name for s in specs] == ["a", "b"] and len(problems) == 3
     a, b = specs
-    assert a.config == str(tmp_path / "repo" / "configs" / "a.yaml") and a.output_dir == "/abs/a"
-    assert a.args == ["--backend", "cuda", "--n-steps", "20"] and a.workdir == str(
-        tmp_path / "repo"
-    )
-    assert b.output_dir == b.run_dir == str(tmp_path / "repo" / "runs" / "b") and b.gpus == 2
-    assert len(problems) == 3
+    repo = str(tmp_path / "repo")
+    assert a.config == os.path.join(repo, "configs", "a.yaml") and a.output_dir == "/abs/a"
+    assert a.args == ["--backend", "cuda", "--n-steps", "20"] and a.workdir == repo
+    assert b.output_dir == b.run_dir == os.path.join(repo, "runs", "b") and b.gpus == 2
 
 
 def test_next_leg_arguments(camp):
@@ -800,29 +684,15 @@ def test_next_leg_arguments(camp):
     job = sched.jobs["j"]
     run_dir = camp.run_dir("j")
     config = str(camp.root / "configs" / "j.yaml")
-    fresh = [
-        "run",
-        config,
-        "--output-dir",
-        run_dir,
-        "--n-steps",
-        "30",
-        "--from-scratch",
-        "--backend",
-        "cuda",
-    ]
+    fresh = ["run", config, "--output-dir", run_dir, "--n-steps", "30", "--from-scratch"]
+    fresh += ["--backend", "cuda"]
 
     job.base_legs = 0
     assert sched.gyaradax_args(job) == fresh
-    os.makedirs(run_dir)
-    with open(os.path.join(run_dir, "run_info.jsonl"), "w") as fh:
-        fh.write(json.dumps({"start_step": 0, "target_step": 30}) + "\n")
+    write_run(run_dir)
     assert sched.gyaradax_args(job) == fresh + ["--overwrite"]
 
-    with open(os.path.join(run_dir, "config.yaml"), "w") as fh:
-        fh.write("steps: 30\n")
-    with zipfile.ZipFile(os.path.join(run_dir, "step_000004.npz"), "w") as zf:
-        zf.writestr("df.npy", b"df")
+    write_run(run_dir, config="steps: 30\n", snapshot=4)
     with open(os.path.join(run_dir, "step_000006.npz"), "wb") as fh:
         fh.write(b"PK\x03\x04truncated")
     assert sched.gyaradax_args(job) == ["run", run_dir, "--backend", "cuda"]
@@ -832,9 +702,8 @@ def test_next_leg_arguments(camp):
     job.base_legs = 1
     assert sched.gyaradax_args(job) == fresh
 
-    assert gs.strip_flags(
-        ["--n-steps=5", "--mp", "--resume-from", "K03", "--overwrite"], gs.FRESH_FLAGS
-    ) == ["--mp"]
+    args = ["--n-steps=5", "--mp", "--resume-from", "K03", "--overwrite"]
+    assert gs.strip_flags(args, gs.FRESH_FLAGS) == ["--mp"]
 
 
 def test_all_gpu_job_takes_the_whole_slot_and_sizes_its_mesh_per_leg(camp):
@@ -851,21 +720,13 @@ def test_all_gpu_job_takes_the_whole_slot_and_sizes_its_mesh_per_leg(camp):
     job = sched.jobs["wide"]
     job.base_legs = 0
     run_dir = camp.run_dir("wide")
-    os.makedirs(run_dir)
-    with open(os.path.join(run_dir, "run_info.jsonl"), "w") as fh:
-        fh.write(json.dumps({"start_step": 0, "target_step": 30}) + "\n")
-    with open(os.path.join(run_dir, "config.yaml"), "w") as fh:
-        fh.write("sharding: {n_gpus_sp: 2, n_gpus_mu: 2}\n")
-    with zipfile.ZipFile(os.path.join(run_dir, "step_000004.npz"), "w") as zf:
-        zf.writestr("df.npy", b"df")
+    write_run(run_dir, config="sharding: {n_gpus_sp: 2, n_gpus_mu: 2}\n", snapshot=4)
     small = sched.pool["c:5,6"]
     assert sched.gyaradax_args(job, small) == ["run", run_dir, "--backend", "cuda", "--n-gpus", "2"]
     assert gs.job_gpus(job.spec, small) == [5, 6]
 
 
 def test_run_database_follows_the_queue(camp, tmp_path):
-    import sqlite3
-
     dataset = tmp_path / "dataset"
     camp.pool(slot("a", 0))
     camp.add_job("first", steps=30, cost=2, args=["--dataset", str(dataset), "--dataset-name", "f"])
@@ -879,31 +740,21 @@ def test_run_database_follows_the_queue(camp, tmp_path):
     for k in range(3):
         (data / f"poten_{k:05d}.zstd16.bin").write_bytes(b"x")
     sched = camp.scheduler()
-
-    def rows(sql):
-        con = sqlite3.connect(sched.db_path)
-        try:
-            return con.execute(sql).fetchall()
-        finally:
-            con.close()
+    db = sched.db_path
 
     camp.drive(sched, lambda: sched.jobs["first"].state == "running")
-    states = dict(rows("SELECT name, state FROM runs"))
-    assert states == {"first": "running", "second": "pending"}
-    frames, total, t, eps = rows(
-        "SELECT frames, frames_total, t, json_extract(params, '$.geometry.eps') FROM runs "
-        "WHERE name = 'first'"
-    )[0]
-    assert (frames, total, t, eps) == (3, 5, 3.0, 0.18)
-    assert rows("SELECT job FROM slots") == [("first",)]
+    assert dict(sql(db, "SELECT name, state FROM runs")) == {"first": "running", "second": "pending"}
+    query = "SELECT frames, frames_total, t, json_extract(params, '$.geometry.eps') FROM runs"
+    assert sql(db, query + " WHERE name = 'first'") == [(3, 5, 3.0, 0.18)]
+    assert sql(db, "SELECT job FROM slots") == [("first",)]
 
     camp.drive(sched, done(sched))
     sched.save()
-    assert dict(rows("SELECT name, state FROM runs")) == {"first": "done", "second": "done"}
-    leg = rows("SELECT leg, slot, exit, result FROM legs WHERE name = 'first'")
+    assert dict(sql(db, "SELECT name, state FROM runs")) == {"first": "done", "second": "done"}
+    leg = sql(db, "SELECT leg, slot, exit, result FROM legs WHERE name = 'first'")
     assert leg == [(1, "a:0", 0, "done")]
-    assert rows("SELECT value IS NOT NULL FROM meta WHERE key = 'updated'") == [(1,)]
-    assert not glob.glob(sched.db_path + ".*.tmp")
+    assert sql(db, "SELECT value IS NOT NULL FROM meta WHERE key = 'updated'") == [(1,)]
+    assert not glob.glob(db + ".*.tmp")
 
 
 def test_truncated_diagnostics_fail_the_job_instead_of_burning_retries(camp):
@@ -934,11 +785,9 @@ def test_ssh_executor_runs_strict_batch_ssh_under_a_timeout(monkeypatch):
     assert "BatchMode=yes" in argv and "StrictHostKeyChecking=yes" in argv
     assert kw["timeout"] == 7 and kw["stdin"] == subprocess.DEVNULL
     assert argv[-1] == "bash -c 'echo hi'"
-    assert ex.alive("scorpion", 123, "tok") is None
-    fake_run.rc = 1
-    assert ex.alive("scorpion", 123, "tok") is False
-    fake_run.rc = 0
-    assert ex.alive("scorpion", 123, "tok") is True
+    for rc, alive in ((255, None), (1, False), (0, True)):
+        fake_run.rc = rc
+        assert ex.alive("scorpion", 123, "tok") is alive
     assert ex.signal("scorpion", 123, "KILL", group=True)
     assert calls[-1][0][-1] == "bash -c 'kill -KILL -- -123'"
     assert ex.argv("here", "true") == ["bash", "-c", "true"]
@@ -952,13 +801,13 @@ def test_scheduler_does_not_import_jax():
         "m = importlib.util.module_from_spec(spec); sys.modules['gs'] = m; spec.loader.exec_module(m)\n"
         "print(sorted(k for k in sys.modules if k.split('.')[0] in ('jax', 'jaxlib', 'numpy', 'gyaradax')))\n"
     )
-    out = subprocess.run(
-        [sys.executable, "-c", code], capture_output=True, text=True, check=True
-    ).stdout
-    assert out.strip() == "[]"
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True)
+    assert out.stdout.strip() == "[]"
 
 
-def test_slurm_queues_up_to_max_jobs_and_queue_time_is_not_a_start_failure(camp, fake_slurm, monkeypatch):
+def test_slurm_queues_up_to_max_jobs_and_queue_time_is_not_a_start_failure(
+    camp, fake_slurm, monkeypatch
+):
     monkeypatch.setenv("FAKE_SLURM_PENDING", "2.0")
     camp.slurm(max_jobs=2, sbatch=["--time=00:10:00"], setup=["echo setup-ran"])
     for name in ("a", "b", "c"):
@@ -974,9 +823,12 @@ def test_slurm_queues_up_to_max_jobs_and_queue_time_is_not_a_start_failure(camp,
     assert max(peak) == 2
     assert all(j.failures == 0 and j.attempts == 1 for j in sched.jobs.values())
     script = open(os.path.join(camp.run_dir("a"), ".sched", "job.sbatch")).read()
-    for line in ("#SBATCH --gres=gpu:1", "#SBATCH --signal=B:TERM@900", "#SBATCH --time=00:10:00", "echo setup-ran"):
+    for line in (
+        "#SBATCH --gres=gpu:1", "#SBATCH --signal=B:TERM@900", "#SBATCH --time=00:10:00",
+        "echo setup-ran", "XLA_PYTHON_CLIENT_PREALLOCATE=false",
+    ):  # fmt: skip
         assert line in script
-    assert "XLA_PYTHON_CLIENT_PREALLOCATE=false" in script and "CUDA_VISIBLE_DEVICES" not in script
+    assert "CUDA_VISIBLE_DEVICES" not in script
     assert any("submitted as Slurm job" in line for line in camp.logs)
 
 
@@ -984,17 +836,16 @@ def test_slurm_walltime_signal_resumes_the_run_without_counting_a_failure(camp, 
     camp.slurm(max_jobs=1)
     camp.add_job("long", steps=60, step_time=0.05)
     sched = camp.scheduler()
-    camp.drive(
-        sched, lambda: sched.jobs["long"].state == "running" and bool(gs.snapshot_steps(camp.run_dir("long")))
-    )
-    handle = sched.jobs["long"].handle
+    jobs = sched.jobs
+    camp.drive(sched, lambda: jobs["long"].state == "running" and snapshot_at(camp.run_dir("long"), 1)())
+    handle = jobs["long"].handle
     # what --signal=B:TERM@lead does ahead of the walltime
     subprocess.run(["scancel", "--batch", "--signal=TERM", handle], check=True)
     camp.drive(sched, done(sched, "long"), timeout=60)
-    job = sched.jobs["long"]
-    assert job.failures == 0 and job.attempts == 2
-    assert job.history[0]["result"] == "pending" and "interrupted" in job.history[0]["note"]
-    assert job.history[0]["handle"] == handle and job.history[1]["handle"] != handle
+    history = jobs["long"].history
+    assert jobs["long"].failures == 0 and jobs["long"].attempts == 2
+    assert history[0]["result"] == "pending" and "interrupted" in history[0]["note"]
+    assert history[0]["handle"] == handle and history[1]["handle"] != handle
     legs = camp.legs("long")
     assert len(legs) == 2 and 0 < legs[1]["start_step"] < 60 and legs[1]["target_step"] == 60
 
@@ -1004,10 +855,11 @@ def test_slurm_cancel_removes_a_queued_job(camp, fake_slurm, monkeypatch):
     camp.slurm(max_jobs=1)
     camp.add_job("queued", steps=3)
     sched = camp.scheduler()
-    camp.drive(sched, lambda: sched.jobs["queued"].state == "starting" and sched.jobs["queued"].handle)
-    handle = sched.jobs["queued"].handle
+    jobs = sched.jobs
+    camp.drive(sched, lambda: jobs["queued"].state == "starting" and jobs["queued"].handle)
+    handle = jobs["queued"].handle
     assert gs.main(["cancel", "queued", "--state", camp.state_path]) == 0
-    camp.drive(sched, lambda: sched.jobs["queued"].state == "cancelled")
+    camp.drive(sched, lambda: jobs["queued"].state == "cancelled")
     queue = subprocess.run(["squeue", "-h", "-o", "%i %T"], capture_output=True, text=True).stdout
     assert handle not in queue.split()
 
@@ -1042,7 +894,7 @@ def test_time_limit_stops_and_requeues_jobs_and_a_later_run_resumes_them(camp):
     camp.add_job("later", steps=2, cost=1)
     run_dir = camp.run_dir("long")
     sched = camp.scheduler()
-    camp.drive(sched, lambda: max(gs.snapshot_steps(run_dir) or [0]) >= 3)
+    camp.drive(sched, snapshot_at(run_dir, 3))
     sched.deadline = time.time() + 0.5
     t0 = time.time()
     sched.run(poll=0.1, until_idle=True)

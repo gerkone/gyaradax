@@ -19,7 +19,6 @@ from __future__ import annotations
 import argparse
 import contextlib
 import fcntl
-import glob
 import json
 import math
 import os
@@ -43,6 +42,21 @@ NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
 OWN_FLAGS = (*sched.REFUSED_FLAGS, "--dataset", "--dataset-name")
 # campaign switches passed to every job as `gyaradax run --<key with dashes>`
 OUTCOME_SETTINGS = ("linear_gate", "stop_on_decay", "stop_on_banding", "track_outcome")
+FIXED = (
+    "dataset",
+    "name",
+    "set",
+    "args",
+    "gpus",
+    "linear_check",
+    "linear_check_tol",
+    *OUTCOME_SETTINGS,
+)
+REQUESTS = {
+    "cancel": "stop jobs (SIGTERM, snapshot, exit) and hold them",
+    "stable": "stop jobs (SIGTERM, snapshot, exit) and record them as decayed",
+    "resume": "put cancelled, failed, diverged or rejected jobs back in the queue",
+}
 
 
 def _git(*args: str) -> str:
@@ -95,19 +109,9 @@ class Campaign:
             **{k: bool(getattr(args, k)) for k in OUTCOME_SETTINGS},
         }
         if self.exists:
-            # only flags given on this call are compared
-            explicit = {
-                "dataset": args.dataset,
-                "name": args.name,
-                "set": args.set,
-                "args": args.args,
-                "gpus": args.gpus,
-                "linear_check": args.linear_check,
-                "linear_check_tol": args.linear_check_tol,
-                **{k: getattr(args, k) for k in OUTCOME_SETTINGS},
-            }
             saved = {**self.settings, **{k: bool(self.settings.get(k)) for k in OUTCOME_SETTINGS}}
-            bad = [k for k, v in explicit.items() if v and given[k] != saved.get(k)]
+            # only flags given on this call are compared
+            bad = [k for k in FIXED if getattr(args, k) and given[k] != saved.get(k)]
             if bad:
                 raise SystemExit(
                     f"error: {self.settings_path} fixes {', '.join(bad)}; drop the flags or start another campaign"
@@ -166,9 +170,7 @@ class Campaign:
     def _job(self, name: str, config: str, cfg: Any) -> dict[str, Any]:
         grid = cfg.get("grid") or {}
         species = len(OmegaConf.select(cfg, "physics.signz") or [1])
-        points = 1
-        for key in ("nvpar", "nmu", "ns", "nkx", "nky"):
-            points *= int(grid.get(key, 1) or 1)
+        points = math.prod(int(grid.get(k, 1) or 1) for k in ("nvpar", "nmu", "ns", "nkx", "nky"))
         steps = int(OmegaConf.select(cfg, "solver.n_steps") or 1)
         t_end = OmegaConf.select(cfg, "solver.t_end")
         if t_end is not None and OmegaConf.select(cfg, "solver.dump_dt"):
@@ -176,12 +178,8 @@ class Campaign:
             steps = math.ceil(float(t_end) / float(OmegaConf.select(cfg, "solver.dt") or 1.0))
         shard = cfg.get("sharding") or {}
         gpus = self.settings.get("gpus") or int(shard.get("n_gpus", 0) or 0)
-        gpus = gpus or max(
-            1,
-            int(shard.get("n_gpus_sp", 1) or 1)
-            * int(shard.get("n_gpus_vp", 1) or 1)
-            * int(shard.get("n_gpus_mu", 1) or 1),
-        )
+        axes = ("n_gpus_sp", "n_gpus_vp", "n_gpus_mu")
+        gpus = gpus or max(1, math.prod(int(shard.get(k, 1) or 1) for k in axes))
         run_dir = os.path.join(self.root, "runs", name)
         args = list(self.settings.get("args") or [])
         dataset = self.settings.get("dataset")
@@ -321,16 +319,9 @@ def _cmd_run(args: argparse.Namespace) -> int:
         print(f"time limit: jobs are stopped and requeued at {stop_at}")
     if args.detach and not args.dry_run:
         return _detach(camp, args)
-    lock = None
-    if not args.dry_run:
-        lock = open(camp.state + ".lock", "a")
-        try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
-            raise SystemExit(f"error: a scheduler already runs this campaign ({camp.state}.lock)")
-    camp.scheduler(args).run(args.poll, once=args.once, until_idle=not args.keep_running)
-    if lock is not None:
-        lock.close()
+    error = f"error: a scheduler already runs this campaign ({camp.state}.lock)"
+    with contextlib.nullcontext() if args.dry_run else sched.lock_state(camp.state, error):
+        camp.scheduler(args).run(args.poll, once=args.once, until_idle=not args.keep_running)
     return 0
 
 
@@ -343,16 +334,13 @@ def _cmd_add(args: argparse.Namespace) -> int:
 
 def _cmd_status(args: argparse.Namespace) -> int:
     camp = Campaign(args.campaign)
-    if not os.path.isfile(camp.state):
-        raise SystemExit(f"error: {camp.state} not found; the campaign has not run yet")
-    with open(camp.state) as fh:
-        doc = json.load(fh)
-    waiting = len(glob.glob(os.path.join(glob.escape(sched.requests_dir(camp.state)), "*.json")))
+    missing = f"error: {camp.state} not found; the campaign has not run yet"
+    doc, status = sched.read_status(camp.state, missing)
     s = camp.settings
     print(
         f"campaign {camp.root}: dataset {s.get('dataset') or '-'}, names {s.get('name')}, set {s.get('set') or {}}"
     )
-    print(sched.format_status(doc, time.time(), waiting))
+    print(status)
     checks = _linear_checks(doc)
     if checks:
         print("\nlinear check (γ at the reference's dominant ky):")
@@ -378,12 +366,8 @@ def _linear_checks(doc: dict[str, Any]) -> dict[str, str]:
 
 
 def _cmd_request(args: argparse.Namespace) -> int:
-    camp = Campaign(args.campaign)
-    action = "requeue" if getattr(args, "requeue", False) else args.command
-    for name in args.names:
-        sched.submit_request(camp.state, action, name)
-        print(f"{action} {name}: queued for the scheduler's next poll")
-    return 0
+    args.state = Campaign(args.campaign).state
+    return sched._cmd_request(args)
 
 
 def _gpus_arg(text: str) -> int | str:
@@ -578,27 +562,15 @@ def build_parser() -> argparse.ArgumentParser:
     campaign(status_p)
     status_p.set_defaults(func=_cmd_status)
 
-    cancel_p = sub.add_parser("cancel", help="stop jobs (SIGTERM, snapshot, exit) and hold them")
-    cancel_p.add_argument("names", nargs="+")
-    campaign(cancel_p)
-    cancel_p.add_argument(
-        "--requeue", action="store_true", help="put the jobs back in the queue instead"
-    )
-    cancel_p.set_defaults(func=_cmd_request)
-
-    stable_p = sub.add_parser(
-        "stable", help="stop jobs (SIGTERM, snapshot, exit) and record them as decayed"
-    )
-    stable_p.add_argument("names", nargs="+")
-    campaign(stable_p)
-    stable_p.set_defaults(func=_cmd_request)
-
-    resume_p = sub.add_parser(
-        "resume", help="put cancelled, failed, diverged or rejected jobs back in the queue"
-    )
-    resume_p.add_argument("names", nargs="+")
-    campaign(resume_p)
-    resume_p.set_defaults(func=_cmd_request)
+    for action, text in REQUESTS.items():
+        request_p = sub.add_parser(action, help=text)
+        request_p.add_argument("names", nargs="+")
+        campaign(request_p)
+        if action == "cancel":
+            request_p.add_argument(
+                "--requeue", action="store_true", help="put the jobs back in the queue instead"
+            )
+        request_p.set_defaults(func=_cmd_request)
 
     host_p = sub.add_parser(
         "host", help="switch a host on, to drain, off or kill while the campaign runs"

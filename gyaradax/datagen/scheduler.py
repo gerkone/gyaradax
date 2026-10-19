@@ -28,8 +28,9 @@ import subprocess
 import time
 import uuid
 import zipfile
+from collections import Counter
 from dataclasses import asdict, dataclass, field, fields
-from typing import Any, Callable, Sequence
+from typing import IO, Any, Callable, Sequence
 
 import yaml
 
@@ -39,29 +40,15 @@ DEFAULT_PROGRAM = ("{python}", "-m", "gyaradax")
 SCHED = ".sched"
 ACTIVE = ("starting", "running", "stopping")
 STATE_ORDER = (
-    "running",
-    "starting",
-    "stopping",
-    "pending",
-    "failed",
-    "diverged",
-    "rejected",
-    "cancelled",
-    "banded",
-    "decayed",
-    "stable",
-    "done",
-)
+    "running", "starting", "stopping", "pending", "failed", "diverged", "rejected", "cancelled",
+    "banded", "decayed", "stable", "done",
+)  # fmt: skip
 # finished with a physics outcome, like done: not retried, not resumed
 OUTCOME_STATES = ("stable", "decayed", "banded")
+RESUMABLE = ("cancelled", "failed", "diverged", "rejected", *OUTCOME_STATES)
 DIAGNOSTICS = (
-    "fluxes.npz",
-    "fluxes_em.npz",
-    "kxspec.npz",
-    "kyspec.npz",
-    "growth.npz",
-    "dt_history.npz",
-)
+    "fluxes.npz", "fluxes_em.npz", "kxspec.npz", "kyspec.npz", "growth.npz", "dt_history.npz",
+)  # fmt: skip
 # flag -> number of values; a resumed leg drops these
 FRESH_FLAGS = {
     "--from-scratch": 0,
@@ -83,6 +70,7 @@ OUTCOME_EXITS = {
     5: ("decayed", "heat flux decayed (outcome.json); stopped"),
     6: ("banded", "s-Nyquist banding (outcome.json); stopped"),
 }
+STABLE_NOTE = "stopped by hand as stable (heat flux still decaying)"
 GATE_FILE = "linear_gate.json"
 OUTCOME_FILE = "outcome.json"
 SLURM_HOST = "slurm"
@@ -93,6 +81,8 @@ HOST_SWITCHES = ("on", "drain", "off", "kill")
 SLURM_QUEUED = ("PENDING", "CONFIGURING", "REQUEUED", "REQUEUE_HOLD", "RESIZING", "SUSPENDED")
 SLURM_RUNNING = ("RUNNING", "COMPLETING", "SIGNALING", "STAGE_OUT")
 GPU_FLAGS = ("--gres", "--gpus", "--gpus-per-node", "--gpus-per-task", "-G")
+YAML_ERRORS = (OSError, yaml.YAMLError, AttributeError, TypeError, ValueError)
+CALL_ERRORS = (subprocess.TimeoutExpired, OSError)
 
 
 RUNS_DB_SCHEMA = """
@@ -132,6 +122,18 @@ def _when(epoch: float | None) -> str | None:
     return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(epoch)) if epoch else None
 
 
+def _js(value: Any) -> str | None:
+    return None if value is None else json.dumps(value)
+
+
+def _bit(doc: dict[str, Any], key: str) -> int | None:
+    return None if key not in doc else int(bool(doc[key]))
+
+
+def _csv(values: Sequence[int] | None) -> str:
+    return ",".join(map(str, values or []))
+
+
 def _flag_value(args: Sequence[str], flag: str) -> str | None:
     for i, a in enumerate(args):
         if a == flag and i + 1 < len(args):
@@ -145,7 +147,7 @@ def job_meta(spec: JobSpec) -> dict[str, Any]:
     """Physics and geometry inputs, end time, frame spacing and dataset frame directory of a job."""
     meta: dict[str, Any] = {"params": {}}
     path = spec.config or (os.path.join(spec.run_dir, "config.yaml") if spec.run_dir else None)
-    with contextlib.suppress(OSError, yaml.YAMLError, AttributeError, TypeError, ValueError):
+    with contextlib.suppress(*YAML_ERRORS):
         with open(path or "") as fh:
             cfg = yaml.safe_load(fh) or {}
         meta["params"] = {
@@ -203,66 +205,24 @@ def outcome_row(
         rows = avg.get(key) or []
         return rows[i][channel] if i is not None and i < len(rows) else None
 
-    def js(value: Any) -> str | None:
-        return None if value is None else json.dumps(value)
-
     return (
-        name,
-        state,
-        out.get("class"),
-        out.get("label"),
-        js(physics.get("rlt")),
-        js(physics.get("rln")),
-        js(physics.get("tmp")),
-        js(physics.get("mas")),
-        of("rlt", ion),
-        of("rlt", electron),
-        of("rln", ion),
+        name, state, out.get("class"), out.get("label"),
+        *(_js(physics.get(k)) for k in ("rlt", "rln", "tmp", "mas")),
+        of("rlt", ion), of("rlt", electron), of("rln", ion),
         tmp_e / tmp_i if tmp_e is not None and tmp_i else None,
-        geometry.get("q"),
-        geometry.get("shat"),
-        geometry.get("eps"),
-        js(grid or None),
-        gate.get("decision"),
-        None if "settled" not in gate else int(bool(gate["settled"])),
-        gate.get("gamma_max"),
-        gate.get("peak_ky"),
-        gate.get("omega_peak"),
-        gate.get("t"),
-        gate.get("gamma_max_lowky"),
-        gate.get("peak_ky_lowky"),
-        gate.get("low_ky"),
-        js(gate.get("ky")),
-        js(gate.get("gamma")),
-        js(gate.get("gamma_std")),
-        js(gate.get("omega")),
-        js(gate.get("omega_std")),
-        out.get("t"),
-        out.get("frames"),
-        frames,
-        out.get("stopped"),
-        None if "banded" not in out else int(bool(out["banded"])),
-        out.get("banded_t"),
-        out.get("nyq_zonal"),
-        out.get("nyq_nonzonal"),
-        out.get("nyq_zonal_max"),
-        out.get("q_peak"),
-        out.get("q_last"),
-        window[0],
-        window[1],
-        avg.get("frames"),
-        flux(ion, 1),
-        flux(ion, 1, "err"),
-        flux(electron, 1),
-        flux(electron, 1, "err"),
-        flux(ion, 0),
-        flux(ion, 0, "err"),
-        avg.get("q_drift"),
-        avg.get("q_drift_sigma"),
-        js(avg or None),
-        cost,
-        gpu_hours,
-    )
+        *(geometry.get(k) for k in ("q", "shat", "eps")), _js(grid or None),
+        gate.get("decision"), _bit(gate, "settled"),
+        *(gate.get(k) for k in ("gamma_max", "peak_ky", "omega_peak", "t", "gamma_max_lowky",
+                                "peak_ky_lowky", "low_ky")),
+        *(_js(gate.get(k)) for k in ("ky", "gamma", "gamma_std", "omega", "omega_std")),
+        out.get("t"), out.get("frames"), frames, out.get("stopped"), _bit(out, "banded"),
+        *(out.get(k) for k in ("banded_t", "nyq_zonal", "nyq_nonzonal", "nyq_zonal_max",
+                               "q_peak", "q_last")),
+        window[0], window[1], avg.get("frames"),
+        flux(ion, 1), flux(ion, 1, "err"), flux(electron, 1), flux(electron, 1, "err"),
+        flux(ion, 0), flux(ion, 0, "err"),
+        avg.get("q_drift"), avg.get("q_drift_sigma"), _js(avg or None), cost, gpu_hours,
+    )  # fmt: skip
 
 
 def dataset_frames(dataset_dir: str | None) -> int | None:
@@ -310,19 +270,13 @@ class Attempt:
 
 def read_attempt(run_dir: str) -> Attempt:
     """The latest launch recorded in ``RUN_DIR/.sched``; ``exit`` is kept only if it is that launch's."""
-    sched = os.path.join(run_dir, SCHED)
-
-    def get(name: str) -> str | None:
-        return _read(os.path.join(sched, name))
-
-    launch = get("launch")
-    exit_lines = (get("exit") or "").splitlines()
+    names = ("launch", "exit", "pid", "host", "slot", "gpus", "heartbeat")
+    get = {n: _read(os.path.join(run_dir, SCHED, n)) for n in names}
+    exit_lines = (get["exit"] or "").splitlines()
     code = _int(exit_lines[0]) if exit_lines else None
-    if len(exit_lines) > 1 and exit_lines[1].strip() != launch:
+    if len(exit_lines) > 1 and exit_lines[1].strip() != get["launch"]:
         code = None
-    return Attempt(
-        launch, _int(get("pid")), get("host"), get("slot"), get("gpus"), get("heartbeat"), code
-    )
+    return Attempt(**{**get, "pid": _int(get["pid"]), "exit": code})
 
 
 def read_submission(run_dir: str) -> tuple[str | None, str | None]:
@@ -402,7 +356,7 @@ def config_shards(path: str) -> bool:
         with open(path) as fh:
             shard = (yaml.safe_load(fh) or {}).get("sharding") or {}
         return any(int(v or 0) > 1 for v in shard.values())
-    except (OSError, yaml.YAMLError, AttributeError, TypeError, ValueError):
+    except YAML_ERRORS:
         return False
 
 
@@ -419,7 +373,7 @@ class Slot:
 
     @property
     def id(self) -> str:
-        return self.name or f"{self.host}:{','.join(map(str, self.gpus))}"
+        return self.name or f"{self.host}:{_csv(self.gpus)}"
 
 
 @dataclass
@@ -451,6 +405,10 @@ def _env(value: Any, where: str) -> dict[str, str]:
     return {str(k): str(v) for k, v in value.items()}
 
 
+def _merged_env(defaults: dict[str, Any], raw: dict[str, Any], where: str) -> dict[str, str]:
+    return {**_env(defaults.get("env"), where), **_env(raw.get("env"), where)}
+
+
 def _load_yaml(path: str, key: str) -> dict[str, Any]:
     with open(path) as fh:
         doc = yaml.safe_load(fh)
@@ -471,8 +429,7 @@ def _slot(raw: Any, defaults: dict[str, Any], where: str) -> Slot:
     if not host or host.startswith("-") or " " in host:
         raise ValueError(f"{where}: host is required")
     gpus = merged.get("gpus")
-    if isinstance(gpus, int):
-        gpus = [gpus]
+    gpus = [gpus] if isinstance(gpus, int) else gpus
     if (
         not isinstance(gpus, list)
         or not gpus
@@ -491,7 +448,7 @@ def _slot(raw: Any, defaults: dict[str, Any], where: str) -> Slot:
         gpus=list(gpus),
         speed=speed,
         python=str(merged.get("python") or DEFAULT_PYTHON),
-        env={**_env(defaults.get("env"), where), **_env(raw.get("env"), where)},
+        env=_merged_env(defaults, raw, where),
         drain=bool(merged.get("drain", False)),
         name=str(raw.get("name") or ""),
         busy_mib=busy_mib,
@@ -501,30 +458,26 @@ def _slot(raw: Any, defaults: dict[str, Any], where: str) -> Slot:
 def host_switches(doc: dict[str, Any]) -> tuple[dict[str, str], list[str]]:
     """The valid ``hosts`` switches of a targets document, plus the entries skipped and why."""
     raw = doc.get("hosts") or {}
+    choices = ", ".join(HOST_SWITCHES)
     if not isinstance(raw, dict):
-        return {}, [f"hosts: expected a mapping of host to {', '.join(HOST_SWITCHES)}"]
-    switches, problems = {}, []
-    for host, value in raw.items():
-        if value in HOST_SWITCHES:
-            switches[str(host)] = value
-        else:
-            problems.append(f"hosts: {host}: {value!r} is not one of {', '.join(HOST_SWITCHES)}")
-    return switches, problems
+        return {}, [f"hosts: expected a mapping of host to {choices}"]
+    switches = {str(h): v for h, v in raw.items() if v in HOST_SWITCHES}
+    bad = [
+        f"hosts: {h}: {v!r} is not one of {choices}"
+        for h, v in raw.items()
+        if v not in HOST_SWITCHES
+    ]
+    return switches, bad
 
 
 def load_pool(path: str) -> tuple[dict[str, Slot], list[str]]:
-    """Parse the pool file into slots by id, plus the entries skipped and why.
-
-    Raises on an unreadable, unparsable or empty file.
-    """
+    """Parse the pool file into slots by id, plus the entries skipped and why; raises on an unreadable file."""
     doc = _load_yaml(path, "slots")
     defaults = doc.get("defaults") or {}
     groups = {**DEFAULT_GPU_GROUPS, **(doc.get("gpu_groups") or {})}
     slots: dict[str, Slot] = {}
     used: dict[str, set[int]] = {}
-    problems = []
-    switches, bad = host_switches(doc)
-    problems.extend(bad)
+    switches, problems = host_switches(doc)
     for i, raw in enumerate(doc.get("slots") or []):
         try:
             slot = _slot(raw, defaults, f"pool slot {i}")
@@ -566,8 +519,7 @@ class SlurmTarget:
 def _slurm_target(raw: Any) -> SlurmTarget:
     if not isinstance(raw, dict):
         raise ValueError("slurm: expected a mapping")
-    known = {f.name for f in fields(SlurmTarget)}
-    unknown = sorted(set(raw) - known)
+    unknown = sorted(set(raw) - {f.name for f in fields(SlurmTarget)})
     if unknown:
         raise ValueError(f"slurm: unknown keys {unknown}")
     target = SlurmTarget(
@@ -587,15 +539,10 @@ def load_targets(path: str) -> tuple[dict[str, Slot], list[str], SlurmTarget | N
     """The slots of a targets file: its ``slurm`` section as ``max_jobs`` submission slots, else the ssh pool."""
     doc = _load_yaml(path, "slots")
     if "slurm" not in doc:
-        slots, problems = load_pool(path)
-        return slots, problems, None
+        return (*load_pool(path), None)
     target = _slurm_target(doc["slurm"])
-    slots = {
-        f"{SLURM_HOST}:{i}": Slot(
-            host=SLURM_HOST, gpus=[], python=target.python, env=target.env, name=f"{SLURM_HOST}:{i}"
-        )
-        for i in range(target.max_jobs)
-    }
+    ids = [f"{SLURM_HOST}:{i}" for i in range(target.max_jobs)]
+    slots = {s: Slot(SLURM_HOST, [], python=target.python, env=target.env, name=s) for s in ids}
     problems = ["targets: slots are ignored next to a slurm section"] if doc.get("slots") else []
     return slots, problems, target
 
@@ -657,7 +604,7 @@ def _job(raw: Any, defaults: dict[str, Any], base: str, where: str) -> JobSpec:
         gpus=gpus,
         cost=float(merged.get("cost", 1.0)),
         workdir=workdir,
-        env={**_env(defaults.get("env"), where), **_env(raw.get("env"), where)},
+        env=_merged_env(defaults, raw, where),
     )
 
 
@@ -717,8 +664,20 @@ class Job:
     def from_dict(cls, data: dict[str, Any]) -> Job:
         known = {f.name for f in fields(cls)}
         data = {k: v for k, v in data.items() if k in known}
-        data["spec"] = JobSpec(**data["spec"])
-        return cls(**data)
+        return cls(**{**data, "spec": JobSpec(**data["spec"])})
+
+    def leg(self, **extra: Any) -> dict[str, Any]:
+        return {
+            "slot": self.slot, "host": self.host, "gpus": self.gpus, "launch": self.launch_id,
+            "handle": self.handle, "start": self.launched_at, **extra,
+        }  # fmt: skip
+
+
+# reset when a launch ends
+LAUNCH_FIELDS = (
+    "slot", "host", "gpus", "pid", "launch_id", "launched_at", "hb_value", "hb_seen", "handle",
+    "stop_reason", "stop_started", "killed_at", "requeue", "finish_as",
+)  # fmt: skip
 
 
 class LaunchError(RuntimeError):
@@ -743,15 +702,17 @@ class Executor:
             timeout=self.timeout,
         )
 
+    def ok(self, host: str, command: str) -> bool:
+        try:
+            return self.run(host, command).returncode == 0
+        except CALL_ERRORS:
+            return False
+
     def describe(self, host: str, command: str) -> str:
         return shlex.join(self.argv(host, command))
 
     def launch(self, host: str, command: str) -> None:
-        """Start a self-detaching command; raises LaunchError when it surely did not start.
-
-        A timeout is not an error: the command may have started, and the scheduler's start
-        timeout decides.
-        """
+        """Start a self-detaching command; raises LaunchError when it surely did not start."""
         try:
             res = self.run(host, command)
         except subprocess.TimeoutExpired:
@@ -767,7 +728,7 @@ class Executor:
         cmd = f"kill -0 {pid} 2>/dev/null && grep -qa -- {q} /proc/{pid}/cmdline 2>/dev/null && exit 0; exit 1"
         try:
             res = self.run(host, cmd)
-        except (subprocess.TimeoutExpired, OSError):
+        except CALL_ERRORS:
             return None
         return {0: True, 1: False}.get(res.returncode)
 
@@ -780,10 +741,7 @@ class Executor:
             cmd = f"grep -qa -- {shlex.quote(token)} /proc/{pid}/cmdline 2>/dev/null && kill -{sig} {pid}"
         else:
             cmd = f"kill -{sig} {pid}"
-        try:
-            return self.run(host, cmd).returncode == 0
-        except (subprocess.TimeoutExpired, OSError):
-            return False
+        return self.ok(host, cmd)
 
 
 class SSHExecutor(Executor):
@@ -818,12 +776,36 @@ def requests_dir(state_path: str) -> str:
     return state_path + ".requests"
 
 
+def request_files(state_path: str) -> list[str]:
+    return sorted(glob.glob(os.path.join(glob.escape(requests_dir(state_path)), "*.json")))
+
+
 def submit_request(state_path: str, action: str, name: str) -> str:
     directory = requests_dir(state_path)
     os.makedirs(directory, exist_ok=True)
     path = os.path.join(directory, f"{time.time_ns()}-{os.getpid()}-{action}.json")
     _atomic_write(path, json.dumps({"action": action, "name": name}))
     return path
+
+
+def lock_state(state_path: str, error: str) -> IO[str]:
+    """Hold ``STATE.lock`` exclusively, or exit with ``error``."""
+    os.makedirs(os.path.dirname(os.path.abspath(state_path)), exist_ok=True)
+    lock = open(state_path + ".lock", "a")
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        raise SystemExit(error)
+    return lock
+
+
+def _slurm_index(slot: Slot) -> int:
+    tail = slot.id.rsplit(":", 1)[1]
+    return int(tail) if tail.isdigit() else 0
+
+
+def _insert(con: sqlite3.Connection, table: str, row: Sequence[Any]) -> None:
+    con.execute(f"INSERT INTO {table} VALUES ({','.join('?' * len(row))})", tuple(row))
 
 
 class Scheduler:
@@ -933,127 +915,64 @@ class Scheduler:
         tmp = f"{self.db_path}.{os.getpid()}.tmp"
         with contextlib.suppress(FileNotFoundError):
             os.remove(tmp)
-        con = sqlite3.connect(tmp)
-        try:
+        with contextlib.closing(sqlite3.connect(tmp)) as con:
             con.executescript(RUNS_DB_SCHEMA)
             for name, job in self.jobs.items():
-                spec, p, meta = job.spec, job.progress, self._meta_of(job.spec)
-                starts = [h.get("start") for h in job.history if h.get("start")]
-                starts += [job.launched_at] if job.launched_at else []
-                finished = (
-                    job.history[-1].get("end") if job.history and job.state not in ACTIVE else None
-                )
-                frames, total = p.get("frames"), p.get("frames_total")
-                eta = None
-                if job.state in ACTIVE:
-                    eta = frames_eta(p, now) if total else eta_seconds(p, now)
-                outcome = read_json(os.path.join(spec.output_dir, OUTCOME_FILE)) or {}
-                con.execute(
-                    "INSERT INTO runs VALUES "
-                    "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                    (
-                        name,
-                        job.state,
-                        job.slot,
-                        job.host,
-                        ",".join(map(str, job.gpus)) or None,
-                        len(job.history) + (job.state in ACTIVE),
-                        job.attempts,
-                        job.failures,
-                        _when(min(starts) if starts else None),
-                        _when(max(starts) if starts else None),
-                        _when(finished),
-                        frames,
-                        total,
-                        frames * meta["dump_dt"]
-                        if frames is not None and "dump_dt" in meta
-                        else None,
-                        meta.get("t_end"),
-                        meta.get("dump_dt"),
-                        p.get("step"),
-                        p.get("target"),
-                        round(eta / 3600.0, 3) if eta is not None else None,
-                        spec.cost,
-                        job.note or None,
-                        spec.output_dir,
-                        meta.get("dataset_dir"),
-                        spec.config or spec.run_dir,
-                        json.dumps(meta.get("params") or {}),
-                        outcome.get("class"),
-                        None if "banded" not in outcome else int(bool(outcome["banded"])),
-                    ),
-                )
-                legs = list(job.history)
-                if job.state in ACTIVE:
-                    legs.append(
-                        {
-                            "slot": job.slot,
-                            "host": job.host,
-                            "gpus": job.gpus,
-                            "launch": job.launch_id,
-                            "start": job.launched_at,
-                            "result": job.state,
-                        }
-                    )
-                gpu_hours = 0.0
-                for i, h in enumerate(legs):
-                    start, end = h.get("start"), h.get("end")
-                    if start:
-                        gpu_hours += (
-                            ((end or now) - start) / 3600.0 * max(len(h.get("gpus") or []), 1)
-                        )
-                    con.execute(
-                        "INSERT INTO legs VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-                        (
-                            name,
-                            i + 1,
-                            h.get("launch"),
-                            h.get("slot"),
-                            h.get("host"),
-                            ",".join(map(str, h.get("gpus") or [])) or None,
-                            _when(start),
-                            _when(end),
-                            round(((end or now) - start) / 3600.0, 3) if start else None,
-                            h.get("exit"),
-                            h.get("result"),
-                            h.get("note") or None,
-                        ),
-                    )
-                row = outcome_row(
-                    name, job.state, meta, spec.output_dir, spec.cost, gpu_hours, frames
-                )
-                con.execute(f"INSERT INTO outcomes VALUES ({','.join('?' * len(row))})", row)
+                self._db_job(con, name, job, now)
             running = {j.slot: n for n, j in self.jobs.items() if j.state in ACTIVE and j.slot}
             for sid, slot in self.pool.items():
-                con.execute(
-                    "INSERT INTO slots VALUES (?,?,?,?,?,?,?,?)",
-                    (
-                        sid,
-                        slot.host,
-                        ",".join(map(str, slot.gpus)),
-                        slot.speed,
-                        int(slot.drain),
-                        int(sid in self._busy),
-                        _when(self.down_until.get(sid))
-                        if self.down_until.get(sid, 0) > now
-                        else None,
-                        running.get(sid),
-                    ),
-                )
-            con.executemany(
-                "INSERT INTO meta VALUES (?,?)",
-                [
-                    ("updated", _when(now)),
-                    ("scheduler", f"{socket.gethostname()} pid {os.getpid()}"),
-                    ("targets", self.pool_path),
-                    ("jobs", self.jobs_path),
-                    ("deadline", _when(self.deadline)),
-                ],
-            )
+                down = self.down_until.get(sid, 0)
+                _insert(con, "slots", (
+                    sid, slot.host, _csv(slot.gpus), slot.speed, int(slot.drain),
+                    int(sid in self._busy), _when(self.down_until.get(sid)) if down > now else None,
+                    running.get(sid),
+                ))  # fmt: skip
+            for row in (
+                ("updated", _when(now)),
+                ("scheduler", f"{socket.gethostname()} pid {os.getpid()}"),
+                ("targets", self.pool_path),
+                ("jobs", self.jobs_path),
+                ("deadline", _when(self.deadline)),
+            ):
+                _insert(con, "meta", row)
             con.commit()
-        finally:
-            con.close()
         os.replace(tmp, self.db_path)
+
+    def _db_job(self, con: sqlite3.Connection, name: str, job: Job, now: float) -> None:
+        spec, p, meta = job.spec, job.progress, self._meta_of(job.spec)
+        active = job.state in ACTIVE
+        starts = [h.get("start") for h in job.history if h.get("start")]
+        starts += [job.launched_at] if job.launched_at else []
+        finished = job.history[-1].get("end") if job.history and not active else None
+        frames = p.get("frames")
+        eta = eta_seconds(p, now) if active else None
+        outcome = read_json(os.path.join(spec.output_dir, OUTCOME_FILE)) or {}
+        _insert(con, "runs", (
+            name, job.state, job.slot, job.host, _csv(job.gpus) or None,
+            len(job.history) + active, job.attempts, job.failures,
+            _when(min(starts) if starts else None), _when(max(starts) if starts else None),
+            _when(finished), frames, p.get("frames_total"),
+            frames * meta["dump_dt"] if frames is not None and "dump_dt" in meta else None,
+            meta.get("t_end"), meta.get("dump_dt"), p.get("step"), p.get("target"),
+            round(eta / 3600.0, 3) if eta is not None else None,
+            spec.cost, job.note or None, spec.output_dir, meta.get("dataset_dir"),
+            spec.config or spec.run_dir, json.dumps(meta.get("params") or {}),
+            outcome.get("class"), _bit(outcome, "banded"),
+        ))  # fmt: skip
+        gpu_hours = 0.0
+        for i, h in enumerate(job.history + ([job.leg(result=job.state)] if active else [])):
+            start, end = h.get("start"), h.get("end")
+            hours = ((end or now) - start) / 3600.0 if start else None
+            if hours is not None:
+                gpu_hours += hours * max(len(h.get("gpus") or []), 1)
+            _insert(con, "legs", (
+                name, i + 1, h.get("launch"), h.get("slot"), h.get("host"),
+                _csv(h.get("gpus")) or None, _when(start), _when(end),
+                round(hours, 3) if hours is not None else None,
+                h.get("exit"), h.get("result"), h.get("note") or None,
+            ))  # fmt: skip
+        row = outcome_row(name, job.state, meta, spec.output_dir, spec.cost, gpu_hours, frames)
+        _insert(con, "outcomes", row)
 
     def _warn(self, msg: str) -> None:
         if msg not in self._warned:
@@ -1071,15 +990,12 @@ class Scheduler:
         if self._queue is None:
             try:
                 res = self.local.run("", 'squeue -h -u "$(id -un)" -o "%i %T"')
-            except (subprocess.TimeoutExpired, OSError):
+            except CALL_ERRORS:
                 return None
             if res.returncode != 0:
                 return None
-            self._queue = {}
-            for line in res.stdout.splitlines():
-                parts = line.split()
-                if len(parts) >= 2:
-                    self._queue[parts[0]] = parts[1]
+            rows = (line.split() for line in res.stdout.splitlines())
+            self._queue = {p[0]: p[1] for p in rows if len(p) >= 2}
         return self._queue.get(handle, "")
 
     def _alive(
@@ -1095,15 +1011,8 @@ class Scheduler:
     def _signal(self, job: Job, sig: str, group: bool = False) -> bool:
         if job.handle:
             # the batch shell is the wrapper, which forwards TERM to the run; KILL cancels the job
-            cmd = (
-                f"scancel {job.handle}"
-                if sig == "KILL"
-                else f"scancel --batch --signal={sig} {job.handle}"
-            )
-            try:
-                return self.local.run("", cmd).returncode == 0
-            except (subprocess.TimeoutExpired, OSError):
-                return False
+            batch = "" if sig == "KILL" else f"--batch --signal={sig} "
+            return self.local.ok("", f"scancel {batch}{job.handle}")
         if job.pid is None:
             return False
         if group:
@@ -1123,7 +1032,7 @@ class Scheduler:
                     slot.host, f"{shlex.quote(slot.python)} {shlex.quote(tool)} probe"
                 )
                 found = json.loads(res.stdout.strip().splitlines()[-1])
-            except (subprocess.TimeoutExpired, OSError, ValueError, IndexError):
+            except (*CALL_ERRORS, ValueError, IndexError):
                 return cached
             found["checked"] = now
             if not found.get("usable") and (cached is None or cached.get("usable")):
@@ -1139,33 +1048,35 @@ class Scheduler:
         if _has_flag(job.spec.args, ("--backend",)):
             return []
         probe = self._probe(slot, job.spec.workdir, now)
-        usable = probe is None or probe.get("usable")
-        return ["--backend", "auto" if usable else "jax"]
+        return ["--backend", "auto" if probe is None or probe.get("usable") else "jax"]
+
+    def _wrapped(
+        self,
+        python: str,
+        job: Job,
+        slot: Slot,
+        argv: list[str],
+        launch_id: str,
+        env: dict[str, str],
+        host: str = "",
+    ) -> str:
+        """``env ... python scheduler.py wrap ... -- argv`` for one leg of ``job``."""
+        wrapper = [
+            python, self.script, "wrap", "--dir", job.spec.output_dir, "--launch-id", launch_id,
+            *(["--host", host] if host else []), "--slot", slot.id,
+            "--heartbeat", f"{self.heartbeat:g}", "--",
+        ]  # fmt: skip
+        return shlex.join(["env", *(f"{k}={v}" for k, v in env.items()), *wrapper, *argv])
 
     def sbatch_script(self, job: Job, slot: Slot, argv: list[str], launch_id: str) -> str:
         """The batch script of one leg: Slurm options, the target's setup lines, then the wrapper."""
         target = self.slurm or SlurmTarget()
         spec = job.spec
-        sched = os.path.join(spec.output_dir, SCHED)
         env = {**target.env, **spec.env, "XLA_PYTHON_CLIENT_PREALLOCATE": "false"}
-        wrapper = [
-            target.python,
-            self.script,
-            "wrap",
-            "--dir",
-            spec.output_dir,
-            "--launch-id",
-            launch_id,
-            "--slot",
-            slot.id,
-            "--heartbeat",
-            f"{self.heartbeat:g}",
-            "--",
-        ]
         lines = [
             "#!/bin/bash",
             f"#SBATCH --job-name={spec.name}",
-            f"#SBATCH --output={sched}/slurm-%j.log",
+            f"#SBATCH --output={os.path.join(spec.output_dir, SCHED)}/slurm-%j.log",
             f"#SBATCH --signal=B:TERM@{target.signal_lead}",
         ]
         if not _has_flag(target.sbatch, GPU_FLAGS):
@@ -1173,10 +1084,39 @@ class Scheduler:
         lines += [f"#SBATCH {a}" for a in target.sbatch]
         lines += target.setup
         lines.append(f"cd {shlex.quote(spec.workdir)}")
-        lines.append(
-            "exec " + shlex.join(["env", *(f"{k}={v}" for k, v in env.items()), *wrapper, *argv])
-        )
+        lines.append("exec " + self._wrapped(target.python, job, slot, argv, launch_id, env))
         return "\n".join(lines) + "\n"
+
+    def launch_command(self, job: Job, slot: Slot, argv: list[str], launch_id: str) -> str:
+        spec = job.spec
+        sched = os.path.join(spec.output_dir, SCHED)
+        env = {
+            **slot.env,
+            **spec.env,
+            "XLA_PYTHON_CLIENT_PREALLOCATE": "false",
+            "CUDA_VISIBLE_DEVICES": _csv(job_gpus(spec, slot)),
+        }
+        inner = self._wrapped(slot.python, job, slot, argv, launch_id, env, host=slot.host)
+        q = shlex.quote
+        return (
+            f"test -x {q(slot.python)} && mkdir -p {q(sched)} && cd {q(spec.workdir)} && "
+            f"{{ nohup {inner} >> {q(os.path.join(sched, 'log'))} 2>&1 < /dev/null & }}"
+        )
+
+    def _started(
+        self,
+        job: Job,
+        slot: Slot,
+        argv: list[str],
+        launch_id: str,
+        now: float,
+        handle: str | None = None,
+    ) -> None:
+        job.state, job.slot, job.host, job.handle = "starting", slot.id, slot.host, handle
+        job.gpus = job_gpus(job.spec, slot)
+        job.launch_id, job.launched_at, job.pid = launch_id, now, None
+        job.hb_value, job.hb_seen, job.argv, job.note = None, None, argv, ""
+        job.attempts += 1
 
     def _submit(self, job: Job, slot: Slot, argv: list[str], launch_id: str, now: float) -> bool:
         spec = job.spec
@@ -1191,7 +1131,7 @@ class Scheduler:
         try:
             res = self.local.run("", f"sbatch --parsable {shlex.quote(path)}")
             error = "" if res.returncode == 0 else (res.stderr or res.stdout or "").strip()[-300:]
-        except (subprocess.TimeoutExpired, OSError) as exc:
+        except CALL_ERRORS as exc:
             error = str(exc)
         if error:
             for sid in self.pool:
@@ -1202,11 +1142,7 @@ class Scheduler:
             return False
         handle = res.stdout.strip().split(";")[0]
         _atomic_write(os.path.join(sched, "slurm"), f"{handle} {launch_id}\n")
-        job.state, job.slot, job.host, job.handle = "starting", slot.id, SLURM_HOST, handle
-        job.gpus = []
-        job.launch_id, job.launched_at, job.pid = launch_id, now, None
-        job.hb_value, job.hb_seen, job.argv, job.note = None, None, argv, ""
-        job.attempts += 1
+        self._started(job, slot, argv, launch_id, now, handle)
         self.log(f"{spec.name}: submitted as Slurm job {handle}: {shlex.join(argv)}")
         return True
 
@@ -1308,12 +1244,8 @@ class Scheduler:
                 return
             busy = {j.slot for j in self._active()}
             free = [sid for sid in self.pool if sid not in busy]
-            job.state, job.slot, job.host, job.handle = (
-                "starting",
-                free[0] if free else f"{SLURM_HOST}:+",
-                SLURM_HOST,
-                handle,
-            )
+            job.state, job.host, job.handle = "starting", SLURM_HOST, handle
+            job.slot = free[0] if free else f"{SLURM_HOST}:+"
             job.launch_id, job.launched_at, job.pid = submitted, now, None
             if job.base_legs is None:
                 job.base_legs = len(run_legs(job.spec.output_dir))
@@ -1336,9 +1268,7 @@ class Scheduler:
         self.log(f"{job.spec.name}: reattached to the running launch {att.launch} on {att.slot}")
 
     def _apply_requests(self, now: float) -> None:
-        for path in sorted(
-            glob.glob(os.path.join(glob.escape(requests_dir(self.state_path)), "*.json"))
-        ):
+        for path in request_files(self.state_path):
             try:
                 req = json.loads(_read(path) or "")
             except ValueError:
@@ -1350,33 +1280,25 @@ class Scheduler:
             if job is None:
                 self.log(f"request {action} {name}: no such job")
                 continue
-            if action in ("cancel", "requeue"):
-                requeue = action == "requeue"
-                if job.state in ACTIVE:
-                    self._stop(job, "requeued" if requeue else "cancelled", requeue, now)
-                elif job.state == "pending" and not requeue:
-                    job.state = "cancelled"
-                    self.log(f"{name}: cancelled")
-                else:
-                    self.log(f"request {action} {name}: nothing to do, the job is {job.state}")
-            elif action == "stable":
-                reason = "stopped by hand as stable (heat flux still decaying)"
-                if job.state in ACTIVE:
-                    job.finish_as = "decayed"
-                    self._stop(job, reason, False, now)
-                elif job.state in ("pending", "cancelled"):
-                    job.state, job.note = "decayed", reason
-                    self.log(f"{name}: decayed ({reason})")
-                else:
-                    self.log(f"request {action} {name}: nothing to do, the job is {job.state}")
-            elif action == "resume":
-                if job.state in ("cancelled", "failed", "diverged", "rejected", *OUTCOME_STATES):
-                    job.state, job.failures, job.note = "pending", 0, ""
-                    self.log(f"{name}: back in the queue")
-                elif job.state == "stopping":
-                    job.requeue = True
-                else:
-                    self.log(f"request {action} {name}: nothing to do, the job is {job.state}")
+            requeue = action == "requeue"
+            if action in ("cancel", "requeue") and job.state in ACTIVE:
+                self._stop(job, "requeued" if requeue else "cancelled", requeue, now)
+            elif action == "cancel" and job.state == "pending":
+                job.state = "cancelled"
+                self.log(f"{name}: cancelled")
+            elif action == "stable" and job.state in ACTIVE:
+                job.finish_as = "decayed"
+                self._stop(job, STABLE_NOTE, False, now)
+            elif action == "stable" and job.state in ("pending", "cancelled"):
+                job.state, job.note = "decayed", STABLE_NOTE
+                self.log(f"{name}: decayed ({STABLE_NOTE})")
+            elif action == "resume" and job.state in RESUMABLE:
+                job.state, job.failures, job.note = "pending", 0, ""
+                self.log(f"{name}: back in the queue")
+            elif action == "resume" and job.state == "stopping":
+                job.requeue = True
+            elif action in ("cancel", "requeue", "stable", "resume"):
+                self.log(f"request {action} {name}: nothing to do, the job is {job.state}")
 
     def _monitor(self, job: Job, now: float) -> None:
         att = read_attempt(job.spec.output_dir)
@@ -1384,23 +1306,17 @@ class Scheduler:
             if job.handle:
                 state = self._slurm_state(job.handle)
                 if state is None or state in SLURM_QUEUED:
-                    # time in the Slurm queue does not count toward the start timeout
+                    # time in the slurm queue does not count toward the start timeout
                     job.launched_at = now
                     return
                 if state == "":
                     log = os.path.join(job.spec.output_dir, SCHED, f"slurm-{job.handle}.log")
-                    self._finish(
-                        job,
-                        None,
-                        now,
-                        f"the Slurm job ended before the run started; see {log}",
-                        startup=True,
-                    )
+                    note = f"the Slurm job ended before the run started; see {log}"
+                    self._finish(job, None, now, note, startup=True)
                     return
             if job.launched_at is not None and now - job.launched_at > self.start_timeout:
-                self._finish(
-                    job, None, now, "the wrapper did not start; see .sched/log", startup=True
-                )
+                note = "the wrapper did not start; see .sched/log"
+                self._finish(job, None, now, note, startup=True)
             return
         if job.pid is None:
             job.pid = att.pid
@@ -1455,7 +1371,7 @@ class Scheduler:
         )
 
     def _kill(self, job: Job, reason: str, now: float) -> None:
-        """SIGKILL ``job`` at once (no SIGTERM, so no snapshot is cut short) and queue it again."""
+        """SIGKILL ``job`` at once and queue it again."""
         if job.state == "stopping" and job.killed_at is not None:
             return
         if job.handle and job.pid is None:
@@ -1475,14 +1391,13 @@ class Scheduler:
     ) -> None:
         """Close the current launch of ``job`` and decide what comes next from its exit code."""
         self._update_progress(job, now)
-        stopping = job.state == "stopping"
         diverged = code == 2 and os.path.exists(os.path.join(job.spec.output_dir, "DIVERGED"))
         if code == 0:
             state = "done"
         elif code in OUTCOME_EXITS:
             state, note = OUTCOME_EXITS[code]
             note += "; not retried"
-        elif stopping:
+        elif job.state == "stopping":
             state = job.finish_as or ("pending" if job.requeue else "cancelled")
             note = f"{job.stop_reason}" + (f", {note}" if note else "")
         elif code == INTERRUPTED:
@@ -1501,36 +1416,20 @@ class Scheduler:
             note = note or f"exit {code}; see {os.path.join(job.spec.output_dir, SCHED, 'log')}"
             if startup and job.slot:
                 self.down_until[job.slot] = now + self.slot_backoff
-        job.history.append(
-            {
-                "slot": job.slot,
-                "host": job.host,
-                "gpus": job.gpus,
-                "launch": job.launch_id,
-                "handle": job.handle,
-                "start": job.launched_at,
-                "end": now,
-                "exit": code,
-                "result": state,
-                "note": note,
-            }
-        )
+        job.history.append(job.leg(end=now, exit=code, result=state, note=note))
         self.log(f"{job.spec.name}: {state} (exit {code}{', ' + note if note else ''})")
         job.state, job.note = state, note
-        job.slot, job.host, job.gpus, job.pid = None, None, [], None
-        job.launch_id, job.launched_at, job.hb_value, job.hb_seen = None, None, None, None
-        job.handle = None
-        job.stop_reason, job.stop_started, job.killed_at, job.requeue = None, None, None, True
-        job.finish_as = None
+        blank = Job(job.spec)
+        for key in LAUNCH_FIELDS:
+            setattr(job, key, getattr(blank, key))
 
     def _update_progress(self, job: Job, now: float) -> None:
-        meta = self._meta_of(job.spec)
+        meta, p = self._meta_of(job.spec), job.progress
         out = read_json(os.path.join(job.spec.output_dir, OUTCOME_FILE))
         if out is not None:
-            job.progress["outcome"] = out.get("label") or out.get("class")
+            p["outcome"] = out.get("label") or out.get("class")
         frames = dataset_frames(meta.get("dataset_dir"))
         if frames is not None:
-            p = job.progress
             p["frames"] = frames
             if "t_end" in meta:
                 p["frames_total"] = math.ceil(meta["t_end"] / meta["dump_dt"] - 1e-9)
@@ -1542,7 +1441,6 @@ class Scheduler:
                 p["frames_last"] = [frames, now]
         steps = snapshot_steps(job.spec.output_dir)
         legs = run_legs(job.spec.output_dir)
-        p = job.progress
         if legs and legs[-1].get("target_step") is not None:
             p["target"] = int(legs[-1]["target_step"])
         if not steps:
@@ -1559,30 +1457,22 @@ class Scheduler:
 
         A larger slot is left alone while a waiting job needs more GPUs than this one and fits it.
         """
-        need = job.spec.gpus
-        if need == ALL_GPUS and not any(s.host == SLURM_HOST for s in free):
-            if not free:
-                return None
-            return min(free, key=lambda s: (s.id in job.avoid, -s.speed * len(s.gpus), s.id))
-
-        def reserved(slot: Slot) -> bool:
-            return len(slot.gpus) > need and any(
-                need < k.spec.gpus <= len(slot.gpus) for k in waiting
-            )
-
         if any(s.host == SLURM_HOST for s in free):
+            return min(free, key=_slurm_index)
+        need = job.spec.gpus
+        if need == ALL_GPUS:
             return min(
-                free,
-                key=lambda s: (
-                    int(s.id.rsplit(":", 1)[1]) if s.id.rsplit(":", 1)[1].isdigit() else 0
-                ),
+                free, key=lambda s: (s.id in job.avoid, -s.speed * len(s.gpus), s.id), default=None
             )
-        candidates = [s for s in free if len(s.gpus) >= need and not reserved(s)]
-        if not candidates:
-            return None
+        candidates = [
+            s
+            for s in free
+            if len(s.gpus) >= need and not any(need < k.spec.gpus <= len(s.gpus) for k in waiting)
+        ]
         return min(
             candidates,
             key=lambda s: (s.id in job.avoid, len(s.gpus) != need, -s.speed, len(s.gpus), s.id),
+            default=None,
         )
 
     def _gpu_memory(self, host: str) -> dict[int, int] | None:
@@ -1592,12 +1482,10 @@ class Scheduler:
                 res = self.executor.run(
                     host, "nvidia-smi --query-gpu=index,memory.used --format=csv,noheader,nounits"
                 )
-                mem = {}
-                for line in res.stdout.strip().splitlines():
-                    idx, used = (int(float(x)) for x in line.split(","))
-                    mem[idx] = used
+                rows = (map(float, line.split(",")) for line in res.stdout.strip().splitlines())
+                mem = {int(idx): int(used) for idx, used in rows}
                 self._gpu_mem[host] = mem if res.returncode == 0 and mem else None
-            except (subprocess.TimeoutExpired, OSError, ValueError):
+            except (*CALL_ERRORS, ValueError):
                 self._gpu_mem[host] = None
         return self._gpu_mem[host]
 
@@ -1629,12 +1517,12 @@ class Scheduler:
             for s in self.pool.values()
             if s.id not in busy and not s.drain and self.down_until.get(s.id, 0.0) <= now
         ]
-        if any(j.state == "pending" for j in self.jobs.values()):
-            free = [s for s in free if not self._occupied(s)]
         pending = sorted(
             (j for j in self.jobs.values() if j.state == "pending"),
             key=lambda j: (-j.spec.cost, j.order),
         )
+        if pending:
+            free = [s for s in free if not self._occupied(s)]
         placed: set[str] = set()
         for job in pending:
             waiting = [k for k in pending if k is not job and k.spec.name not in placed]
@@ -1666,43 +1554,11 @@ class Scheduler:
         else:
             args = first + ([] if "--overwrite" in first else ["--overwrite"])
         if spec.gpus == ALL_GPUS and slot is not None and not _has_flag(args, MESH_FLAGS):
-            # every leg sizes its mesh to its slot; this overrides a layout saved by an earlier leg
+            # every leg sizes its mesh to its slot, over a layout saved by an earlier leg
             args += ["--n-gpus", str(len(slot.gpus))]
         elif spec.gpus > 1 and not _has_flag(args, MESH_FLAGS) and not config_shards(args[1]):
             args += ["--n-gpus", str(spec.gpus)]
         return args
-
-    def launch_command(self, job: Job, slot: Slot, argv: list[str], launch_id: str) -> str:
-        spec = job.spec
-        sched = os.path.join(spec.output_dir, SCHED)
-        env = {
-            **slot.env,
-            **spec.env,
-            "XLA_PYTHON_CLIENT_PREALLOCATE": "false",
-            "CUDA_VISIBLE_DEVICES": ",".join(map(str, job_gpus(spec, slot))),
-        }
-        wrapper = [
-            slot.python,
-            self.script,
-            "wrap",
-            "--dir",
-            spec.output_dir,
-            "--launch-id",
-            launch_id,
-            "--host",
-            slot.host,
-            "--slot",
-            slot.id,
-            "--heartbeat",
-            f"{self.heartbeat:g}",
-            "--",
-        ]
-        inner = shlex.join(["env", *(f"{k}={v}" for k, v in env.items()), *wrapper, *argv])
-        q = shlex.quote
-        return (
-            f"test -x {q(slot.python)} && mkdir -p {q(sched)} && cd {q(spec.workdir)} && "
-            f"{{ nohup {inner} >> {q(os.path.join(sched, 'log'))} 2>&1 < /dev/null & }}"
-        )
 
     def _launch(self, job: Job, slot: Slot, now: float) -> bool:
         spec = job.spec
@@ -1717,8 +1573,7 @@ class Scheduler:
             self.log(f"{spec.name}: {job.note}")
             return False
         argv = [a.replace("{python}", slot.python) for a in self.program]
-        argv += self.gyaradax_args(job, slot)
-        argv += self._backend_args(job, slot, now)
+        argv += self.gyaradax_args(job, slot) + self._backend_args(job, slot, now)
         launch_id = uuid.uuid4().hex[:16]
         if slot.host == SLURM_HOST:
             return self._submit(job, slot, argv, launch_id, now)
@@ -1736,11 +1591,7 @@ class Scheduler:
                 f"{spec.name}: launch on {slot.id} failed ({exc}); slot paused {self.slot_backoff:.0f} s"
             )
             return False
-        job.state, job.slot, job.host = "starting", slot.id, slot.host
-        job.gpus = job_gpus(spec, slot)
-        job.launch_id, job.launched_at, job.pid = launch_id, now, None
-        job.hb_value, job.hb_seen, job.argv, job.note = None, None, argv, ""
-        job.attempts += 1
+        self._started(job, slot, argv, launch_id, now)
         self.log(f"{spec.name}: launched on {slot.id}: {shlex.join(argv)}")
         return True
 
@@ -1757,31 +1608,21 @@ class Scheduler:
         try:
             while True:
                 self.poll()
+                states = [j.state for j in self.jobs.values()]
                 if once or self.dry_run or stop:
                     break
                 if self.expired() and not self._active():
-                    left = sum(j.state == "pending" for j in self.jobs.values())
+                    left = states.count("pending")
                     self.log(
                         f"time limit reached; {left} job(s) pending, `gyaradax datagen run` resumes them"
                     )
                     break
-                if (
-                    until_idle
-                    and self.jobs
-                    and not any(
-                        j.state == "pending" or j.state in ACTIVE for j in self.jobs.values()
-                    )
-                ):
+                if until_idle and states and not set(states) & {"pending", *ACTIVE}:
                     self.log("every job has finished")
                     break
-                wait = (
-                    min(poll, 2.0)
-                    if any(j.state == "stopping" for j in self.jobs.values())
-                    else poll
-                )
-                deadline = time.monotonic() + wait
-                while not stop and time.monotonic() < deadline:
-                    time.sleep(min(0.5, max(deadline - time.monotonic(), 0.0)))
+                end = time.monotonic() + (min(poll, 2.0) if "stopping" in states else poll)
+                while not stop and time.monotonic() < end:
+                    time.sleep(min(0.5, max(end - time.monotonic(), 0.0)))
                 if stop:
                     break
         finally:
@@ -1795,8 +1636,9 @@ class Scheduler:
 def parse_duration(text: str) -> float:
     """Seconds in a duration such as ``10h``, ``90m``, ``1h30m``, ``2d`` or ``3600``."""
     units = {"d": 86400, "h": 3600, "m": 60, "s": 1, "": 1}
-    parts = re.findall(r"(\d+(?:\.\d+)?)\s*([dhms]?)", text.strip().lower())
-    if not parts or re.sub(r"\d+(?:\.\d+)?\s*[dhms]?", "", text.strip().lower()).strip():
+    part, clean = r"(\d+(?:\.\d+)?)\s*([dhms]?)", text.strip().lower()
+    parts = re.findall(part, clean)
+    if not parts or re.sub(part, "", clean).strip():
         raise argparse.ArgumentTypeError(f"not a duration: {text!r} (e.g. 10h, 90m, 3600)")
     seconds = sum(float(v) * units[u] for v, u in parts)
     if seconds <= 0:
@@ -1817,29 +1659,17 @@ def _duration(seconds: float | None) -> str:
     return f"{s}s"
 
 
-def frames_eta(progress: dict[str, Any], now: float) -> float | None:
-    """Seconds left from the dataset frames written in the current leg, None before two frames."""
-    first, last, total = (
-        progress.get("frames_first"),
-        progress.get("frames_last"),
-        progress.get("frames_total"),
-    )
-    if not first or not last or not total or last[0] <= first[0] or last[1] <= first[1]:
+def eta_seconds(progress: dict[str, Any], now: float) -> float | None:
+    """Time left for a running leg, from its dataset frames (time mode) or its snapshot steps."""
+    p = progress
+    if p.get("frames_total"):
+        first, last, total = p.get("frames_first"), p.get("frames_last"), p["frames_total"]
+    else:
+        first, last, total = p.get("first"), p.get("last"), p.get("target")
+    if not total or not first or not last or last[0] <= first[0] or last[1] <= first[1]:
         return None
     rate = (last[0] - first[0]) / (last[1] - first[1])
     return max(0.0, (total - last[0]) / rate - (now - last[1]))
-
-
-def eta_seconds(progress: dict[str, Any], now: float) -> float | None:
-    """Time left for a running leg, from the snapshot steps seen during it."""
-    target, first, last = progress.get("target"), progress.get("first"), progress.get("last")
-    if not target or not first or not last:
-        return None
-    (s0, t0), (s1, t1) = first, last
-    if s1 <= s0 or t1 <= t0:
-        return None
-    rate = (s1 - s0) / (t1 - t0)
-    return max(0.0, (target - s1) / rate - (now - t1))
 
 
 def _table(rows: list[tuple[str, ...]]) -> list[str]:
@@ -1863,36 +1693,29 @@ def format_status(doc: dict[str, Any], now: float, pending_requests: int = 0) ->
             f"time limit: jobs stop at {when} "
             + (f"(in {_duration(left)})" if left > 0 else f"(passed {_duration(-left)} ago)")
         )
-    counts: dict[str, int] = {}
-    for j in jobs:
-        counts[j["state"]] = counts.get(j["state"], 0) + 1
+    counts = Counter(j["state"] for j in jobs)
     lines.append("jobs: " + ", ".join(f"{counts[s]} {s}" for s in STATE_ORDER if s in counts))
     rows = [("JOB", "STATE", "SLOT", "GPUS", "COST", "FAIL", "STEP", "ETA", "OUTCOME", "NOTE")]
-    # the outcome column only once a run tracks its outcome
-    outcomes = any((j.get("progress") or {}).get("outcome") for j in jobs)
     rank = {s: i for i, s in enumerate(STATE_ORDER)}
     for j in sorted(jobs, key=lambda j: (rank.get(j["state"], 99), -j["spec"]["cost"], j["order"])):
         p = j.get("progress") or {}
         step = f"{p['step']}/{p.get('target', '?')}" if "step" in p else "-"
-        eta = eta_seconds(p, now) if j["state"] in ACTIVE else None
         if p.get("frames_total"):
             step = f"frame {p.get('frames', 0)}/{p['frames_total']}"
-            eta = frames_eta(p, now) if j["state"] in ACTIVE else None
-        rows.append(
-            (
-                j["spec"]["name"],
-                j["state"],
-                (j.get("slot") or "-") + (f" (job {j['handle']})" if j.get("handle") else ""),
-                ",".join(map(str, j.get("gpus") or [])) or str(j["spec"]["gpus"] or "all"),
-                f"{j['spec']['cost']:g}",
-                str(j.get("failures", 0)),
-                step,
-                _duration(eta),
-                (p.get("outcome") or "-")[:60],
-                (j.get("note") or "")[:80],
-            )
-        )
-    if not outcomes:
+        rows.append((
+            j["spec"]["name"],
+            j["state"],
+            (j.get("slot") or "-") + (f" (job {j['handle']})" if j.get("handle") else ""),
+            _csv(j.get("gpus")) or str(j["spec"]["gpus"] or "all"),
+            f"{j['spec']['cost']:g}",
+            str(j.get("failures", 0)),
+            step,
+            _duration(eta_seconds(p, now) if j["state"] in ACTIVE else None),
+            (p.get("outcome") or "-")[:60],
+            (j.get("note") or "")[:80],
+        ))  # fmt: skip
+    # the outcome column only once a run tracks its outcome
+    if not any((j.get("progress") or {}).get("outcome") for j in jobs):
         rows = [r[:8] + r[9:] for r in rows]
     lines += [""] + _table(rows)
     for probe in (doc.get("probes") or {}).values():
@@ -1904,20 +1727,11 @@ def format_status(doc: dict[str, Any], now: float, pending_requests: int = 0) ->
     srows = [("SLOT", "HOST", "GPUS", "SPEED", "STATUS", "JOB")]
     for sid, s in sorted(doc.get("slots", {}).items()):
         down = doc.get("down_until", {}).get(sid, 0.0)
-        status = "busy" if sid in by_slot else "free"
-        if s.get("drain"):
-            status += ", draining"
+        status = ("busy" if sid in by_slot else "free") + (", draining" if s.get("drain") else "")
         if down > now:
             status += f", paused {_duration(down - now)}"
         srows.append(
-            (
-                sid,
-                s["host"],
-                ",".join(map(str, s["gpus"])),
-                f"{s['speed']:g}",
-                status,
-                by_slot.get(sid, "-"),
-            )
+            (sid, s["host"], _csv(s["gpus"]), f"{s['speed']:g}", status, by_slot.get(sid, "-"))
         )
     lines += [""] + _table(srows)
     return "\n".join(lines)
@@ -1941,14 +1755,14 @@ def wrap(
     for name in ("exit", "launch", "heartbeat", "pid", "child"):
         with contextlib.suppress(FileNotFoundError):
             os.remove(os.path.join(sched, name))
+    gpus = os.environ.get("CUDA_VISIBLE_DEVICES", "")
     put("pid", os.getpid())
     put("host", host or socket.gethostname())
     put("slot", slot)
-    put("gpus", os.environ.get("CUDA_VISIBLE_DEVICES", ""))
+    put("gpus", gpus)
     put("heartbeat", f"{time.time():.3f}")
     put("launch", launch_id)
     stamp = time.strftime("%Y-%m-%d %H:%M:%S")
-    gpus = os.environ.get("CUDA_VISIBLE_DEVICES", "")
     print(
         f"=== {stamp} {socket.gethostname()} gpus={gpus} launch {launch_id}: {shlex.join(command)}",
         flush=True,
@@ -1979,6 +1793,24 @@ def wrap(
     return code
 
 
+RUN_OPTIONS = (
+    ("--poll", float, 30.0, "seconds between polls (default 30)"),
+    ("--grace", float, 120.0, "seconds from SIGTERM to SIGKILL (default 120)"),
+    ("--heartbeat", float, 30.0, "wrapper heartbeat period (default 30 s)"),
+    ("--heartbeat-timeout", float, 300.0,
+     "heartbeat age after which the process is checked over ssh (default 300 s)"),
+    ("--start-timeout", float, 300.0, "seconds a launched wrapper has to report in (default 300)"),
+    ("--max-retries", int, 3, "retries after failures (default 3)"),
+    ("--slot-backoff", float, 300.0, "seconds a slot is skipped after a failed launch (default 300)"),
+    ("--ssh-timeout", float, 30.0, "timeout of each ssh call (default 30 s)"),
+)  # fmt: skip
+REQUESTS = {
+    "cancel": "stop jobs (SIGTERM, grace, SIGKILL) and hold them",
+    "resume": "put cancelled, failed, diverged or rejected jobs back in the queue",
+    "stable": "stop jobs (SIGTERM, grace, SIGKILL) and record them as decayed",
+}
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="scheduler.py",
@@ -1991,42 +1823,11 @@ def build_parser() -> argparse.ArgumentParser:
     run_p.add_argument("--jobs", required=True, help="job YAML (re-read every poll)")
     run_p.add_argument("--state", required=True, help="scheduler state JSON")
     run_p.add_argument(
-        "--poll", type=float, default=30.0, help="seconds between polls (default 30)"
-    )
-    run_p.add_argument(
         "--dry-run", action="store_true", help="print the launch commands of one round, run nothing"
     )
     run_p.add_argument("--once", action="store_true", help="poll once and exit")
-    run_p.add_argument(
-        "--grace", type=float, default=120.0, help="seconds from SIGTERM to SIGKILL (default 120)"
-    )
-    run_p.add_argument(
-        "--heartbeat", type=float, default=30.0, help="wrapper heartbeat period (default 30 s)"
-    )
-    run_p.add_argument(
-        "--heartbeat-timeout",
-        type=float,
-        default=300.0,
-        help="heartbeat age after which the process is checked over ssh (default 300 s)",
-    )
-    run_p.add_argument(
-        "--start-timeout",
-        type=float,
-        default=300.0,
-        help="seconds a launched wrapper has to report in (default 300)",
-    )
-    run_p.add_argument(
-        "--max-retries", type=int, default=3, help="retries after failures (default 3)"
-    )
-    run_p.add_argument(
-        "--slot-backoff",
-        type=float,
-        default=300.0,
-        help="seconds a slot is skipped after a failed launch (default 300)",
-    )
-    run_p.add_argument(
-        "--ssh-timeout", type=float, default=30.0, help="timeout of each ssh call (default 30 s)"
-    )
+    for flag, kind, default, text in RUN_OPTIONS:
+        run_p.add_argument(flag, type=kind, default=default, help=text)
     run_p.add_argument(
         "--time-limit",
         type=parse_duration,
@@ -2038,24 +1839,14 @@ def build_parser() -> argparse.ArgumentParser:
     status_p = sub.add_parser("status", help="jobs, slots and ETAs from the state file")
     status_p.add_argument("--state", required=True)
 
-    cancel_p = sub.add_parser("cancel", help="stop jobs (SIGTERM, grace, SIGKILL) and hold them")
-    cancel_p.add_argument("names", nargs="+")
-    cancel_p.add_argument("--state", required=True)
-    cancel_p.add_argument(
-        "--requeue", action="store_true", help="put the jobs back in the queue instead"
-    )
-
-    resume_p = sub.add_parser(
-        "resume", help="put cancelled, failed, diverged or rejected jobs back in the queue"
-    )
-    resume_p.add_argument("names", nargs="+")
-    resume_p.add_argument("--state", required=True)
-
-    stable_p = sub.add_parser(
-        "stable", help="stop jobs (SIGTERM, grace, SIGKILL) and record them as decayed"
-    )
-    stable_p.add_argument("names", nargs="+")
-    stable_p.add_argument("--state", required=True)
+    for action, text in REQUESTS.items():
+        request_p = sub.add_parser(action, help=text)
+        request_p.add_argument("names", nargs="+")
+        request_p.add_argument("--state", required=True)
+        if action == "cancel":
+            request_p.add_argument(
+                "--requeue", action="store_true", help="put the jobs back in the queue instead"
+            )
 
     wrap_p = sub.add_parser("wrap", help="launch wrapper run on the GPU host (internal)")
     wrap_p.add_argument("--dir", required=True)
@@ -2071,51 +1862,32 @@ def _cmd_run(args: argparse.Namespace) -> int:
     for path in (args.pool, args.jobs):
         if not os.path.isfile(path):
             raise SystemExit(f"error: {path} not found")
-    lock = None
-    if not args.dry_run:
-        os.makedirs(os.path.dirname(os.path.abspath(args.state)), exist_ok=True)
-        lock = open(args.state + ".lock", "a")
-        try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
-            raise SystemExit(f"error: another scheduler holds {args.state}.lock")
-    sched = Scheduler(
-        args.pool,
-        args.jobs,
-        args.state,
-        SSHExecutor(timeout=args.ssh_timeout),
-        heartbeat=args.heartbeat,
-        heartbeat_timeout=args.heartbeat_timeout,
-        grace=args.grace,
-        start_timeout=args.start_timeout,
-        max_retries=args.max_retries,
-        slot_backoff=args.slot_backoff,
-        dry_run=args.dry_run,
-        deadline=time.time() + args.time_limit if args.time_limit else None,
-    )
-    sched.run(args.poll, once=args.once)
-    if lock is not None:
-        lock.close()
+    keys = "heartbeat heartbeat_timeout grace start_timeout max_retries slot_backoff dry_run"
+    options = {k: getattr(args, k) for k in keys.split()}
+    error = f"error: another scheduler holds {args.state}.lock"
+    with contextlib.nullcontext() if args.dry_run else lock_state(args.state, error):
+        options["deadline"] = time.time() + args.time_limit if args.time_limit else None
+        executor = SSHExecutor(timeout=args.ssh_timeout)
+        Scheduler(args.pool, args.jobs, args.state, executor, **options).run(
+            args.poll, once=args.once
+        )
     return 0
 
 
-def _cmd_status(args: argparse.Namespace) -> int:
-    if not os.path.isfile(args.state):
-        raise SystemExit(f"error: {args.state} not found")
-    with open(args.state) as fh:
+def read_status(state_path: str, missing: str) -> tuple[dict[str, Any], str]:
+    """The state document and its status tables, or exit with ``missing``."""
+    if not os.path.isfile(state_path):
+        raise SystemExit(missing)
+    with open(state_path) as fh:
         doc = json.load(fh)
-    waiting = len(
-        glob.glob(os.path.join(glob.escape(requests_dir(os.path.abspath(args.state))), "*.json"))
-    )
-    print(format_status(doc, time.time(), waiting))
-    return 0
+    waiting = len(request_files(os.path.abspath(state_path)))
+    return doc, format_status(doc, time.time(), waiting)
 
 
 def _cmd_request(args: argparse.Namespace) -> int:
     action = "requeue" if getattr(args, "requeue", False) else args.command
-    state = os.path.abspath(args.state)
     for name in args.names:
-        submit_request(state, action, name)
+        submit_request(os.path.abspath(args.state), action, name)
         print(f"{action} {name}: queued for the scheduler's next poll")
     return 0
 
@@ -2125,8 +1897,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "run":
         return _cmd_run(args)
     if args.command == "status":
-        return _cmd_status(args)
-    if args.command in ("cancel", "resume", "stable"):
+        print(read_status(args.state, f"error: {args.state} not found")[1])
+        return 0
+    if args.command in REQUESTS:
         return _cmd_request(args)
     cmd = args.cmd[1:] if args.cmd[:1] == ["--"] else args.cmd
     if not cmd:

@@ -4,6 +4,7 @@ import argparse
 import os
 import sys
 import time
+from pathlib import Path
 
 import pytest
 import yaml
@@ -83,29 +84,28 @@ def test_collisions_changed_configs_and_settings_are_refused(tmp_path):
         cg.main(["add", plain, "--campaign", str(tmp_path / "c3"), "--name", "x_{id}"])
 
 
+def _targets(path):
+    slots = [{"host": "here", "gpus": [g]} for g in (0, 1)]
+    path.write_text(yaml.safe_dump({"defaults": {"python": sys.executable}, "slots": slots}))
+    return str(path)
+
+
 def test_campaign_jobs_run_to_completion(tmp_path):
-    from test_datagen_scheduler import FAKE_GYARADAX  # type: ignore[import-not-found]
+    from test_datagen_scheduler import FAKE_GYARADAX, done, drive  # type: ignore[import-not-found]
 
     fake = tmp_path / "fake_gyaradax.py"
     fake.write_text(FAKE_GYARADAX)
     configs = [_config(tmp_path / f"k_{i}.yaml", f"k_{i}", steps=3, step_time=0.02) for i in (1, 2, 3)]
     camp = cg.Campaign(str(tmp_path / "camp"))
     assert cg.main(["add", *configs, "--campaign", camp.root, "--dataset", str(tmp_path / "data")]) == 0
-    with open(camp.targets, "w") as fh:
-        slots = [{"host": "here", "gpus": [g]} for g in (0, 1)]
-        yaml.safe_dump({"defaults": {"python": sys.executable}, "slots": slots}, fh)
+    _targets(Path(camp.targets))
     logs = []
     sched = gs.Scheduler(
         camp.targets, camp.jobs_path, camp.state, gs.LocalExecutor(),
         heartbeat=0.2, grace=1.0, program=[sys.executable, str(fake)], log=logs.append,
     )
-    deadline = time.time() + 60
-    sched.poll()
-    while time.time() < deadline and not all(j.state == "done" for j in sched.jobs.values()):
-        time.sleep(0.1)
-        sched.poll()
+    drive(sched, lambda: len(sched.jobs) == 3 and done(sched)(), timeout=60, logs=logs)
     assert sorted(sched.jobs) == ["k_1", "k_2", "k_3"], logs
-    assert all(j.state == "done" for j in sched.jobs.values()), logs
     for name, job in sched.jobs.items():
         legs = gs.run_legs(job.spec.output_dir)
         assert len(legs) == 1 and legs[0]["argv"][:2] == ["run", os.path.join(camp.root, "configs", f"{name}.yaml")]
@@ -135,11 +135,10 @@ def test_time_limit_becomes_a_deadline_the_detached_scheduler_keeps(tmp_path, mo
 
     real_popen = cg.subprocess.Popen
     monkeypatch.setattr(cg.subprocess, "Popen", popen)
-    targets = tmp_path / "targets.yaml"
-    targets.write_text(yaml.safe_dump({"defaults": {"python": sys.executable}, "slots": [{"host": "here", "gpus": [0]}]}))
+    targets = _targets(tmp_path / "targets.yaml")
     cfg = _config(tmp_path / "k_1.yaml", "k_1")
     t0 = time.time()
-    argv = ["run", cfg, "--campaign", str(tmp_path / "camp"), "--targets", str(targets)]
+    argv = ["run", cfg, "--campaign", str(tmp_path / "camp"), "--targets", targets]
     assert cg.main([*argv, "--time-limit", "10h", "--detach"]) == 0
     (child,) = launched
     deadline = float(child[child.index("--deadline") + 1])
