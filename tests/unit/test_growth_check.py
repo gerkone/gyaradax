@@ -1,15 +1,13 @@
-"""Linear growth check: growth rates per resolution, `gyaradax growth`, `run --linear-check`, datagen."""
+"""Linear growth check: growth rates per resolution, `gyaradax growth`, `run --linear-check`."""
 
 import json
 import os
 
 import numpy as np
 import pytest
-import yaml
 from omegaconf import OmegaConf
 
 from gyaradax.cli import main
-from gyaradax.datagen import campaign as cg
 from gyaradax.diagnostics import growth
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -162,56 +160,6 @@ def test_tolerance_refuses_the_run_with_its_own_exit_code(tmp_path, config, caps
     assert "+50.0%, tolerance 10.0%" in capsys.readouterr().out
     assert not any(p.name.startswith("step_") for p in out.iterdir())
     assert main([*argv, "--linear-check", "12", "--linear-check-tol", "0.6"]) == 0
-
-
-def test_datagen_passes_the_check_to_every_job_and_reports_it(tmp_path, config):
-    camp = str(tmp_path / "camp")
-    assert (
-        cg.main(
-            [
-                "add",
-                config,
-                "--campaign",
-                camp,
-                "--linear-check",
-                "24,36",
-                "--linear-check-tol",
-                "0.2",
-            ]
-        )
-        == 0
-    )
-    with open(os.path.join(camp, "jobs.yaml")) as fh:
-        job = yaml.safe_load(fh)["jobs"][0]
-    assert job["args"][-4:] == ["--linear-check", "24,36", "--linear-check-tol", "0.2"]
-    with pytest.raises(SystemExit, match="not both"):
-        cg.main(
-            [
-                "add",
-                config,
-                "--campaign",
-                str(tmp_path / "c2"),
-                "--linear-check",
-                "36",
-                "--args",
-                "--linear-check 24",
-            ]
-        )
-    with pytest.raises(SystemExit, match="fixes linear_check"):
-        cg.main(["add", config, "--campaign", camp, "--linear-check", "48"])
-    ky = [0.0, 0.5]
-    report = growth.assemble(
-        [
-            {"ns": 8, "ky": ky, "gamma": [0.0, 0.064], "config_key": "k"},
-            {"ns": 36, "ky": ky, "gamma": [0.0, 0.051], "config_key": "r"},
-        ],
-        8,
-    )
-    os.makedirs(job["output_dir"], exist_ok=True)
-    with open(os.path.join(job["output_dir"], "linear_check.json"), "w") as fh:
-        json.dump(report, fh)
-    doc = {"jobs": {job["name"]: {"spec": {"output_dir": job["output_dir"]}}}}
-    assert cg._linear_checks(doc) == {job["name"]: "γ ns8 0.064 / ns36 0.051 (+25%)"}
 
 
 @pytest.mark.parametrize("adiabatic", [False, True])
