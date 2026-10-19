@@ -448,6 +448,17 @@ def _setup_run(config_path: str, args: argparse.Namespace, run_dir: str | None =
     else:
         pre = linear_precompute(geometry, params)
 
+    if not (params.adaptive_dt and params.non_linear):
+        from gyaradax.cfl import estimate_linear_timestep
+
+        dt_lin = float(estimate_linear_timestep(pre, params=params))
+        if dt_lin < params.dt:
+            print(
+                f"  linear timestep automatically reduced: dt {params.dt:.4e} -> {dt_lin:.4e} "
+                "(linear stability estimate)"
+            )
+            params = replace(params, dt=dt_lin)
+
     # checkpoint cadence: --block-size > run.block_size > config's dump_interval x naverage
     run_block = int(getattr(cfg.run, "block_size", 0) or 0)
     if args.block_size:

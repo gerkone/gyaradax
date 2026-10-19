@@ -34,7 +34,6 @@ struct LinearRhsArgs {
     const double2* bpar;          // (ns, nkx, nky)
     const double*  bpar_chi;      // (nsp, nmu, ns, nkx, nky)
     const double*  s_disp_tab;    // (nsp, nv, ns, n_class, 9)
-    const double*  dvp;           // (1,): parallel velocity grid spacing
     const double2* dproj_m0;      // (nsp, ns, nkx, nky)
     const double2* dproj_m1;      // (nsp, ns, nkx, nky)
     const double*  dproj_e0;      // (nsp, nv, nmu, ns, nkx, nky)
@@ -44,7 +43,7 @@ struct LinearRhsArgs {
     int ky_tile;                  // ky per block (nky unless ns * nky > 1024)
     double c_d1_0, c_d1_1, c_d1_2, c_d1_3, c_d1_4;
     double c_d4_0, c_d4_1, c_d4_2, c_d4_3, c_d4_4;
-    double disp_vp, drive_scale;
+    double dvp, disp_vp, drive_scale;
     // vpar shard halo (HALO variants): planes v0 - 2, v0 - 1, v0 + nv, v0 + nv + 1, zero past the grid
     const double2* df_halo;       // (nsp, 4, nmu, ns, nkx, nky)
     const double*  fm_halo;       // (nsp, 4, nmu, ns)
@@ -270,7 +269,7 @@ __device__ __forceinline__ void linear_rhs_fused_body(const LinearRhsArgs& a) {
     double hyper_val   = __ldg(&a.hyper[(size_t)kx * nky + ky]);
 
     double kdotvd  = drift_x_val * kx_val + drift_y_val * ky_val;
-    double inv_dvp = 1.0 / __ldg(a.dvp);
+    double inv_dvp = 1.0 / a.dvp;
     double inv_tmp = 1.0 / fmax(tmp0, 1e-15);
 
     // term_iv = utrap * out_d1 / dvp
@@ -417,7 +416,6 @@ xla_ffi::Error LinearRhsFusedImpl(
     xla_ffi::Buffer<xla_ffi::DataType::C128> dproj_m1,
     xla_ffi::Buffer<xla_ffi::DataType::F64>  dproj_e0,
     xla_ffi::Buffer<xla_ffi::DataType::F64>  dproj_e1,
-    xla_ffi::Buffer<xla_ffi::DataType::F64>  dvp,
     xla_ffi::Buffer<xla_ffi::DataType::C128> df_halo,
     xla_ffi::Buffer<xla_ffi::DataType::F64>  fm_halo,
     xla_ffi::Buffer<xla_ffi::DataType::F64>  g2f_halo,
@@ -426,7 +424,7 @@ xla_ffi::Error LinearRhsFusedImpl(
     int32_t has_apar, int32_t has_bpar, int32_t has_dpc, int32_t has_halo,
     double c_d1_0, double c_d1_1, double c_d1_2, double c_d1_3, double c_d1_4,
     double c_d4_0, double c_d4_1, double c_d4_2, double c_d4_3, double c_d4_4,
-    double disp_vp, double drive_scale
+    double dvp, double disp_vp, double drive_scale
 ) {
     if (ns > 1024)
         return xla_ffi::Error(XLA_FFI_Error_Code_INVALID_ARGUMENT,
@@ -446,14 +444,13 @@ xla_ffi::Error LinearRhsFusedImpl(
         (const double2*)apar.typed_data(), chi_vfac.typed_data(), g2f_vfac.typed_data(),
         (const double2*)bpar.typed_data(), bpar_chi.typed_data(),
         s_disp_tab.typed_data(),
-        dvp.typed_data(),
         (const double2*)dproj_m0.typed_data(), (const double2*)dproj_m1.typed_data(),
         dproj_e0.typed_data(), dproj_e1.typed_data(),
         (double2*)rhs_out->typed_data(),
         nsp, nv, nmu, ns, nkx, nky, n_class, ky_tile,
         c_d1_0, c_d1_1, c_d1_2, c_d1_3, c_d1_4,
         c_d4_0, c_d4_1, c_d4_2, c_d4_3, c_d4_4,
-        disp_vp, drive_scale,
+        dvp, disp_vp, drive_scale,
         has_halo ? (const double2*)df_halo.typed_data() : nullptr,
         has_halo ? fm_halo.typed_data() : nullptr,
         has_halo ? g2f_halo.typed_data() : nullptr
@@ -509,7 +506,6 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(
         .Arg<xla_ffi::Buffer<xla_ffi::DataType::C128>>() // dproj_m1
         .Arg<xla_ffi::Buffer<xla_ffi::DataType::F64>>()  // dproj_e0
         .Arg<xla_ffi::Buffer<xla_ffi::DataType::F64>>()  // dproj_e1
-        .Arg<xla_ffi::Buffer<xla_ffi::DataType::F64>>()  // dvp
         .Arg<xla_ffi::Buffer<xla_ffi::DataType::C128>>() // df_halo
         .Arg<xla_ffi::Buffer<xla_ffi::DataType::F64>>()  // fm_halo
         .Arg<xla_ffi::Buffer<xla_ffi::DataType::F64>>()  // g2f_halo
@@ -529,6 +525,7 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(
         .Attr<double>("c_d1_3").Attr<double>("c_d1_4")
         .Attr<double>("c_d4_0").Attr<double>("c_d4_1").Attr<double>("c_d4_2")
         .Attr<double>("c_d4_3").Attr<double>("c_d4_4")
+        .Attr<double>("dvp")
         .Attr<double>("disp_vp")
         .Attr<double>("drive_scale")
 );
