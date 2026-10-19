@@ -40,8 +40,8 @@ gyaradax/
     rundir.py         — run directory output (save_dumps, save_run_metadata, checkpoints)
     dataset.py        — preprocessed dataset output (`run --dataset`): quantized real-space frames + neugk metadata + resume dump
   datagen/
-    campaign.py       — `gyaradax datagen`: campaign directory, configs -> named jobs, overrides, dataset collisions
-    scheduler.py      — job placement over an ssh GPU mesh or Slurm, run wrapper, resume / retry (stdlib + PyYAML only)
+    campaign.py       — `gyaradax datagen`: campaign directory, configs -> named jobs, dataset collisions
+    scheduler.py      — job placement over an ssh GPU mesh, run wrapper, resume / retry (stdlib + PyYAML only)
   geometry/           — geometry models (circular, s-alpha, Miller, loaded geom.dat), metric and drift tensors
   quasilinear/        — quasilinear transport: linear harvest, saturation rules, calibration
   sharding.py         — device mesh, sharded precompute / init, shard_map helpers for the kernels
@@ -232,7 +232,7 @@ SIGTERM stops a run after the running block and its snapshot, with exit code 75;
 `run --linear-check 36` (off by default) compares linear growth rates at the run's ns with a
 finer reference before the run (docs/CLI.md, "Linear growth check").
 `gyaradax datagen` (docs/CLI.md, "Data generation") runs a list of configs over an ssh GPU
-mesh or Slurm, with run directories, trajectory names and resumes handled per campaign directory.
+mesh, with run directories, trajectory names and resumes handled per campaign directory.
 
 ## Building the CUDA backend
 
