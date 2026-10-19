@@ -191,12 +191,12 @@ def _compute_geometry_impl(
         ss, ks, vs = _build_parallel_shift_maps(ixp, ixm, iyz_bc, ns, max_shift=4)
     else:
         # prebuilt topology (jit/AD-safe path; see build_topology)
-        _check_topology_flip(topology, q, shat, eps, signB, signJ)
-        ml_kxky = topology["mode_label"]
-        ixp, ixm = topology["ixplus"], topology["ixminus"]
-        ixz, iyz = topology["ixzero"], topology["iyzero"]
-        pos = topology["pos_par_grid_class"]
-        ss, ks, vs = topology["s_shift"], topology["kx_shift"], topology["valid_shift"]
+        topo = _oriented_topology(topology, q, shat, eps, signB, signJ)
+        ml_kxky = topo["mode_label"]
+        ixp, ixm = topo["ixplus"], topo["ixminus"]
+        ixz, iyz = topo["ixzero"], topo["iyzero"]
+        pos = topo["pos_par_grid_class"]
+        ss, ks, vs = topo["s_shift"], topo["kx_shift"], topo["valid_shift"]
 
     return assemble_geometry_dict(
         spec=spec,
@@ -226,25 +226,39 @@ register_circular_geometry_models(_compute_geometry_impl)
 register_miller_geometry_model(_compute_geometry_impl)
 
 
-def _check_topology_flip(topology, q, shat, eps, signB, signJ):
-    """Raise when a prebuilt topology runs the field line the wrong way for concrete (q, shat, eps)."""
+_FLIP_KEYS = ("ixplus", "ixminus", "pos_par_grid_class", "s_shift", "kx_shift", "valid_shift")
+
+
+def _oriented_topology(topology, q, shat, eps, signB, signJ):
+    """The prebuilt topology for the field-line direction of (q, shat, eps), traced or not."""
     try:
         flip = connection_flip(q, shat, eps, signB, signJ)
-    except (TypeError, jax.errors.ConcretizationTypeError):
-        return
-    if bool(topology.get("flip", False)) != flip:
-        raise ValueError(
-            "prebuilt topology has flip=%s but signB*signJ*q*shat/eps gives flip=%s; "
-            "build it with build_topology(..., flip=connection_flip(q, shat, eps, signB))"
-            % (topology.get("flip", False), flip)
-        )
+    except (TypeError, jax.errors.ConcretizationTypeError, jax.errors.TracerBoolConversionError):
+        flip = None
+    if topology.get("flip") is not None:
+        if flip is not None and bool(topology["flip"]) != flip:
+            raise ValueError(
+                "prebuilt topology has flip=%s but signB*signJ*q*shat/eps gives flip=%s; "
+                "build it with build_topology(..., flip=None) or flip=connection_flip(...)"
+                % (topology["flip"], flip)
+            )
+        return topology
+    if flip is not None:
+        return {**topology, **topology["flipped"]} if flip else topology
+    # traced (q, shat, eps): pick the orientation per call
+    flip_t = signB * signJ * jnp.sign(q * shat * eps) < 0
+    return {
+        **topology,
+        **{k: jnp.where(flip_t, topology["flipped"][k], topology[k]) for k in _FLIP_KEYS},
+    }
 
 
-def build_topology(nkx, nky, ikxspace, ns, max_shift=4, nperiod=1, flip=False):
+def build_topology(nkx, nky, ikxspace, ns, max_shift=4, nperiod=1, flip=None):
     """Build the discrete-topology pytree for a (nkx, nky, ikxspace, ns) grid.
 
     Topology depends only on grid shape, nperiod and the direction of the field
-    line in kx (``flip``, see ``connection_flip``: the sign of signB signJ q shat),
+    line in kx (``flip``, see ``connection_flip``: the sign of signB signJ q shat;
+    ``None`` keeps both orientations and picks one from (q, shat, eps) at use, also when traced),
     not on the values of (q, shat, eps, miller): the twist-shift stride is an
     integer number of kx cells by construction, since the radial grid spacing is
     defined as the one-turn shift divided by ikxspace. The centered kx grid puts
@@ -261,26 +275,35 @@ def build_topology(nkx, nky, ikxspace, ns, max_shift=4, nperiod=1, flip=False):
     nkx_actual = kxrh_surrogate.shape[0]
 
     ml = _build_mode_label(nkx_actual, nky, ikxspace, nperiod)
-    ml_kxky, ixp, ixm, ixz, iyz, iyz_bc = _build_mode_connectivity(
-        ml, kxrh_surrogate, krho_surrogate, flip=flip
-    )
-    pos = _build_pos_par_grid_classes(ixp, ixm, ns)
-    ss, ks, vs = _build_parallel_shift_maps(ixp, ixm, iyz_bc, ns, max_shift=max_shift)
 
-    return {
-        "mode_label": _i32(ml_kxky),
-        "ixplus": _i32(ixp),
-        "ixminus": _i32(ixm),
-        "ixzero": _i32(ixz),
-        "iyzero": _i32(iyz),
-        "iyzero_bc": int(iyz_bc),
-        "pos_par_grid_class": jnp.array(pos, dtype=jnp.int8),
-        "s_shift": _i32(ss),
-        "kx_shift": _i32(ks),
-        "valid_shift": jnp.array(vs, dtype=jnp.bool_),
-        "nkx_actual": int(nkx_actual),
-        "flip": bool(flip),
-    }
+    def oriented(f):
+        ml_kxky, ixp, ixm, ixz, iyz, iyz_bc = _build_mode_connectivity(
+            ml, kxrh_surrogate, krho_surrogate, flip=f
+        )
+        pos = _build_pos_par_grid_classes(ixp, ixm, ns)
+        ss, ks, vs = _build_parallel_shift_maps(ixp, ixm, iyz_bc, ns, max_shift=max_shift)
+        return {
+            "mode_label": _i32(ml_kxky),
+            "ixplus": _i32(ixp),
+            "ixminus": _i32(ixm),
+            "ixzero": _i32(ixz),
+            "iyzero": _i32(iyz),
+            "iyzero_bc": int(iyz_bc),
+            "pos_par_grid_class": jnp.array(pos, dtype=jnp.int8),
+            "s_shift": _i32(ss),
+            "kx_shift": _i32(ks),
+            "valid_shift": jnp.array(vs, dtype=jnp.bool_),
+            "nkx_actual": int(nkx_actual),
+            "flip": bool(f),
+        }
+
+    if flip is not None:
+        return oriented(flip)
+    topology = oriented(False)
+    flipped = oriented(True)
+    topology["flip"] = None
+    topology["flipped"] = {k: flipped[k] for k in _FLIP_KEYS}
+    return topology
 
 
 def compute_continuous_geometry(
