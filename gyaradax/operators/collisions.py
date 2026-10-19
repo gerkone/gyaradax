@@ -310,6 +310,13 @@ def _build_stencil(
     c_pm = -sum_F - sum_G
     c_mm = sum_F + sum_H
 
+    # mu = 0: the ghost below mirrors onto the first point (vgridboundary, velocitygrid.f90:798)
+    mu0 = jnp.arange(nmu).reshape(1, nmu, 1) == 0
+    c_self = c_self + jnp.where(mu0, c_mu_m, 0.0)
+    c_vpar_p = c_vpar_p + jnp.where(mu0, c_pm, 0.0)
+    c_vpar_m = c_vpar_m + jnp.where(mu0, c_mm, 0.0)
+    c_mu_m, c_pm, c_mm = (jnp.where(mu0, 0.0, c) for c in (c_mu_m, c_pm, c_mm))
+
     stencil = vthrat_target * jnp.stack(
         [c_self, c_vpar_p, c_vpar_m, c_mu_p, c_mu_m, c_pp, c_mp, c_pm, c_mm],
         axis=0,
@@ -369,6 +376,74 @@ def _collect_species_arrays(params):
     )
 
 
+def _reference_log(params, bg_mas, bg_signz, bg_tmp, bg_de, ne19):
+    """Coulomb log of the first ion-ion pair, the freq_override reference (GKW iigamma).
+
+    Falls back to the first species when all species are electrons.
+    """
+    idx = jnp.argmax(bg_signz > 0)
+    iref = jnp.where(jnp.any(bg_signz > 0), idx, 0)
+    L_ref = _coulomb_log_pair(
+        bg_signz[iref],
+        bg_signz[iref],
+        bg_tmp[iref],
+        bg_tmp[iref],
+        bg_mas[iref],
+        bg_mas[iref],
+        bg_de[iref],
+        bg_de[iref],
+        ne19,
+        params.coll_nref,
+        params.coll_tref,
+    )
+    return jnp.maximum(L_ref, EPS)
+
+
+def collision_frequencies(params: GKParams):
+    """Coulomb logarithms and prefactors Gamma^(a/b), each (n_target, n_background).
+
+    The same numbers as GKW's CoulombLog and CollFreqs outputs (collision_init),
+    first index the scattered species, second the scattering one.
+    """
+    (
+        tgt_mas,
+        tgt_signz,
+        tgt_tmp,
+        tgt_de,
+        _,
+        bg_mas,
+        bg_signz,
+        bg_tmp,
+        bg_de,
+        _,
+        ne19,
+    ) = _collect_species_arrays(params)
+    L_ref = _reference_log(params, bg_mas, bg_signz, bg_tmp, bg_de, ne19)
+
+    def pair(mas_a, signz_a, tmp_a, de_a, mas_b, signz_b, tmp_b, de_b):
+        L = _coulomb_log_pair(
+            signz_a,
+            signz_b,
+            tmp_a,
+            tmp_b,
+            mas_a,
+            mas_b,
+            de_a,
+            de_b,
+            ne19,
+            params.coll_nref,
+            params.coll_tref,
+        )
+        g = _gamma_pair(
+            params, signz_a, mas_a, tmp_a, de_a, signz_b, mas_b, tmp_b, de_b, ne19, L_ref
+        )
+        return L, g
+
+    over_bg = jax.vmap(pair, in_axes=(None,) * 4 + (0,) * 4)
+    over_tgt = jax.vmap(over_bg, in_axes=(0,) * 4 + (None,) * 4)
+    return over_tgt(tgt_mas, tgt_signz, tgt_tmp, tgt_de, bg_mas, bg_signz, bg_tmp, bg_de)
+
+
 def precompute_collisions(geometry: Dict, params: GKParams) -> Dict[str, jnp.ndarray]:
     """Build the 9-point collision stencil.
 
@@ -384,7 +459,7 @@ def precompute_collisions(geometry: Dict, params: GKParams) -> Dict[str, jnp.nda
     vpgr = jnp.asarray(geometry["vpgr"], dtype=jnp.float64)
     mugr = jnp.asarray(geometry["mugr"], dtype=jnp.float64)
     bn = jnp.asarray(geometry["bn"], dtype=jnp.float64)
-    dvp = float(geometry.get("dvp", params.dvp))
+    dvp = float(geometry["dvp"])
     vperp_grid = jnp.sqrt(jnp.maximum(2.0 * mugr, 0.0))
     dvperp = vperp_grid[0] * 2.0
 
@@ -409,50 +484,35 @@ def precompute_collisions(geometry: Dict, params: GKParams) -> Dict[str, jnp.nda
         ne19,
     ) = _collect_species_arrays(params)
 
-    # reference Coulomb log for freq_override normalization: first ion-ion pair
-    # in the species list, falling back to (0,0) when all species are electrons.
-    def _first_ion(signz_arr):
-        idx = jnp.argmax(signz_arr > 0)
-        return jnp.where(jnp.any(signz_arr > 0), idx, 0)
+    L_ref = _reference_log(params, bg_mas, bg_signz, bg_tmp, bg_de, ne19)
 
-    iref = _first_ion(bg_signz)
-    L_ref = _coulomb_log_pair(
-        bg_signz[iref],
-        bg_signz[iref],
-        bg_tmp[iref],
-        bg_tmp[iref],
-        bg_mas[iref],
-        bg_mas[iref],
-        bg_de[iref],
-        bg_de[iref],
-        ne19,
-        params.coll_nref,
-        params.coll_tref,
-    )
-    L_ref = jnp.maximum(L_ref, EPS)
+    def pair_stencil(mas_a, signz_a, tmp_a, de_a, vthrat_a, mas_b, signz_b, tmp_b, de_b, vthrat_b):
+        gp = _gamma_pair(
+            params, signz_a, mas_a, tmp_a, de_a, signz_b, mas_b, tmp_b, de_b, ne19, L_ref
+        )
+        vtb_scale = vthrat_a / jnp.maximum(vthrat_b, EPS)
+        mrat = mas_a / jnp.maximum(mas_b, EPS)
+        return _build_stencil(vpgr, mugr, bn, dvp, dvperp, gp, vthrat_a, vtb_scale, mrat, *flags)
 
-    def stencil_for_target(mas_a, signz_a, tmp_a, de_a, vthrat_a):
-        def per_bg(mas_b, signz_b, tmp_b, de_b, vthrat_b):
-            gp = _gamma_pair(
-                params, signz_a, mas_a, tmp_a, de_a, signz_b, mas_b, tmp_b, de_b, ne19, L_ref
-            )
-            vtb_scale = vthrat_a / jnp.maximum(vthrat_b, EPS)
-            mrat = mas_a / jnp.maximum(mas_b, EPS)
-            return _build_stencil(
-                vpgr, mugr, bn, dvp, dvperp, gp, vthrat_a, vtb_scale, mrat, *flags
-            )
+    def stencil_for_target(*a):
+        per_bg = jax.vmap(lambda *b: pair_stencil(*a, *b))
+        return jnp.sum(per_bg(bg_mas, bg_signz, bg_tmp, bg_de, bg_vthrat), axis=0)
 
-        bg_stencils = jax.vmap(per_bg)(bg_mas, bg_signz, bg_tmp, bg_de, bg_vthrat)
-        return jnp.sum(bg_stencils, axis=0)
+    def self_stencil(*a):
+        return pair_stencil(*a, *a)
 
-    if params.adiabatic_electrons and tgt_signz.shape[0] == 1:
-        stencil = stencil_for_target(tgt_mas[0], tgt_signz[0], tgt_tmp[0], tgt_de[0], tgt_vthrat[0])
-    else:
-        stencil = jax.vmap(stencil_for_target)(tgt_mas, tgt_signz, tgt_tmp, tgt_de, tgt_vthrat)
+    tgt = (tgt_mas, tgt_signz, tgt_tmp, tgt_de, tgt_vthrat)
+    single = params.adiabatic_electrons and tgt_signz.shape[0] == 1
 
-    out = {"coll_stencil": stencil}
+    def per_target(fn):
+        return fn(*(x[0] for x in tgt)) if single else jax.vmap(fn)(*tgt)
+
+    out = {"coll_stencil": per_target(stencil_for_target)}
     if params.coll_mom_conservation or params.coll_ene_conservation:
         out.update(_precompute_conservation(geometry, params, vpgr, mugr, bn))
+        # moments of the self-collision part only (GKW selfcollcon, collisionop.f90:2931)
+        if bg_signz.shape[0] > 1:
+            out["coll_self_stencil"] = per_target(self_stencil)
     return out
 
 
@@ -482,9 +542,8 @@ def _precompute_conservation(geometry, params, vpgr, mugr, bn):
     d3v = intvp_b * intmu_b * bn_b
 
     def _for_species(tmp_val, de_val):
-        t_rat = tmp_val
-        fm_env = jnp.exp(-vsq / t_rat) / (jnp.sqrt(t_rat * jnp.pi) ** 3)
-        fmax = de_val * fm_env
+        # velocities are in units of the species' own thermal speed
+        fmax = de_val * jnp.exp(-vsq) / jnp.sqrt(jnp.pi) ** 3
         part = jnp.sum(fmax * d3v, axis=(0, 1))
         ene = jnp.sum(vsq * fmax * d3v, axis=(0, 1))
         A = ene / jnp.maximum(part, EPS)
@@ -539,6 +598,7 @@ def conservation_correction(coll_rhs, mom_factor, ene_factor, vpar_w, vsq_w, red
 
 _SHIFTS = ((0, 0), (1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (-1, 1), (1, -1), (-1, -1))
 CONSERVATION_KEYS = ("coll_mom_factor", "coll_ene_factor", "coll_vpar_weight", "coll_vsq_weight")
+STENCIL_KEYS = ("coll_stencil", "coll_self_stencil")
 
 
 def collisions_on(params, pre) -> bool:
@@ -556,12 +616,16 @@ def collision_term(df: jnp.ndarray, params, pre, mesh=None) -> jnp.ndarray:
         params.coll_mom_conservation or params.coll_ene_conservation
     ) and "coll_mom_factor" in pre
     weights = tuple(pre[k] for k in CONSERVATION_KEYS) if conserve else ()
-    args = (df, pre["coll_stencil"]) + weights
+    self_part = conserve and "coll_self_stencil" in pre
+    stencils = (pre["coll_stencil"],) + ((pre["coll_self_stencil"],) if self_part else ())
+    args = (df,) + stencils + weights
 
-    def one(f, stencil, *w, halo=None, reduce=None):
+    def one(f, stencil, *rest, halo=None, reduce=None):
         term = collision_rhs(f, stencil, halo)
         if conserve:
-            term = term + conservation_correction(term, *w, reduce=reduce)
+            base = collision_rhs(f, rest[0], halo) if self_part else term
+            w = rest[1:] if self_part else rest
+            term = term + conservation_correction(base, *w, reduce=reduce)
         return term
 
     if not sharding.splits_velocity(mesh):
@@ -571,7 +635,7 @@ def collision_term(df: jnp.ndarray, params, pre, mesh=None) -> jnp.ndarray:
 
     lead = ("sp",) if df.ndim == 6 else ()
     vel = lead + ("vp", "mu")
-    axes = (vel, lead + (None, "vp", "mu")) + (vel,) * len(weights)
+    axes = (vel,) + (lead + (None, "vp", "mu"),) * len(stencils) + (vel,) * len(weights)
 
     def halo(f):
         # one plane per side in vpar then mu; the second exchange carries the corners
@@ -583,8 +647,8 @@ def collision_term(df: jnp.ndarray, params, pre, mesh=None) -> jnp.ndarray:
         return f
 
     def local(*xs):
-        def block(f, stencil, *w):
-            return one(f, stencil, *w, halo=halo, reduce=lambda x: jax.lax.psum(x, ("vp", "mu")))
+        def block(f, stencil, *rest):
+            return one(f, stencil, *rest, halo=halo, reduce=lambda x: jax.lax.psum(x, ("vp", "mu")))
 
         return jax.vmap(block)(*xs) if df.ndim == 6 else block(*xs)
 
@@ -599,6 +663,9 @@ def collision_rhs(df: jnp.ndarray, stencil: jnp.ndarray, halo=None) -> jnp.ndarr
     ``halo`` (inside ``shard_map``) extends a local block by one neighbour plane per side
     in vpar and mu, taking the place of the zero padding at the block edges.
     """
+    if halo is None and jnp.iscomplexobj(df):
+        # real and imaginary parts apart run faster than one complex pass (same values)
+        return jax.lax.complex(collision_rhs(df.real, stencil), collision_rhs(df.imag, stencil))
     nv, nmu = df.shape[0], df.shape[1]
     out = jnp.zeros_like(df)
     if halo is not None:

@@ -494,7 +494,6 @@ def gkstep_single(
     return next_df, (phi, (z, z, substage_dt_est)), next_state
 
 
-@functools.partial(jax.jit, static_argnames=("n_steps", "return_dt_info"))
 def gksolve(
     df: jnp.ndarray,
     geometry: Dict[str, jnp.ndarray],
@@ -521,6 +520,24 @@ def gksolve(
     """
     if pre is None:
         pre = linear_precompute(geometry, params)
+    return _gksolve(
+        df, geometry, params, state, n_steps=n_steps, pre=pre, return_dt_info=return_dt_info
+    )
+
+
+@functools.partial(jax.jit, static_argnames=("n_steps", "return_dt_info"))
+def _gksolve(
+    df: jnp.ndarray,
+    geometry: Dict[str, jnp.ndarray],
+    params: GKParams,
+    state: GKState,
+    n_steps: int,
+    pre: GKPre,
+    return_dt_info: bool,
+) -> (
+    Tuple[jnp.ndarray, Tuple[jnp.ndarray, Any], GKState]
+    | Tuple[jnp.ndarray, Tuple[jnp.ndarray, Any], GKState, Dict[str, Any]]
+):
     geometry = _species_geometry(geometry, params)
     ops = _solver_ops(pre, params)
 
@@ -593,7 +610,6 @@ def gksolve(
 DT_MIN = 2.0e-5
 
 
-@functools.partial(jax.jit, static_argnames=("max_steps",))
 def gksolve_until(
     df: jnp.ndarray,
     geometry: Dict[str, jnp.ndarray],
@@ -611,6 +627,19 @@ def gksolve_until(
     """
     if pre is None:
         pre = linear_precompute(geometry, params)
+    return _gksolve_until(df, geometry, params, state, t_end, max_steps=max_steps, pre=pre)
+
+
+@functools.partial(jax.jit, static_argnames=("max_steps",))
+def _gksolve_until(
+    df: jnp.ndarray,
+    geometry: Dict[str, jnp.ndarray],
+    params: GKParams,
+    state: GKState,
+    t_end: Any,
+    max_steps: int,
+    pre: GKPre,
+) -> Tuple[jnp.ndarray, Tuple[jnp.ndarray, Any], GKState, Dict[str, Any]]:
     geometry = _species_geometry(geometry, params)
     ops = _solver_ops(pre, params)
     t_end = jnp.asarray(t_end, dtype=jnp.float64)

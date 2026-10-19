@@ -6,6 +6,7 @@ from typing import cast
 from conftest import ALL_BACKENDS  # type: ignore[import-not-found]
 
 from gyaradax.solver.rk4 import gksolve, init_f, default_state
+from gyaradax.operators.precompute import linear_precompute
 from gyaradax.core.params import GKParams
 from gyaradax.diagnostics.diag import project_all_modes_to_kx0
 from gyaradax.io.gkw import parse_input_dat
@@ -19,8 +20,8 @@ from gyaradax.operators.poisson import (
 
 
 @jax.jit
-def _step_jitted(prev_df, geom, params, state):
-    return gksolve(prev_df, geom, params, state, n_steps=1)
+def _step_jitted(prev_df, geom, params, state, pre):
+    return gksolve(prev_df, geom, params, state, n_steps=1, pre=pre)
 
 
 def test_phi_adiabatic_no_zonal_bug():
@@ -158,7 +159,8 @@ def test_gksolve_zero_input_invariance(lin_geom, lin_shape, backend, use_z2z, mi
     )
     state = default_state(nky=len(lin_geom["krho"]))
 
-    next_df, (phi, fluxes), next_state = _step_jitted(prev_df, lin_geom, params, state)
+    pre = linear_precompute(lin_geom, params)
+    next_df, (phi, fluxes), next_state = _step_jitted(prev_df, lin_geom, params, state, pre)
 
     assert jnp.allclose(next_df, 0.0)
     assert jnp.allclose(phi, 0.0)

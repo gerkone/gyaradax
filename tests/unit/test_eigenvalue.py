@@ -311,7 +311,9 @@ class TestEMAparBpar:
 
 class TestCollisions:
     def test_dominant_matches_ivp(self):
-        geom, params, nsp = _es_adiabatic_case(collisions=True, coll_freq=0.1)
+        geom, params, nsp = _es_adiabatic_case(
+            collisions=True, coll_freq=0.1, coll_freq_override=True, coll_mass_conserve=True
+        )
         assert params.collisions and params.coll_freq > 0
         pre, gamma, lam, eigvals, _ = _run_case(geom, params, nsp, iky=1)
         _assert_eig_matches_ivp(eigvals[0], gamma[1], lam[1])
@@ -330,7 +332,9 @@ class TestCollisions:
             n_steps_per_matvec=25,
             ky_select=1,
         )
-        geom_c, params_c, _ = _es_adiabatic_case(collisions=True, coll_freq=0.5)
+        geom_c, params_c, _ = _es_adiabatic_case(
+            collisions=True, coll_freq=0.5, coll_freq_override=True, coll_mass_conserve=True
+        )
         pre_c = linear_precompute(geom_c, params_c)
         ev1, _ = eigensolve_linear(
             geom_c,

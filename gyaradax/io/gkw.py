@@ -380,6 +380,18 @@ def load_runtime_params(input_dat_path: str) -> Dict[str, Any]:
         return as_bool(coll.get(name, default), default)
 
     collisions_on = _bool("collisions", False)
+    if collisions_on:
+        unsupported = {
+            "lorentz": _coll_bool("lorentz", False),
+            "freq_input": _coll_bool("freq_input", False),
+            "selfcollcon = .false.": not _coll_bool("selfcollcon", True),
+            "cons_type other than 'Xu'": str(coll.get("cons_type", "Xu")).strip("'\" ").lower()
+            != "xu",
+            "zeff > 1": float(coll.get("zeff", 1.0)) > 1.0,
+        }
+        bad = [k for k, v in unsupported.items() if v]
+        if bad:
+            raise NotImplementedError(f"collisions: {', '.join(bad)} not implemented in gyaradax")
 
     return {
         "dtim": _flt("dtim", 0.01),
@@ -621,6 +633,15 @@ def gkw_to_yaml(gkw_dir, output_yaml):
     config["grid"].update(
         {"krhomax": spec.krhomax, "ikxspace": spec.ikxspace, "nperiod": spec.nperiod, "vpar_max": spec.vpar_max}
     )
+
+    if scalars.get("collisions"):
+        keys = ("pitch_angle", "en_scatter", "friction", "freq_override", "mass_conserve")
+        keys += ("mom_conservation", "ene_conservation", "rref", "nref", "tref")
+        coll = {"enabled": True}
+        coll.update({k: scalars[f"coll_{k}"] for k in keys if f"coll_{k}" in scalars})
+        if coll.get("freq_override"):
+            coll["freq"] = scalars.get("coll_freq", 0.0)
+        config["collisions"] = coll
 
     conf = OmegaConf.create(config)
     OmegaConf.save(conf, output_yaml)

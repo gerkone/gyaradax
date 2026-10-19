@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 from typing import Dict, Tuple, cast
 
+import jax
 import jax.numpy as jnp
 
 import gyaradax.operators.stencils as stencils
@@ -72,30 +73,13 @@ def extended_seconddim_fft_size(nx: int) -> int:
     return dum
 
 
-def _static_float(v):
-    """Coerce a static scalar to a python float when concrete.
-
-    Python scalars pass through untouched (wrapping them in jnp.asarray under
-    an active jit trace would turn them into tracers); concrete numpy/jax
-    arrays are converted. Traced values (e.g. geometry arguments inside the
-    vmapped gk_run_batched path) cannot be made static -- they fall through
-    unchanged, reproducing the pre-static behavior on those paths."""
-    if isinstance(v, (int, float)):
-        return float(v)
+def _static(convert, v, name):
     try:
-        return float(jnp.asarray(v))
-    except Exception:  # ConcretizationTypeError under trace
-        return v
-
-
-def _static_int(v):
-    """Int analogue of _static_float (GKPre aux wants python ints when possible)."""
-    if isinstance(v, int):
-        return v
-    try:
-        return int(v)
-    except Exception:  # ConcretizationTypeError under trace
-        return jnp.asarray(v, dtype=jnp.int32)
+        return convert(v)
+    except (jax.errors.ConcretizationTypeError, jax.errors.TracerIntegerConversionError) as exc:
+        raise ValueError(
+            f"linear_precompute needs a concrete {name}; build pre outside jit"
+        ) from exc
 
 
 def build_jind(nkx: int, mrad: int, ixzero: int) -> jnp.ndarray:
@@ -111,8 +95,12 @@ def _precompute_shared(
     # concrete python ints: these land in GKPre's aux (jit-static metadata), so
     # they must be hashable. Topology entries are always concrete, even when
     # (q, shat, eps) are traced in the torax-plugin path.
-    ixzero = _static_int(geometry["ixzero"] if "ixzero" in geometry else jnp.argmin(jnp.abs(kx)))
-    iyzero = _static_int(geometry["iyzero"] if "iyzero" in geometry else jnp.argmin(jnp.abs(ky)))
+    ixzero = _static(
+        int, geometry["ixzero"] if "ixzero" in geometry else jnp.argmin(jnp.abs(kx)), "ixzero"
+    )
+    iyzero = _static(
+        int, geometry["iyzero"] if "iyzero" in geometry else jnp.argmin(jnp.abs(ky)), "iyzero"
+    )
     mphi, mphiw3 = extended_firstdim_fft_size(nky)
     mrad = extended_seconddim_fft_size(nkx)
 
@@ -165,15 +153,11 @@ def _precompute_shared(
         "s_d4_ineg": _parallel_coefficients(pos_par, stencils.D4_IPW_NEG),
         # stencil-table row of each point, the idx used by _parallel_coefficients
         "par_stencil_class": jnp.clip(pos_par + 2, 0, 4).astype(jnp.int32),
-        # grid spacings: geometry is the source of truth (always matches the
-        # actual grids, incl. direct-GKParams users like the torax plugin);
-        # params carries the config-derived value as fallback. Keep python
-        # floats untouched (jnp.asarray would stage them into tracers under
-        # jit); coerce only concrete arrays so GKPre's aux stays hashable.
-        "dvp": _static_float(geometry.get("dvp", params.dvp)),
+        # grid spacings: static python floats, set by the geometry builders
+        "dvp": _static(float, geometry["dvp"], "geometry['dvp']"),
         "vpmax": jnp.max(jnp.abs(vpgr)),
         "vthrat_max": jnp.max(jnp.abs(jnp.asarray(params.vthrat, dtype=jnp.float64))),
-        "sgr_dist": _static_float(geometry.get("sgr_dist", params.sgr_dist)),
+        "sgr_dist": _static(float, geometry["sgr_dist"], "geometry['sgr_dist']"),
         "ixzero": ixzero,
         "iyzero": iyzero,
         "nl_mphi": mphi,
