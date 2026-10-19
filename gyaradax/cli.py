@@ -1936,7 +1936,7 @@ def build_parser() -> argparse.ArgumentParser:
     build_p.set_defaults(func=_cmd_build_cuda)
 
     datagen_p = sub.add_parser(
-        "datagen", add_help=False, help="generate a dataset: run configs over an ssh GPU mesh or Slurm"
+        "datagen", add_help=False, help="generate a dataset: run configs over an ssh GPU mesh"
     )
     datagen_p.add_argument("rest", nargs=argparse.REMAINDER)
     datagen_p.set_defaults(func=_cmd_datagen)

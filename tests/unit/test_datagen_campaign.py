@@ -1,9 +1,7 @@
-"""gyaradax datagen: campaign directories, job names, overrides, collisions, and a full run."""
+"""gyaradax datagen: campaign directories, job names, collisions, and a full run."""
 
-import argparse
 import os
 import sys
-import time
 from pathlib import Path
 
 import pytest
@@ -30,12 +28,12 @@ def _jobs(camp_dir):
         return {j["name"]: j for j in yaml.safe_load(fh)["jobs"]}
 
 
-def test_configs_become_named_jobs_with_overrides(tmp_path):
+def test_configs_become_named_jobs(tmp_path):
     a = _config(tmp_path / "kinetic_534.yaml", "kinetic_534", n_steps=200)
     b = _config(tmp_path / "kinetic_614.yaml", "kinetic_614", n_steps=100, ns=16)
     camp, data = tmp_path / "camp", tmp_path / "data"
     argv = ["add", a, b, "--campaign", str(camp), "--dataset", str(data), "--name", "iteration_{id}_dp4"]
-    assert cg.main([*argv, "--set", "solver.disp_par=4.0", "--args", "--backend cuda"]) == 0
+    assert cg.main([*argv, "--args", "--backend cuda"]) == 0
 
     jobs = _jobs(camp)
     assert set(jobs) == {"iteration_534_dp4", "iteration_614_dp4"}
@@ -46,10 +44,10 @@ def test_configs_become_named_jobs_with_overrides(tmp_path):
     assert job["cost"] == pytest.approx(jobs["iteration_614_dp4"]["cost"]) and job["cost"] > 0
     with open(job["config"]) as fh:
         cfg = yaml.safe_load(fh)
-    assert cfg["solver"]["disp_par"] == 4.0 and cfg["run"]["name"] == "iteration_534_dp4"
+    assert cfg["solver"]["disp_par"] == 1.0 and cfg["run"]["name"] == "iteration_534_dp4"
     with open(camp / "campaign.yaml") as fh:
         settings = yaml.safe_load(fh)
-    assert settings["workdir"] == str(cg.REPO_ROOT) and settings["set"] == {"solver.disp_par": 4.0}
+    assert settings["workdir"] == str(cg.REPO_ROOT) and not set(cg.REMOVED) & set(settings)
     # the job file is the scheduler's, launched from the campaign's code
     specs, problems = gs.load_jobs(str(camp / "jobs.yaml"))
     assert not problems and {s.name for s in specs} == set(jobs)
@@ -75,8 +73,8 @@ def test_collisions_changed_configs_and_settings_are_refused(tmp_path):
     _config(tmp_path / "kinetic_1.yaml", "kinetic_1", n_steps=999)
     with pytest.raises(SystemExit, match="different config"):
         cg.main(["add", a, "--campaign", camp])
-    with pytest.raises(SystemExit, match="fixes set"):
-        cg.main(["add", a, "--campaign", camp, "--set", "solver.disp_par=2"])
+    with pytest.raises(SystemExit, match="fixes args"):
+        cg.main(["add", a, "--campaign", camp, "--args", "--backend cuda"])
     with pytest.raises(SystemExit, match="may not contain"):
         cg.main(["add", a, "--campaign", str(tmp_path / "c2"), "--args", "--dataset x"])
     plain = _config(tmp_path / "plain.yaml", "plain")
@@ -114,14 +112,7 @@ def test_campaign_jobs_run_to_completion(tmp_path):
     assert len(sched.probes) == 1
 
 
-def test_time_limit_becomes_a_deadline_the_detached_scheduler_keeps(tmp_path, monkeypatch):
-    assert [gs.parse_duration(t) for t in ("10h", "90m", "1h30m", "2d", "3600", "45s", "1.5h")] == [
-        36000, 5400, 5400, 172800, 3600, 45, 5400
-    ]
-    for bad in ("", "10x", "h", "0", "-5m"):
-        with pytest.raises(argparse.ArgumentTypeError):
-            gs.parse_duration(bad)
-
+def test_detach_starts_the_scheduler_in_the_background(tmp_path, monkeypatch):
     launched = []
 
     class Proc:
@@ -137,13 +128,39 @@ def test_time_limit_becomes_a_deadline_the_detached_scheduler_keeps(tmp_path, mo
     monkeypatch.setattr(cg.subprocess, "Popen", popen)
     targets = _targets(tmp_path / "targets.yaml")
     cfg = _config(tmp_path / "k_1.yaml", "k_1")
-    t0 = time.time()
-    argv = ["run", cfg, "--campaign", str(tmp_path / "camp"), "--targets", targets]
-    assert cg.main([*argv, "--time-limit", "10h", "--detach"]) == 0
+    camp = str(tmp_path / "camp")
+    assert cg.main(["run", cfg, "--campaign", camp, "--targets", targets, "--detach"]) == 0
     (child,) = launched
-    deadline = float(child[child.index("--deadline") + 1])
-    assert t0 + 36000 <= deadline <= time.time() + 36000
-    assert "--time-limit" not in child
+    assert child[child.index("run") + 1 : child.index("run") + 3] == ["--campaign", camp]
+    assert child[child.index("--max-retries") + 1] == "3" and "--detach" not in child
+
+
+def test_old_campaign_settings_load_and_removed_features_are_refused(tmp_path):
+    a = _config(tmp_path / "kinetic_1.yaml", "kinetic_1")
+    camp = tmp_path / "camp"
+    (camp / "configs").mkdir(parents=True)
+    old = {
+        "dataset": None, "name": "{run}", "set": {}, "args": [], "gpus": "all",
+        "linear_check": None, "linear_check_tol": None, "linear_gate": False,
+        "workdir": str(cg.REPO_ROOT), "code": {}, "created": "2026-10-13 21:52:08",
+    }  # fmt: skip
+    (camp / "campaign.yaml").write_text(yaml.safe_dump(old))
+    assert cg.main(["add", a, "--campaign", str(camp)]) == 0
+    assert _jobs(camp)["kinetic_1"]["gpus"] == "all"
+    for key, value in (("set", {"solver.disp_par": 4.0}), ("linear_check", "36"), ("gpus", 2)):
+        (camp / "campaign.yaml").write_text(yaml.safe_dump({**old, key: value}))
+        with pytest.raises(SystemExit, match="no longer supported"):
+            cg.main(["add", a, "--campaign", str(camp)])
+    for flag in (["--set", "solver.disp_par=4"], ["--linear-check", "36"], ["--gpus", "2"]):
+        with pytest.raises(SystemExit):
+            cg.main(["add", a, "--campaign", str(tmp_path / "new"), *flag])
+    sharded = _config(tmp_path / "kinetic_2.yaml", "kinetic_2", sharding={"n_gpus_sp": 2})
+    with pytest.raises(SystemExit, match="pass --gpus all"):
+        cg.main(["add", sharded, "--campaign", str(tmp_path / "c2")])
+    for gpus in ("all", "1"):
+        camp = tmp_path / f"c_{gpus}"
+        assert cg.main(["add", sharded, "--campaign", str(camp), "--gpus", gpus]) == 0
+        assert _jobs(camp)["kinetic_2"]["gpus"] == (gpus if gpus == "all" else 1)
 
 
 def test_time_mode_cost_follows_the_end_time(tmp_path):

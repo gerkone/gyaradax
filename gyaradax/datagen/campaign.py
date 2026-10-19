@@ -1,11 +1,11 @@
-"""``gyaradax datagen``: run a list of configs over an ssh GPU mesh or Slurm and collect a dataset.
+"""``gyaradax datagen``: run a list of configs over an ssh GPU mesh and collect a dataset.
 
 A campaign directory holds everything a campaign uses and produces::
 
-    campaign.yaml   settings fixed at creation: dataset, name template, overrides, run arguments, code
-    targets.yaml    where runs go: ssh slots or a ``slurm`` section, re-read while the campaign runs
+    campaign.yaml   settings fixed at creation: dataset, name template, run arguments, code
+    targets.yaml    where runs go: ssh slots, re-read while the campaign runs
     jobs.yaml       one job per config (generated)
-    configs/        the configs as run, overrides applied
+    configs/        the configs as run
     runs/<name>/    run directories
     state.json      scheduler state; datagen.log is the scheduler log of a detached campaign
 
@@ -42,20 +42,13 @@ NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
 OWN_FLAGS = (*sched.REFUSED_FLAGS, "--dataset", "--dataset-name")
 # campaign switches passed to every job as `gyaradax run --<key with dashes>`
 OUTCOME_SETTINGS = ("linear_gate", "stop_on_decay", "stop_on_banding", "track_outcome")
-FIXED = (
-    "dataset",
-    "name",
-    "set",
-    "args",
-    "gpus",
-    "linear_check",
-    "linear_check_tol",
-    *OUTCOME_SETTINGS,
-)
+FIXED = ("dataset", "name", "args", "gpus", *OUTCOME_SETTINGS)
+# removed settings, accepted while unset
+REMOVED = ("set", "linear_check", "linear_check_tol")
 REQUESTS = {
     "cancel": "stop jobs (SIGTERM, snapshot, exit) and hold them",
     "stable": "stop jobs (SIGTERM, snapshot, exit) and record them as decayed",
-    "resume": "put cancelled, failed, diverged or rejected jobs back in the queue",
+    "resume": "put cancelled, failed or diverged jobs back in the queue",
 }
 
 
@@ -66,16 +59,6 @@ def _git(*args: str) -> str:
         ).stdout.strip()
     except (OSError, subprocess.SubprocessError):
         return ""
-
-
-def _parse_sets(items: Sequence[str]) -> dict[str, Any]:
-    out = {}
-    for item in items:
-        key, sep, value = item.partition("=")
-        if not sep or not key.strip():
-            raise SystemExit(f"error: --set expects KEY=VALUE, got {item!r}")
-        out[key.strip()] = yaml.safe_load(value)
-    return out
 
 
 class Campaign:
@@ -101,14 +84,17 @@ class Campaign:
         given = {
             "dataset": os.path.abspath(args.dataset) if args.dataset else None,
             "name": args.name,
-            "set": _parse_sets(args.set or []),
             "args": shlex.split(args.args) if args.args else [],
             "gpus": args.gpus,
-            "linear_check": args.linear_check,
-            "linear_check_tol": args.linear_check_tol,
             **{k: bool(getattr(args, k)) for k in OUTCOME_SETTINGS},
         }
         if self.exists:
+            removed = [k for k in REMOVED if self.settings.get(k)]
+            if removed or self.settings.get("gpus") not in (None, 1, "all"):
+                what = ", ".join(removed) or f"gpus: {self.settings['gpus']}"
+                raise SystemExit(
+                    f"error: {self.settings_path} sets {what}, no longer supported; start another campaign"
+                )
             saved = {**self.settings, **{k: bool(self.settings.get(k)) for k in OUTCOME_SETTINGS}}
             # only flags given on this call are compared
             bad = [k for k in FIXED if getattr(args, k) and given[k] != saved.get(k)]
@@ -120,10 +106,6 @@ class Campaign:
         if sched._has_flag(given["args"], OWN_FLAGS):
             raise SystemExit(
                 f"error: --args may not contain {', '.join(OWN_FLAGS)}; the campaign sets them"
-            )
-        if given["linear_check"] and sched._has_flag(given["args"], ("--linear-check",)):
-            raise SystemExit(
-                "error: give the linear check either as --linear-check or in --args, not both"
             )
         given["name"] = given["name"] or "{run}"
         commit = _git("rev-parse", "HEAD")
@@ -142,7 +124,10 @@ class Campaign:
 
     def set_targets(self, path: str | None) -> None:
         if path:
-            sched.load_targets(path)
+            try:
+                sched.load_pool(path)
+            except (OSError, ValueError, yaml.YAMLError) as exc:
+                raise SystemExit(f"error: {path}: {exc}")
             with open(path) as fh:
                 sched._atomic_write(self.targets, fh.read())
         if not os.path.isfile(self.targets):
@@ -176,19 +161,17 @@ class Campaign:
         if t_end is not None and OmegaConf.select(cfg, "solver.dump_dt"):
             # time mode: steps at the largest time step
             steps = math.ceil(float(t_end) / float(OmegaConf.select(cfg, "solver.dt") or 1.0))
+        gpus = self.settings.get("gpus")
         shard = cfg.get("sharding") or {}
-        gpus = self.settings.get("gpus") or int(shard.get("n_gpus", 0) or 0)
-        axes = ("n_gpus_sp", "n_gpus_vp", "n_gpus_mu")
-        gpus = gpus or max(1, math.prod(int(shard.get(k, 1) or 1) for k in axes))
+        if gpus is None and any(int(v or 0) > 1 for v in shard.values()):
+            raise SystemExit(
+                f"error: {config}: its sharding needs several GPUs; pass --gpus all or 1"
+            )
         run_dir = os.path.join(self.root, "runs", name)
         args = list(self.settings.get("args") or [])
         dataset = self.settings.get("dataset")
         if dataset:
             args += ["--dataset", dataset, "--dataset-name", name]
-        if self.settings.get("linear_check"):
-            args += ["--linear-check", str(self.settings["linear_check"])]
-            if self.settings.get("linear_check_tol") is not None:
-                args += ["--linear-check-tol", f"{float(self.settings['linear_check_tol']):g}"]
         for key in OUTCOME_SETTINGS:
             flag = "--" + key.replace("_", "-")
             if self.settings.get(key) and flag not in args:
@@ -198,7 +181,7 @@ class Campaign:
             "config": config,
             "output_dir": run_dir,
             "args": args,
-            "gpus": gpus,
+            "gpus": gpus or 1,
             "cost": float(f"{points * species * steps / 1e12:.4g}"),
         }
 
@@ -232,8 +215,6 @@ class Campaign:
             added, staged = [], {}
             for path in config_paths:
                 cfg = OmegaConf.load(path)
-                for key, value in (self.settings.get("set") or {}).items():
-                    OmegaConf.update(cfg, key, value, force_add=True)
                 name = self.job_name(cfg, path)
                 OmegaConf.update(cfg, "run.name", name, force_add=True)
                 text = OmegaConf.to_yaml(cfg)
@@ -267,8 +248,6 @@ class Campaign:
             sched.SSHExecutor(timeout=args.ssh_timeout),
             grace=args.grace,
             max_retries=args.max_retries,
-            dry_run=args.dry_run,
-            deadline=args.deadline,
         )
 
 
@@ -288,7 +267,6 @@ def _detach(camp: Campaign, args: argparse.Namespace) -> int:
         f"{args.grace:g}",
         "--max-retries",
         str(args.max_retries),
-        *(["--deadline", repr(args.deadline)] if args.deadline else []),
     ]
     log = open(os.path.join(camp.root, "datagen.log"), "a")
     proc = subprocess.Popen(
@@ -305,8 +283,6 @@ def _detach(camp: Campaign, args: argparse.Namespace) -> int:
 
 
 def _cmd_run(args: argparse.Namespace) -> int:
-    if args.time_limit:
-        args.deadline = time.time() + args.time_limit
     camp = Campaign(args.campaign)
     camp.create_or_check(args)
     camp.set_targets(args.targets)
@@ -314,13 +290,10 @@ def _cmd_run(args: argparse.Namespace) -> int:
         camp.add(args.configs)
     if not os.path.isfile(camp.jobs_path):
         raise SystemExit("error: no jobs yet; pass config files")
-    if args.deadline:
-        stop_at = time.strftime("%Y-%m-%d %H:%M", time.localtime(args.deadline))
-        print(f"time limit: jobs are stopped and requeued at {stop_at}")
-    if args.detach and not args.dry_run:
+    if args.detach:
         return _detach(camp, args)
     error = f"error: a scheduler already runs this campaign ({camp.state}.lock)"
-    with contextlib.nullcontext() if args.dry_run else sched.lock_state(camp.state, error):
+    with sched.lock_state(camp.state, error):
         camp.scheduler(args).run(args.poll, once=args.once, until_idle=not args.keep_running)
     return 0
 
@@ -335,34 +308,11 @@ def _cmd_add(args: argparse.Namespace) -> int:
 def _cmd_status(args: argparse.Namespace) -> int:
     camp = Campaign(args.campaign)
     missing = f"error: {camp.state} not found; the campaign has not run yet"
-    doc, status = sched.read_status(camp.state, missing)
+    _, status = sched.read_status(camp.state, missing)
     s = camp.settings
-    print(
-        f"campaign {camp.root}: dataset {s.get('dataset') or '-'}, names {s.get('name')}, set {s.get('set') or {}}"
-    )
+    print(f"campaign {camp.root}: dataset {s.get('dataset') or '-'}, names {s.get('name')}")
     print(status)
-    checks = _linear_checks(doc)
-    if checks:
-        print("\nlinear check (γ at the reference's dominant ky):")
-        width = max(len(n) for n in checks)
-        for name, line in checks.items():
-            print(f"  {name:<{width}}  {line}")
     return 0
-
-
-def _linear_checks(doc: dict[str, Any]) -> dict[str, str]:
-    """Summary per job of RUN_DIR/linear_check.json, where present."""
-    from gyaradax.diagnostics.growth import summary
-
-    out = {}
-    for name, job in sorted(doc.get("jobs", {}).items()):
-        path = os.path.join(job["spec"]["output_dir"], "linear_check.json")
-        try:
-            with open(path) as fh:
-                out[name] = summary(json.load(fh))
-        except (OSError, ValueError, KeyError):
-            continue
-    return out
 
 
 def _cmd_request(args: argparse.Namespace) -> int:
@@ -371,12 +321,9 @@ def _cmd_request(args: argparse.Namespace) -> int:
 
 
 def _gpus_arg(text: str) -> int | str:
-    if text == "all":
-        return text
-    value = int(text)
-    if value < 1:
-        raise argparse.ArgumentTypeError("--gpus must be >= 1 or 'all'")
-    return value
+    if text not in ("1", "all"):
+        raise argparse.ArgumentTypeError("--gpus must be 1 or 'all'")
+    return text if text == "all" else 1
 
 
 def _cmd_host(args: argparse.Namespace) -> int:
@@ -406,20 +353,15 @@ def _cmd_host(args: argparse.Namespace) -> int:
 def _cmd_probe(args: argparse.Namespace) -> int:
     camp = Campaign(args.campaign)
     path = args.targets or camp.targets
-    slots, problems, slurm = sched.load_targets(path)
+    slots, problems = sched.load_pool(path)
     for problem in problems:
         print(f"warning: {problem}")
     tool = REPO_ROOT / "gyaradax" / "backends" / "cuda_lib.py"
     executor = sched.SSHExecutor(timeout=args.ssh_timeout)
-    hosts = {
-        ("localhost (slurm login node)" if slurm else s.host): s.python for s in slots.values()
-    }
+    hosts = {s.host: s.python for s in slots.values()}
     for host, python in sorted(hosts.items()):
-        run_on = "localhost" if slurm else host
         try:
-            res = (sched.LocalExecutor() if slurm else executor).run(
-                run_on, f"{shlex.quote(python)} {shlex.quote(str(tool))} probe"
-            )
+            res = executor.run(host, f"{shlex.quote(python)} {shlex.quote(str(tool))} probe")
             p = json.loads(res.stdout.strip().splitlines()[-1])
         except (subprocess.TimeoutExpired, OSError, ValueError, IndexError) as exc:
             print(f"{host}: probe failed ({exc})")
@@ -428,17 +370,13 @@ def _cmd_probe(args: argparse.Namespace) -> int:
         print(
             f"{host}: GPUs sm {p['gpus'] or '?'}, library {p['lib']} (sm {p['archs'] or 'dev build'}): {state}"
         )
-    if slurm:
-        print(
-            "slurm: compute nodes may differ from this node; the library must cover their sm (gyaradax build-cuda --archs)"
-        )
     return 0
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="gyaradax datagen",
-        description="Run a list of configs over an ssh GPU mesh or Slurm and collect their dataset.",
+        description="Run a list of configs over an ssh GPU mesh and collect their dataset.",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -452,35 +390,14 @@ def build_parser() -> argparse.ArgumentParser:
             help="job and trajectory name template: {run} (run.name), {stem}, {id} (default {run})",
         )
         p.add_argument(
-            "--set",
-            action="append",
-            default=None,
-            metavar="KEY=VALUE",
-            help="override a config entry, e.g. solver.disp_par=4.0 (repeatable)",
-        )
-        p.add_argument(
             "--args", default=None, help="extra `gyaradax run` arguments, e.g. '--backend cuda'"
         )
         p.add_argument(
             "--gpus",
             type=_gpus_arg,
             default=None,
-            help="GPUs per job, or 'all': every GPU of the slot it lands on, mesh sized per "
-            "leg (default: the config's sharding, else 1)",
-        )
-        p.add_argument(
-            "--linear-check",
-            default=None,
-            metavar="NS[,NS...]",
-            help="before each run, compare linear growth rates with these reference resolutions "
-            "(gyaradax run --linear-check)",
-        )
-        p.add_argument(
-            "--linear-check-tol",
-            type=float,
-            default=None,
-            metavar="X",
-            help="reject a job (state rejected, not retried) whose relative γ deviation exceeds X",
+            help="1 (the default), or 'all': every GPU of the slot the job lands on, mesh sized "
+            "per leg",
         )
         p.add_argument(
             "--linear-gate",
@@ -537,19 +454,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="keep polling for added jobs once every job has finished (default: exit)",
     )
-    run_p.add_argument(
-        "--dry-run", action="store_true", help="print the launch commands of one round, run nothing"
-    )
     run_p.add_argument("--detach", action="store_true", help="run the scheduler in the background")
-    run_p.add_argument(
-        "--time-limit",
-        type=sched.parse_duration,
-        default=None,
-        metavar="DURATION",
-        help="stop every job after this long (e.g. 10h, 90m): SIGTERM, snapshot, back in the queue; then exit",
-    )
-    # absolute deadline handed to a detached scheduler
-    run_p.add_argument("--deadline", type=float, default=None, help=argparse.SUPPRESS)
     run_p.set_defaults(func=_cmd_run)
 
     add_p = sub.add_parser("add", help="add configs to a campaign (picked up at the next poll)")

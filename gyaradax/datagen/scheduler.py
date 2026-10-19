@@ -1,13 +1,13 @@
 #!/usr/bin/env python
-"""Scheduler for gyaradax runs over an ssh GPU mesh or a Slurm cluster.
+"""Scheduler for gyaradax runs over an ssh GPU mesh.
 
 ``run`` re-reads the targets and job YAML files on every poll, places pending jobs longest-first
-on free slots (ssh) or submits them (Slurm, one ``sbatch`` per leg), starts them through the
-``wrap`` subcommand of this file and follows them through the ``RUN_DIR/.sched/`` files on the
-shared filesystem. A run stopped by SIGTERM (a cancel, a removed slot, a Slurm walltime signal)
-snapshots and exits 75, and its next leg resumes the run directory. ``status``, ``cancel`` and
-``resume`` work on the state file. Standard library and PyYAML only, so ``wrap`` runs from the
-file path without importing JAX. ``gyaradax datagen`` (campaign.py) builds the job file.
+on free slots, starts them through the ``wrap`` subcommand of this file and follows them through
+the ``RUN_DIR/.sched/`` files on the shared filesystem. A run stopped by SIGTERM (a cancel, a
+removed slot) snapshots and exits 75, and its next leg resumes the run directory. ``status``,
+``cancel`` and ``resume`` work on the state file. Standard library and PyYAML only, so ``wrap``
+runs from the file path without importing JAX. ``gyaradax datagen`` (campaign.py) builds the job
+file.
 """
 
 from __future__ import annotations
@@ -35,17 +35,18 @@ from typing import IO, Any, Callable, Sequence
 import yaml
 
 DEFAULT_PYTHON = "/system/apps/userenv/galletti/gyaradax_env/bin/python"
-DEFAULT_GPU_GROUPS: dict[str, list[list[int]]] = {"lizard": [[0, 1], [2, 3], [4, 5]]}
+# the only multi-GPU slots allowed per host (nvlink pairs)
+GPU_GROUPS: dict[str, list[list[int]]] = {"lizard": [[0, 1], [2, 3], [4, 5]]}
 DEFAULT_PROGRAM = ("{python}", "-m", "gyaradax")
 SCHED = ".sched"
 ACTIVE = ("starting", "running", "stopping")
 STATE_ORDER = (
-    "running", "starting", "stopping", "pending", "failed", "diverged", "rejected", "cancelled",
-    "banded", "decayed", "stable", "done",
+    "running", "starting", "stopping", "pending", "failed", "diverged", "cancelled", "banded",
+    "decayed", "stable", "done",
 )  # fmt: skip
 # finished with a physics outcome, like done: not retried, not resumed
 OUTCOME_STATES = ("stable", "decayed", "banded")
-RESUMABLE = ("cancelled", "failed", "diverged", "rejected", *OUTCOME_STATES)
+RESUMABLE = ("cancelled", "failed", "diverged", *OUTCOME_STATES)
 DIAGNOSTICS = (
     "fluxes.npz", "fluxes_em.npz", "kxspec.npz", "kyspec.npz", "growth.npz", "dt_history.npz",
 )  # fmt: skip
@@ -62,8 +63,6 @@ REFUSED_FLAGS = ("--device", "--device-list", "--output-dir")
 ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 # exit code of a run stopped by SIGTERM after its snapshot (gyaradax.solver.driver.EXIT_INTERRUPTED)
 INTERRUPTED = 75
-# exit code of a run refused by its linear check (gyaradax.diagnostics.growth.EXIT_LINEAR_CHECK)
-LINEAR_CHECK_FAILED = 3
 # exit codes of the run outcomes (gyaradax.diagnostics.outcome.EXIT_*)
 OUTCOME_EXITS = {
     4: ("stable", "linearly stable (linear_gate.json); nonlinear run skipped"),
@@ -73,14 +72,10 @@ OUTCOME_EXITS = {
 STABLE_NOTE = "stopped by hand as stable (heat flux still decaying)"
 GATE_FILE = "linear_gate.json"
 OUTCOME_FILE = "outcome.json"
-SLURM_HOST = "slurm"
 # job gpus value meaning every GPU of the slot it lands on ("all" in the job file)
 ALL_GPUS = 0
 # host switches: drain finishes jobs, off stops them with a snapshot, kill stops them now
 HOST_SWITCHES = ("on", "drain", "off", "kill")
-SLURM_QUEUED = ("PENDING", "CONFIGURING", "REQUEUED", "REQUEUE_HOLD", "RESIZING", "SUSPENDED")
-SLURM_RUNNING = ("RUNNING", "COMPLETING", "SIGNALING", "STAGE_OUT")
-GPU_FLAGS = ("--gres", "--gpus", "--gpus-per-node", "--gpus-per-task", "-G")
 YAML_ERRORS = (OSError, yaml.YAMLError, AttributeError, TypeError, ValueError)
 CALL_ERRORS = (subprocess.TimeoutExpired, OSError)
 
@@ -279,12 +274,6 @@ def read_attempt(run_dir: str) -> Attempt:
     return Attempt(**{**get, "pid": _int(get["pid"]), "exit": code})
 
 
-def read_submission(run_dir: str) -> tuple[str | None, str | None]:
-    """Slurm job id and launch id of the latest submission, from ``RUN_DIR/.sched/slurm``."""
-    parts = (_read(os.path.join(run_dir, SCHED, "slurm")) or "").split()
-    return (parts[0], parts[1]) if len(parts) == 2 else (None, None)
-
-
 def snapshot_steps(run_dir: str) -> dict[int, str]:
     steps = {}
     for path in glob.glob(os.path.join(glob.escape(run_dir), "step_*.npz")):
@@ -348,18 +337,6 @@ def strip_flags(args: Sequence[str], flags: dict[str, int]) -> list[str]:
     return out
 
 
-def config_shards(path: str) -> bool:
-    """Whether a config (or a run directory's config.yaml) asks for more than one GPU itself."""
-    if os.path.isdir(path):
-        path = os.path.join(path, "config.yaml")
-    try:
-        with open(path) as fh:
-            shard = (yaml.safe_load(fh) or {}).get("sharding") or {}
-        return any(int(v or 0) > 1 for v in shard.values())
-    except YAML_ERRORS:
-        return False
-
-
 @dataclass
 class Slot:
     host: str
@@ -368,12 +345,11 @@ class Slot:
     python: str = DEFAULT_PYTHON
     env: dict[str, str] = field(default_factory=dict)
     drain: bool = False
-    name: str = ""
     busy_mib: int = 0
 
     @property
     def id(self) -> str:
-        return self.name or f"{self.host}:{_csv(self.gpus)}"
+        return f"{self.host}:{_csv(self.gpus)}"
 
 
 @dataclass
@@ -386,7 +362,11 @@ class JobSpec:
     gpus: int = 1
     cost: float = 1.0
     workdir: str = "/"
-    env: dict[str, str] = field(default_factory=dict)
+
+
+def _known(cls: type, data: dict[str, Any]) -> dict[str, Any]:
+    names = {f.name for f in fields(cls)}
+    return {k: v for k, v in data.items() if k in names}
 
 
 def job_gpus(spec: JobSpec, slot: Slot) -> list[int]:
@@ -405,8 +385,10 @@ def _env(value: Any, where: str) -> dict[str, str]:
     return {str(k): str(v) for k, v in value.items()}
 
 
-def _merged_env(defaults: dict[str, Any], raw: dict[str, Any], where: str) -> dict[str, str]:
-    return {**_env(defaults.get("env"), where), **_env(raw.get("env"), where)}
+def _refuse(doc: dict[str, Any], keys: Sequence[str], where: str) -> None:
+    used = [k for k in keys if doc.get(k)]
+    if used:
+        raise ValueError(f"{where}: {', '.join(used)} no longer supported")
 
 
 def _load_yaml(path: str, key: str) -> dict[str, Any]:
@@ -424,6 +406,7 @@ def _load_yaml(path: str, key: str) -> dict[str, Any]:
 def _slot(raw: Any, defaults: dict[str, Any], where: str) -> Slot:
     if not isinstance(raw, dict):
         raise ValueError(f"{where}: a slot is a mapping")
+    _refuse(raw, ("name", "env"), where)
     merged = {**defaults, **raw}
     host = str(merged.get("host") or "").strip()
     if not host or host.startswith("-") or " " in host:
@@ -448,9 +431,8 @@ def _slot(raw: Any, defaults: dict[str, Any], where: str) -> Slot:
         gpus=list(gpus),
         speed=speed,
         python=str(merged.get("python") or DEFAULT_PYTHON),
-        env=_merged_env(defaults, raw, where),
+        env=_env(defaults.get("env"), where),
         drain=bool(merged.get("drain", False)),
-        name=str(raw.get("name") or ""),
         busy_mib=busy_mib,
     )
 
@@ -473,8 +455,8 @@ def host_switches(doc: dict[str, Any]) -> tuple[dict[str, str], list[str]]:
 def load_pool(path: str) -> tuple[dict[str, Slot], list[str]]:
     """Parse the pool file into slots by id, plus the entries skipped and why; raises on an unreadable file."""
     doc = _load_yaml(path, "slots")
+    _refuse(doc, ("slurm", "gpu_groups"), "targets")
     defaults = doc.get("defaults") or {}
-    groups = {**DEFAULT_GPU_GROUPS, **(doc.get("gpu_groups") or {})}
     slots: dict[str, Slot] = {}
     used: dict[str, set[int]] = {}
     switches, problems = host_switches(doc)
@@ -489,7 +471,7 @@ def load_pool(path: str) -> tuple[dict[str, Slot], list[str]]:
         if switch in ("off", "kill"):
             continue
         slot.drain = slot.drain or switch == "drain"
-        allowed = groups.get(slot.host, groups.get(short))
+        allowed = GPU_GROUPS.get(slot.host, GPU_GROUPS.get(short))
         if allowed and len(slot.gpus) > 1 and sorted(slot.gpus) not in [sorted(g) for g in allowed]:
             problems.append(
                 f"pool slot {slot.id}: multi-GPU slots on {slot.host} must be one of {allowed}"
@@ -504,49 +486,6 @@ def load_pool(path: str) -> tuple[dict[str, Slot], list[str]]:
     return slots, problems
 
 
-@dataclass
-class SlurmTarget:
-    """A Slurm cluster as a target: at most ``max_jobs`` legs submitted at a time."""
-
-    python: str = DEFAULT_PYTHON
-    max_jobs: int = 8
-    sbatch: list[str] = field(default_factory=list)
-    setup: list[str] = field(default_factory=list)
-    signal_lead: int = 900
-    env: dict[str, str] = field(default_factory=dict)
-
-
-def _slurm_target(raw: Any) -> SlurmTarget:
-    if not isinstance(raw, dict):
-        raise ValueError("slurm: expected a mapping")
-    unknown = sorted(set(raw) - {f.name for f in fields(SlurmTarget)})
-    if unknown:
-        raise ValueError(f"slurm: unknown keys {unknown}")
-    target = SlurmTarget(
-        python=str(raw.get("python") or DEFAULT_PYTHON),
-        max_jobs=int(raw.get("max_jobs", 8)),
-        sbatch=_args(raw.get("sbatch"), "slurm.sbatch"),
-        setup=[str(line) for line in (raw.get("setup") or [])],
-        signal_lead=int(raw.get("signal_lead", 900)),
-        env=_env(raw.get("env"), "slurm"),
-    )
-    if target.max_jobs < 1 or target.signal_lead < 0:
-        raise ValueError("slurm: max_jobs must be >= 1 and signal_lead >= 0")
-    return target
-
-
-def load_targets(path: str) -> tuple[dict[str, Slot], list[str], SlurmTarget | None]:
-    """The slots of a targets file: its ``slurm`` section as ``max_jobs`` submission slots, else the ssh pool."""
-    doc = _load_yaml(path, "slots")
-    if "slurm" not in doc:
-        return (*load_pool(path), None)
-    target = _slurm_target(doc["slurm"])
-    ids = [f"{SLURM_HOST}:{i}" for i in range(target.max_jobs)]
-    slots = {s: Slot(SLURM_HOST, [], python=target.python, env=target.env, name=s) for s in ids}
-    problems = ["targets: slots are ignored next to a slurm section"] if doc.get("slots") else []
-    return slots, problems, target
-
-
 def _args(value: Any, where: str) -> list[str]:
     if value is None:
         return []
@@ -557,18 +496,16 @@ def _args(value: Any, where: str) -> list[str]:
     raise ValueError(f"{where}: args must be a string or a list")
 
 
-def _job(raw: Any, defaults: dict[str, Any], base: str, where: str) -> JobSpec:
+def _job(raw: Any, base: str, where: str) -> JobSpec:
     if not isinstance(raw, dict) or not raw.get("name"):
         raise ValueError(f"{where}: a job is a mapping with a name")
     name = str(raw["name"])
     where = f"job {name}"
-    merged = {**defaults, **raw}
-    workdir = os.path.abspath(
-        os.path.join(base, os.path.expanduser(str(merged.get("workdir", "."))))
-    )
+    _refuse(raw, ("env", "workdir"), where)
+    workdir = os.path.abspath(base)
 
     def path(key: str) -> str | None:
-        value = merged.get(key)
+        value = raw.get(key)
         return (
             os.path.abspath(os.path.join(workdir, os.path.expanduser(str(value))))
             if value
@@ -586,15 +523,15 @@ def _job(raw: Any, defaults: dict[str, Any], base: str, where: str) -> JobSpec:
         output_dir = run_dir
     if output_dir is None:
         raise ValueError(f"{where}: output_dir is required")
-    args = _args(defaults.get("args"), where) + _args(raw.get("args"), where)
+    args = _args(raw.get("args"), where)
     if _has_flag(args, REFUSED_FLAGS):
         raise ValueError(
             f"{where}: --device, --device-list and --output-dir are set by the scheduler"
         )
-    raw_gpus = merged.get("gpus", 1)
+    raw_gpus = raw.get("gpus", 1)
     gpus = ALL_GPUS if raw_gpus == "all" else int(raw_gpus)
-    if gpus < 1 and gpus != ALL_GPUS:
-        raise ValueError(f"{where}: gpus must be >= 1 or 'all'")
+    if gpus != 1 and raw_gpus != "all":
+        raise ValueError(f"{where}: gpus must be 1 or 'all'")
     return JobSpec(
         name=name,
         output_dir=output_dir,
@@ -602,25 +539,24 @@ def _job(raw: Any, defaults: dict[str, Any], base: str, where: str) -> JobSpec:
         run_dir=run_dir,
         args=args,
         gpus=gpus,
-        cost=float(merged.get("cost", 1.0)),
+        cost=float(raw.get("cost", 1.0)),
         workdir=workdir,
-        env=_merged_env(defaults, raw, where),
     )
 
 
 def load_jobs(path: str) -> tuple[list[JobSpec], list[str]]:
     """Parse the job file into specs with absolute paths, plus the entries skipped and why.
 
-    Relative paths are taken from ``workdir`` (top level and per job), itself relative to the
-    job file's directory; it is also the directory the run is launched from.
+    Relative paths are taken from the top-level ``workdir``, itself relative to the job file's
+    directory; it is also the directory the runs are launched from.
     """
     doc = _load_yaml(path, "jobs")
+    _refuse(doc, ("defaults",), "jobs")
     base = os.path.join(os.path.dirname(os.path.abspath(path)), str(doc.get("workdir", ".")))
-    defaults = doc.get("defaults") or {}
     specs, names, problems = [], set(), []
     for i, raw in enumerate(doc.get("jobs") or []):
         try:
-            spec = _job(raw, defaults, base, f"job {i}")
+            spec = _job(raw, base, f"job {i}")
         except (KeyError, TypeError, ValueError) as exc:
             problems.append(str(exc))
             continue
@@ -645,7 +581,6 @@ class Job:
     gpus: list[int] = field(default_factory=list)
     launch_id: str | None = None
     launched_at: float | None = None
-    handle: str | None = None
     pid: int | None = None
     hb_value: str | None = None
     hb_seen: float | None = None
@@ -662,21 +597,20 @@ class Job:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Job:
-        known = {f.name for f in fields(cls)}
-        data = {k: v for k, v in data.items() if k in known}
-        return cls(**{**data, "spec": JobSpec(**data["spec"])})
+        data = _known(cls, data)
+        return cls(**{**data, "spec": JobSpec(**_known(JobSpec, data["spec"]))})
 
     def leg(self, **extra: Any) -> dict[str, Any]:
         return {
             "slot": self.slot, "host": self.host, "gpus": self.gpus, "launch": self.launch_id,
-            "handle": self.handle, "start": self.launched_at, **extra,
+            "start": self.launched_at, **extra,
         }  # fmt: skip
 
 
 # reset when a launch ends
 LAUNCH_FIELDS = (
-    "slot", "host", "gpus", "pid", "launch_id", "launched_at", "hb_value", "hb_seen", "handle",
-    "stop_reason", "stop_started", "killed_at", "requeue", "finish_as",
+    "slot", "host", "gpus", "pid", "launch_id", "launched_at", "hb_value", "hb_seen", "stop_reason",
+    "stop_started", "killed_at", "requeue", "finish_as",
 )  # fmt: skip
 
 
@@ -707,9 +641,6 @@ class Executor:
             return self.run(host, command).returncode == 0
         except CALL_ERRORS:
             return False
-
-    def describe(self, host: str, command: str) -> str:
-        return shlex.join(self.argv(host, command))
 
     def launch(self, host: str, command: str) -> None:
         """Start a self-detaching command; raises LaunchError when it surely did not start."""
@@ -799,11 +730,6 @@ def lock_state(state_path: str, error: str) -> IO[str]:
     return lock
 
 
-def _slurm_index(slot: Slot) -> int:
-    tail = slot.id.rsplit(":", 1)[1]
-    return int(tail) if tail.isdigit() else 0
-
-
 def _insert(con: sqlite3.Connection, table: str, row: Sequence[Any]) -> None:
     con.execute(f"INSERT INTO {table} VALUES ({','.join('?' * len(row))})", tuple(row))
 
@@ -826,8 +752,6 @@ class Scheduler:
         slot_backoff: float = 300.0,
         program: Sequence[str] = DEFAULT_PROGRAM,
         script: str | None = None,
-        dry_run: bool = False,
-        deadline: float | None = None,
         clock: Callable[[], float] = time.time,
         log: Callable[[str], None] | None = None,
     ):
@@ -843,18 +767,13 @@ class Scheduler:
         self.slot_backoff = slot_backoff
         self.program = list(program)
         self.script = os.path.abspath(script or __file__)
-        self.dry_run = dry_run
-        self.deadline = deadline
         self.clock = clock
         self.log = log or (
             lambda msg: print(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {msg}", flush=True)
         )
         self.jobs: dict[str, Job] = {}
         self.pool: dict[str, Slot] = {}
-        self.slurm: SlurmTarget | None = None
-        self.local = LocalExecutor(timeout=self.executor.timeout)
         self.probes: dict[str, dict[str, Any]] = {}
-        self._queue: dict[str, str] | None = None
         self.down_until: dict[str, float] = {}
         self._gpu_mem: dict[str, dict[int, int] | None] = {}
         self._meta: dict[str, dict[str, Any]] = {}
@@ -871,25 +790,20 @@ class Scheduler:
         with open(self.state_path) as fh:
             doc = json.load(fh)
         self.jobs = {name: Job.from_dict(d) for name, d in doc.get("jobs", {}).items()}
-        self.pool = {sid: Slot(**s) for sid, s in doc.get("slots", {}).items()}
-        self.slurm = SlurmTarget(**doc["slurm"]) if doc.get("slurm") else None
+        self.pool = {sid: Slot(**_known(Slot, s)) for sid, s in doc.get("slots", {}).items()}
         self.probes = doc.get("probes", {})
         self.down_until = {k: float(v) for k, v in doc.get("down_until", {}).items()}
         self.next_order = int(doc.get("next_order", len(self.jobs)))
 
     def save(self) -> None:
-        if self.dry_run:
-            return
         doc = {
             "version": 1,
             "updated": self.clock(),
             "scheduler": {"host": socket.gethostname(), "pid": os.getpid()},
             "pool_file": self.pool_path,
             "jobs_file": self.jobs_path,
-            "deadline": self.deadline,
             "next_order": self.next_order,
             "slots": {sid: asdict(s) for sid, s in self.pool.items()},
-            "slurm": asdict(self.slurm) if self.slurm else None,
             "probes": self.probes,
             "down_until": self.down_until,
             "jobs": {name: asdict(j) for name, j in self.jobs.items()},
@@ -932,7 +846,7 @@ class Scheduler:
                 ("scheduler", f"{socket.gethostname()} pid {os.getpid()}"),
                 ("targets", self.pool_path),
                 ("jobs", self.jobs_path),
-                ("deadline", _when(self.deadline)),
+                ("deadline", None),
             ):
                 _insert(con, "meta", row)
             con.commit()
@@ -982,37 +896,12 @@ class Scheduler:
     def _active(self) -> list[Job]:
         return [j for j in self.jobs.values() if j.state in ACTIVE]
 
-    def expired(self) -> bool:
-        return self.deadline is not None and self.clock() >= self.deadline
-
-    def _slurm_state(self, handle: str) -> str | None:
-        """Queue state of a Slurm job ('' once it left the queue), None if squeue fails; one squeue per poll."""
-        if self._queue is None:
-            try:
-                res = self.local.run("", 'squeue -h -u "$(id -un)" -o "%i %T"')
-            except CALL_ERRORS:
-                return None
-            if res.returncode != 0:
-                return None
-            rows = (line.split() for line in res.stdout.splitlines())
-            self._queue = {p[0]: p[1] for p in rows if len(p) >= 2}
-        return self._queue.get(handle, "")
-
-    def _alive(
-        self, host: str | None, pid: int | None, token: str | None, handle: str | None
-    ) -> bool | None:
-        if handle:
-            state = self._slurm_state(handle)
-            return None if state is None else state in (*SLURM_QUEUED, *SLURM_RUNNING)
+    def _alive(self, host: str | None, pid: int | None, token: str | None) -> bool | None:
         if pid is None:
             return False
         return self.executor.alive(host or "", pid, token or "")
 
     def _signal(self, job: Job, sig: str, group: bool = False) -> bool:
-        if job.handle:
-            # the batch shell is the wrapper, which forwards TERM to the run; KILL cancels the job
-            batch = "" if sig == "KILL" else f"--batch --signal={sig} "
-            return self.local.ok("", f"scancel {batch}{job.handle}")
         if job.pid is None:
             return False
         if group:
@@ -1022,7 +911,7 @@ class Scheduler:
     def _probe(self, slot: Slot, workdir: str, now: float) -> dict[str, Any] | None:
         """The host's CUDA library state from ``gyaradax/backends/cuda_lib.py probe``, rechecked hourly."""
         tool = os.path.join(workdir, "gyaradax", "backends", "cuda_lib.py")
-        if self.dry_run or slot.host == SLURM_HOST or not os.path.isfile(tool):
+        if not os.path.isfile(tool):
             return None
         key = f"{slot.host} {slot.python} {workdir}"
         cached = self.probes.get(key)
@@ -1050,112 +939,39 @@ class Scheduler:
         probe = self._probe(slot, job.spec.workdir, now)
         return ["--backend", "auto" if probe is None or probe.get("usable") else "jax"]
 
-    def _wrapped(
-        self,
-        python: str,
-        job: Job,
-        slot: Slot,
-        argv: list[str],
-        launch_id: str,
-        env: dict[str, str],
-        host: str = "",
-    ) -> str:
-        """``env ... python scheduler.py wrap ... -- argv`` for one leg of ``job``."""
-        wrapper = [
-            python, self.script, "wrap", "--dir", job.spec.output_dir, "--launch-id", launch_id,
-            *(["--host", host] if host else []), "--slot", slot.id,
-            "--heartbeat", f"{self.heartbeat:g}", "--",
-        ]  # fmt: skip
-        return shlex.join(["env", *(f"{k}={v}" for k, v in env.items()), *wrapper, *argv])
-
-    def sbatch_script(self, job: Job, slot: Slot, argv: list[str], launch_id: str) -> str:
-        """The batch script of one leg: Slurm options, the target's setup lines, then the wrapper."""
-        target = self.slurm or SlurmTarget()
-        spec = job.spec
-        env = {**target.env, **spec.env, "XLA_PYTHON_CLIENT_PREALLOCATE": "false"}
-        lines = [
-            "#!/bin/bash",
-            f"#SBATCH --job-name={spec.name}",
-            f"#SBATCH --output={os.path.join(spec.output_dir, SCHED)}/slurm-%j.log",
-            f"#SBATCH --signal=B:TERM@{target.signal_lead}",
-        ]
-        if not _has_flag(target.sbatch, GPU_FLAGS):
-            lines.append(f"#SBATCH --gres=gpu:{max(spec.gpus, 1)}")
-        lines += [f"#SBATCH {a}" for a in target.sbatch]
-        lines += target.setup
-        lines.append(f"cd {shlex.quote(spec.workdir)}")
-        lines.append("exec " + self._wrapped(target.python, job, slot, argv, launch_id, env))
-        return "\n".join(lines) + "\n"
-
     def launch_command(self, job: Job, slot: Slot, argv: list[str], launch_id: str) -> str:
+        """``nohup env ... python scheduler.py wrap ... -- argv`` for one leg of ``job``, detached."""
         spec = job.spec
         sched = os.path.join(spec.output_dir, SCHED)
         env = {
             **slot.env,
-            **spec.env,
             "XLA_PYTHON_CLIENT_PREALLOCATE": "false",
             "CUDA_VISIBLE_DEVICES": _csv(job_gpus(spec, slot)),
         }
-        inner = self._wrapped(slot.python, job, slot, argv, launch_id, env, host=slot.host)
+        wrapper = [
+            slot.python, self.script, "wrap", "--dir", spec.output_dir, "--launch-id", launch_id,
+            "--host", slot.host, "--slot", slot.id, "--heartbeat", f"{self.heartbeat:g}", "--",
+        ]  # fmt: skip
+        inner = shlex.join(["env", *(f"{k}={v}" for k, v in env.items()), *wrapper, *argv])
         q = shlex.quote
         return (
             f"test -x {q(slot.python)} && mkdir -p {q(sched)} && cd {q(spec.workdir)} && "
             f"{{ nohup {inner} >> {q(os.path.join(sched, 'log'))} 2>&1 < /dev/null & }}"
         )
 
-    def _started(
-        self,
-        job: Job,
-        slot: Slot,
-        argv: list[str],
-        launch_id: str,
-        now: float,
-        handle: str | None = None,
-    ) -> None:
-        job.state, job.slot, job.host, job.handle = "starting", slot.id, slot.host, handle
+    def _started(self, job: Job, slot: Slot, argv: list[str], launch_id: str, now: float) -> None:
+        job.state, job.slot, job.host = "starting", slot.id, slot.host
         job.gpus = job_gpus(job.spec, slot)
         job.launch_id, job.launched_at, job.pid = launch_id, now, None
         job.hb_value, job.hb_seen, job.argv, job.note = None, None, argv, ""
         job.attempts += 1
 
-    def _submit(self, job: Job, slot: Slot, argv: list[str], launch_id: str, now: float) -> bool:
-        spec = job.spec
-        sched = os.path.join(spec.output_dir, SCHED)
-        script = self.sbatch_script(job, slot, argv, launch_id)
-        if self.dry_run:
-            self.log(f"[dry-run] {spec.name} -> sbatch:\n{script}")
-            return True
-        os.makedirs(sched, exist_ok=True)
-        path = os.path.join(sched, "job.sbatch")
-        _atomic_write(path, script)
-        try:
-            res = self.local.run("", f"sbatch --parsable {shlex.quote(path)}")
-            error = "" if res.returncode == 0 else (res.stderr or res.stdout or "").strip()[-300:]
-        except CALL_ERRORS as exc:
-            error = str(exc)
-        if error:
-            for sid in self.pool:
-                self.down_until[sid] = now + self.slot_backoff
-            self.log(
-                f"{spec.name}: sbatch failed ({error}); no submissions for {self.slot_backoff:.0f} s"
-            )
-            return False
-        handle = res.stdout.strip().split(";")[0]
-        _atomic_write(os.path.join(sched, "slurm"), f"{handle} {launch_id}\n")
-        self._started(job, slot, argv, launch_id, now, handle)
-        self.log(f"{spec.name}: submitted as Slurm job {handle}: {shlex.join(argv)}")
-        return True
-
     def poll(self) -> None:
         """One round: re-read pool and jobs, apply requests, follow active jobs, launch pending."""
         now = self.clock()
-        self._queue = None
         self._gpu_mem = {}
         self._refresh_pool()
         self._refresh_jobs(now)
-        if self.dry_run:
-            self._place(now)
-            return
         if self._fresh:
             for job in [j for j in self.jobs.values() if j.state == "pending"]:
                 self._adopt(job, now)
@@ -1164,32 +980,22 @@ class Scheduler:
         for job in self._active():
             self._monitor(job, now)
         for job in self._active():
-            if job.host != SLURM_HOST and job.slot not in self.pool:
+            if job.slot not in self.pool:
                 if {job.host, (job.host or "").split(".")[0]} & self.killed_hosts:
                     self._kill(job, f"host {job.host} killed", now)
                 else:
                     self._stop(job, "slot removed", True, now)
-        if self.deadline is not None and now >= self.deadline:
-            for job in self._active():
-                self._stop(job, "time limit", True, now)
-        else:
-            self._place(now)
+        self._place(now)
         for job in self._active():
             self._update_progress(job, now)
         self.save()
 
     def _refresh_pool(self) -> None:
         try:
-            slots, problems, slurm = load_targets(self.pool_path)
+            slots, problems = load_pool(self.pool_path)
         except (OSError, ValueError, yaml.YAMLError) as exc:
             self._warn(f"pool {self.pool_path} unreadable ({exc}); keeping the previous pool")
             return
-        if (slurm is None) != (self.slurm is None) and self._active():
-            self._warn(
-                "targets switch between ssh and slurm while jobs run; keeping the previous targets"
-            )
-            return
-        self.slurm = slurm
         with contextlib.suppress(OSError, ValueError, yaml.YAMLError):
             switches, _ = host_switches(_load_yaml(self.pool_path, "slots"))
             self.killed_hosts = {h for h, v in switches.items() if v == "kill"}
@@ -1226,7 +1032,7 @@ class Scheduler:
                 self.jobs[spec.name] = job
                 claimed[spec.output_dir] = spec.name
                 self.log(f"job {spec.name} added (cost {spec.cost:g}, {spec.gpus or 'all'} GPU)")
-                if not self._fresh and not self.dry_run:
+                if not self._fresh:
                     self._adopt(job, now)
             elif job.state == "pending" and job.spec != spec:
                 if job.base_legs is not None and spec.output_dir != job.spec.output_dir:
@@ -1236,27 +1042,11 @@ class Scheduler:
                 self.log(f"job {spec.name} updated")
 
     def _adopt(self, job: Job, now: float) -> None:
-        """Take over a still-running launch, or a still-queued Slurm submission, of the job's ``.sched`` files."""
+        """Take over a still-running launch of the job's ``.sched`` files."""
         att = read_attempt(job.spec.output_dir)
-        handle, submitted = read_submission(job.spec.output_dir)
-        if handle and submitted != att.launch:
-            if self._slurm_state(handle) not in (*SLURM_QUEUED, *SLURM_RUNNING):
-                return
-            busy = {j.slot for j in self._active()}
-            free = [sid for sid in self.pool if sid not in busy]
-            job.state, job.host, job.handle = "starting", SLURM_HOST, handle
-            job.slot = free[0] if free else f"{SLURM_HOST}:+"
-            job.launch_id, job.launched_at, job.pid = submitted, now, None
-            if job.base_legs is None:
-                job.base_legs = len(run_legs(job.spec.output_dir))
-            self.log(f"{job.spec.name}: reattached to the queued Slurm job {handle}")
-            return
         if not att.launch or att.exit is not None or att.pid is None or not att.host:
             return
-        if handle and submitted == att.launch:
-            job.handle = handle
-        if self._alive(att.host, att.pid, att.launch, job.handle) is not True:
-            job.handle = None
+        if self._alive(att.host, att.pid, att.launch) is not True:
             return
         legs = len(run_legs(job.spec.output_dir))
         job.state, job.slot, job.host, job.pid = "running", att.slot, att.host, att.pid
@@ -1303,17 +1093,6 @@ class Scheduler:
     def _monitor(self, job: Job, now: float) -> None:
         att = read_attempt(job.spec.output_dir)
         if att.launch != job.launch_id:
-            if job.handle:
-                state = self._slurm_state(job.handle)
-                if state is None or state in SLURM_QUEUED:
-                    # time in the slurm queue does not count toward the start timeout
-                    job.launched_at = now
-                    return
-                if state == "":
-                    log = os.path.join(job.spec.output_dir, SCHED, f"slurm-{job.handle}.log")
-                    note = f"the Slurm job ended before the run started; see {log}"
-                    self._finish(job, None, now, note, startup=True)
-                    return
             if job.launched_at is not None and now - job.launched_at > self.start_timeout:
                 note = "the wrapper did not start; see .sched/log"
                 self._finish(job, None, now, note, startup=True)
@@ -1335,7 +1114,7 @@ class Scheduler:
             return
         stale = now - (job.hb_seen if job.hb_seen is not None else now)
         if stale > self.heartbeat_timeout and job.pid is not None:
-            alive = self._alive(job.host, job.pid, job.launch_id, job.handle)
+            alive = self._alive(job.host, job.pid, job.launch_id)
             if alive is False or (alive is None and stale > 2 * self.heartbeat_timeout):
                 self._finish(job, None, now, f"lost: no heartbeat for {stale:.0f} s and no process")
 
@@ -1350,7 +1129,7 @@ class Scheduler:
                     f"{job.spec.name}: still running {self.grace:.0f} s after SIGTERM, sent SIGKILL"
                 )
             return
-        gone = self._alive(job.host, job.pid, job.launch_id, job.handle) is False
+        gone = self._alive(job.host, job.pid, job.launch_id) is False
         if gone or now - job.killed_at > self.grace:
             self._finish(job, None, now, "killed")
 
@@ -1360,10 +1139,6 @@ class Scheduler:
             return
         job.state, job.stop_reason, job.requeue = "stopping", reason, requeue
         job.stop_started, job.killed_at = now, None
-        if job.handle and job.pid is None:
-            self._signal(job, "KILL")
-            self._finish(job, None, now, "removed from the Slurm queue before it started")
-            return
         if job.pid is not None:
             self._signal(job, "TERM")
         self.log(
@@ -1373,9 +1148,6 @@ class Scheduler:
     def _kill(self, job: Job, reason: str, now: float) -> None:
         """SIGKILL ``job`` at once and queue it again."""
         if job.state == "stopping" and job.killed_at is not None:
-            return
-        if job.handle and job.pid is None:
-            self._stop(job, reason, True, now)
             return
         job.state, job.stop_reason, job.requeue = "stopping", reason, True
         job.stop_started, job.killed_at = now - self.grace - 1.0, None
@@ -1402,13 +1174,10 @@ class Scheduler:
             note = f"{job.stop_reason}" + (f", {note}" if note else "")
         elif code == INTERRUPTED:
             state = "pending"
-            note = "interrupted after a snapshot (walltime, preemption or SIGTERM); the next leg resumes it"
+            note = "interrupted after a snapshot (SIGTERM); the next leg resumes it"
         elif diverged:
             state = "diverged"
             note = "diverged (DIVERGED marker); not retried"
-        elif code == LINEAR_CHECK_FAILED:
-            state = "rejected"
-            note = "linear check outside its tolerance (linear_check.json); not retried"
         else:
             job.failures += 1
             job.avoid = [job.slot] if job.slot else []
@@ -1452,28 +1221,18 @@ class Scheduler:
             p.update(last=[step, now], step=step)
 
     @staticmethod
-    def _choose(job: Job, free: list[Slot], waiting: list[Job]) -> Slot | None:
-        """The fastest free slot with exactly the job's GPU count, else the fastest larger one.
+    def _choose(job: Job, free: list[Slot]) -> Slot | None:
+        """The free slot of most ``speed`` x GPUs for an all-GPU job, else the fastest one-GPU slot.
 
-        A larger slot is left alone while a waiting job needs more GPUs than this one and fits it.
+        A one-GPU job takes a wider slot only when no one-GPU slot is free.
         """
-        if any(s.host == SLURM_HOST for s in free):
-            return min(free, key=_slurm_index)
-        need = job.spec.gpus
-        if need == ALL_GPUS:
-            return min(
-                free, key=lambda s: (s.id in job.avoid, -s.speed * len(s.gpus), s.id), default=None
-            )
-        candidates = [
-            s
-            for s in free
-            if len(s.gpus) >= need and not any(need < k.spec.gpus <= len(s.gpus) for k in waiting)
-        ]
-        return min(
-            candidates,
-            key=lambda s: (s.id in job.avoid, len(s.gpus) != need, -s.speed, len(s.gpus), s.id),
-            default=None,
-        )
+
+        def rank(s: Slot) -> tuple[Any, ...]:
+            if job.spec.gpus == ALL_GPUS:
+                return (s.id in job.avoid, -s.speed * len(s.gpus), s.id)
+            return (s.id in job.avoid, len(s.gpus) != 1, -s.speed, len(s.gpus), s.id)
+
+        return min(free, key=rank, default=None)
 
     def _gpu_memory(self, host: str) -> dict[int, int] | None:
         """Memory in use per GPU index on a host (MiB), read once per poll; None on failure."""
@@ -1491,7 +1250,7 @@ class Scheduler:
 
     def _occupied(self, slot: Slot) -> bool:
         """True if another process holds more than ``busy_mib`` on one of the slot's GPUs."""
-        if slot.busy_mib <= 0 or slot.host == SLURM_HOST or self.dry_run:
+        if slot.busy_mib <= 0:
             return False
         mem = self._gpu_memory(slot.host)
         hot = None if mem is None else [g for g in slot.gpus if mem.get(g, 0) > slot.busy_mib]
@@ -1523,15 +1282,12 @@ class Scheduler:
         )
         if pending:
             free = [s for s in free if not self._occupied(s)]
-        placed: set[str] = set()
         for job in pending:
-            waiting = [k for k in pending if k is not job and k.spec.name not in placed]
-            slot = self._choose(job, free, waiting)
+            slot = self._choose(job, free)
             if slot is None:
                 continue
             free.remove(slot)
-            if self._launch(job, slot, now):
-                placed.add(job.spec.name)
+            self._launch(job, slot, now)
 
     def gyaradax_args(self, job: Job, slot: Slot | None = None) -> list[str]:
         """The ``gyaradax`` arguments of the job's next leg: first launch, resume, or restart.
@@ -1547,17 +1303,13 @@ class Scheduler:
         ours = job.base_legs is not None and len(run_legs(run_dir)) > job.base_legs
         if not ours:
             args = first
-        elif latest_snapshot(run_dir, quarantine=not self.dry_run) and os.path.isfile(
-            os.path.join(run_dir, "config.yaml")
-        ):
+        elif latest_snapshot(run_dir) and os.path.isfile(os.path.join(run_dir, "config.yaml")):
             args = ["run", run_dir] + strip_flags(spec.args, FRESH_FLAGS)
         else:
             args = first + ([] if "--overwrite" in first else ["--overwrite"])
         if spec.gpus == ALL_GPUS and slot is not None and not _has_flag(args, MESH_FLAGS):
             # every leg sizes its mesh to its slot, over a layout saved by an earlier leg
             args += ["--n-gpus", str(len(slot.gpus))]
-        elif spec.gpus > 1 and not _has_flag(args, MESH_FLAGS) and not config_shards(args[1]):
-            args += ["--n-gpus", str(spec.gpus)]
         return args
 
     def _launch(self, job: Job, slot: Slot, now: float) -> bool:
@@ -1575,14 +1327,7 @@ class Scheduler:
         argv = [a.replace("{python}", slot.python) for a in self.program]
         argv += self.gyaradax_args(job, slot) + self._backend_args(job, slot, now)
         launch_id = uuid.uuid4().hex[:16]
-        if slot.host == SLURM_HOST:
-            return self._submit(job, slot, argv, launch_id, now)
         command = self.launch_command(job, slot, argv, launch_id)
-        if self.dry_run:
-            self.log(
-                f"[dry-run] {spec.name} -> {slot.id}: {self.executor.describe(slot.host, command)}"
-            )
-            return True
         try:
             self.executor.launch(slot.host, command)
         except LaunchError as exc:
@@ -1596,10 +1341,7 @@ class Scheduler:
         return True
 
     def run(self, poll: float, once: bool = False, until_idle: bool = False) -> None:
-        """Poll until a signal (or once); ``until_idle`` also stops once no job is pending or active.
-
-        Past ``deadline`` the running jobs are stopped and requeued, and the loop ends once they are down.
-        """
+        """Poll until a signal (or once); ``until_idle`` also stops once no job is pending or active."""
         stop: list[int] = []
         previous = {
             sig: signal.signal(sig, lambda signum, frame: stop.append(signum))
@@ -1609,13 +1351,7 @@ class Scheduler:
             while True:
                 self.poll()
                 states = [j.state for j in self.jobs.values()]
-                if once or self.dry_run or stop:
-                    break
-                if self.expired() and not self._active():
-                    left = states.count("pending")
-                    self.log(
-                        f"time limit reached; {left} job(s) pending, `gyaradax datagen run` resumes them"
-                    )
+                if once or stop:
                     break
                 if until_idle and states and not set(states) & {"pending", *ACTIVE}:
                     self.log("every job has finished")
@@ -1629,21 +1365,7 @@ class Scheduler:
             for sig, handler in previous.items():
                 signal.signal(sig, handler)
         self.save()
-        if not self.dry_run:
-            self.log("scheduler stopped; running jobs keep going and are reattached on restart")
-
-
-def parse_duration(text: str) -> float:
-    """Seconds in a duration such as ``10h``, ``90m``, ``1h30m``, ``2d`` or ``3600``."""
-    units = {"d": 86400, "h": 3600, "m": 60, "s": 1, "": 1}
-    part, clean = r"(\d+(?:\.\d+)?)\s*([dhms]?)", text.strip().lower()
-    parts = re.findall(part, clean)
-    if not parts or re.sub(part, "", clean).strip():
-        raise argparse.ArgumentTypeError(f"not a duration: {text!r} (e.g. 10h, 90m, 3600)")
-    seconds = sum(float(v) * units[u] for v, u in parts)
-    if seconds <= 0:
-        raise argparse.ArgumentTypeError(f"not a positive duration: {text!r}")
-    return seconds
+        self.log("scheduler stopped; running jobs keep going and are reattached on restart")
 
 
 def _duration(seconds: float | None) -> str:
@@ -1686,13 +1408,6 @@ def format_status(doc: dict[str, Any], now: float, pending_requests: int = 0) ->
         f"{_duration(now - doc.get('updated', now))} ago"
         + (f", {pending_requests} request(s) waiting" if pending_requests else "")
     ]
-    if doc.get("deadline"):
-        left = doc["deadline"] - now
-        when = time.strftime("%Y-%m-%d %H:%M", time.localtime(doc["deadline"]))
-        lines.append(
-            f"time limit: jobs stop at {when} "
-            + (f"(in {_duration(left)})" if left > 0 else f"(passed {_duration(-left)} ago)")
-        )
     counts = Counter(j["state"] for j in jobs)
     lines.append("jobs: " + ", ".join(f"{counts[s]} {s}" for s in STATE_ORDER if s in counts))
     rows = [("JOB", "STATE", "SLOT", "GPUS", "COST", "FAIL", "STEP", "ETA", "OUTCOME", "NOTE")]
@@ -1705,7 +1420,7 @@ def format_status(doc: dict[str, Any], now: float, pending_requests: int = 0) ->
         rows.append((
             j["spec"]["name"],
             j["state"],
-            (j.get("slot") or "-") + (f" (job {j['handle']})" if j.get("handle") else ""),
+            j.get("slot") or "-",
             _csv(j.get("gpus")) or str(j["spec"]["gpus"] or "all"),
             f"{j['spec']['cost']:g}",
             str(j.get("failures", 0)),
@@ -1806,7 +1521,7 @@ RUN_OPTIONS = (
 )  # fmt: skip
 REQUESTS = {
     "cancel": "stop jobs (SIGTERM, grace, SIGKILL) and hold them",
-    "resume": "put cancelled, failed, diverged or rejected jobs back in the queue",
+    "resume": "put cancelled, failed or diverged jobs back in the queue",
     "stable": "stop jobs (SIGTERM, grace, SIGKILL) and record them as decayed",
 }
 
@@ -1814,7 +1529,7 @@ REQUESTS = {
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="scheduler.py",
-        description="Dispatch gyaradax runs over an ssh GPU mesh or Slurm (see gyaradax datagen).",
+        description="Dispatch gyaradax runs over an ssh GPU mesh (see gyaradax datagen).",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -1822,19 +1537,9 @@ def build_parser() -> argparse.ArgumentParser:
     run_p.add_argument("--pool", required=True, help="pool YAML (re-read every poll)")
     run_p.add_argument("--jobs", required=True, help="job YAML (re-read every poll)")
     run_p.add_argument("--state", required=True, help="scheduler state JSON")
-    run_p.add_argument(
-        "--dry-run", action="store_true", help="print the launch commands of one round, run nothing"
-    )
     run_p.add_argument("--once", action="store_true", help="poll once and exit")
     for flag, kind, default, text in RUN_OPTIONS:
         run_p.add_argument(flag, type=kind, default=default, help=text)
-    run_p.add_argument(
-        "--time-limit",
-        type=parse_duration,
-        default=None,
-        metavar="DURATION",
-        help="stop and requeue every job after this long (e.g. 10h, 90m), then exit",
-    )
 
     status_p = sub.add_parser("status", help="jobs, slots and ETAs from the state file")
     status_p.add_argument("--state", required=True)
@@ -1862,11 +1567,9 @@ def _cmd_run(args: argparse.Namespace) -> int:
     for path in (args.pool, args.jobs):
         if not os.path.isfile(path):
             raise SystemExit(f"error: {path} not found")
-    keys = "heartbeat heartbeat_timeout grace start_timeout max_retries slot_backoff dry_run"
+    keys = "heartbeat heartbeat_timeout grace start_timeout max_retries slot_backoff"
     options = {k: getattr(args, k) for k in keys.split()}
-    error = f"error: another scheduler holds {args.state}.lock"
-    with contextlib.nullcontext() if args.dry_run else lock_state(args.state, error):
-        options["deadline"] = time.time() + args.time_limit if args.time_limit else None
+    with lock_state(args.state, f"error: another scheduler holds {args.state}.lock"):
         executor = SSHExecutor(timeout=args.ssh_timeout)
         Scheduler(args.pool, args.jobs, args.state, executor, **options).run(
             args.poll, once=args.once

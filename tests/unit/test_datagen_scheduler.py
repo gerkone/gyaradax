@@ -63,9 +63,6 @@ def main(argv):
             "gpus": os.environ.get("CUDA_VISIBLE_DEVICES"),
             "prealloc": os.environ.get("XLA_PYTHON_CLIENT_PREALLOCATE"),
         }) + "\n")
-    # as gyaradax run --linear-check-tol: refused before the first step
-    if cfg.get("linear_reject"):
-        return 3
     # as gyaradax run --linear-gate / --stop-on-decay / --stop-on-banding / --track-outcome
     for name in ("linear_gate", "outcome"):
         if cfg.get(name):
@@ -107,67 +104,9 @@ sys.exit(main(sys.argv[1:]))
 """
 
 FAKE_KEYS = (
-    "steps", "step_time", "fail_once_at", "fail_at", "diverge_at", "ignore_term", "linear_reject",
-    "linear_gate", "outcome", "outcome_exit",
+    "steps", "step_time", "fail_once_at", "fail_at", "diverge_at", "ignore_term", "linear_gate",
+    "outcome", "outcome_exit",
 )
-
-# sbatch / squeue / scancel on one machine: a job is its batch script run in a new session
-FAKE_SLURM = r"""
-import json, os, shlex, signal, subprocess, sys, time
-STATE = os.environ["FAKE_SLURM_DIR"]
-
-def jobs():
-    return {f[:-5]: json.load(open(os.path.join(STATE, f))) for f in os.listdir(STATE) if f.endswith(".json")}
-
-def alive(pid):
-    try:
-        os.kill(pid, 0)
-        return True
-    except OSError:
-        return False
-
-cmd, args = os.path.basename(sys.argv[0]), sys.argv[1:]
-if cmd == "sbatch":
-    script = args[-1]
-    jid = str(101 + len(jobs()))
-    pending = float(os.environ.get("FAKE_SLURM_PENDING", "0"))
-    log = next((l.split("=", 1)[1].strip() for l in open(script) if l.startswith("#SBATCH --output=")), "/dev/null")
-    out = open(log.replace("%j", jid), "a")
-    proc = subprocess.Popen(["bash", "-c", f"sleep {pending}; exec bash {shlex.quote(script)}"],
-                            env=dict(os.environ, SLURM_JOB_ID=jid), stdin=subprocess.DEVNULL,
-                            stdout=out, stderr=subprocess.STDOUT, start_new_session=True)
-    json.dump({"pid": proc.pid, "start": time.time() + pending, "script": script}, open(os.path.join(STATE, jid + ".json"), "w"))
-    print(jid)
-elif cmd == "squeue":
-    for jid, job in sorted(jobs().items()):
-        if alive(job["pid"]):
-            print(jid, "PENDING" if time.time() < job["start"] else "RUNNING")
-elif cmd == "scancel":
-    job = jobs().get(args[-1])
-    sig = next((getattr(signal, "SIG" + a.split("=", 1)[1]) for a in args if a.startswith("--signal=")), None)
-    if job and alive(job["pid"]):
-        if "--batch" in args and sig is not None:
-            os.kill(job["pid"], sig)
-        else:
-            os.killpg(job["pid"], signal.SIGKILL)
-"""
-
-
-@pytest.fixture
-def fake_slurm(tmp_path, monkeypatch):
-    bin_dir, state = tmp_path / "slurm_bin", tmp_path / "slurm_state"
-    bin_dir.mkdir()
-    state.mkdir()
-    for name in ("sbatch", "squeue", "scancel"):
-        path = bin_dir / name
-        path.write_text(f"#!{sys.executable}\n{FAKE_SLURM}")
-        path.chmod(0o755)
-    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
-    monkeypatch.setenv("FAKE_SLURM_DIR", str(state))
-    yield state
-    for job in glob.glob(str(state / "*.json")):
-        with contextlib.suppress(OSError, ValueError):
-            os.killpg(json.load(open(job))["pid"], signal.SIGKILL)
 
 
 def slot(host, *gpus, speed=1.0, **extra):
@@ -185,12 +124,10 @@ class Campaign:
         self.entries = []
         self.logs = []
 
-    def pool(self, *slots, hosts=None):
-        doc = {"defaults": {"python": sys.executable}, "slots": list(slots)}
-        Path(self.pool_path).write_text(yaml.safe_dump({**doc, **({"hosts": hosts} if hosts else {})}))
-
-    def slurm(self, **target):
-        Path(self.pool_path).write_text(yaml.safe_dump({"slurm": {"python": sys.executable, **target}}))
+    def pool(self, *slots, hosts=None, env=None):
+        defaults = {"python": sys.executable, **({"env": env} if env else {})}
+        doc = {"defaults": defaults, "slots": list(slots), **({"hosts": hosts} if hosts else {})}
+        Path(self.pool_path).write_text(yaml.safe_dump(doc))
 
     def add_job(self, name, steps=5, step_time=0.05, **job):
         cfg = {"steps": steps, "step_time": step_time, **{k: job.pop(k) for k in FAKE_KEYS if k in job}}
@@ -264,6 +201,17 @@ def sql(db, query):
         return con.execute(query).fetchall()
 
 
+class Record(gs.LocalExecutor):
+    """Records launch commands instead of running them."""
+
+    def __init__(self):
+        super().__init__()
+        self.launched = []
+
+    def launch(self, host, command):
+        self.launched.append((host, command))
+
+
 def test_lpt_puts_longest_jobs_on_fastest_slots(camp):
     camp.pool(slot("slow", 0, speed=1), slot("fast", 1, speed=3), slot("mid", 2, speed=2))
     for name, cost in (("short", 10), ("long", 30), ("medium", 20), ("tiny", 1)):
@@ -274,7 +222,9 @@ def test_lpt_puts_longest_jobs_on_fastest_slots(camp):
     assert placed == {"long": "fast:1", "medium": "mid:2", "short": "slow:0"}
     assert sched.jobs["tiny"].state == "pending"
     camp.drive(sched, done(sched))
-    assert camp.legs("long")[0]["gpus"] == "1" and camp.legs("long")[0]["prealloc"] == "false"
+    leg = camp.legs("long")[0]
+    assert leg["gpus"] == "1" and leg["prealloc"] == "false"
+    assert leg["argv"][leg["argv"].index("--backend") + 1] == "auto"
     assert len(camp.legs("tiny")) == 1
 
 
@@ -399,18 +349,15 @@ def test_lost_process_counts_as_failure_until_retries_run_out(camp):
     assert all(h["note"].startswith("lost") for h in jobs["doomed"].history)
 
 
-@pytest.mark.parametrize(
-    "fake, state", [({"diverge_at": 3}, "diverged"), ({"linear_reject": True}, "rejected")]
-)
-def test_divergence_and_linear_check_rejection_are_not_retried(camp, fake, state):
+def test_divergence_is_not_retried(camp):
     camp.pool(slot("a", 0))
-    camp.add_job("x", steps=10, **fake)
+    camp.add_job("x", steps=10, diverge_at=3)
     sched = camp.scheduler()
-    camp.drive(sched, lambda: sched.jobs["x"].state == state)
+    camp.drive(sched, lambda: sched.jobs["x"].state == "diverged")
     assert sched.jobs["x"].attempts == 1 and sched.jobs["x"].failures == 0
     assert gs.main(["resume", "x", "--state", camp.state_path]) == 0
     sched.poll()
-    assert sched.jobs["x"].state in ("starting", "running", state)
+    assert sched.jobs["x"].state in ("starting", "running", "diverged")
 
 
 GATE = {
@@ -505,44 +452,6 @@ def test_restart_reattaches_to_the_running_job(camp, keep_state):
     assert len(camp.legs("long")) == 1
 
 
-def test_multi_gpu_jobs_only_go_to_slots_with_enough_gpus(camp):
-    camp.pool(slot("one", 0, speed=10), slot("two", 0, speed=8), slot("pair", 2, 3, speed=1))
-    camp.add_job("big", gpus=2, cost=1, steps=3)
-    camp.add_job("small", cost=100, steps=3)
-    camp.add_job("small2", cost=50, steps=3)
-    sched = camp.scheduler()
-    sched.poll()
-    assert sched.jobs["big"].slot == "pair:2,3"
-    assert sched.jobs["small"].slot == "one:0" and sched.jobs["small2"].slot == "two:0"
-    camp.drive(sched, done(sched))
-    leg = camp.legs("big")[0]
-    argv = leg["argv"]
-    assert leg["gpus"] == "2,3" and argv[argv.index("--n-gpus") + 1] == "2"
-    assert argv[argv.index("--backend") + 1] == "auto"
-
-
-def test_small_jobs_leave_the_pair_to_a_waiting_multi_gpu_job(camp):
-    camp.pool(slot("pair", 0, 1))
-    camp.add_job("small", cost=100, steps=2)
-    camp.add_job("big", gpus=2, cost=1, steps=2)
-    sched = camp.scheduler()
-    sched.poll()
-    assert sched.jobs["big"].slot == "pair:0,1" and sched.jobs["small"].state == "pending"
-    camp.drive(sched, done(sched))
-    assert camp.legs("small")[0]["gpus"] == "0"
-
-
-def test_multi_gpu_job_waits_without_a_large_enough_slot(camp):
-    camp.pool(slot("a", 0), slot("b", 1))
-    camp.add_job("big", gpus=2, cost=100, steps=2)
-    camp.add_job("small", cost=1, steps=2)
-    sched = camp.scheduler()
-    camp.drive(sched, done(sched, "small"))
-    for _ in range(3):
-        sched.poll()
-    assert sched.jobs["big"].state == "pending" and sched.jobs["big"].attempts == 0
-
-
 def test_drained_slot_finishes_its_job_then_gets_nothing(camp):
     camp.pool(slot("a", 0))
     camp.add_job("first", steps=20, cost=2)
@@ -603,20 +512,17 @@ def test_unreadable_pool_keeps_the_previous_one(camp):
     camp.drive(sched, done(sched))
 
 
-def test_dry_run_prints_commands_and_runs_nothing(camp):
-    class Refuse(gs.LocalExecutor):
-        def run(self, host, command):
-            raise AssertionError("dry run executed a command")
-
-    camp.pool(slot("a", 3))
+def test_launch_command_runs_the_wrapper_on_the_slot_gpus(camp):
+    record = Record()
+    camp.pool(slot("a", 3), env={"HDISP": "0.01"})
     camp.add_job("x", steps=2, args=["--backend", "cuda"])
-    sched = camp.scheduler(dry_run=True, executor=Refuse())
-    sched.run(poll=0.1)
-    (line,) = [line for line in camp.logs if line.startswith("[dry-run]")]
+    sched = camp.scheduler(executor=record)
+    sched.poll()
+    ((host, line),) = record.launched
+    assert host == "a" and sched.jobs["x"].state == "starting"
     for part in ("CUDA_VISIBLE_DEVICES=3", "XLA_PYTHON_CLIENT_PREALLOCATE=false", "--backend cuda"):
         assert part in line
-    assert " wrap " in line
-    assert not os.path.exists(camp.state_path) and not os.path.exists(camp.run_dir("x"))
+    assert " wrap " in line and "HDISP=0.01" in line
 
 
 def test_pool_validation(tmp_path):
@@ -625,18 +531,25 @@ def test_pool_validation(tmp_path):
         {"host": "lizard", "gpus": [0, 1]},
         {"host": "lizard", "gpus": [1, 2]},
         {"host": "lizard", "gpus": [1]},
-        {"host": "shark", "gpus": [0], "speed": 2, "env": {"BAD-NAME": 1}},
+        {"host": "shark", "gpus": [0], "speed": 2, "env": {"X": 1}},
         {"gpus": [0]},
-        {"host": "shark", "gpus": [1], "drain": True, "name": "s1"},
+        {"host": "shark", "gpus": [1], "drain": True, "name": None, "env": {}},
+        {"host": "shark", "gpus": [2], "name": "s2"},
     ]
-    path.write_text(yaml.safe_dump({"slots": slots}))
+    defaults = {"env": {"HDISP": "0.01"}}
+    path.write_text(yaml.safe_dump({"defaults": defaults, "slots": slots, "gpu_groups": {}}))
     slots, problems = gs.load_pool(str(path))
-    assert list(slots) == ["lizard:0,1", "s1"]
-    assert slots["s1"].drain and slots["lizard:0,1"].python == gs.DEFAULT_PYTHON
-    assert len(problems) == 4 and any("must be one of" in p for p in problems)
-    path.write_text("")
-    with pytest.raises(ValueError):
-        gs.load_pool(str(path))
+    assert list(slots) == ["lizard:0,1", "shark:1"]
+    assert slots["shark:1"].drain and slots["lizard:0,1"].python == gs.DEFAULT_PYTHON
+    assert slots["shark:1"].env == slots["lizard:0,1"].env == {"HDISP": "0.01"}
+    assert len(problems) == 5 and any("must be one of" in p for p in problems)
+    assert sum("no longer supported" in p for p in problems) == 2
+    path.write_text(yaml.safe_dump({"defaults": {"env": {"BAD-NAME": 1}}, "slots": [{"host": "a", "gpus": [0]}]}))
+    assert "invalid environment variable names" in gs.load_pool(str(path))[1][0]
+    for doc in ("", "slurm: {max_jobs: 2}\n", "gpu_groups: {shark: [[0, 1]]}\nslots: []\n"):
+        path.write_text(doc)
+        with pytest.raises(ValueError):
+            gs.load_pool(str(path))
 
     slots = [
         {"host": "shark", "gpus": [0]},
@@ -660,20 +573,26 @@ def test_job_validation(tmp_path):
     path = tmp_path / "jobs.yaml"
     jobs = [
         {"name": "a", "config": "configs/a.yaml", "output_dir": "/abs/a", "args": "--n-steps 20"},
-        {"name": "b", "run_dir": "runs/b", "cost": 5, "gpus": 2},
+        {"name": "b", "run_dir": "runs/b", "cost": 5, "gpus": "all", "env": {}, "workdir": None},
         {"name": "c", "config": "x.yaml"},
         {"name": "d", "config": "x.yaml", "output_dir": "o", "args": ["--device", "1"]},
         {"name": "a", "run_dir": "r"},
+        {"name": "e", "run_dir": "r", "gpus": 2},
+        {"name": "f", "run_dir": "r", "env": {"X": "1"}},
+        {"name": "g", "run_dir": "r", "workdir": "elsewhere"},
     ]
-    doc = {"workdir": "repo", "defaults": {"args": ["--backend", "cuda"]}, "jobs": jobs}
-    path.write_text(yaml.safe_dump(doc))
+    path.write_text(yaml.safe_dump({"workdir": "repo", "defaults": None, "jobs": jobs}))
     specs, problems = gs.load_jobs(str(path))
-    assert [s.name for s in specs] == ["a", "b"] and len(problems) == 3
+    assert [s.name for s in specs] == ["a", "b"] and len(problems) == 6
+    assert sum("no longer supported" in p for p in problems) == 2
     a, b = specs
     repo = str(tmp_path / "repo")
     assert a.config == os.path.join(repo, "configs", "a.yaml") and a.output_dir == "/abs/a"
-    assert a.args == ["--backend", "cuda", "--n-steps", "20"] and a.workdir == repo
-    assert b.output_dir == b.run_dir == os.path.join(repo, "runs", "b") and b.gpus == 2
+    assert a.args == ["--n-steps", "20"] and a.workdir == repo and a.gpus == 1
+    assert b.output_dir == b.run_dir == os.path.join(repo, "runs", "b") and b.gpus == gs.ALL_GPUS
+    path.write_text(yaml.safe_dump({"defaults": {"args": ["--backend", "cuda"]}, "jobs": jobs}))
+    with pytest.raises(ValueError, match="defaults no longer supported"):
+        gs.load_jobs(str(path))
 
 
 def test_next_leg_arguments(camp):
@@ -707,15 +626,16 @@ def test_next_leg_arguments(camp):
 
 
 def test_all_gpu_job_takes_the_whole_slot_and_sizes_its_mesh_per_leg(camp):
+    record = Record()
     camp.pool(slot("a", 0, speed=2), slot("b", 1, 2, 3, 4), slot("c", 5, 6))
     camp.add_job("wide", gpus="all", args=["--backend", "cuda"])
     camp.add_job("narrow", gpus=1, cost=0.5)
-    sched = camp.scheduler(dry_run=True)
+    sched = camp.scheduler(executor=record)
     sched.poll()
-    lines = {line.split()[1]: line for line in camp.logs if line.startswith("[dry-run]")}
-    assert "-> b:1,2,3,4" in lines["wide"]
+    assert sched.jobs["wide"].slot == "b:1,2,3,4" and sched.jobs["narrow"].slot == "a:0"
+    lines = {name: line for _, line in record.launched for name in sched.jobs if f"/runs/{name} " in line}
     assert "CUDA_VISIBLE_DEVICES=1,2,3,4" in lines["wide"] and "--n-gpus 4" in lines["wide"]
-    assert "-> a:0" in lines["narrow"] and "--n-gpus" not in lines["narrow"]
+    assert "CUDA_VISIBLE_DEVICES=0" in lines["narrow"] and "--n-gpus" not in lines["narrow"]
 
     job = sched.jobs["wide"]
     job.base_legs = 0
@@ -724,6 +644,8 @@ def test_all_gpu_job_takes_the_whole_slot_and_sizes_its_mesh_per_leg(camp):
     small = sched.pool["c:5,6"]
     assert sched.gyaradax_args(job, small) == ["run", run_dir, "--backend", "cuda", "--n-gpus", "2"]
     assert gs.job_gpus(job.spec, small) == [5, 6]
+    # a one-GPU job on a wider slot takes its first GPU
+    assert gs.job_gpus(sched.jobs["narrow"].spec, small) == [5]
 
 
 def test_run_database_follows_the_queue(camp, tmp_path):
@@ -805,79 +727,6 @@ def test_scheduler_does_not_import_jax():
     assert out.stdout.strip() == "[]"
 
 
-def test_slurm_queues_up_to_max_jobs_and_queue_time_is_not_a_start_failure(
-    camp, fake_slurm, monkeypatch
-):
-    monkeypatch.setenv("FAKE_SLURM_PENDING", "2.0")
-    camp.slurm(max_jobs=2, sbatch=["--time=00:10:00"], setup=["echo setup-ran"])
-    for name in ("a", "b", "c"):
-        camp.add_job(name, steps=4)
-    sched = camp.scheduler(start_timeout=1.0)
-    peak = []
-
-    def finished():
-        peak.append(sum(j.state in gs.ACTIVE for j in sched.jobs.values()))
-        return all(j.state == "done" for j in sched.jobs.values())
-
-    camp.drive(sched, finished, timeout=60)
-    assert max(peak) == 2
-    assert all(j.failures == 0 and j.attempts == 1 for j in sched.jobs.values())
-    script = open(os.path.join(camp.run_dir("a"), ".sched", "job.sbatch")).read()
-    for line in (
-        "#SBATCH --gres=gpu:1", "#SBATCH --signal=B:TERM@900", "#SBATCH --time=00:10:00",
-        "echo setup-ran", "XLA_PYTHON_CLIENT_PREALLOCATE=false",
-    ):  # fmt: skip
-        assert line in script
-    assert "CUDA_VISIBLE_DEVICES" not in script
-    assert any("submitted as Slurm job" in line for line in camp.logs)
-
-
-def test_slurm_walltime_signal_resumes_the_run_without_counting_a_failure(camp, fake_slurm):
-    camp.slurm(max_jobs=1)
-    camp.add_job("long", steps=60, step_time=0.05)
-    sched = camp.scheduler()
-    jobs = sched.jobs
-    camp.drive(sched, lambda: jobs["long"].state == "running" and snapshot_at(camp.run_dir("long"), 1)())
-    handle = jobs["long"].handle
-    # what --signal=B:TERM@lead does ahead of the walltime
-    subprocess.run(["scancel", "--batch", "--signal=TERM", handle], check=True)
-    camp.drive(sched, done(sched, "long"), timeout=60)
-    history = jobs["long"].history
-    assert jobs["long"].failures == 0 and jobs["long"].attempts == 2
-    assert history[0]["result"] == "pending" and "interrupted" in history[0]["note"]
-    assert history[0]["handle"] == handle and history[1]["handle"] != handle
-    legs = camp.legs("long")
-    assert len(legs) == 2 and 0 < legs[1]["start_step"] < 60 and legs[1]["target_step"] == 60
-
-
-def test_slurm_cancel_removes_a_queued_job(camp, fake_slurm, monkeypatch):
-    monkeypatch.setenv("FAKE_SLURM_PENDING", "60")
-    camp.slurm(max_jobs=1)
-    camp.add_job("queued", steps=3)
-    sched = camp.scheduler()
-    jobs = sched.jobs
-    camp.drive(sched, lambda: jobs["queued"].state == "starting" and jobs["queued"].handle)
-    handle = jobs["queued"].handle
-    assert gs.main(["cancel", "queued", "--state", camp.state_path]) == 0
-    camp.drive(sched, lambda: jobs["queued"].state == "cancelled")
-    queue = subprocess.run(["squeue", "-h", "-o", "%i %T"], capture_output=True, text=True).stdout
-    assert handle not in queue.split()
-
-
-def test_slurm_restart_without_state_reattaches_the_queued_job(camp, fake_slurm, monkeypatch):
-    monkeypatch.setenv("FAKE_SLURM_PENDING", "3")
-    camp.slurm(max_jobs=1)
-    camp.add_job("x", steps=3)
-    first = camp.scheduler()
-    camp.drive(first, lambda: first.jobs["x"].state == "starting" and first.jobs["x"].handle)
-    handle = first.jobs["x"].handle
-    os.remove(camp.state_path)
-    second = camp.scheduler()
-    camp.drive(second, done(second, "x"), timeout=60)
-    assert second.jobs["x"].history[-1]["handle"] == handle
-    assert len(glob.glob(str(fake_slurm / "*.json"))) == 1
-
-
 def test_until_idle_returns_once_every_job_has_finished(camp):
     camp.pool(slot("a", 0))
     camp.add_job("x", steps=2)
@@ -886,32 +735,3 @@ def test_until_idle_returns_once_every_job_has_finished(camp):
     sched.run(poll=0.1, until_idle=True)
     assert sched.jobs["x"].state == "done" and time.time() - t0 < 30
     assert "every job has finished" in camp.logs
-
-
-def test_time_limit_stops_and_requeues_jobs_and_a_later_run_resumes_them(camp):
-    camp.pool(slot("a", 0))
-    camp.add_job("long", steps=60, step_time=0.05, cost=2)
-    camp.add_job("later", steps=2, cost=1)
-    run_dir = camp.run_dir("long")
-    sched = camp.scheduler()
-    camp.drive(sched, snapshot_at(run_dir, 3))
-    sched.deadline = time.time() + 0.5
-    t0 = time.time()
-    sched.run(poll=0.1, until_idle=True)
-    assert time.time() - t0 < 15
-    job = sched.jobs["long"]
-    assert job.state == "pending" and job.note.startswith("time limit") and job.failures == 0
-    assert job.history[-1]["exit"] == 75 and gs.snapshot_steps(run_dir)
-    # nothing is launched past the deadline
-    assert sched.jobs["later"].state == "pending" and not sched.jobs["later"].history
-    assert any(m.startswith("time limit reached; 2 job(s) pending") for m in camp.logs), camp.logs
-    with open(camp.state_path) as fh:
-        doc = json.load(fh)
-    assert doc["deadline"] == sched.deadline
-    assert "time limit: jobs stop at" in gs.format_status(doc, time.time())
-
-    second = camp.scheduler()
-    camp.drive(second, done(second))
-    first_leg, second_leg = camp.legs("long")
-    assert second_leg["argv"][:2] == ["run", run_dir]
-    assert second_leg["start_step"] >= 3 and second_leg["target_step"] == first_leg["target_step"] == 60
