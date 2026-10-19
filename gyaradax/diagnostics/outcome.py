@@ -5,6 +5,7 @@
 
     linear_gate.json     linear growth rates, real frequencies and the gate decision
     linear_mode.npz      df (complex64) and phi at the end of the linear run
+    linear.json          with ``--linear-only``: the gate document, eigenmode fluxes and files
     monitor_series.npz   per frame: time, step, fluxes, growth rate, s-Nyquist shares of phi
     outcome.json         summary: outcome class, flux averages, banding, stop reason
 
@@ -31,6 +32,7 @@ GATE_FILE = "linear_gate.json"
 MODE_FILE = "linear_mode.npz"
 SERIES_FILE = "monitor_series.npz"
 OUTCOME_FILE = "outcome.json"
+LINEAR_FILE = "linear.json"
 
 # outcome classes counted as stable in the dataset metadata
 STABLE_CLASSES = ("linear_stable", "decayed", "flat")
@@ -125,22 +127,37 @@ def heat_flux(fluxes: Any) -> np.ndarray:
     return np.asarray(fluxes, np.float64).reshape(-1, 3)[:, 1]
 
 
-def decayed(t: Any, q: Any, *, t_min: float, floor: float, rel_floor: float, window: int) -> bool:
+def decayed(t: Any, q: Any, *, t_min: float, floor: float, rel_floor: float, window: int,
+            peak_min: float = 1e-2, quiet_t_min: float = 60.0, quiet_span: float = 0.0) -> bool:
     """Whether the heat flux ``q(t)`` has decayed.
 
-    After ``t_min``, the last ``window`` values all lie below the larger of ``floor`` and
-    ``rel_floor`` times the peak, and still fall (negative slope of log q over them, and the
-    last below the first).
+    After ``t_min``, and once the flux has reached ``peak_min`` at least once, the last ``window``
+    values all lie below the larger of ``floor`` and ``rel_floor`` times the peak, and still fall
+    (negative slope of log q over them, and the last below the first). A flux that never reached
+    ``peak_min`` has decayed after ``quiet_t_min`` when it is below ``floor`` and has fallen over
+    the last ``quiet_span`` (0 disables this).
     """
     t, q = np.asarray(t, float), np.abs(np.asarray(q, float))
     if len(q) < max(window, 2) or t[-1] < t_min:
         return False
+    if float(np.max(q)) < peak_min:
+        return quiet_span > 0 and quiet_decay(t, q, quiet_t_min, quiet_span, floor)
     limit = max(floor, rel_floor * float(np.max(q)))
     last = q[-window:]
     if not np.all(last < limit):
         return False
     slope = np.polyfit(t[-window:], np.log(np.maximum(last, 1e-300)), 1)[0]
     return bool(slope < 0 and last[-1] < last[0])
+
+
+def quiet_decay(t: np.ndarray, q: np.ndarray, t_min: float, span: float, floor: float) -> bool:
+    if t[-1] < t_min:
+        return False
+    sel = t >= t[-1] - span
+    if sel.sum() < 5:
+        return False
+    slope = np.polyfit(t[sel], np.log(np.maximum(q[sel], 1e-300)), 1)[0]
+    return bool(slope < 0 and q[-1] < q[sel][0] and q[-1] < floor)
 
 
 def banded(shares: Any, threshold: float, window: int) -> bool:
@@ -224,6 +241,11 @@ class MonitorSettings:
     stop_on_decay: bool = False
     decay_t_min: float = 30.0
     decay_floor: float = 1e-3
+    # a decay stop needs the flux to have reached this level once (not the initial noise phase)
+    decay_peak_min: float = 1e-2
+    # below decay_peak_min: stop after this time if the flux fell over the last decay_quiet_span
+    decay_quiet_t_min: float = 60.0
+    decay_quiet_span: float = 0.0
     decay_rel_floor: float = 1e-3
     decay_window: int = 5
     decay_keep_frames: bool = False
@@ -295,6 +317,9 @@ class RunMonitor:
             floor=s.decay_floor,
             rel_floor=s.decay_rel_floor,
             window=s.decay_window,
+            peak_min=s.decay_peak_min,
+            quiet_t_min=s.decay_quiet_t_min,
+            quiet_span=s.decay_quiet_span,
         ):
             self.stopped = "decayed"
             self.message = (
@@ -420,7 +445,7 @@ class RunMonitor:
             "trace_timesteps": np.asarray(self.series["time"], np.float64),
             "trace_solver_steps": np.asarray(self.series["step"], np.int64),
             "trace_flux": np.asarray(self.series["flux"], np.float64).reshape(
-                len(self.series["flux"]), -1
+                len(self.series["flux"]), -1 if self.series["flux"] else 0
             ),
             "trace_growth": np.asarray(self.series["growth"], np.float64),
             "trace_nyq_zonal": np.asarray(self.series["nyq_zonal"], np.float64),
@@ -444,17 +469,19 @@ class RunMonitor:
         return doc
 
 
-def gate_outcome(run_dir: str, gate: Mapping[str, Any]) -> dict[str, Any]:
-    """Write the ``outcome.json`` of a run the linear gate skipped."""
+def gate_outcome(
+    run_dir: str, gate: Mapping[str, Any], cls: str = "linear_stable"
+) -> dict[str, Any]:
+    """Write the ``outcome.json`` of a run that ends after the linear gate (class ``cls``)."""
     doc = {
         "updated": time.time(),
         "final": True,
-        "class": "linear_stable",
-        "stopped": "linear_stable",
+        "class": cls,
+        "stopped": cls,
         "gate": gate["decision"],
         "frames": 0,
         "t": None,
-        "label": "linear_stable " + format_gate(gate).split(": ", 1)[1].rsplit(":", 1)[0],
+        "label": f"{cls} " + format_gate(gate).split(": ", 1)[1].rsplit(":", 1)[0],
         "message": format_gate(gate),
     }
     _atomic_json(os.path.join(run_dir, OUTCOME_FILE), doc)

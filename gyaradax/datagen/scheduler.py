@@ -703,6 +703,7 @@ class Job:
     hb_value: str | None = None
     hb_seen: float | None = None
     stop_reason: str | None = None
+    finish_as: str | None = None
     requeue: bool = True
     stop_started: float | None = None
     killed_at: float | None = None
@@ -1358,8 +1359,18 @@ class Scheduler:
                     self.log(f"{name}: cancelled")
                 else:
                     self.log(f"request {action} {name}: nothing to do, the job is {job.state}")
+            elif action == "stable":
+                reason = "stopped by hand as stable (heat flux still decaying)"
+                if job.state in ACTIVE:
+                    job.finish_as = "decayed"
+                    self._stop(job, reason, False, now)
+                elif job.state in ("pending", "cancelled"):
+                    job.state, job.note = "decayed", reason
+                    self.log(f"{name}: decayed ({reason})")
+                else:
+                    self.log(f"request {action} {name}: nothing to do, the job is {job.state}")
             elif action == "resume":
-                if job.state in ("cancelled", "failed", "diverged", "rejected"):
+                if job.state in ("cancelled", "failed", "diverged", "rejected", *OUTCOME_STATES):
                     job.state, job.failures, job.note = "pending", 0, ""
                     self.log(f"{name}: back in the queue")
                 elif job.state == "stopping":
@@ -1472,7 +1483,7 @@ class Scheduler:
             state, note = OUTCOME_EXITS[code]
             note += "; not retried"
         elif stopping:
-            state = "pending" if job.requeue else "cancelled"
+            state = job.finish_as or ("pending" if job.requeue else "cancelled")
             note = f"{job.stop_reason}" + (f", {note}" if note else "")
         elif code == INTERRUPTED:
             state = "pending"
@@ -1510,6 +1521,7 @@ class Scheduler:
         job.launch_id, job.launched_at, job.hb_value, job.hb_seen = None, None, None, None
         job.handle = None
         job.stop_reason, job.stop_started, job.killed_at, job.requeue = None, None, None, True
+        job.finish_as = None
 
     def _update_progress(self, job: Job, now: float) -> None:
         meta = self._meta_of(job.spec)
@@ -2039,6 +2051,12 @@ def build_parser() -> argparse.ArgumentParser:
     resume_p.add_argument("names", nargs="+")
     resume_p.add_argument("--state", required=True)
 
+    stable_p = sub.add_parser(
+        "stable", help="stop jobs (SIGTERM, grace, SIGKILL) and record them as decayed"
+    )
+    stable_p.add_argument("names", nargs="+")
+    stable_p.add_argument("--state", required=True)
+
     wrap_p = sub.add_parser("wrap", help="launch wrapper run on the GPU host (internal)")
     wrap_p.add_argument("--dir", required=True)
     wrap_p.add_argument("--launch-id", required=True)
@@ -2108,7 +2126,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _cmd_run(args)
     if args.command == "status":
         return _cmd_status(args)
-    if args.command in ("cancel", "resume"):
+    if args.command in ("cancel", "resume", "stable"):
         return _cmd_request(args)
     cmd = args.cmd[1:] if args.cmd[:1] == ["--"] else args.cmd
     if not cmd:

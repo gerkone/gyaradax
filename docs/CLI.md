@@ -417,7 +417,27 @@ shift), and the nonlinear run decides that.
   and `linear_ky`, `linear_gamma`, `linear_gamma_std`, `linear_omega`, `linear_omega_std`,
   `linear_settled`, `linear_peak_ky`, `linear_gamma_max`, `linear_gamma_max_lowky`,
   `linear_low_ky`, `linear_gate` (the decision), `linear_t` (end of the linear run),
-  `linear_time` (time of the stored eigenmode), `linear_source`.
+  `linear_time` (time of the stored eigenmode), `linear_source`, `linear_dt` (the linear time
+  step), and the fluxes of the final eigenmode below.
+- **Eigenmode fluxes.** `linear_gate.json` also holds `mode_fluxes`: the flux integrals of the
+  solver diagnostics on the final eigenmode (physical f, plus the A_par / B_par flutter parts),
+  per species, channel (particle, heat, momentum) and ky. In the metadata, in the `flux_labels`
+  layout: `linear_flux` (the sum over ky and kx), `linear_flux_ky` (`flux_labels` x ky, summed
+  over kx), `linear_phi2_ky` (|φ|² averaged over the flux surface, summed over kx), the same over
+  the kx chain through kx = 0 alone (`linear_flux_ky_chain0`, `linear_phi2_ky_chain0`: the mode
+  whose γ and ω are reported), and the quasilinear weights `linear_weight_ky` =
+  `linear_flux_ky_chain0 / linear_phi2_ky_chain0` and `linear_weight_ky_allkx` =
+  `linear_flux_ky / linear_phi2_ky` (nan where |φ|² is 0). The linear run normalizes every kx
+  chain to unit amplitude on its own, so fluxes and |φ|² have arbitrary size and only their
+  ratios within a chain are physical; the all-kx weight averages the chains with equal weight.
+- **Linear only** (`--linear-only`). The linear run of the gate alone, with no nonlinear run and
+  no trajectory: `RUN_DIR/linear.json` (the `linear_gate.json` document plus the config, the
+  eigenmode time and the file shapes) and the eigenmode as `RUN_DIR/data/linear.bin`,
+  `linear_k.bin` and `linear_poten.bin` (the trajectory layout above; `linear_mode.npz` is removed
+  once they are written). `outcome.json` gets class `linear_only` and the run exits 0, so the
+  datagen scheduler marks it `done` with the gate results in its `outcomes` table. A repeat with
+  the outputs present returns at once. `gyaradax.io.dataset.attach_linear` adds such a staged
+  eigenmode to an existing trajectory (files and `linear_*` keys only, metadata backed up).
 - **Low-ky peak.** `gamma_max` and the decision use every ky > 0 of the grid. `gamma_max_lowky`
   and `peak_ky_lowky` are the same over kθρ <= `--linear-gate-low-ky` (default 1.0), reported
   alongside (in `linear_gate.json`, the trajectory metadata and the `outcomes` table) to see
@@ -445,6 +465,7 @@ shift), and the nonlinear run decides that.
 | Class | Meaning |
 |---|---|
 | `linear_stable` | skipped by the linear gate |
+| `linear_only` | `--linear-only`: the linear run alone |
 | `decayed` | stopped by `--stop-on-decay` |
 | `banded` | banding flagged (stopped or not) |
 | `flat` | mean heat flux over the averaging window below `--decay-floor` |

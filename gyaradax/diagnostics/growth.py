@@ -77,6 +77,7 @@ def growth_rates(
     log: Callable[[str], None] | None = None,
     frequencies: bool = False,
     keep_mode: bool = False,
+    mesh: Sequence[int] | None = None,
 ) -> dict[str, Any]:
     """Per-ky growth rates of ``cfg`` run linearly, averaged over the last ``settle`` time units.
 
@@ -84,7 +85,9 @@ def growth_rates(
     run). The run stops once the unstable ky (kθρ <= ``ky_max``, γ > ``gamma_min``) vary by less
     than ``tol`` over ``settle`` time units after ``t_min``, or at ``t_end``. ``frequencies``
     adds the real frequencies (``omega``, ``omega_std``) from a few short blocks after that;
-    ``keep_mode`` returns the final df and phi under ``mode``.
+    ``keep_mode`` returns the final df and phi under ``mode`` and their fluxes per ky under
+    ``mode_fluxes`` (:func:`mode_fluxes`). ``mesh`` (species, vpar, mu) shards the run over that
+    many visible GPUs, as for a nonlinear run; the default is one device.
     """
     import jax.numpy as jnp
 
@@ -95,7 +98,8 @@ def growth_rates(
     from gyaradax.solver.driver import gk_init, gk_run
 
     run_cfg = adjusted_config(cfg, ns, sets)
-    overrides: dict[str, Any] = {"n_gpus_sp": 1, "n_gpus_vp": 1, "n_gpus_mu": 1}
+    sp, vp, mu = (int(m) for m in mesh) if mesh is not None else (1, 1, 1)
+    overrides: dict[str, Any] = {"n_gpus_sp": sp, "n_gpus_vp": vp, "n_gpus_mu": mu}
     if backend:
         overrides["backend"] = backend
     params = gkparams_from_config(run_cfg, **overrides)
@@ -139,6 +143,9 @@ def growth_rates(
     result = {
         "ns": int(run_cfg.grid.ns),
         "ky": ky.tolist(),
+        "ky_convention": "kthrho: geometry krho * kthnorm (not krho / kthnorm)",
+        "kthnorm": kthnorm,
+        "kxrh": np.asarray(geometry["kxrh"], dtype=float).tolist(),
         "gamma": mean.tolist(),
         "gamma_std": std.tolist(),
         "t": t,
@@ -155,8 +162,66 @@ def growth_rates(
         omega, omega_std, df, phi, state = real_frequency(df, phi, geometry, params, state, pre)
         result["omega"], result["omega_std"] = omega.tolist(), omega_std.tolist()
     if keep_mode:
+        result["mode_fluxes"] = {
+            k: np.asarray(v).tolist() for k, v in mode_fluxes(df, geometry, params, pre).items()
+        }
         result["mode"] = {"df": np.asarray(df), "phi": np.asarray(phi), "time": float(state.time)}
     return result
+
+
+def mode_fluxes(df: Any, geometry: Mapping[str, Any], params: Any, pre: Any) -> dict[str, Any]:
+    """Fluxes of a linear eigenmode per ky and its quasilinear weights.
+
+    The flux integrals of the solver diagnostics (``quasilinear.linear_pipeline._harvest``: the
+    electrostatic fluxes of the physical f plus the A_par / B_par flutter parts), kept per
+    (species, channel, ky) with channels (particle, heat, momentum) as in ``flux_labels``.
+    Returns ``flux_kxy`` (nsp, 3, nkx, nky) and ``phi2_kxy`` (nkx, nky); ``flux`` (nsp, 3), the sum
+    over ky; ``flux_ky`` (nsp, 3, nky), summed over kx;
+    ``phi2_ky`` (nky,), the flux-surface average of |phi|^2 summed over kx; the same over the kx
+    chain through kx = 0 alone (``flux_ky_chain0``, ``phi2_ky_chain0``), the mode whose growth
+    rate and frequency are reported; and the weights ``weight_ky`` = ``flux_ky_chain0 /
+    phi2_ky_chain0`` and ``weight_ky_allkx`` = ``flux_ky / phi2_ky`` (nan where |phi|^2 is 0).
+    The linear run normalizes every kx chain on its own, so only per-chain ratios are physical.
+    """
+    from types import SimpleNamespace
+
+    from gyaradax.operators.fields import _compute_fields, g_to_f
+    from gyaradax.quasilinear.linear_pipeline import _harvest
+
+    phi, apar, bpar = _compute_fields(df, geometry, params, pre)
+    f = g_to_f(df, apar, params, pre) if params.nlapar else df
+    out = _harvest(
+        geometry,
+        f,
+        phi,
+        SimpleNamespace(last_growth_rate=None),
+        params=params,
+        apar=apar if params.nlapar else None,
+        bpar=bpar if params.nlbpar else None,
+        pre=pre,
+    )
+    if "fluxes_kxy_sp" in out:
+        kxy = np.asarray(out["fluxes_kxy_sp"], np.float64)
+    else:
+        channels = ("pflux", "eflux", "vflux")
+        kxy = np.stack([np.asarray(out[f"{c}_kxy"], np.float64) for c in channels])[None]
+    phi2 = np.asarray(out["phi2_kxy"], np.float64)
+    mode_label = np.asarray(geometry["mode_label"])
+    chain0 = mode_label == mode_label[int(np.asarray(geometry["ixzero"])), :]
+    res = {
+        "flux_kxy": kxy,
+        "phi2_kxy": phi2,
+        "flux": kxy.sum(axis=(-2, -1)),
+        "flux_ky": kxy.sum(axis=-2),
+        "phi2_ky": phi2.sum(axis=0),
+        "flux_ky_chain0": (kxy * chain0).sum(axis=-2),
+        "phi2_ky_chain0": (phi2 * chain0).sum(axis=0),
+    }
+    with np.errstate(divide="ignore", invalid="ignore"):
+        for name, suffix in (("weight_ky", "_chain0"), ("weight_ky_allkx", "")):
+            p2 = res["phi2_ky" + suffix]
+            res[name] = np.where(p2 > 0, res["flux_ky" + suffix] / p2, np.nan)
+    return res
 
 
 def _chain_phase(phi: Any, geometry: Mapping[str, Any]) -> np.ndarray:

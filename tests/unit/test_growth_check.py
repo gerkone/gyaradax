@@ -212,3 +212,44 @@ def test_datagen_passes_the_check_to_every_job_and_reports_it(tmp_path, config):
         json.dump(report, fh)
     doc = {"jobs": {job["name"]: {"spec": {"output_dir": job["output_dir"]}}}}
     assert cg._linear_checks(doc) == {job["name"]: "γ ns8 0.064 / ns36 0.051 (+25%)"}
+
+
+@pytest.mark.parametrize("adiabatic", [False, True])
+def test_mode_fluxes_sum_to_the_flux_and_weights_ignore_the_normalization(adiabatic):
+    import jax.numpy as jnp
+
+    from gyaradax.core.params import gkparams_from_config
+    from gyaradax.geometry import compute_geometry_from_config
+    from gyaradax.operators.precompute import linear_precompute
+    from gyaradax.solver.driver import _diagnostics, gk_init
+
+    cfg = growth.adjusted_config(_cfg())
+    if adiabatic:
+        cfg = OmegaConf.load(os.path.join(REPO_ROOT, "configs", "iteration_13.yaml"))
+        for key, value in GRID.items():
+            cfg.grid[key] = value
+    params = gkparams_from_config(cfg, n_gpus_sp=1, n_gpus_vp=1, n_gpus_mu=1)
+    n_species = 1 if params.adiabatic_electrons else len(params.mas)
+    df, geometry, _ = gk_init(compute_geometry_from_config(cfg), params, n_species=n_species)
+    rng = np.random.default_rng(1)
+    df = jnp.asarray(rng.standard_normal(df.shape) + 1j * rng.standard_normal(df.shape))
+    pre = linear_precompute(geometry, params)
+    out = growth.mode_fluxes(df, geometry, params, pre)
+    _, ref = _diagnostics(df, geometry, params, pre)
+    ref = np.asarray(ref, np.float64).reshape(-1, 3)
+    assert out["flux_ky"].shape == (ref.shape[0], 3, GRID["nky"])
+    atol = 1e-12 * np.abs(ref).max()
+    np.testing.assert_allclose(out["flux_ky"].sum(-1), ref, rtol=1e-10, atol=atol)
+    np.testing.assert_allclose(out["flux"], ref, rtol=1e-10, atol=atol)
+    np.testing.assert_allclose(out["weight_ky_allkx"] * out["phi2_ky"], out["flux_ky"], rtol=1e-12)
+    chain = out["weight_ky"] * out["phi2_ky_chain0"]
+    np.testing.assert_allclose(chain, out["flux_ky_chain0"], rtol=1e-12)
+    # ky = 0 has one kx per chain; the chain of a ky > 0 holds part of its kx
+    assert np.all(out["phi2_ky_chain0"] <= out["phi2_ky"] * (1 + 1e-12))
+    assert np.all(out["phi2_ky_chain0"][1:] < out["phi2_ky"][1:])
+    # rescaling one ky (as the per-ky normalization does) keeps its weight
+    scaled = df.at[..., 2].multiply(3.0 - 2.0j)
+    again = growth.mode_fluxes(scaled, geometry, params, pre)
+    np.testing.assert_allclose(again["phi2_ky"][2], 13.0 * out["phi2_ky"][2], rtol=1e-10)
+    for key in ("weight_ky", "weight_ky_allkx"):
+        np.testing.assert_allclose(again[key], out[key], rtol=1e-8, atol=1e-14)

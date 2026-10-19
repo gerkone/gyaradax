@@ -479,7 +479,12 @@ def test_outcome_exits_end_jobs_without_retries_and_fill_the_outcome_table(camp)
     assert "not retried" in sched.jobs["stable"].note
     assert gs.main(["resume", "decay", "--state", camp.state_path]) == 0
     sched.poll()
+    assert sched.jobs["decay"].state in ("pending", "starting", "running")
+    assert gs.main(["stable", "decay", "--state", camp.state_path]) == 0
+    active = ("pending", "starting", "running", "stopping")
+    camp.drive(sched, lambda: sched.jobs["decay"].state not in active)
     assert sched.jobs["decay"].state == "decayed"
+    assert "stopped by hand as stable" in sched.jobs["decay"].note
 
     con = sqlite3.connect(sched.db_path)
     try:

@@ -308,6 +308,7 @@ def _linear_gate(args: argparse.Namespace, config_path: str, run_dir: str | None
     from gyaradax.diagnostics import growth, outcome
 
     cfg = OmegaConf.load(config_path)
+    mesh = _mesh_request(args, _peek_config(config_path))
     output_dir = _default_output_dir(cfg, args, run_dir)
     path = os.path.join(output_dir, outcome.GATE_FILE)
     mode_path = os.path.join(output_dir, outcome.MODE_FILE)
@@ -320,7 +321,10 @@ def _linear_gate(args: argparse.Namespace, config_path: str, run_dir: str | None
             gate = cached
             print(f"linear gate: {path} (computed before)")
     if gate is None:
-        print(f"linear gate: linear run on the config's grid (t_end {args.linear_gate_t_end:g})")
+        print(
+            f"linear gate: linear run on the config's grid (t_end {args.linear_gate_t_end:g}, "
+            f"mesh sp, vp, mu = {mesh})"
+        )
         t0 = time.time()
         result = growth.growth_rates(
             cfg,
@@ -331,6 +335,7 @@ def _linear_gate(args: argparse.Namespace, config_path: str, run_dir: str | None
             ky_max=math.inf,
             frequencies=True,
             keep_mode=True,
+            mesh=mesh,
         )
         mode = result.pop("mode")
         result["wall_s"] = time.time() - t0
@@ -346,6 +351,46 @@ def _linear_gate(args: argparse.Namespace, config_path: str, run_dir: str | None
     outcome._atomic_json(path, gate)
     print(outcome.format_gate(gate))
     return gate
+
+
+def _linear_only(args: argparse.Namespace, config_path: str, run_dir: str | None) -> int:
+    """The linear gate alone: RUN_DIR/linear.json and the eigenmode as RUN_DIR/data/linear*.bin."""
+    import numpy as np
+
+    from gyaradax.diagnostics import growth, outcome
+    from gyaradax.io.dataset import LINEAR_FILES, linear_frames, write_linear_frames
+
+    cfg = OmegaConf.load(config_path)
+    output_dir = _default_output_dir(cfg, args, run_dir)
+    path = os.path.join(output_dir, outcome.LINEAR_FILE)
+    data_dir = os.path.join(output_dir, "data")
+    key = growth.config_key(growth.adjusted_config(cfg))
+    have = all(os.path.isfile(os.path.join(data_dir, n)) for n in LINEAR_FILES)
+    if have and os.path.isfile(path):
+        with open(path) as fh:
+            done = json.load(fh)
+        if done.get("config_key") == key:
+            print(f"linear only: {path} (computed before)")
+            print(outcome.format_gate(done))
+            return 0
+    gate = _linear_gate(args, config_path, run_dir)
+    mode_path = os.path.join(output_dir, outcome.MODE_FILE)
+    with np.load(mode_path) as mode:
+        frames = linear_frames(mode["df"], mode["phi"])
+        mode_time = float(mode["time"])
+    write_linear_frames(data_dir, frames)
+    doc = {
+        **gate,
+        "config": os.path.abspath(config_path),
+        "mode_time": mode_time,
+        "files": {f"data/{n}": list(a.shape) for n, a in zip(LINEAR_FILES, frames)},
+    }
+    outcome._atomic_json(path, doc)
+    outcome.gate_outcome(output_dir, gate, cls="linear_only")
+    # the eigenmode now lives in data/
+    os.remove(mode_path)
+    print(f"linear only: {path} and {data_dir}/linear*.bin; not starting the nonlinear run")
+    return 0
 
 
 def _stable_trajectory(
@@ -448,9 +493,18 @@ def _run_monitor(settings: Any, setup: RunSetup, gate: dict[str, Any] | None) ->
 def _cmd_growth(args: argparse.Namespace) -> int:
     if args.mem_fraction:
         os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = str(args.mem_fraction)
+    facts = _peek_config(args.config)
+    mesh = _auto_mesh(args.n_gpus, facts) if args.n_gpus > 1 else (1, 1, 1)
+    _check_mesh(mesh, facts, _visible_gpus(args))
     configure_runtime_env(
-        device=args.device if args.device is not None else -1, device_list=args.device_list
+        device=args.device if args.device is not None else -1,
+        device_list=args.device_list,
+        n_gpus_sp=mesh[0],
+        n_gpus_vp=mesh[1],
+        n_gpus_mu=mesh[2],
     )
+    if args.n_gpus > 1:
+        append_xla_flags(_MULTI_GPU_XLA_FLAGS)
     from gyaradax.diagnostics import growth
 
     cfg = growth.adjusted_config(OmegaConf.load(args.config), sets=_parse_sets(args.set))
@@ -459,7 +513,9 @@ def _cmd_growth(args: argparse.Namespace) -> int:
     for ns in sorted(set(args.ns or [own])):
         print(f"ns {ns}: linear run to settled growth rates (t_end {args.t_end:g})", flush=True)
         runs.append(
-            growth.growth_rates(cfg, ns, backend=args.backend, t_end=args.t_end, log=_progress())
+            growth.growth_rates(
+                cfg, ns, backend=args.backend, t_end=args.t_end, log=_progress(), mesh=mesh
+            )
         )
     report = growth.assemble(runs, own)
     report["config"] = os.path.abspath(args.config)
@@ -1097,10 +1153,11 @@ def _cmd_run(args: argparse.Namespace) -> int:
             raise SystemExit(
                 "error: --linear-check takes one config; run the configs one at a time"
             )
-        if _monitor_settings(args) is not None:
+        if _monitor_settings(args) is not None or args.linear_only:
             raise SystemExit(
-                "error: --linear-gate, --stop-on-decay, --stop-on-banding, --track-outcome and "
-                "--dataset-from-flux take one config; run the configs one at a time"
+                "error: --linear-gate, --linear-only, --stop-on-decay, --stop-on-banding, "
+                "--track-outcome and --dataset-from-flux take one config; run the configs one "
+                "at a time"
             )
         return _run_batched(args, run_dirs)
     return _run_single(args, args.configs[0], run_dirs[0])
@@ -1219,6 +1276,8 @@ def _run_single(args: argparse.Namespace, config_path: str, run_dir: str | None)
         code = _linear_check(args, config_path, run_dir)
         if code:
             return code
+    if args.linear_only and not args.dry_run:
+        return _linear_only(args, config_path, run_dir)
     gate = None
     if args.linear_gate and not args.dry_run:
         gate = _linear_gate(args, config_path, run_dir)
@@ -1734,6 +1793,12 @@ def build_parser() -> argparse.ArgumentParser:
              "linear_mode.npz, reused on resume); exit 4 instead of running when no ky grows",
     )
     run_p.add_argument(
+        "--linear-only", action="store_true",
+        help="the linear run of --linear-gate alone: RUN_DIR/linear.json (rates, frequencies, "
+             "per-ky eigenmode fluxes) and the eigenmode as RUN_DIR/data/linear*.bin; exit 0 "
+             "without the nonlinear run (outcome class linear_only)",
+    )
+    run_p.add_argument(
         "--linear-gate-t-end", type=float, default=60.0, metavar="T",
         help="with --linear-gate: end of the linear run if its growth rates have not settled "
              "(default 60)",
@@ -1836,6 +1901,9 @@ def build_parser() -> argparse.ArgumentParser:
     growth_p.add_argument("--device", type=int, default=None, help="pin to a single GPU index")
     growth_p.add_argument(
         "--device-list", type=str, default=None, help="comma-separated GPU indices"
+    )
+    growth_p.add_argument(
+        "--n-gpus", type=int, default=1, help="shard each linear run over N GPUs (default 1)"
     )
     growth_p.add_argument("--mem-fraction", type=float, default=None)
     growth_p.set_defaults(func=_cmd_growth)

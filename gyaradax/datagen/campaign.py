@@ -586,6 +586,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     cancel_p.set_defaults(func=_cmd_request)
 
+    stable_p = sub.add_parser(
+        "stable", help="stop jobs (SIGTERM, snapshot, exit) and record them as decayed"
+    )
+    stable_p.add_argument("names", nargs="+")
+    campaign(stable_p)
+    stable_p.set_defaults(func=_cmd_request)
+
     resume_p = sub.add_parser(
         "resume", help="put cancelled, failed, diverged or rejected jobs back in the queue"
     )

@@ -258,9 +258,9 @@ def test_cached_stable_gate_skips_the_nonlinear_run(tmp_path, config, capsys):
     real = np.fromfile(os.path.join(traj, "data", "linear.bin"), np.float32)
     np.testing.assert_allclose(real.reshape(meta["linear_shape"]), ds.df_to_real(df), atol=1e-5)
     poten = np.fromfile(os.path.join(traj, "data", "linear_poten.bin"), np.float32)
-    np.testing.assert_array_equal(poten.reshape(meta["phi_shape"]), ds.phi_to_real(phi))
+    np.testing.assert_array_equal(poten.reshape(meta["phi_shape"]), ds.phi_to_reim(phi))
     frame = ds.read_frame(ds.frame_path(traj, "poten", 0, "zstd16"), meta["phi_shape"])
-    np.testing.assert_allclose(frame, ds.phi_to_real(phi), rtol=1e-2, atol=1e-2)
+    np.testing.assert_allclose(frame, ds.phi_to_reim(phi), rtol=1e-2, atol=1e-2)
     assert not os.path.exists(ds.resume_path(traj))
 
 
@@ -302,3 +302,33 @@ def test_deferred_frames_of_a_quiet_run_keep_the_last(tmp_path, config):
     assert main([*argv, "--dataset-from-flux", "1e9"]) == 0
     meta = _meta(ds.trajectory_path(root, "tiny"))
     assert meta["solver_steps"].tolist() == [4] and meta["trace_solver_steps"].tolist() == [2, 4]
+
+
+def test_linear_only_writes_the_linear_outputs_and_stops(tmp_path, config, capsys):
+    run = str(tmp_path / "run")
+    argv = ["run", config, *COMMON, "--n-steps", "4", "--output-dir", run]
+    assert main([*argv, "--linear-only", "--linear-gate-t-end", "0.5"]) == 0
+    with open(os.path.join(run, outcome.LINEAR_FILE)) as fh:
+        doc = json.load(fh)
+    shape = (2, 2, 8, 2, 8, 11, 5)
+    assert doc["files"] == {
+        "data/linear.bin": list(shape),
+        "data/linear_k.bin": list(shape),
+        "data/linear_poten.bin": [2, 11, 8, 5],
+    }
+    assert len(doc["omega"]) == len(doc["gamma"]) == GRID["nky"] and doc["dt"] > 0
+    fluxes = doc["mode_fluxes"]
+    assert np.shape(fluxes["flux_ky"]) == (2, 3, GRID["nky"])
+    atol = 1e-12 * np.abs(fluxes["flux"]).max()
+    np.testing.assert_allclose(np.sum(fluxes["flux_ky"], -1), fluxes["flux"], atol=atol)
+    for name, size in (("linear.bin", np.prod(shape)), ("linear_poten.bin", 2 * 11 * 8 * 5)):
+        assert os.path.getsize(os.path.join(run, "data", name)) == 4 * size
+    with open(os.path.join(run, outcome.OUTCOME_FILE)) as fh:
+        assert json.load(fh)["class"] == "linear_only"
+    assert not os.path.exists(os.path.join(run, outcome.MODE_FILE))
+    assert not any(p.startswith("step_") for p in os.listdir(run))
+    assert "not starting the nonlinear run" in capsys.readouterr().out
+
+    # a repeat finds the outputs
+    assert main([*argv, "--linear-only", "--linear-gate-t-end", "0.5"]) == 0
+    assert "(computed before)" in capsys.readouterr().out
