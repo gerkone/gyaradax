@@ -9,7 +9,7 @@ import ctypes
 import logging
 import os
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Dict, Optional, Tuple
 
 import jax
 import jax.numpy as jnp
@@ -33,44 +33,8 @@ _ffi_registered = False
 _has_bracket_v6 = False
 
 
-def _concrete_int_or_none(value: Any) -> int | None:
-    """Return a Python int for concrete scalar metadata, or None for tracers."""
-    try:
-        arr = np.asarray(value)
-    except (jax.errors.ConcretizationTypeError, jax.errors.TracerArrayConversionError, TypeError):
-        return None
-    if arr.shape != ():
-        raise ValueError(f"expected scalar metadata, got shape {arr.shape}")
-    return int(arr.item())
-
-
-def _concrete_float(value: Any, name: str) -> float:
-    """Return a Python float for scalar metadata passed as an FFI attribute."""
-    try:
-        return float(np.asarray(value))
-    except (
-        jax.errors.ConcretizationTypeError,
-        jax.errors.TracerArrayConversionError,
-        TypeError,
-    ) as exc:
-        raise ValueError(f"CUDA backend needs a concrete {name}") from exc
-
-
-def _cuda_zero_mode_index(pre: GKPre, key: str, fallback: int, size: int) -> np.int32:
-    """Get concrete zero-mode metadata for CUDA FFI static attributes.
-
-    CUDA FFI attributes must be Python-concrete at trace time. Prefer the
-    precomputed zero-mode index when available; when ``pre`` was constructed
-    inside a JIT trace, scalar metadata can be traced, so fall back to the
-    current mode-box convention while still validating all concrete metadata.
-    """
-    concrete = _concrete_int_or_none(pre[key])
-    if concrete is None:
-        if key == "ixzero" and size % 2 != 1:
-            raise ValueError("CUDA nonlinear mode-box fallback requires odd nkx")
-        idx = fallback
-    else:
-        idx = concrete
+def _cuda_zero_mode_index(pre: GKPre, key: str, size: int) -> np.int32:
+    idx = int(pre[key])
     if not 0 <= idx < size:
         raise ValueError(f"{key}={idx} out of bounds for size {size}")
     return np.int32(idx)
@@ -271,7 +235,7 @@ class CUDAOps(SolverOps):
             c_d4_2=float(d4[2]),
             c_d4_3=float(d4[3]),
             c_d4_4=float(d4[4]),
-            dvp=_concrete_float(pre["dvp"], "pre['dvp']"),
+            dvp=float(pre["dvp"]),
             disp_vp=float(params.disp_vp),
             drive_scale=float(params.drive_scale),
         )
@@ -548,11 +512,8 @@ class CUDAOps(SolverOps):
         else:
             kernel_name = "cufft_graph_bracket_fp64_ffi"
 
-        # Fallback convention for currently supported CUDA mode-box grids.
-        # _cuda_zero_mode_index uses concrete precomputed metadata when it can,
-        # and only falls back here when the metadata is traced under JIT.
-        ixzero_static = _cuda_zero_mode_index(pre, "ixzero", nkx // 2, nkx)
-        iyzero_static = _cuda_zero_mode_index(pre, "iyzero", 0, nky)
+        ixzero_static = _cuda_zero_mode_index(pre, "ixzero", nkx)
+        iyzero_static = _cuda_zero_mode_index(pre, "iyzero", nky)
 
         def to6(x):
             x = jnp.asarray(x)
