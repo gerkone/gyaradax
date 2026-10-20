@@ -1,0 +1,68 @@
+{
+ "rule": "sat2",
+ "parameters": {
+  "cn": 0.8498809601501882,
+  "flux_exponent": 0.59
+ },
+ "options": {
+  "gate_sharpness": 20.0,
+  "kx_width_model": "tglf"
+ },
+ "fit": {
+  "method": "gyaradax.quasilinear.calibration.fit_sat2",
+  "date": "2026-10-20",
+  "tables": {
+   "adiabatic": {
+    "file": "adiabatic.parquet",
+    "modified": "2026-10-18T21:07:09"
+   },
+   "kinetic": {
+    "file": "kinetic.parquet",
+    "modified": "2026-10-18T21:07:09"
+   }
+  },
+  "rows": "saturated, settled QL weights, collisionless kinetic",
+  "channel": "Qi",
+  "n_train": {
+   "adiabatic": 264,
+   "kinetic": 116
+  },
+  "n_test": {
+   "adiabatic": 30,
+   "kinetic": 10
+  }
+ },
+ "test": {
+  "adiabatic": {
+   "n": 30,
+   "rmse": 30.12909367726357,
+   "mean_error": 16.24217159237586,
+   "rmse_log10": 0.15146530424996782,
+   "med_rel": 0.20452305175600527
+  },
+  "kinetic": {
+   "n": 10,
+   "rmse": 76.95351129348803,
+   "mean_error": -37.47946233564969,
+   "rmse_log10": 0.5005916096370162,
+   "med_rel": 0.6700402716487255
+  }
+ },
+ "cross_validation": {
+  "folds": 10,
+  "adiabatic": {
+   "n": 294,
+   "rmse": 25.95996838175385,
+   "mean_error": 11.315923297146236,
+   "rmse_log10": 0.1631896381275904,
+   "med_rel": 0.21421122556840988
+  },
+  "kinetic": {
+   "n": 126,
+   "rmse": 59.35094007608363,
+   "mean_error": -27.219798083711662,
+   "rmse_log10": 0.5133000173079113,
+   "med_rel": 0.4563654796031675
+  }
+ }
+}
