@@ -24,9 +24,9 @@ dev = ["pytest", "ruff", "black"]
 [tool.setuptools.packages.find]
 include = ["gyaradax*"]
 
-# ship the bundled gyaradax-QL Cn calibration weights as package data
+# ship the bundled saturation-rule calibrations as package data
 [tool.setuptools.package-data]
-"gyaradax.quasilinear.models" = ["*.pkl"]
+"gyaradax.quasilinear.calibrations" = ["*.json"]
 
 [tool.ruff]
 line-length = 100

@@ -1,13 +1,16 @@
 """sat2 calibration on the summary tables.
 
 `fit_sat2` fits the one (cn, flux_exponent) pair of `rules.ql_flux_sat2` for the adiabatic and
-kinetic sets together; the result goes into `rules.CALIBRATION`.
+kinetic sets together and returns it as a calibration record for `calibrations.save`.
 """
+
+import datetime
+import os
 
 import numpy as np
 
 SUMMARY = "/restricteddata/ukaea/gyrokinetics/preprocessed/summary"
-GQ_DEFAULT = 0.826
+SETS = ("adiabatic", "kinetic")
 
 
 def summary_rows(kind, collisional=False, summary=SUMMARY):
@@ -24,6 +27,8 @@ def summary_rows(kind, collisional=False, summary=SUMMARY):
             continue
         if r.lin_weight_Qi is None or np.size(r.lin_weight_Qi) == 0:
             continue
+        if not (np.isfinite(r.get("lin_gq", np.nan)) and np.isfinite(r.get("lin_grad_r0", np.nan))):
+            continue
         ky, g, w = (np.asarray(x, float) for x in (r.lin_ky, r.lin_gamma, r.lin_weight_Qi))
         n = min(ky.size, g.size, w.size)
         ky, g, w = ky[:n], g[:n], w[:n]
@@ -31,15 +36,13 @@ def summary_rows(kind, collisional=False, summary=SUMMARY):
         if m.sum() < 4 or not (g[m] > 0).any():
             continue
         o = np.argsort(ky[m])
-        gq = r.get("lin_gq")
-        gq = GQ_DEFAULT if gq is None or not np.isfinite(gq) else float(gq)
         # lin_ky is k_theta*rho, the rule's physical axis when kthnorm = 1
-        rows.append(dict(ky=ky[m][o], g=np.maximum(g[m], 0.0)[o], w=w[m][o],
-                         dlnpdr=float(r.dlnpdr_tglf), Q=float(r.Qi_avg), gq=gq))
+        rows.append(dict(ky=ky[m][o], g=np.maximum(g[m], 0.0)[o], w=w[m][o], Q=float(r.Qi_avg),
+                         dlnpdr=float(r.dlnpdr_tglf), gq=float(r.lin_gq), grad_r0=float(r.lin_grad_r0)))
     return rows
 
 
-def sat2_predict(rows, cn, flux_exponent, gate_sharpness=20.0):
+def sat2_predict(rows, cn, options):
     import jax.numpy as jnp
 
     from .rules import ql_flux_sat2
@@ -48,8 +51,7 @@ def sat2_predict(rows, cn, flux_exponent, gate_sharpness=20.0):
         float(ql_flux_sat2(
             jnp.asarray(r["g"]), None, jnp.ones((1, r["ky"].size)), jnp.asarray(r["w"])[None, :],
             jnp.asarray(r["ky"]), jnp.zeros(1), None, None, cn=cn, dlnpdr=r["dlnpdr"],
-            kthnorm=1.0, grad_r0=1.0, gq=r["gq"], flux_exponent=flux_exponent,
-            gate_sharpness=gate_sharpness,
+            kthnorm=1.0, grad_r0=r["grad_r0"], gq=r["gq"], **options,
         ))
         for r in rows
     ])
@@ -77,36 +79,68 @@ def flux_metrics(y, p):
     y, p = np.asarray(y, float), np.asarray(p, float)
     m = np.isfinite(y) & np.isfinite(p) & (y > 0) & (p > 0)
     y, p = y[m], p[m]
-    return dict(n=int(m.sum()), rmse=float(np.sqrt(np.mean((p - y) ** 2))), mean_error=float(np.mean(p - y)),
+    return dict(n=int(m.sum()), rmse=float(np.sqrt(np.mean((p - y) ** 2))),
+                mean_error=float(np.mean(p - y)),
                 rmse_log10=float(np.sqrt(np.mean(np.log10(p / y) ** 2))),
                 med_rel=float(np.median(np.abs(p / y - 1))))
 
 
-def fit_sat2(summary=SUMMARY, gate_sharpness=20.0, collisional=False):
-    """Joint (cn, flux_exponent) of ql_flux_sat2 for the adiabatic and kinetic tables, Qi only.
-
-    Test rows are 10% of each log-flux decile of each set; p runs over a 0.01 grid, cn is the
-    log-mean ratio over the train rows, and the pair with the lowest train log10 RMSE wins.
-    Returns the pair and the test metrics per set.
-    """
-    sets = {k: summary_rows(k, collisional, summary) for k in ("adiabatic", "kinetic")}
-    y = {k: np.array([r["Q"] for r in v]) for k, v in sets.items()}
+def _best(x_by_p, y, mask, exponents):
+    """(p index, cn) minimising log10 RMSE over `mask`, cn the log-mean ratio there."""
     best = None
-    for p in np.arange(0.30, 1.35, 0.01):
-        x = {k: sat2_predict(v, 1.0, p, gate_sharpness) for k, v in sets.items()}
-        ok = {k: np.isfinite(x[k]) & (x[k] > 0) & (y[k] > 0) for k in sets}
-        test = {k: stratified_test(np.where(ok[k], y[k], np.nan)) & ok[k] for k in sets}
-        train = {k: ok[k] & ~test[k] for k in sets}
-        xj = np.concatenate([x[k][train[k]] for k in sets])
-        yj = np.concatenate([y[k][train[k]] for k in sets])
-        cn = float(np.exp(np.mean(np.log(yj) - np.log(xj))))
-        err = float(np.sqrt(np.mean((np.log10(cn * xj) - np.log10(yj)) ** 2)))
+    for i in range(len(exponents)):
+        x = x_by_p[i]
+        ok = mask & np.isfinite(x) & (x > 0) & (y > 0)
+        cn = float(np.exp(np.mean(np.log(y[ok]) - np.log(x[ok]))))
+        err = float(np.sqrt(np.mean((np.log10(cn * x[ok]) - np.log10(y[ok])) ** 2)))
         if best is None or err < best[0]:
-            best = (err, float(p), cn, x, test, train)
-    _, p, cn, x, test, train = best
+            best = (err, i, cn)
+    return best[1], best[2]
+
+
+def fit_sat2(summary=SUMMARY, options=None, collisional=False, exponents=None, folds=10):
+    """Calibration record of ql_flux_sat2 fitted jointly on the adiabatic and kinetic tables, Qi only.
+
+    The fit uses 90% of each set (the test rows are 10% of each log-flux decile): p over
+    `exponents`, cn the log-mean ratio over the train rows, minimising log10 RMSE. The record
+    also carries the test metrics and a `folds`-fold cross-validation over all rows.
+    """
+    options = dict(options or {"gate_sharpness": 20.0, "kx_width_model": "tglf"})
+    exponents = np.round(np.arange(0.30, 1.35, 0.01) if exponents is None else np.asarray(exponents), 4)
+    sets = {k: summary_rows(k, collisional, summary) for k in SETS}
+    kind = np.concatenate([[k] * len(v) for k, v in sets.items()])
+    rows = [r for k in SETS for r in sets[k]]
+    y = np.array([r["Q"] for r in rows])
+    x_by_p = np.array([sat2_predict(rows, 1.0, {**options, "flux_exponent": p}) for p in exponents])
+
+    test = np.zeros(y.size, bool)
+    for k in SETS:
+        sel = kind == k
+        test[sel] = stratified_test(y[sel])
+    i, cn = _best(x_by_p, y, ~test, exponents)
+    pred = cn * x_by_p[i]
+
+    fold = np.random.default_rng(0).permutation(y.size) % folds
+    cv = np.full(y.size, np.nan)
+    for f in range(folds):
+        j, c = _best(x_by_p, y, fold != f, exponents)
+        cv[fold == f] = c * x_by_p[j][fold == f]
+
+    tables = {k: f"{summary}/{k}.parquet" for k in SETS}
     return dict(
-        cn=cn,
-        flux_exponent=round(p, 2),
-        n={k: {"train": int(train[k].sum()), "test": int(test[k].sum())} for k in sets},
-        test={k: flux_metrics(y[k][test[k]], cn * x[k][test[k]]) for k in sets},
+        rule="sat2",
+        parameters=dict(cn=cn, flux_exponent=float(exponents[i])),
+        options=options,
+        fit=dict(
+            method="gyaradax.quasilinear.calibration.fit_sat2",
+            date=datetime.date.today().isoformat(),
+            tables={k: dict(path=v, modified=datetime.datetime.fromtimestamp(os.path.getmtime(v)).isoformat(
+                timespec="seconds")) for k, v in tables.items()},
+            rows="saturated, settled QL weights, " + ("all" if collisional else "collisionless") + " kinetic",
+            channel="Qi",
+            n_train={k: int(((kind == k) & ~test).sum()) for k in SETS},
+            n_test={k: int(((kind == k) & test).sum()) for k in SETS},
+        ),
+        test={k: flux_metrics(y[(kind == k) & test], pred[(kind == k) & test]) for k in SETS},
+        cross_validation=dict(folds=folds, **{k: flux_metrics(y[kind == k], cv[kind == k]) for k in SETS}),
     )

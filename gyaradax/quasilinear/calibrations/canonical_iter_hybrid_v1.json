@@ -1,0 +1,30 @@
+{
+ "rule": "canonical",
+ "parameters": {
+  "cn": 0.16027657811580445
+ },
+ "options": {},
+ "grid": {
+  "nvpar": 32,
+  "nmu": 8,
+  "ns": 16,
+  "nkx": 43,
+  "nky": 16,
+  "ikxspace": 5,
+  "krhomax": 1.4
+ },
+ "fit": {
+  "source": "gkw_aggregated",
+  "rows": 835,
+  "n_train": 668,
+  "n_test": 167,
+  "note": "ITER-hybrid-like GKW adiabatic scans, fitted at the grid above"
+ },
+ "test": {
+  "all": {
+   "n": 167,
+   "rmse": 28.00811047574904,
+   "r2": 0.6604176488192842
+  }
+ }
+}

@@ -1745,21 +1745,25 @@ Not included: the sat_geo factor (the solve already uses the real flux surface) 
 
 ### 14.3 calibration
 
-`calibration.fit_sat2()` fits one (cn, p) for both sets through `ql_flux_sat2` itself:
+Fitted parameters live in `quasilinear/calibrations/`, one JSON per fit: the rule, its fitted
+`parameters` (`cn`, and `flux_exponent` for sat2), the rule `options` held fixed, optionally the
+`grid`, and the `fit` record with `test` and `cross_validation` metrics. `calibrations.load(name)`
+reads one (`"auto"` picks the rule's default, `calibrations.DEFAULTS`); `calibrations.rule_kwargs`
+gives the rule's keyword arguments besides `cn`. No fitted number is hard-coded in the rules.
+
+`calibration.fit_sat2()` returns such a record (`calibrations.save` writes it); it fits one (cn, p)
+for both sets through `ql_flux_sat2` itself:
 
 - data: `/restricteddata/ukaea/gyrokinetics/preprocessed/summary/{adiabatic,kinetic}.parquet`,
   saturated rows with settled QL weights (`lin_ky`, `lin_gamma`, `lin_weight_Qi`, `lin_gq`,
   `dlnpdr_tglf` against `Qi_avg`); kinetic collisionless unless `collisional=True`;
 - test rows: 10% per log-flux decile of each set; p on a 0.01 grid, cn the log-mean ratio over the
   train rows, minimising log10 RMSE;
-- current `CALIBRATION["sat2"]`: cn 0.8499, p 0.590 (tables of 18 Oct 2026, 264 adiabatic +
-  116 kinetic train rows), fitted at eps = 0.19, collisionless, Qi only.
+- bundled: `sat2_v1` (tables of 18 Oct 2026, eps = 0.19, collisionless, Qi only; not final) and
+  `canonical_iter_hybrid_v1` (fitted at 43x16).
 
-The canonical rule takes its Cn from the bundled head `models/cn_iter_hybrid_v1.pkl` (scalar 0.160,
-fitted at 43x16); sat0 and sat2 take theirs from `CALIBRATION` or an explicit cn.
-
-10-fold cross-validation over all rows (294 adiabatic, 126 kinetic), each row predicted by a fit
-that did not see it:
+`sat2_v1` under 10-fold cross-validation over all rows (294 adiabatic, 126 kinetic), each row
+predicted by a fit that did not see it:
 
 | set (Qi range) | n | mean Qi | RMSE | mean error | median rel. error | pred / true (geo mean) |
 |---|--:|--:|--:|--:|--:|--:|

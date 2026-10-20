@@ -126,14 +126,6 @@ _SAT2_CZ2 = 1.05
 # floor of the gamma/ky peak search, so the lowest ky is not taken as the peak
 _SAT2_KYMIN = 0.173 * 2.0**0.5
 
-# sat2 from calibration.fit_sat2 on the summary tables (collisionless, Qi only, gate 20)
-CALIBRATION = {
-    "canonical": {"cn": None},
-    "sat0": {"cn": None},
-    "sat2": {"cn": 0.8499, "flux_exponent": 0.590},
-}
-_SAT2_FLUX_EXPONENT = CALIBRATION["sat2"]["flux_exponent"]
-
 # cap of the gamma/ky peak search, 0.8 grad_r0 / rho_ion with rho_ion = 1
 _SAT2_KYCUT = 0.8
 
@@ -358,7 +350,7 @@ def ql_flux_sat2(
     grad_r0=1.0,
     gq=1.0,
     kx_width_model="tglf",
-    flux_exponent=_SAT2_FLUX_EXPONENT,
+    flux_exponent=1.0,
     gate_threshold=0.0,
     gate_sharpness=20.0,
     eps=1e-30,
@@ -370,8 +362,9 @@ def ql_flux_sat2(
     the quadratically refined peak of gamma/ky (floored at `kymin`, default 0.173 sqrt(2) grad_r0),
     gamma_eff the growth rate clamped above kymax and Lorentzian-averaged over high ky, and
     kx_width from SAT2's model (`kx_width_model="tglf"`) or measured from |phi|^2. b2 folds into cn
-    and sat_geo is left out. `flux_exponent` p acts on each mode's intensity and defaults to
-    CALIBRATION; `dlnpdr=None` drops 12/dlnpdr; `kthnorm` converts krho to k_theta rho.
+    and sat_geo is left out. `flux_exponent` p acts on each mode's intensity (1 is SAT2's own form;
+    fitted values live in `calibrations`); `dlnpdr=None` drops 12/dlnpdr; `kthnorm` converts krho
+    to k_theta rho.
     """
     ghat = _gated_gamma(growth_rate, gate_threshold, gate_sharpness)
     w = _w_ky(flux_kxy, phi2_kxy, eps)

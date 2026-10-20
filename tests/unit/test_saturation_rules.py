@@ -11,6 +11,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+from gyaradax.quasilinear import calibrations
 from gyaradax.quasilinear.rules import RULES, dlnpdr_tglf, ql_flux, ql_flux_per_species
 
 NS, NKX, NKY = 8, 5, 6
@@ -417,3 +418,20 @@ class TestDlnpdr:
                 spec["ds"], dlnpdr=6.0, flux_exponent=p,
             ))
             assert q_on == pytest.approx(q_off * (12.0 / 6.0) ** p, rel=1e-10)
+
+
+@pytest.mark.parametrize("name", calibrations.names())
+def test_bundled_calibration_drives_its_rule(name):
+    cal = calibrations.load(name)
+    assert cal["rule"] in RULES and cal["parameters"]["cn"] > 0
+    q = float(call_rule(RULES[cal["rule"]], synthetic_spectrum(), cn=cal["parameters"]["cn"],
+                        **calibrations.rule_kwargs(cal)))
+    assert np.isfinite(q) and q > 0
+
+
+def test_auto_resolves_the_rule_default():
+    for rule, name in calibrations.DEFAULTS.items():
+        assert calibrations.load("auto", rule) == calibrations.load(name)
+    assert calibrations.load("auto", "sat0") is None
+    with pytest.raises(ValueError, match="is for rule"):
+        calibrations.load("sat2_v1", "canonical")
