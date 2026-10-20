@@ -92,6 +92,8 @@ class GKParams:
     mixed_precision: bool = True
     backend: str = "jax"
     use_z2z: bool = False
+    # cuda backend: fused electrostatic linear kernel (collisions, rk4 stage updates, field moments)
+    fused_linear: bool = False
 
     # rotation (GKW &ROTATION): rigid toroidal rotation in the co-moving
     # frame. vcor = Rref*Omega/vthref adds the Coriolis drift
@@ -182,6 +184,7 @@ class GKParams:
         "mixed_precision",
         "backend",
         "use_z2z",
+        "fused_linear",
         "nlapar",
         "nlbpar",
         "collisions",
@@ -286,6 +289,7 @@ def gkparams_from_runtime(runtime: Dict[str, Any], **overrides: Any) -> GKParams
         "fac_dtim_nl": fac_dtim_nl,
         "spectral_radius": bool(runtime.get("spectral_radius", True)),
         "backend": str(runtime.get("backend", "jax")),
+        "fused_linear": bool(runtime.get("fused_linear", False)),
         "nlapar": bool(runtime.get("nlapar", False)),
         "nlbpar": bool(runtime.get("nlbpar", False)),
         "beta": float(runtime.get("beta", 0.0)),
@@ -525,6 +529,7 @@ def gkparams_from_config(config: Any, **overrides: Any) -> GKParams:
         "nlbpar": bool(getattr(solver_cfg, "nlbpar", False)),
         "mixed_precision": bool(getattr(solver_cfg, "mixed_precision", True)),
         "use_z2z": bool(getattr(solver_cfg, "use_z2z", False)),
+        "fused_linear": bool(getattr(solver_cfg, "fused_linear", False)),
         "disable_per_ky_norm": bool(getattr(solver_cfg, "disable_per_ky_norm", False)),
         "beta": float(getattr(physics_cfg, "beta", 0.0)),
         "betaprime": float(getattr(physics_cfg, "betaprime", 0.0)),

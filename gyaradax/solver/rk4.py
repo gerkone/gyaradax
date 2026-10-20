@@ -394,14 +394,31 @@ def gkstep_single(
     # rk4 as a running sum in the closed form's association
     dt6 = dt / 6.0
     dt3 = dt / 3.0
-    k1, phi1, apar1 = _rhs(prev_df)
-    acc, stage = jax.lax.optimization_barrier((prev_df + dt6 * k1, prev_df + 0.5 * dt * k1))
-    k2, phi2, apar2 = _rhs(stage)
-    acc, stage = jax.lax.optimization_barrier((acc + dt3 * k2, prev_df + 0.5 * dt * k2))
-    k3, phi3, apar3 = _rhs(stage)
-    acc, stage = jax.lax.optimization_barrier((acc + dt3 * k3, prev_df + dt * k3))
-    k4, phi4, apar4 = _rhs(stage)
-    next_df_raw = acc + dt6 * k4
+    if getattr(ops, "supports_rk_fused", lambda *a: False)(prev_df, params, pre):
+
+        def _stage(dg, acc, c_acc, c_stage, want_stage):
+            phi_l, apar_l, bpar_l = ops.compute_fields(dg, geometry, params, pre)
+            nl = None
+            if params.non_linear:
+                nl = ops.nonlinear_term_iii(dg, phi_l, geometry, apar=apar_l, bpar=bpar_l)
+            acc, stage = ops.rk_stage(
+                dg, phi_l, params, pre, prev_df, acc, nl, c_acc, c_stage, want_stage
+            )
+            return acc, stage, phi_l, apar_l
+
+        acc, stage, phi1, apar1 = _stage(prev_df, prev_df, dt6, 0.5 * dt, True)
+        acc, stage, phi2, apar2 = _stage(stage, acc, dt3, 0.5 * dt, True)
+        acc, stage, phi3, apar3 = _stage(stage, acc, dt3, dt, True)
+        next_df_raw, _, phi4, apar4 = _stage(stage, acc, dt6, 0.0, False)
+    else:
+        k1, phi1, apar1 = _rhs(prev_df)
+        acc, stage = jax.lax.optimization_barrier((prev_df + dt6 * k1, prev_df + 0.5 * dt * k1))
+        k2, phi2, apar2 = _rhs(stage)
+        acc, stage = jax.lax.optimization_barrier((acc + dt3 * k2, prev_df + 0.5 * dt * k2))
+        k3, phi3, apar3 = _rhs(stage)
+        acc, stage = jax.lax.optimization_barrier((acc + dt3 * k3, prev_df + dt * k3))
+        k4, phi4, apar4 = _rhs(stage)
+        next_df_raw = acc + dt6 * k4
 
     # inline NL CFL: max grad across all RK4 substages (GKW non_linear_terms.F90:1538)
     if params.non_linear:

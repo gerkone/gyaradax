@@ -21,7 +21,12 @@ import gyaradax.operators.stencils as stencils
 import gyaradax.sharding as sharding
 from gyaradax.backends.ops import SolverOps
 from gyaradax.core.state import GKPre
-from gyaradax.operators.collisions import collision_term, collisions_on
+from gyaradax.operators.collisions import (
+    CONSERVATION_KEYS,
+    collision_term,
+    collisions_on,
+    conservation_correction,
+)
 from gyaradax.operators.fields import g_to_f
 
 log = logging.getLogger(__name__)
@@ -31,6 +36,9 @@ LIB_PATH = _CUDA_KERNELS_DIR / "libgyaradax_cuda.so"
 _ffi_registered = False
 # set when the library carries the cuFFTDx (v6) bracket; GYARADAX_BRACKET=v5 forces the v5 pipeline
 _has_bracket_v6 = False
+_has_linear_es = False
+_has_collision_rhs = False
+_fused_fallback_logged = False
 
 
 def _cuda_zero_mode_index(pre: GKPre, key: str, size: int) -> np.int32:
@@ -41,7 +49,7 @@ def _cuda_zero_mode_index(pre: GKPre, key: str, size: int) -> np.int32:
 
 
 def _register_ffi():
-    global _ffi_registered, _has_bracket_v6
+    global _ffi_registered, _has_bracket_v6, _has_linear_es, _has_collision_rhs
     if _ffi_registered:
         return True
 
@@ -65,6 +73,11 @@ def _register_ffi():
         if hasattr(_lib, name):
             targets[name] = getattr(_lib, name)
     _has_bracket_v6 = "cufft_bracket_v6_fp32_ffi" in targets
+    for name in ("linear_rhs_es_ffi", "linear_rhs_es_rk_ffi", "collision_rhs_ffi"):
+        if hasattr(_lib, name):
+            targets[name] = getattr(_lib, name)
+    _has_linear_es = "linear_rhs_es_rk_ffi" in targets
+    _has_collision_rhs = "collision_rhs_ffi" in targets
 
     for name, symbol in targets.items():
         try:
@@ -81,6 +94,41 @@ def is_available():
     return LIB_PATH.exists() and bool(jax.devices("cuda"))
 
 
+# parallel-stencil taps summed by linear_rhs_fused.cu
+PAR_TAP_LO, PAR_TAP_HI = 2, 7
+_PAR_TABLES = ("s_upar_tab", "s_t7_tab", "s_disp_par_tab")
+
+
+def _assert_vpar_centre_zero() -> None:
+    c = float(np.asarray(stencils.VPAR_D1)[2])
+    if c != 0.0:
+        raise ValueError(
+            f"VPAR_D1 centre tap is {c!r}, not 0; linear_rhs_fused.cu drops it. "
+            "Restore the term in out_d1 if the vpar scheme changes.")
+
+
+def _assert_dead_taps_zero(pre: GKPre) -> None:
+    """Raise if a parallel-stencil table is nonzero outside the taps the kernel sums."""
+    dead = [i for i in range(9) if not PAR_TAP_LO <= i < PAR_TAP_HI]
+    for key in _PAR_TABLES:
+        if key not in pre:
+            continue
+        try:
+            tab = np.asarray(pre[key])
+        except (jax.errors.ConcretizationTypeError, jax.errors.TracerArrayConversionError,
+                TypeError):
+            continue                      # tracer under jit
+        if tab.shape[-1] != 9:
+            raise ValueError(f"{key} has {tab.shape[-1]} taps, kernel assumes 9")
+        bad = [i for i in dead if np.abs(tab[..., i]).max() != 0.0]
+        if bad:
+            raise ValueError(
+                f"{key} is nonzero at taps {bad}, which the CUDA linear kernel "
+                f"does not sum (it covers {PAR_TAP_LO}..{PAR_TAP_HI - 1}). "
+                "A wider parallel stencil needs PAR_TAP_LO/HI widened in "
+                "kernels/linear_rhs_fused.cu and this guard updated.")
+
+
 @jax.tree_util.register_pytree_node_class
 class CUDAOps(SolverOps):
     """CUDA backend using custom FFI kernels for stencils and FFT bracket.
@@ -95,6 +143,8 @@ class CUDAOps(SolverOps):
             log.warning("CUDA backend: use_z2z=True ignored (CUDA is Z2Z-only)")
 
         super().__init__(pre, use_z2z, mixed_precision, mesh)
+        _assert_dead_taps_zero(pre)
+        _assert_vpar_centre_zero()
 
     def _pack_shift_maps(self):
         """Pack precomputed shift maps into (9, ns, nkx, nky, 2) int32 array."""
@@ -119,6 +169,7 @@ class CUDAOps(SolverOps):
         df is 5D (adiabatic) or 6D (kinetic). With apar, df_is_g selects whether
         df holds the mixed variable g (the kernel forms f = g + g2f*apar) or f.
         dproj = (m0, m1) enables the conservative parallel dissipation projection.
+        Unsharded electrostatic calls without it run the vpar-marching linear_rhs_es kernel.
         """
         kinetic = df.ndim == 6
         if kinetic:
@@ -311,6 +362,182 @@ class CUDAOps(SolverOps):
             return kernel(*args)
         return sharding.velocity_map(kernel, self.mesh, args, axes, PartitionSpec(*vel))
 
+    def _es_ok(self, df, pre, has_em, has_dpc) -> bool:
+        """Whether the fused electrostatic kernel can run this call; warns once when it cannot."""
+        global _fused_fallback_logged
+        nv, ns, nky = df.shape[-5], df.shape[-3], df.shape[-1]
+        reason = None
+        if not _has_linear_es:
+            reason = "the CUDA library has no linear_rhs_es kernel (rebuild it)"
+        elif has_em:
+            reason = "electromagnetic runs are not supported"
+        elif has_dpc:
+            reason = "conservative parallel dissipation is not supported"
+        elif self.mesh is not None:
+            reason = "sharded runs are not supported"
+        elif ns * nky > 576 or nv % 8 != 0:
+            reason = f"needs ns * nky <= 576 and nv % 8 == 0 (ns={ns}, nky={nky}, nv={nv})"
+        elif df.size >= 2**31:
+            reason = "grid exceeds 32-bit indexing"
+        if reason is not None and not _fused_fallback_logged:
+            log.warning("fused_linear falls back to the default linear kernel: %s", reason)
+            _fused_fallback_logged = True
+        return reason is None
+
+    @staticmethod
+    def _fuse_collisions(params, pre) -> bool:
+        return collisions_on(params, pre) and not (
+            params.coll_mom_conservation or params.coll_ene_conservation
+        )
+
+    def _es_call(self, df, phi, pre, params, with_collisions):
+        """Positional arguments and attributes of the linear_rhs_es kernels."""
+        kinetic = df.ndim == 6
+        nsp = df.shape[0] if kinetic else 1
+        nv, nmu, ns, nkx, nky = df.shape[-5:]
+
+        def sp6(x):
+            x = jnp.asarray(x, dtype=jnp.float64)
+            return x if kinetic else x[None]
+
+        def table(key, shape, out_shape):
+            return jnp.broadcast_to(sp6(pre[key]), shape).reshape(out_shape)
+
+        def per_species(key):
+            return jnp.broadcast_to(jnp.asarray(pre[key], dtype=jnp.float64).reshape(-1), (nsp,))
+
+        n_class = int(pre["s_upar_tab"].shape[-2])
+        mu_s, v_mu_s = (nsp, 1, nmu, ns, 1, 1), (nsp, nv, nmu, ns, 1, 1)
+        inv_dvp = 1.0 / float(pre["dvp"])
+        utrap = table("utrap", mu_s, (nsp, nmu, ns, 1))
+        abs_vp = table("abs_dum2_vp", mu_s, (nsp, nmu, ns, 1))
+        wvp = utrap * inv_dvp * jnp.asarray(stencils.VPAR_D1) + float(
+            params.disp_vp
+        ) * abs_vp * inv_dvp * jnp.asarray(stencils.VPAR_D4)
+        fmaxwl = table("fmaxwl", v_mu_s, (nsp, nv, nmu, ns))
+        drive_b = (
+            float(params.drive_scale) * per_species("signz0")[:, None, None, None] * fmaxwl
+            * (1.0 / jnp.maximum(per_species("tmp0"), 1e-15))[:, None, None, None]
+        )
+        dmaxwel = table("dmaxwel_fm_ek", (nsp, nv, nmu, ns, 1, nky), (nsp, nv, nmu, ns, nky))
+        coll = jnp.zeros((1,), jnp.float64)
+        if with_collisions:
+            coll = jnp.broadcast_to(sp6(pre["coll_stencil"]), (nsp, 9, nv, nmu, ns))
+        args = (
+            df.astype(jnp.complex128),
+            phi.astype(jnp.complex128),
+            table("bessel", (nsp, 1, nmu, ns, nkx, nky), (nsp, nmu, ns, nkx, nky)),
+            jnp.broadcast_to(sp6(pre["s_upar_tab"]), (nsp, nv, 1, ns, n_class, 9)).reshape(
+                nsp, nv, ns, n_class, 9
+            ),
+            table("s_t7_tab", (nsp, nv, nmu, ns, n_class, 9), (nsp, nv, nmu, ns, n_class, 9)),
+            jnp.broadcast_to(pre["par_stencil_class"], (ns, nkx, nky)).astype(jnp.int32),
+            self._pack_shift_maps().reshape(9, ns, nkx, nky, 2),
+            wvp,
+            table("drift_x", v_mu_s, (nsp, nv, nmu, ns)),
+            table("drift_y", v_mu_s, (nsp, nv, nmu, ns)),
+            float(params.drive_scale) * dmaxwel,
+            drive_b,
+            jnp.broadcast_to(pre["hyper"], (1, 1, 1, nkx, nky)).reshape(nkx, nky),
+            jnp.asarray(pre["kx_b"]).reshape(-1)[:nkx],
+            jnp.asarray(pre["ky_b"]).reshape(-1)[:nky],
+            coll,
+        )
+        attrs = dict(
+            nsp=np.int32(nsp),
+            nv=np.int32(nv),
+            nmu=np.int32(nmu),
+            ns=np.int32(ns),
+            nkx=np.int32(nkx),
+            nky=np.int32(nky),
+            n_class=np.int32(n_class),
+            has_coll=np.int32(with_collisions),
+        )
+        return args, attrs
+
+    def _linear_rhs_es(self, df, phi, pre, params, with_collisions):
+        args, attrs = self._es_call(df, phi, pre, params, with_collisions)
+        return ffi.ffi_call(
+            "linear_rhs_es_ffi",
+            jax.ShapeDtypeStruct(df.shape, jnp.complex128),
+            vmap_method="sequential",
+        )(*args, **attrs)
+
+    def _collision_cuda(self, df, params, pre):
+        """Collision RHS from the collision_rhs kernel, conservation correction in JAX."""
+        kinetic = df.ndim == 6
+        f = df if kinetic else df[None]
+        nsp, nv, nmu, ns, nkx, nky = f.shape
+
+        def apply(key):
+            stencil = jnp.asarray(pre[key], dtype=jnp.float64)
+            stencil = stencil if kinetic else stencil[None]
+            return ffi.ffi_call(
+                "collision_rhs_ffi",
+                jax.ShapeDtypeStruct(f.shape, jnp.complex128),
+                vmap_method="sequential",
+            )(
+                f.astype(jnp.complex128),
+                jnp.broadcast_to(stencil, (nsp, 9, nv, nmu, ns)),
+                nsp=np.int32(nsp),
+                nv=np.int32(nv),
+                nmu=np.int32(nmu),
+                ns=np.int32(ns),
+                nxy=np.int32(nkx * nky),
+            )
+
+        term = apply("coll_stencil")
+        if (params.coll_mom_conservation or params.coll_ene_conservation) and (
+            "coll_mom_factor" in pre
+        ):
+            # the correction is taken from the self-collision part, as in collision_term
+            base = apply("coll_self_stencil") if "coll_self_stencil" in pre else term
+            weights = [jnp.asarray(pre[k]) for k in CONSERVATION_KEYS]
+            if kinetic:
+                term = term + jax.vmap(conservation_correction)(base, *weights)
+            else:
+                term = term + conservation_correction(base[0], *weights)[None]
+        return term if kinetic else term[0]
+
+    def _collisions(self, f, params, pre):
+        if params.fused_linear and _has_collision_rhs and self.mesh is None:
+            return self._collision_cuda(f, params, pre)
+        return collision_term(f, params, pre, self.mesh)
+
+    def supports_rk_fused(self, dg, params, pre) -> bool:
+        return (
+            bool(params.fused_linear)
+            and not (params.nlapar or params.nlbpar)
+            and self._es_ok(dg, pre, False, "s_disp_par_tab" in pre)
+        )
+
+    def rk_stage(self, dg, phi, params, pre, prev, acc, extra, c_acc, c_stage, want_stage):
+        """One fused RK4 stage: (acc + c_acc k, prev + c_stage k), k = linear RHS of dg + extra."""
+        fuse = self._fuse_collisions(params, pre)
+        if collisions_on(params, pre) and not fuse:
+            coll = self._collisions(dg, params, pre)
+            extra = coll if extra is None else extra + coll
+        args, attrs = self._es_call(dg, phi, pre, params, fuse)
+        coef = jnp.stack([jnp.asarray(c_acc, jnp.float64), jnp.asarray(c_stage, jnp.float64)])
+        acc_out, stage_out = ffi.ffi_call(
+            "linear_rhs_es_rk_ffi",
+            (
+                jax.ShapeDtypeStruct(dg.shape, jnp.complex128),
+                jax.ShapeDtypeStruct(dg.shape if want_stage else (1,), jnp.complex128),
+            ),
+            vmap_method="sequential",
+        )(
+            *args,
+            prev.astype(jnp.complex128),
+            acc.astype(jnp.complex128),
+            jnp.zeros((1,), jnp.complex128) if extra is None else extra.astype(jnp.complex128),
+            coef,
+            **attrs,
+            has_extra=np.int32(extra is not None),
+            has_stage=np.int32(want_stage),
+        )
+        return acc_out, (stage_out if want_stage else None)
+
     def _field_moments(self, g, weights, g2f=None, apar=None):
         """Moments sum_{sp,v,mu} w * f per spatial point for each weight, f = g + g2f*apar if given."""
         ns, nkx, nky = g.shape[3:]
@@ -364,10 +591,16 @@ class CUDAOps(SolverOps):
     def compute_fields(self, dg, geometry, params, pre):
         """Field solve (phi, apar, bpar) from the mixed variable g.
 
-        Kinetic electromagnetic runs take the velocity moments with the fused
-        field_moments kernel; all other configurations use the JAX field solve.
+        Kinetic electromagnetic runs, and kinetic electrostatic runs with fused_linear, take the
+        velocity moments with the field_moments kernel; all other configurations use the JAX solve.
         """
-        if dg.ndim != 6 or params.adiabatic_electrons or not (params.nlapar or params.nlbpar):
+        em = params.nlapar or params.nlbpar
+        if (
+            dg.ndim != 6
+            or params.adiabatic_electrons
+            or "phi_weight" not in pre
+            or not (em or params.fused_linear)
+        ):
             return super().compute_fields(dg, geometry, params, pre)
         _register_ffi()
         apar = None
@@ -406,12 +639,20 @@ class CUDAOps(SolverOps):
             f_phys = physical_f()
             dproj = self._dproj_moments(f_phys, pre)
 
-        rhs = self._linear_rhs_fused(
-            df, phi, pre, params, apar=apar, bpar=bpar, df_is_g=df_is_g, dproj=dproj
+        has_em = (apar is not None and "apar_chi_factor" in pre) or (
+            bpar is not None and "bpar_chi_factor" in pre
         )
-        if collisions_on(params, pre):
+        coll_done = False
+        if params.fused_linear and self._es_ok(df, pre, has_em, dproj is not None):
+            coll_done = self._fuse_collisions(params, pre)
+            rhs = self._linear_rhs_es(df, phi, pre, params, coll_done)
+        else:
+            rhs = self._linear_rhs_fused(
+                df, phi, pre, params, apar=apar, bpar=bpar, df_is_g=df_is_g, dproj=dproj
+            )
+        if collisions_on(params, pre) and not coll_done:
             f_phys = physical_f() if f_phys is None else f_phys
-            rhs = rhs + collision_term(f_phys, params, pre, self.mesh)
+            rhs = rhs + self._collisions(f_phys, params, pre)
         return rhs
 
     def linear_rhs(
