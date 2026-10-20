@@ -1,115 +1,112 @@
-"""Cn calibration head classes.
+"""sat2 calibration on the summary tables.
 
-Only the containers the bundled heads were pickled as. The fitting that
-produced them is gone: calibration now runs off the summary parquets, not a
-walk over paired run directories. Kept so the shipped Cn payloads still
-unpickle.
+`fit_sat2` fits the one (cn, flux_exponent) pair of `rules.ql_flux_sat2` for the adiabatic and
+kinetic sets together; the result goes into `rules.CALIBRATION`.
 """
-
-from dataclasses import dataclass, field
-from typing import Any, Dict, Optional, Sequence, Tuple
 
 import numpy as np
 
+SUMMARY = "/restricteddata/ukaea/gyrokinetics/preprocessed/summary"
+GQ_DEFAULT = 0.826
 
-@dataclass
-class ParametricCn:
-    """Fitted parametric C_n = a + Σ_i β_i · feature_i.
 
-    Apply via `.predict(X, F)` → returns X · C_n(F).
-    `.cn_jax(F)` evaluates in JAX so the head can be used inside a jit'd path
-    (e.g. the TORAX plug-in's per-radius call).
+def summary_rows(kind, collisional=False, summary=SUMMARY):
+    """sat2 inputs and Qi of the saturated rows with settled QL weights in one summary table."""
+    import pandas as pd
+
+    rows = []
+    for _, r in pd.read_parquet(f"{summary}/{kind}.parquet").iterrows():
+        if r.run_class != "saturated" or not np.isfinite(r.get("Qi_avg", np.nan)):
+            continue
+        if r.get("lin_weight_settled") is False:
+            continue
+        if kind == "kinetic" and not collisional and (r.get("collisionality") or 0.0) > 0.0:
+            continue
+        if r.lin_weight_Qi is None or np.size(r.lin_weight_Qi) == 0:
+            continue
+        ky, g, w = (np.asarray(x, float) for x in (r.lin_ky, r.lin_gamma, r.lin_weight_Qi))
+        n = min(ky.size, g.size, w.size)
+        ky, g, w = ky[:n], g[:n], w[:n]
+        m = np.isfinite(ky) & (ky > 0) & np.isfinite(g) & np.isfinite(w)
+        if m.sum() < 4 or not (g[m] > 0).any():
+            continue
+        o = np.argsort(ky[m])
+        gq = r.get("lin_gq")
+        gq = GQ_DEFAULT if gq is None or not np.isfinite(gq) else float(gq)
+        # lin_ky is k_theta*rho, the rule's physical axis when kthnorm = 1
+        rows.append(dict(ky=ky[m][o], g=np.maximum(g[m], 0.0)[o], w=w[m][o],
+                         dlnpdr=float(r.dlnpdr_tglf), Q=float(r.Qi_avg), gq=gq))
+    return rows
+
+
+def sat2_predict(rows, cn, flux_exponent, gate_sharpness=20.0):
+    import jax.numpy as jnp
+
+    from .rules import ql_flux_sat2
+
+    return np.array([
+        float(ql_flux_sat2(
+            jnp.asarray(r["g"]), None, jnp.ones((1, r["ky"].size)), jnp.asarray(r["w"])[None, :],
+            jnp.asarray(r["ky"]), jnp.zeros(1), None, None, cn=cn, dlnpdr=r["dlnpdr"],
+            kthnorm=1.0, grad_r0=1.0, gq=r["gq"], flux_exponent=flux_exponent,
+            gate_sharpness=gate_sharpness,
+        ))
+        for r in rows
+    ])
+
+
+def stratified_test(y, frac=0.10, nbin=10, seed=0):
+    """Deterministic test mask: a fraction `frac` of each decile of log(y)."""
+    y = np.asarray(y, float)
+    ok = np.isfinite(y) & (y > 0)
+    mask = np.zeros(y.size, bool)
+    ly = np.full(y.size, np.nan)
+    ly[ok] = np.log10(y[ok])
+    edges = np.nanquantile(ly[ok], np.linspace(0, 1, nbin + 1))
+    edges[-1] += 1e-9
+    rng = np.random.default_rng(seed)
+    for lo, hi in zip(edges[:-1], edges[1:]):
+        idx = np.where(ok & (ly >= lo) & (ly < hi))[0]
+        if idx.size:
+            k = max(1, int(round(frac * idx.size)))
+            mask[rng.choice(idx, size=min(k, idx.size), replace=False)] = True
+    return mask
+
+
+def flux_metrics(y, p):
+    y, p = np.asarray(y, float), np.asarray(p, float)
+    m = np.isfinite(y) & np.isfinite(p) & (y > 0) & (p > 0)
+    y, p = y[m], p[m]
+    return dict(n=int(m.sum()), rmse=float(np.sqrt(np.mean((p - y) ** 2))), mean_error=float(np.mean(p - y)),
+                rmse_log10=float(np.sqrt(np.mean(np.log10(p / y) ** 2))),
+                med_rel=float(np.median(np.abs(p / y - 1))))
+
+
+def fit_sat2(summary=SUMMARY, gate_sharpness=20.0, collisional=False):
+    """Joint (cn, flux_exponent) of ql_flux_sat2 for the adiabatic and kinetic tables, Qi only.
+
+    Test rows are 10% of each log-flux decile of each set; p runs over a 0.01 grid, cn is the
+    log-mean ratio over the train rows, and the pair with the lowest train log10 RMSE wins.
+    Returns the pair and the test metrics per set.
     """
-
-    coef: np.ndarray
-    feature_names: Tuple[str, ...]
-
-    def cn(self, F):
-        """Compute C_n(features) for a feature matrix F (n, len(FEATURE_NAMES))."""
-        idx = [FEATURE_NAMES.index(nm) for nm in self.feature_names]
-        out = float(self.coef[0]) * np.ones(F.shape[0])
-        for i, ii in enumerate(idx):
-            out = out + float(self.coef[i + 1]) * np.asarray(F[:, ii])
-        return out
-
-    def cn_jax(self, F):
-        """JAX-native C_n(F). F is (n, len(FEATURE_NAMES))."""
-        idx = [FEATURE_NAMES.index(nm) for nm in self.feature_names]
-        Fsub = jnp.asarray(F)
-        out = jnp.full((Fsub.shape[0],), float(self.coef[0]))
-        for i, ii in enumerate(idx):
-            out = out + float(self.coef[i + 1]) * Fsub[:, ii]
-        return out
-
-    def predict(self, X, F):
-        """Y_pred = X · C_n(F)."""
-        return np.asarray(X) * self.cn(F)
-
-    def __repr__(self):
-        s = f"ParametricCn(C_n = {self.coef[0]:+.4f}"
-        for nm, c in zip(self.feature_names, self.coef[1:]):
-            s += f" {'+' if c >= 0 else ''}{c:+.4f}·{nm}"
-        return s + ")"
-
-
-@dataclass
-class PolynomialCn:
-    """Fitted polynomial C_n = poly_d(features). Apply via `.predict(X, F)`.
-
-    Strict generalization of ParametricCn: degree=1 recovers the affine fit.
-    Higher degree captures cross-terms (e.g. shat * rlt_i) and curvature in
-    individual features. With more coefficients the fit is more flexible on
-    train, more prone to OOD overshoot — track held-out RMSE.
-
-    `log_space=True` means the polynomial fits log(C_n), so C_n = exp(poly(F))
-    and the head is strictly positive. Useful when Y spans many decades.
-    """
-
-    coef: np.ndarray
-    feature_names: Tuple[str, ...]
-    degree: int
-    log_space: bool = False
-
-    def _terms(self):
-        return _poly_terms(len(self.feature_names), self.degree)
-
-    def cn(self, F):
-        """Evaluate C_n(F) = poly_d(F) (or exp(poly_d(F)) if log_space)."""
-        idx = [FEATURE_NAMES.index(nm) for nm in self.feature_names]
-        Fsub = np.asarray(F)[:, idx]
-        terms = self._terms()
-        out = np.zeros(Fsub.shape[0])
-        for c, t in zip(self.coef, terms):
-            prod = np.ones(Fsub.shape[0])
-            for i in t:
-                prod = prod * Fsub[:, i]
-            out = out + float(c) * prod
-        return np.exp(out) if self.log_space else out
-
-    def cn_jax(self, F):
-        """JAX-native C_n(F). Polynomial-term loop is unrolled at trace time."""
-        idx = [FEATURE_NAMES.index(nm) for nm in self.feature_names]
-        Fsub = jnp.asarray(F)[:, idx]
-        terms = self._terms()
-        out = jnp.zeros(Fsub.shape[0])
-        for c, t in zip(self.coef, terms):
-            prod = jnp.ones(Fsub.shape[0])
-            for i in t:
-                prod = prod * Fsub[:, i]
-            out = out + float(c) * prod
-        return jnp.exp(out) if self.log_space else out
-
-    def predict(self, X, F):
-        """Y_pred = X · poly_d(F)."""
-        return np.asarray(X) * self.cn(F)
-
-    def __repr__(self):
-        terms = self._terms()
-        n_show = min(len(terms), 8)
-        parts = [
-            f"{self.coef[i]:+.3e}·{_term_label(terms[i], self.feature_names)}"
-            for i in range(n_show)
-        ]
-        suffix = f" + {len(terms) - n_show} more" if len(terms) > n_show else ""
-        tag = "log " if self.log_space else ""
-        return f"PolynomialCn({tag}degree={self.degree}, n_coef={len(terms)}: " + " ".join(parts) + suffix + ")"
+    sets = {k: summary_rows(k, collisional, summary) for k in ("adiabatic", "kinetic")}
+    y = {k: np.array([r["Q"] for r in v]) for k, v in sets.items()}
+    best = None
+    for p in np.arange(0.30, 1.35, 0.01):
+        x = {k: sat2_predict(v, 1.0, p, gate_sharpness) for k, v in sets.items()}
+        ok = {k: np.isfinite(x[k]) & (x[k] > 0) & (y[k] > 0) for k in sets}
+        test = {k: stratified_test(np.where(ok[k], y[k], np.nan)) & ok[k] for k in sets}
+        train = {k: ok[k] & ~test[k] for k in sets}
+        xj = np.concatenate([x[k][train[k]] for k in sets])
+        yj = np.concatenate([y[k][train[k]] for k in sets])
+        cn = float(np.exp(np.mean(np.log(yj) - np.log(xj))))
+        err = float(np.sqrt(np.mean((np.log10(cn * xj) - np.log10(yj)) ** 2)))
+        if best is None or err < best[0]:
+            best = (err, float(p), cn, x, test, train)
+    _, p, cn, x, test, train = best
+    return dict(
+        cn=cn,
+        flux_exponent=round(p, 2),
+        n={k: {"train": int(train[k].sum()), "test": int(test[k].sum())} for k in sets},
+        test={k: flux_metrics(y[k][test[k]], cn * x[k][test[k]]) for k in sets},
+    )

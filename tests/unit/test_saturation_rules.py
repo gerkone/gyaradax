@@ -11,12 +11,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from gyaradax.quasilinear.rules import (
-    RULES,
-    dlnpdr_tglf,
-    ql_flux_per_species,
-)
-from gyaradax.quasilinear.saturation import ql_flux
+from gyaradax.quasilinear.rules import RULES, dlnpdr_tglf, ql_flux, ql_flux_per_species
 
 NS, NKX, NKY = 8, 5, 6
 

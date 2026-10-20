@@ -1,14 +1,12 @@
-"""Saturation-rule zoo: TGLF-flavored variants of the canonical ql_flux.
+"""Saturation rules: the canonical ql_flux and its sat0 / sat2 variants.
 
-Every rule consumes MORE of the linear eigenmode information than the
-canonical γ/⟨k⊥²⟩ rule in saturation.py (which stays the default and is
-untouched). All rules share the ql_flux call-signature family, are pure
-jax.numpy (differentiable, jit-able), have exactly ONE fitted amplitude
-constant `cn`, and are registered in RULES at the bottom.
+The variants use more of the linear eigenmode than the canonical γ/⟨k⊥²⟩ rule (ql_flux, the
+default). All rules share the ql_flux call signature, are pure jax.numpy (differentiable,
+jit-able), have one fitted amplitude `cn`, and are registered in RULES at the bottom.
 
 ĝ = sigmoid(20γ)·relu(γ) is the smooth stability-gated growth rate and
 W(ky) = Σ_kx Γ / Σ_kx |φ|² the normalization-invariant QL weight, both
-identical to saturation.ql_flux.
+identical to ql_flux.
 
   canonical      Q = C·Σ W·ĝ/⟨k⊥²⟩.  Plain mixing length, the reference.
 
@@ -19,7 +17,7 @@ identical to saturation.ql_flux.
                  and the flux carries the explicit ky factor of the ExB
                  drift v_E = i·ky·φ.
 
-  sat2           TGLF SAT2 on the full eigenmode; see ql_flux_sat2.
+  sat2           SAT2 on the full eigenmode; see ql_flux_sat2.
 
 Structural constants (SAT2's ay) are fixed by construction
 and documented at their definition — they are NOT calibrated; each rule
@@ -31,7 +29,102 @@ from functools import partial
 import jax
 import jax.numpy as jnp
 
-from .saturation import k_perp_eff_squared, k_perp_squared, ql_flux
+
+def k_perp_squared(krho, kxrh, little_g):
+    """k_⊥²(s, kx, ky) from geometry metric tensors.
+
+    krho: (nky,), kxrh: (nkx,), little_g: (3, ns) = [g_zz, g_ez, g_ee].
+    Returns (ns, nkx, nky).
+    """
+    g_zz = little_g[0][:, None, None]
+    g_ez = little_g[1][:, None, None]
+    g_ee = little_g[2][:, None, None]
+    krho_t = krho[None, None, :]
+    kxrh_t = kxrh[None, :, None]
+    return krho_t**2 * g_zz + 2.0 * krho_t * kxrh_t * g_ez + kxrh_t**2 * g_ee
+
+
+def k_perp_eff_squared(phi2, k_perp2, ds):
+    """Eigenmode-weighted <k_⊥²>(ky): ∫ds Σ_kx k_⊥²|φ|² / ∫ds Σ_kx |φ|².
+
+    phi2: (ns, nkx, nky), k_perp2: (ns, nkx, nky), ds: scalar.
+    Returns (nky,).
+    """
+    norm = jnp.sum(phi2, axis=(0, 1)) * ds
+    weighted = jnp.sum(k_perp2 * phi2, axis=(0, 1)) * ds
+    return weighted / jnp.maximum(norm, 1e-30)
+
+
+@partial(jax.jit, static_argnames=("mask_zonal", "kx_ratio_sum"))
+def ql_flux(
+    growth_rate,
+    phi2,
+    phi2_kxy,
+    flux_kxy,
+    krho,
+    kxrh,
+    little_g,
+    ds,
+    cn=1.0,
+    gate_threshold=0.0,
+    gate_sharpness=20.0,
+    eps=1e-30,
+    mask_zonal=True,
+    kx_ratio_sum=False,
+    kperp2_eff=None,
+):
+    """Compute Q_QL from a gyaradax linear-run end-state.
+
+    Args:
+        growth_rate : (nky,)            converged γ per ky.
+        phi2        : (ns, nkx, nky)    |φ|² of the eigenmode (for <k_⊥²>).
+        phi2_kxy    : (nkx, nky)        |φ|² integrated over s with `ints` weights.
+        flux_kxy    : (nkx, nky)        per-mode linear flux (energy by default)
+                                        from calculate_fluxes(..., reduce=False).
+        krho        : (nky,)
+        kxrh        : (nkx,)
+        little_g    : (3, ns)           [g_zz, g_ez, g_ee].
+        ds          : scalar            mean(ints).
+        cn          : scalar amplitude calibration.
+        gate_*      : smooth sigmoid on γ > gate_threshold.
+        mask_zonal  : suppress ky=0 contribution.
+
+    Returns: scalar Q_QL.
+    """
+    if kperp2_eff is None:
+        # all-chain by default. every theta0 chain is unit-normalised, so
+        # this weights the large-kx chains equally with the physical
+        # theta0 = 0 mode and then scales with ikxspace; pass kperp2_eff
+        # from table_loader.kperp2_eff(chain0=True) to avoid that.
+        kperp2_eff = k_perp_eff_squared(phi2, k_perp_squared(krho, kxrh, little_g), ds)
+
+    # geometric floor keeps γ/<k_⊥²> bounded for broad eigenmodes
+    g_zz_min = jnp.min(little_g[0])
+    safe_kperp2 = jnp.maximum(kperp2_eff, jnp.maximum(krho**2 * g_zz_min, eps))
+
+    # smooth stability gate, γ-linear amplitude. relu keeps stable modes at
+    # exactly zero: sigmoid(20γ)·γ alone is negative for γ<0 and leaked small
+    # negative flux at near-marginal radii (REVIEW.md).
+    gate = jax.nn.sigmoid(gate_sharpness * (growth_rate - gate_threshold))
+    sat_amp = gate * jax.nn.relu(growth_rate) / safe_kperp2
+
+    # normalization-invariant QL weight. Intensity-weighted over kx
+    # (default): W(ky) = (sum_kx flux)/(sum_kx phi2) — grid-robust (a sum of
+    # per-kx ratios scales ~nkx for ballooning modes; REVIEW.md item 2;
+    # measured skill identical on the legacy set). kx_ratio_sum=True
+    # restores the legacy per-kx-ratio behavior.
+    if kx_ratio_sum:
+        w_kxy = flux_kxy / jnp.maximum(phi2_kxy, eps)
+    else:
+        w_kxy = (jnp.sum(flux_kxy, axis=0, keepdims=True)
+                 / jnp.maximum(jnp.sum(phi2_kxy, axis=0, keepdims=True), eps))
+
+    # mask the zonal mode by its wavenumber, not by position: grids without
+    # a ky=0 column must not lose a physical mode
+    ky_mask = (
+        (jnp.abs(krho) > eps).astype(krho.dtype) if mask_zonal else jnp.ones_like(krho)
+    )
+    return cn * jnp.sum(w_kxy * sat_amp[None, :] * ky_mask[None, :])
 
 # TGLF SAT2 spectral-shift weight, ay in tglf_multiscale_spectrum.f90
 _SAT2_AY = 1.0
@@ -46,7 +139,7 @@ _SAT2_CZ2 = 1.05
 # (joint test RMSE 98.6 against 18.7) and 1.4 on adiabatic.
 _SAT2_KYMIN = 0.173 * 2.0**0.5
 
-# sat2 from scripts/fit_sat2.py on the summary tables (collisionless, Qi only, gate 20)
+# sat2 from calibration.fit_sat2 on the summary tables (collisionless, Qi only, gate 20)
 CALIBRATION = {
     "canonical": {"cn": None},
     "sat0": {"cn": None},
@@ -189,7 +282,9 @@ def _zonal_mixing(ky, gamma, eps, kycut=_SAT2_KYCUT, kymin=0.0):
     x1 = (ky[jm] - k0) / dky
     b = (f1 - f0 * (1.0 - x1 * x1) - f2 * x1 * x1) / jnp.maximum(x1 - x1 * x1, eps)
     c = f2 - f0 - b
-    quad = lambda x: f0 + b * x + c * x * x
+
+    def quad(x):
+        return f0 + b * x + c * x * x
 
     xmin = jnp.where(k0 < kymin, (kymin - k0) / dky, 0.0)
     xmax = jnp.clip(-b / jnp.where(jnp.abs(c) > eps, 2.0 * c, eps), 0.0, 1.0)
@@ -287,7 +382,7 @@ def ql_flux_sat2(
     eps=1e-30,
     mask_zonal=True,
 ):
-    """TGLF SAT2 intensity evaluated on the full linear eigenmode.
+    """SAT2 intensity evaluated on the full linear eigenmode.
 
     Follows tglf_multiscale_spectrum.f90 (GACODE 7e22eb70), which sets
 

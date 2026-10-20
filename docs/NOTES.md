@@ -303,7 +303,7 @@ via `gyaradax/_compat.py` and the `gyaradax.solver` package attributes)
 | `io/gkw.py` | GKW file loading: K-dumps, `input.dat` / `geom.dat` parsing, `load_geometry`, `gkw_to_yaml` |
 | `io/rundir.py` | run-directory output: diagnostic histories, restart snapshots, `config.yaml` / `geometry.pkl` |
 | `geometry/` | geometry package: circular (Lapillonne), s-alpha, Miller, tensors, grids, mode connectivity |
-| `quasilinear/` | quasilinear flux rule (saturation), calibration, linear pipeline |
+| `quasilinear/` | saturation rules, single-point linear solve, sat2 fit (section 14) |
 | `sharding.py` | device mesh, sharded precompute and init, `shard_map` helpers for the kernels |
 | `cli.py` | `gyaradax run / bench / info` console script (docs/CLI.md) |
 
@@ -1727,33 +1727,36 @@ only through their weights. `nl_at_point` is the nonlinear ground truth (tail-av
 |---|---|
 | `canonical` | W gamma_hat / <k_perp^2>, plain mixing length (`saturation.ql_flux`) |
 | `sat0` | W ky (gamma_hat / <k_perp^2>)^2, Waltz mixing rule |
-| `sat2` | W I(ky)^p, TGLF SAT2's intensity on the full linear eigenmode |
+| `sat2` | W I(ky)^p, the SAT2 intensity on the full linear eigenmode |
 
-sat2 follows GACODE TGLF SAT2 (tested against TGLF's own per-ky intensity, `test_sat2_vs_tglf`):
+sat2 is the SAT2 rule (Staebler et al.), evaluated on the full linear eigenmode:
 
 - zonal mixing: kymax is the peak of gamma/ky below kycut = 0.8, refined quadratically, floored at
-  TGLF's kymin = 0.173 sqrt(2) grad_r0;
-- gamma_eff = TGLF's gamma_kymix: clamped above kymax, then Lorentzian-averaged over high ky;
-- kx width from TGLF's model (`kx_width_model="tglf"`, b0 0.76, b1 1.22, gq from the geometry);
+  kymin = 0.173 sqrt(2) grad_r0;
+- gamma_eff: clamped above kymax, then Lorentzian-averaged over high ky;
+- the modelled kx width (`kx_width_model="tglf"`, b0 0.76, b1 1.22, gq from the geometry);
 - I = (1/kymax) (12/dlnpdr) (gamma_eff / (kx_width ky))^2, with dlnpdr clamped to [4, 18];
 - thresholds act on the physical k_theta rho = krho * kthnorm;
 - the exponent p acts on the per-mode intensity, so the rule stays linear in the flux and the
   per-species channels sum to the total.
 
-Differences from TGLF: the soft gate above, no sat_geo factor (the solve already uses the real
-flux surface), no ExB shift (kx0_e = 0, no rotation).
+Not included: the sat_geo factor (the solve already uses the real flux surface) and the ExB shift
+(kx0_e = 0, no rotation).
 
 ### 14.3 calibration
 
-`scripts/fit_sat2.py` fits one (cn, p) for both sets through `ql_flux_sat2` itself:
+`calibration.fit_sat2()` fits one (cn, p) for both sets through `ql_flux_sat2` itself:
 
 - data: `/restricteddata/ukaea/gyrokinetics/preprocessed/summary/{adiabatic,kinetic}.parquet`,
   saturated rows with settled QL weights (`lin_ky`, `lin_gamma`, `lin_weight_Qi`, `lin_gq`,
-  `dlnpdr_tglf` against `Qi_avg`); kinetic collisionless unless `--collisional`;
+  `dlnpdr_tglf` against `Qi_avg`); kinetic collisionless unless `collisional=True`;
 - test rows: 10% per log-flux decile of each set; p on a 0.01 grid, cn the log-mean ratio over the
   train rows, minimising log10 RMSE;
 - current `CALIBRATION["sat2"]`: cn 0.8499, p 0.590 (tables of 18 Oct 2026, 264 adiabatic +
   116 kinetic train rows), fitted at eps = 0.19, collisionless, Qi only.
+
+The canonical rule takes its Cn from the bundled head `models/cn_iter_hybrid_v1.pkl` (scalar 0.160,
+fitted at 43x16); sat0 and sat2 take theirs from `CALIBRATION` or an explicit cn.
 
 10-fold cross-validation over all rows (294 adiabatic, 126 kinetic), each row predicted by a fit
 that did not see it:

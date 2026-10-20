@@ -1,16 +1,13 @@
 """Evaluate the QL model at one operating point (params + geometry).
 
-This is the engine behind both the TORAX `gyaradax-ql` transport model
-(jit/vmap-safe path: `initial_df`, `linear_early_stop`, `ql_at_point`) and
-`scripts/run.py --ql-linear` campaign harvesting (host path:
-`harvest_linear_from_config`, CFL-pinned dt + convergence loop).
+jit/vmap-safe, the path the TORAX gyaradax-ql model takes: `initial_df`, `linear_early_stop`,
+`ql_at_point`; `nl_at_point` for the nonlinear ground truth.
 """
 
 from typing import Any, Dict, Tuple
 
 import jax
 import jax.numpy as jnp
-import numpy as np
 
 from gyaradax.diagnostics.fluxes import calculate_fluxes
 from gyaradax.operators.poisson import geom_tensors
@@ -25,7 +22,6 @@ from .rules import (
     dlnpdr_tglf,
     ql_flux_per_species,
 )
-from .saturation import ql_flux
 
 DF_SEED_AMPLITUDE = 1e-3
 
@@ -168,35 +164,6 @@ def ql_at_point(
         }
         return q_i, q_e, pfe, diagnostics
     return q_i, q_e, pfe
-
-
-def ql_rules_at_point(
-    params,
-    geom,
-    grid_shape: Tuple[int, int, int, int, int],
-    *,
-    rules,
-    cn=1.0,
-    n_steps_linear=2000,
-    early_stop=True,
-    early_stop_opts: Dict[str, Any] | None = None,
-) -> Dict[str, jnp.ndarray]:
-    """Several saturation rules on ONE linear solve -> {rule: Q_i}, for calibration."""
-    spec, _b, _s, _g, _f = _linear_harvest(
-        params, geom, grid_shape, n_steps_linear=n_steps_linear,
-        early_stop=early_stop, early_stop_opts=early_stop_opts,
-    )
-    dlnpdr = _dlnpdr_from_params(params)
-    kth = jnp.asarray(geom.get("kthnorm", 1.0), dtype=jnp.float64)
-
-    def _extra(r):
-        e = {"dlnpdr": dlnpdr} if r in RULES_WITH_DLNPDR else {}
-        if r in RULES_WITH_KTHNORM:
-            e["kthnorm"] = kth
-            e["grad_r0"], e["gq"] = geom_sat2_factors(geom)
-        return e
-
-    return {r: RULES[r](cn=cn, **spec, **_extra(r)) for r in rules}
 
 
 def _species_geom(geom, params):
@@ -349,79 +316,3 @@ def nl_at_point(
     if return_df:
         return q_i, q_i, jnp.asarray(0.0), df_f
     return q_i, q_i, jnp.asarray(0.0)
-
-
-def harvest_linear_from_config(
-    config_path,
-    *,
-    block=200,
-    max_steps=6000,
-    atol=1e-4,
-    rtol=1e-3,
-    patience=2,
-    dump_df=False,
-    converge=True,
-    disable_per_ky_norm=True,
-) -> Dict[str, np.ndarray]:
-    """Run one linear point from a YAML config to gamma convergence, return QL harvest arrays.
-
-    Host-side loop for campaign workers. dt is pinned to the von Neumann
-    linear CFL estimate: adaptive dt is NL-gated in gksolve and the
-    kinetic-electron field CFL is tighter than typical config dt.
-    """
-    import dataclasses
-
-    from gyaradax.solver.cfl import estimate_linear_timestep
-    from gyaradax.solver.driver import gk_from_config
-
-    from .linear_pipeline import _harvest
-
-    df, geom, params, state, pre = gk_from_config(
-        config_path,
-        non_linear=False,
-        disable_per_ky_norm=disable_per_ky_norm,
-        adaptive_dt=False,
-        backend="jax",
-    )
-    dt_cfl = float(estimate_linear_timestep(pre, params))
-    if np.isfinite(dt_cfl) and dt_cfl < params.dt:
-        params = dataclasses.replace(params, dt=dt_cfl)
-
-    prev, steps, phi, streak = None, 0, None, 0
-    ghist, shist = [], []  # per-block growth rate g(ky) and ky power spectrum
-    while steps < max_steps:
-        df, (phi, _f), state = gksolve(df, geom, params, state, n_steps=block, pre=pre)
-        jax.block_until_ready(df)
-        steps += block
-        g = np.asarray(state.last_growth_rate)
-        ghist.append(g)
-        ph = np.asarray(phi)
-        # normalized ky power spectrum; unnormalized would overflow f64
-        sp = np.sum(np.abs(ph) ** 2, axis=tuple(range(ph.ndim - 1)))
-        tot = sp.sum()
-        shist.append(sp / tot if np.isfinite(tot) and tot > 0 else sp)
-        if prev is not None and np.all(np.isfinite(g)):
-            ok = np.max(np.abs(g - prev)) <= atol + rtol * np.max(np.abs(g))
-            streak = streak + 1 if ok else 0
-        prev = g
-        # converge=False -> fixed-length run (exactly max_steps), no early stop
-        if converge and streak >= patience:
-            break
-
-    arrays = {k: np.asarray(v) for k, v in dict(_harvest(geom, df, phi, state, params=params, pre=pre)).items()}
-    arrays["gamma"] = np.asarray(prev)
-    arrays["n_steps"] = np.asarray(steps)
-    arrays["dt"] = np.asarray(float(params.dt))
-    # per-block histories, sampled every `block` steps
-    arrays["gamma_history"] = np.asarray(ghist)
-    arrays["ky_spectrum_history"] = np.asarray(shist)
-    arrays["history_block"] = np.asarray(int(block))
-    # streak hits patience only on convergence; always False when converge=False
-    arrays["converged"] = np.asarray(bool(streak >= patience))
-    # rescale the converged eigenmode to a seed amplitude, keeping shape and phase
-    if dump_df:
-        dfm = np.asarray(df)
-        peak = float(np.abs(dfm).max())
-        amp = float(getattr(params, "amp_init", 1e-4)) or 1e-4
-        arrays["df"] = (dfm / peak * amp) if peak > 0 and np.isfinite(peak) else dfm
-    return arrays
