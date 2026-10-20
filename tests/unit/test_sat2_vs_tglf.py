@@ -1,4 +1,4 @@
-"""Check ql_flux_sat2's intensity against GACODE TGLF SAT2's own output.
+"""Check the sat2 rule against GACODE TGLF SAT2's own output.
 
 Requires a reference dump produced by scripts/gen_tglf_sat2_ref.py; see the
 skip message and that script's header.
@@ -9,7 +9,9 @@ import os
 import numpy as np
 import pytest
 
-from gyaradax.quasilinear.rules import _gamma_kymix, _zonal_mixing
+import jax.numpy as jnp
+
+from gyaradax.quasilinear.rules import _gamma_kymix, _zonal_mixing, dlnpdr_tglf, ql_flux_sat2
 
 # tglf_multiscale_spectrum.f90: b2 drops to 3.55 once nmodes_in > 1
 _B0, _B1, _B2 = 0.76, 1.22, 3.74
@@ -95,6 +97,43 @@ def test_sat2_intensity_matches_tglf(tglf_ref):
         assert ok.sum() > 4, f"{name}: TGLF returned no saturated intensity"
         rel = np.abs(ours[ok] - ref[ok]) / ref[ok]
         assert rel.max() < 1e-10, f"{name}: max rel {rel.max():.3e}"
+
+
+def test_rule_matches_tglf_intensity(tglf_ref):
+    """ql_flux_sat2 itself, one ky at a time, against TGLF's intensity.
+
+    The rule drops sat_geo and folds b2 into cn, so those two factors are
+    divided out of TGLF's spectrum; the gate is made a hard relu, as in TGLF.
+    """
+    for name in _case_ids(tglf_ref):
+        c = tglf_ref[name]
+        ky, gamma = np.asarray(c["ky"]), np.asarray(c["gamma"])
+        n = ky.size
+        kymin = _KYMIN * c["grad_r0"] if c["alpha_zf"] < 0 else 0.0
+        ours = np.array([
+            float(ql_flux_sat2(
+                jnp.asarray(gamma), None, jnp.ones((1, n)), jnp.eye(n)[k][None, :], jnp.asarray(ky),
+                jnp.zeros(1), None, None, cn=1.0, dlnpdr=c["dlnpdr"], kymin=kymin, kthnorm=1.0,
+                grad_r0=c["grad_r0"], gq=c["b_geo0"] / c["grad_r0"], flux_exponent=1.0,
+                gate_sharpness=1e8,
+            ))
+            for k in range(n)
+        ])
+        b2 = 3.55 if c["nmodes"] > 1 else _B2
+        geo = _tglf_sat_geo(
+            ky, c["kymax"], c["grad_r0"], c["b_geo0"], c["bt0"],
+            c["sat_geo0"], c["sat_geo1"], c["sat_geo2"],
+        )
+        ref = np.asarray(c["phinorm"]) / (b2 * geo)
+        ok = ref > 0
+        rel = np.abs(ours[ok] - ref[ok]) / ref[ok]
+        assert rel.max() < 1e-8, f"{name}: max rel {rel.max():.3e}"
+
+
+def test_dlnpdr_matches_tglf(tglf_ref):
+    # base case: a/L_n = 1, a/L_T = 3 for both species, R/a = 3, Te = Ti
+    ours = float(dlnpdr_tglf(np.array([9.0, 9.0]), np.array([3.0, 3.0]), te_ti=1.0))
+    assert ours == pytest.approx(tglf_ref["base_azf-1"]["dlnpdr"], rel=1e-12)
 
 
 def test_reference_covers_both_kymin_settings(tglf_ref):
