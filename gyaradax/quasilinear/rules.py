@@ -46,7 +46,7 @@ _SAT2_CZ2 = 1.05
 # (joint test RMSE 98.6 against 18.7) and 1.4 on adiabatic.
 _SAT2_KYMIN = 0.173 * 2.0**0.5
 
-# sat2 from scripts/fit_sat2_joint.py on the summary tables (collisionless, Qi only, gate 20)
+# sat2 from scripts/fit_sat2.py on the summary tables (collisionless, Qi only, gate 20)
 CALIBRATION = {
     "canonical": {"cn": None},
     "sat0": {"cn": None},
