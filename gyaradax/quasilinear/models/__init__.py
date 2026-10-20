@@ -12,11 +12,7 @@ from . import registry
 
 
 def load_weights_from_name(name):
-    """load a bundled Cn weights dict by registry name.
-
-    returns the full payload (scalar + parametric + polynomial heads + fit
-    metadata), so both the basic-ql scalar and the cn-version head are available.
-    """
+    """Load a bundled Cn payload (scalar Cn, its grid and fit metadata) by registry name."""
     path = registry.MODELS.get(name)
     if path is None:
         raise ValueError(
@@ -60,12 +56,7 @@ def load_cn_payload(spec):
 
 
 def select_cn_head(payload):
-    """pick the head from a payload: scalar (QL-proper, safest OOD) > poly_log > poly."""
+    """The scalar Cn of a payload (a dict with 'scalar', or a bare number); None when absent."""
     if isinstance(payload, dict):
-        if payload.get("scalar") is not None:
-            return float(payload["scalar"])
-        if payload.get("polynomial_log") is not None:
-            return payload["polynomial_log"]
-        if "polynomial" in payload:
-            return payload["polynomial"]
-    return payload
+        payload = payload.get("scalar")
+    return None if payload is None else float(payload)

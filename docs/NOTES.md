@@ -303,7 +303,7 @@ via `gyaradax/_compat.py` and the `gyaradax.solver` package attributes)
 | `io/gkw.py` | GKW file loading: K-dumps, `input.dat` / `geom.dat` parsing, `load_geometry`, `gkw_to_yaml` |
 | `io/rundir.py` | run-directory output: diagnostic histories, restart snapshots, `config.yaml` / `geometry.pkl` |
 | `geometry/` | geometry package: circular (Lapillonne), s-alpha, Miller, tensors, grids, mode connectivity |
-| `quasilinear/` | quasilinear flux rule (saturation), calibration, linear pipeline |
+| `quasilinear/` | saturation rules, single-point linear solve, sat2 fit (section 14) |
 | `sharding.py` | device mesh, sharded precompute and init, `shard_map` helpers for the kernels |
 | `cli.py` | `gyaradax run / bench / info` console script (docs/CLI.md) |
 
@@ -1701,3 +1701,82 @@ timings as the minimum over interleaved repeats when the GPU is shared.
 - `gyaradax run ... --telemetry` records per-block timings, dt and device memory in the run
   directory (`telemetry.jsonl`); `--profile` adds a profiler trace of one block and its GPU kernel
   breakdown (`profile_summary.json`). Both are off by default (docs/CLI.md).
+
+## 14. quasilinear transport (`quasilinear/`)
+
+### 14.1 point evaluation
+
+`point_eval.ql_at_point(params, geom, grid, cn=, rule=, rule_options=)` returns (Qi, Qe, Gamma_e) in
+GKW gyroBohm units at one flux tube:
+
+1. one linear initial-value solve from a seeded df, all ky at once (`disable_per_ky_norm`);
+2. early stop when every ky's growth rate has settled: blocks of 100 steps, at least 200 steps,
+   max |delta gamma| <= 1e-4 + 1e-3 max |gamma| twice in a row, capped at `n_steps_linear`;
+3. the saturation rule on the final eigenmode.
+
+Shared ingredients of every rule: the QL weight W(ky) = sum_kx Gamma(kx, ky) / sum_kx |phi|^2(kx, ky),
+which does not depend on the eigenmode's normalisation, and the gated growth rate
+gamma_hat = sigmoid(20 gamma) relu(gamma), smooth so the flux stays differentiable through marginal
+modes. Adiabatic runs return Qe = Qi and Gamma_e = 0. Kinetic runs evaluate the rule per species
+and channel (`ql_flux_per_species`) against one shared saturated intensity, so the channels differ
+only through their weights. `nl_at_point` is the nonlinear ground truth (tail-averaged fluxes).
+
+### 14.2 rules (`rules.RULES`)
+
+| rule | Q = cn * sum_ky ... |
+|---|---|
+| `canonical` | W gamma_hat / <k_perp^2>, plain mixing length (`saturation.ql_flux`) |
+| `sat0` | W ky (gamma_hat / <k_perp^2>)^2, Waltz mixing rule |
+| `sat2` | W I(ky)^p, the SAT2 intensity on the full linear eigenmode |
+
+sat2 is the SAT2 rule (Staebler et al.), evaluated on the full linear eigenmode:
+
+- zonal mixing: kymax is the peak of gamma/ky below kycut = 0.8, refined quadratically, floored at
+  kymin = 0.173 sqrt(2) grad_r0;
+- gamma_eff: clamped above kymax, then Lorentzian-averaged over high ky;
+- the modelled kx width (`kx_width_model="tglf"`, b0 0.76, b1 1.22, gq from the geometry);
+- I = (1/kymax) (12/dlnpdr) (gamma_eff / (kx_width ky))^2, with dlnpdr clamped to [4, 18];
+- thresholds act on the physical k_theta rho = krho * kthnorm;
+- the exponent p acts on the per-mode intensity, so the rule stays linear in the flux and the
+  per-species channels sum to the total.
+
+Not included: the sat_geo factor (the solve already uses the real flux surface) and the ExB shift
+(kx0_e = 0, no rotation).
+
+### 14.3 calibration
+
+`calibration.fit_sat2()` fits one (cn, p) for both sets through `ql_flux_sat2` itself:
+
+- data: `/restricteddata/ukaea/gyrokinetics/preprocessed/summary/{adiabatic,kinetic}.parquet`,
+  saturated rows with settled QL weights (`lin_ky`, `lin_gamma`, `lin_weight_Qi`, `lin_gq`,
+  `dlnpdr_tglf` against `Qi_avg`); kinetic collisionless unless `collisional=True`;
+- test rows: 10% per log-flux decile of each set; p on a 0.01 grid, cn the log-mean ratio over the
+  train rows, minimising log10 RMSE;
+- current `CALIBRATION["sat2"]`: cn 0.8499, p 0.590 (tables of 18 Oct 2026, 264 adiabatic +
+  116 kinetic train rows), fitted at eps = 0.19, collisionless, Qi only.
+
+The canonical rule takes its Cn from the bundled head `models/cn_iter_hybrid_v1.pkl` (scalar 0.160,
+fitted at 43x16); sat0 and sat2 take theirs from `CALIBRATION` or an explicit cn.
+
+10-fold cross-validation over all rows (294 adiabatic, 126 kinetic), each row predicted by a fit
+that did not see it:
+
+| set (Qi range) | n | mean Qi | RMSE | mean error | median rel. error | pred / true (geo mean) |
+|---|--:|--:|--:|--:|--:|--:|
+| adiabatic, all | 294 | 92.5 | 26.0 | +11.3 | +13.9% | 1.11 |
+| adiabatic, Qi <= 76 | 98 | 40.1 | 16.1 | +6.5 | +19.3% | 1.11 |
+| adiabatic, 76-116 | 98 | 94.3 | 29.7 | +19.4 | +21.1% | 1.17 |
+| adiabatic, Qi > 116 | 98 | 142.9 | 29.7 | +8.1 | +5.8% | 1.05 |
+| kinetic, all | 126 | 50.2 | 59.4 | -27.2 | -30.4% | 0.79 |
+| kinetic, Qi <= 15 | 42 | 5.5 | 4.4 | +0.9 | +29.9% | 2.08 |
+| kinetic, 15-43 | 42 | 26.1 | 13.1 | -8.9 | -29.3% | 0.58 |
+| kinetic, Qi > 43 | 42 | 119.1 | 101.9 | -73.6 | -59.8% | 0.40 |
+
+The errors are biased, not zero-mean: the shared (cn, p) overpredicts adiabatic by about 11% and
+underpredicts kinetic, and on kinetic the bias runs with the flux (low fluxes twice too high, high
+fluxes 2.5 times too low), i.e. the kinetic response is steeper than the joint exponent allows. A
+hard gate (the numpy kernel) gives the same picture (adiabatic RMSE 28.5, kinetic 59.0).
+
+The exponent is not validated against collisionality. Fitting the rule through a different
+implementation (e.g. a numpy copy with a hard gate) gives a different cn, so the fit must always
+call `ql_flux_sat2`.

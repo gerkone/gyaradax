@@ -2,8 +2,7 @@
 
 mirrors fusion_surrogates' qlknn/models/registry: weights ship as package
 data and are resolved by name, with a default. each entry points at a pickle
-holding both the scalar (basic ql) and the parametric/polynomial (cn version)
-calibration heads.
+holding the canonical rule's scalar Cn, the grid it was fitted on and the fit metadata.
 """
 
 import pathlib
