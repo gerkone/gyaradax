@@ -1,0 +1,87 @@
+! nonlinear full EM (A_par + B_par) benchmark vs gyaradax
+! CBC: q=1.4, shat=0.78, eps=0.19, beta=0.001, rlt=6.9, rln=2.2
+! small multi-mode grid (NX=9, NMOD=5), kinetic electrons
+ &CONTROL
+ fac_dtim_est = 0.95
+ silent = .false.
+ order_of_the_scheme = 'fourth_order'
+ parallel_boundary_conditions = "open"
+ read_file  = .false.
+ NON_LINEAR = .true.
+ zonal_adiabatic = .false.
+ METHOD = 'EXP'
+ METH   = 2
+ DTIM   = 0.005
+ NTIME  = 200
+ NAVERAGE = 100
+ nlapar = .true.
+ nlbpar = .true.
+ collisions = .false.
+ disp_par = 1.0
+ disp_vp  = 0.1
+ disp_x   = 0.1
+ disp_y   = 0.1
+ lverbose = .true.
+ io_format = 'ascii'
+ io_testdata = .true.
+/
+ &GRIDSIZE
+ n_procs_s = 2
+ n_procs_vpar = 4
+ n_procs_mu = 2
+ n_procs_sp = 2
+ NX = 9
+ N_s_grid = 16
+ N_mu_grid = 8
+ nperiod = 1
+ N_vpar_grid = 32
+ NMOD = 5
+ number_of_species = 2
+ /
+ &MODE
+ CHIN    = 0.0
+ mode_box = .true.
+ krhomax = 1.0
+ ikxspace = 5
+ /
+ &GEOM
+ geom_type = 'circ'
+ SHAT = 0.78
+ Q    = 1.4
+ EPS  = 0.19
+ /
+ &SPCGENERAL
+ finit = "cosine2"
+ beta = 0.001
+ adiabatic_electrons = .false.
+ amp_init = 0.005
+ /
+ &SPECIES
+ MASS  = 1.0
+ Z     = 1.0
+ TEMP  = 1.0
+ dens  = 1.0
+ rlt   = 6.9
+ rln   = 2.2
+ uprim = 0.0
+ /
+ &SPECIES
+ MASS  = 2.72e-4
+ Z     = -1.0
+ TEMP  = 1.0
+ dens  = 1.0
+ rlt   = 6.9
+ rln   = 2.2
+ uprim = 0.0
+ /
+ &ROTATION
+ VCOR = 0.0
+ /
+&DIAGNOSTIC
+ lcalc_freq = .false.
+ lfinal_output = .true.
+ lphi_diagnostics = .true.
+ lcalc_zonal_evo = .true.
+ zevo_detail = .false.
+ zevo_xy_spec = .true.
+/

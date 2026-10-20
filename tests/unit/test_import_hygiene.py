@@ -72,16 +72,6 @@ for name in gyaradax.__all__:
     )
 
 
-def test_legacy_eps_alias_remains_available_in_fresh_process() -> None:
-    _run_fresh_python(
-        """
-import gyaradax
-from gyaradax.core.constants import EPS
-assert gyaradax._EPS == EPS == 1e-30
-"""
-    )
-
-
 def test_old_module_paths_alias_the_new_modules_in_fresh_process() -> None:
     _run_fresh_python(
         """

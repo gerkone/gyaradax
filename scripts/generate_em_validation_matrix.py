@@ -33,8 +33,8 @@ from typing import Any
 
 
 DEFAULT_INPUT_DIR = Path("gkw_ref/em_validation_inputs")
-DEFAULT_TEMPLATE_DIR = Path("gkw_ref/em_validation_templates")
-DEFAULT_MATRIX = Path("gkw_ref/em_validation_matrix.json")
+DEFAULT_TEMPLATE_DIR = Path("tests/data/em_validation/templates")
+DEFAULT_MATRIX = Path("tests/data/em_validation/matrix.json")
 DEFAULT_SETTINGS_DIR = Path("gkw_ref/em_validation_cases")
 DEFAULT_DATA_ROOT = Path("/local00/bioinf/volkmann/gyrokinetics/em_validation")
 TEMPLATE_SUFFIX = ".input.dat"
