@@ -19,7 +19,6 @@ import pandas as pd
 from scipy.optimize import least_squares
 
 from gyaradax.quasilinear.rules import CALIBRATION, dlnpdr_tglf, ql_flux_sat2
-from gyaradax.quasilinear.table_loader import rule_inputs
 
 SUMMARY = "/restricteddata/ukaea/gyrokinetics/preprocessed/summary"
 
@@ -31,10 +30,16 @@ def load(kind, weight, collisional):
         df = df[df["collisionality"].fillna(0.0) == 0.0]
     rows = []
     for _, r in df.iterrows():
-        inp = rule_inputs(r.to_dict(), "Qi", chain0_weight=weight == "chain0")
-        if inp is None:
+        # sat2 with TGLF's kx width needs no eigenmode, so rows without one stay in
+        wkey = "lin_weight_Qi_chain0" if weight == "chain0" else "lin_weight_Qi"
+        if r[wkey] is None or len(r[wkey]) == 0:
             continue
-        ky, g, w, _kp = inp
+        ky, g, w = (np.asarray(r[k], float) for k in ("lin_ky", "lin_gamma", wkey))
+        n = min(ky.size, g.size, w.size)
+        m = (ky[:n] > 0) & np.isfinite(g[:n]) & np.isfinite(w[:n])
+        if m.sum() < 4 or not (g[:n][m] > 0).any():
+            continue
+        ky, g, w = ky[:n][m], np.maximum(g[:n][m], 0.0), w[:n][m]
         adiabatic = kind == "adiabatic"
         rlt = r["rlt_i"] if adiabatic else np.array([r["rlt_i"], r["rlt_e"]])
         rln = r["rln"] if adiabatic else np.array([r["rln"], r["rln"]])
