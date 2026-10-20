@@ -134,8 +134,8 @@ def fit_sat2(summary=SUMMARY, options=None, collisional=False, exponents=None, f
         fit=dict(
             method="gyaradax.quasilinear.calibration.fit_sat2",
             date=datetime.date.today().isoformat(),
-            tables={k: dict(path=v, modified=datetime.datetime.fromtimestamp(os.path.getmtime(v)).isoformat(
-                timespec="seconds")) for k, v in tables.items()},
+            tables={k: dict(file=os.path.basename(v), modified=datetime.datetime.fromtimestamp(
+                os.path.getmtime(v)).isoformat(timespec="seconds")) for k, v in tables.items()},
             rows="saturated, settled QL weights, " + ("all" if collisional else "collisionless") + " kinetic",
             channel="Qi",
             n_train={k: int(((kind == k) & ~test).sum()) for k in SETS},

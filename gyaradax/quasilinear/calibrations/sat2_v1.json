@@ -13,11 +13,11 @@
   "date": "2026-10-20",
   "tables": {
    "adiabatic": {
-    "path": "/restricteddata/ukaea/gyrokinetics/preprocessed/summary/adiabatic.parquet",
+    "file": "adiabatic.parquet",
     "modified": "2026-10-18T21:07:09"
    },
    "kinetic": {
-    "path": "/restricteddata/ukaea/gyrokinetics/preprocessed/summary/kinetic.parquet",
+    "file": "kinetic.parquet",
     "modified": "2026-10-18T21:07:09"
    }
   },
