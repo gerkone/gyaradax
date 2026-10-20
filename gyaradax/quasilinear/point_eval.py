@@ -147,8 +147,7 @@ def ql_at_point(
         return jnp.where(jnp.abs(q) < qi_tiny, 0.0, q)
 
     if flux_kxy_sp is not None:
-        # one shared saturated intensity, species and channels differ only
-        # through their QL weights
+        # one shared saturated intensity; species and channels differ only in their weights
         rest = {k: v for k, v in spec.items() if k != "flux_kxy"}
         f = ql_flux_per_species(rule, flux_kxy_sp=flux_kxy_sp, cn=cn, **rest, **extra)
         q_i, q_e, pfe = _clean(f[0, 1]), _clean(f[1, 1]), _clean(f[1, 0], lo=-qi_clip)
@@ -250,9 +249,7 @@ def _linear_harvest(
 
 def _dlnpdr_from_params(params):
     """TGLF dlnpdr for the rules that want it; see rules.dlnpdr_tglf."""
-    # traced under the TORAX plugin's vmap over radii, so everything here
-    # stays in jnp: no np.asarray, no float(), no branching on a value.
-    # adiabatic_electrons and the array shapes are static, so they may.
+    # traced under the plugin's vmap: jnp only, branching only on static fields
     adiabatic = bool(params.adiabatic_electrons)
     tmp = jnp.atleast_1d(jnp.asarray(params.tmp, dtype=jnp.float64))
     te_ti = 1.0 if adiabatic or tmp.shape[0] < 2 else tmp[1] / tmp[0]

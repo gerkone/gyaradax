@@ -92,51 +92,38 @@ def ql_flux(
     Returns: scalar Q_QL.
     """
     if kperp2_eff is None:
-        # all-chain by default. every theta0 chain is unit-normalised, so
-        # this weights the large-kx chains equally with the physical
-        # theta0 = 0 mode and then scales with ikxspace; pass kperp2_eff
-        # from table_loader.kperp2_eff(chain0=True) to avoid that.
+        # averages all theta0 chains equally; pass kperp2_eff for the kx = 0 chain alone
         kperp2_eff = k_perp_eff_squared(phi2, k_perp_squared(krho, kxrh, little_g), ds)
 
     # geometric floor keeps γ/<k_⊥²> bounded for broad eigenmodes
     g_zz_min = jnp.min(little_g[0])
     safe_kperp2 = jnp.maximum(kperp2_eff, jnp.maximum(krho**2 * g_zz_min, eps))
 
-    # smooth stability gate, γ-linear amplitude. relu keeps stable modes at
-    # exactly zero: sigmoid(20γ)·γ alone is negative for γ<0 and leaked small
-    # negative flux at near-marginal radii (REVIEW.md).
+    # smooth stability gate; relu keeps stable modes at exactly zero
     gate = jax.nn.sigmoid(gate_sharpness * (growth_rate - gate_threshold))
     sat_amp = gate * jax.nn.relu(growth_rate) / safe_kperp2
 
-    # normalization-invariant QL weight. Intensity-weighted over kx
-    # (default): W(ky) = (sum_kx flux)/(sum_kx phi2) — grid-robust (a sum of
-    # per-kx ratios scales ~nkx for ballooning modes; REVIEW.md item 2;
-    # measured skill identical on the legacy set). kx_ratio_sum=True
-    # restores the legacy per-kx-ratio behavior.
+    # W(ky) = sum_kx flux / sum_kx |phi|^2; kx_ratio_sum sums per-kx ratios instead
     if kx_ratio_sum:
         w_kxy = flux_kxy / jnp.maximum(phi2_kxy, eps)
     else:
         w_kxy = (jnp.sum(flux_kxy, axis=0, keepdims=True)
                  / jnp.maximum(jnp.sum(phi2_kxy, axis=0, keepdims=True), eps))
 
-    # mask the zonal mode by its wavenumber, not by position: grids without
-    # a ky=0 column must not lose a physical mode
+    # mask the zonal mode by wavenumber, so grids without a ky = 0 column keep every mode
     ky_mask = (
         (jnp.abs(krho) > eps).astype(krho.dtype) if mask_zonal else jnp.ones_like(krho)
     )
     return cn * jnp.sum(w_kxy * sat_amp[None, :] * ky_mask[None, :])
 
-# TGLF SAT2 spectral-shift weight, ay in tglf_multiscale_spectrum.f90
+
+# SAT2 spectral-shift weight ay
 _SAT2_AY = 1.0
 
-# zonal-mixing constants: cz2 = 1.05*|alpha_zf| with alpha_zf = -1, and the
-# Lorentzian mixing kernel's cky; etg_stiff is 1 unless ETG_FACTOR < 0
+# zonal-mixing cz2 = 1.05 |alpha_zf| with alpha_zf = -1
 _SAT2_CZ2 = 1.05
 
-# TGLF's kymin floor, enabled there by ALPHA_ZF < 0. It stops the lowest ky
-# being picked as the gamma/ky peak, which on our 32-point ky grids is a
-# real pathology: defaulting it off cost a factor 5.3 on the kinetic set
-# (joint test RMSE 98.6 against 18.7) and 1.4 on adiabatic.
+# floor of the gamma/ky peak search, so the lowest ky is not taken as the peak
 _SAT2_KYMIN = 0.173 * 2.0**0.5
 
 # sat2 from calibration.fit_sat2 on the summary tables (collisionless, Qi only, gate 20)
@@ -147,19 +134,16 @@ CALIBRATION = {
 }
 _SAT2_FLUX_EXPONENT = CALIBRATION["sat2"]["flux_exponent"]
 
-# get_zonal_mixing caps the peak search at 0.8*grad_r0/rho_ion; rho_ion is 1
-# in gyaradax units and grad_r0 ~ 1 for the circular flux surface
+# cap of the gamma/ky peak search, 0.8 grad_r0 / rho_ion with rho_ion = 1
 _SAT2_KYCUT = 0.8
 
-# TGLF's kx_width model: b0 sets kycut, b1 the slope above it. grad_r0 and
-# Gq come from the geometry, not from constants -- see geom_sat2_factors.
+# kx width model: b0 sets kycut, b1 the slope above it (grad_r0, gq from the geometry)
 _SAT2_B0, _SAT2_B1 = 0.76, 1.22
 _CKY = 3.0
 _SQCKY = _CKY**0.5
 
 
-# TGLF clamps dlnpdr into [4, rlnp_cutoff]; rlnp_cutoff default 18 lives in
-# tglf_modules.f90
+# dlnpdr clamp [4, rlnp_cutoff]
 _DLNPDR_FLOOR, _DLNPDR_CUTOFF = 4.0, 18.0
 
 
@@ -180,8 +164,7 @@ def dlnpdr_tglf(rlt, rln, te_ti=1.0, adiabatic=False):
     rln_i = rln if adiabatic else rln[0]
     ti_te = 1.0 if adiabatic else 1.0 / te_ti
     num = (rln_i + rlt_e) + ti_te * (rln_i + rlt_i)
-    # jnp.clip, not min/max: this runs inside the plugin's vmap over radii,
-    # where rlt/rln/te_ti are tracers and Python comparisons fail
+    # jnp.clip: the arguments are tracers under the plugin's vmap
     return jnp.clip(num / (1.0 + ti_te), _DLNPDR_FLOOR, _DLNPDR_CUTOFF)
 
 
@@ -289,8 +272,7 @@ def _zonal_mixing(ky, gamma, eps, kycut=_SAT2_KYCUT, kymin=0.0):
     xmin = jnp.where(k0 < kymin, (kymin - k0) / dky, 0.0)
     xmax = jnp.clip(-b / jnp.where(jnp.abs(c) > eps, 2.0 * c, eps), 0.0, 1.0)
 
-    # f0 >= f1 means the discrete peak is not a local maximum: fall back to f0,
-    # itself floored at kymin
+    # f0 >= f1: the discrete peak is not a local maximum, fall back to f0 floored at kymin
     lo_k = jnp.where(k0 < kymin, kymin, k0)
     lo_g = jnp.where(k0 < kymin, quad(xmin) * kymin, f0 * k0)
     # xmax <= xmin: the fitted peak sits below the floor
@@ -382,60 +364,19 @@ def ql_flux_sat2(
     eps=1e-30,
     mask_zonal=True,
 ):
-    """SAT2 intensity evaluated on the full linear eigenmode.
+    """SAT2 flux Q = cn * sum_ky W(ky) I(ky)^p on the full linear eigenmode.
 
-    Follows tglf_multiscale_spectrum.f90 (GACODE 7e22eb70), which sets
-
-        |phi|^2(ky) = measure * cnorm
-                      * ((gamma_eff / (kx_width*ky)) / (1 + ay*kx_hat^2))^2
-                      * sat_geo_factor
-
-    with measure = 1/kymax, cnorm = b2*(12/dlnpdr), ay = 1 and kx_hat the
-    spectral shift rescaled by the kx width. TGLF has to MODEL kx_width, the
-    shift and the sat_geo factors because its reduced solve does not resolve
-    the eigenmode; a full linear solve measures all three, so they are taken
-    from |phi|^2 here instead of from the CGYRO fits:
-
-      kx_width  -> the measured kx width of |phi|^2(ky), replacing TGLF's
-                   kycut/grad_r0 below kycut and b1*(ky-kycut)*Gq above it
-      kymax     -> the zonal-mixing peak, the quadratically refined maximum
-                   of gamma/ky, as in get_zonal_mixing
-
-    gamma_eff is NOT the raw growth rate: it is TGLF's gamma_kymix, the rate
-    clamped above kymax and then Lorentzian-averaged over the high-ky range.
-    sat_geo_factor is dropped -- it rescales TGLF's s-alpha-like model
-    geometry onto the real flux surface, which the full solve already uses.
-
-    `kymin` defaults to TGLF's floor 0.173*sqrt(2)*grad_r0, which TGLF
-    itself enables with ALPHA_ZF < 0. Pass 0.0 to disable it. Our ky grids
-    are coarse enough that without it the gamma/ky peak lands on the lowest
-    ky and the rule degrades badly -- see the constant's definition.
-
-    `kx0_e` is TGLF's ExB spectral shift and defaults to 0, which is what
-    TGLF itself uses without rotation; it is NOT the eigenmode kx centroid,
-    whose effect already sits inside kperp2_eff.
-
-    b2 is a pure constant and folds into cn. measure and 12/dlnpdr vary per
-    run and do not, so they are kept; `dlnpdr` omitted drops that factor.
-
-    `flux_exponent` p returns cn*Q**p instead of cn*Q. It defaults to the
-    jointly fitted CALIBRATION value, not to 1; pass 1.0 for SAT2's own
-    form. SAT2's intensity is
-    quadratic in gamma, and on the GKW adiabatic scans that is too steep:
-    with p = 1 the rule is beaten by predicting a constant, while p = 0.58
-    takes the test median error from 61% to 13%. Note p acts on the SUMMED
-    flux, which is the form that was fitted; raising the per-mode intensity
-    instead is a different model and is untested. A rule linear in gamma
-    needs no exponent at all (its fitted p comes back at 1.05), so prefer
-    that over tuning this.
+    I(ky) = (1/kymax) (12/dlnpdr) ((gamma_eff / (kx_width ky)) / (1 + ay kx_hat^2))^2, with kymax
+    the quadratically refined peak of gamma/ky (floored at `kymin`, default 0.173 sqrt(2) grad_r0),
+    gamma_eff the growth rate clamped above kymax and Lorentzian-averaged over high ky, and
+    kx_width from SAT2's model (`kx_width_model="tglf"`) or measured from |phi|^2. b2 folds into cn
+    and sat_geo is left out. `flux_exponent` p acts on each mode's intensity and defaults to
+    CALIBRATION; `dlnpdr=None` drops 12/dlnpdr; `kthnorm` converts krho to k_theta rho.
     """
     ghat = _gated_gamma(growth_rate, gate_threshold, gate_sharpness)
     w = _w_ky(flux_kxy, phi2_kxy, eps)
     mask = _ky_mask(krho, mask_zonal, eps)
-    # SAT2's kycut and kymin are absolute thresholds in k_theta*rho, but
-    # gyaradax solves on krho = k_theta*rho / kthnorm, so the zonal-mixing
-    # logic has to run on the physical axis or the cutoffs land in the wrong
-    # place by kthnorm (0.7-6.2 over our scans)
+    # the thresholds are in k_theta rho; gyaradax's krho is k_theta rho / kthnorm
     ky = jnp.abs(krho) * kthnorm
 
     ky_floor = _SAT2_KYMIN * grad_r0 if kymin is None else kymin
@@ -444,10 +385,6 @@ def ql_flux_sat2(
     measure = 1.0 / kymax
 
     if kx_width_model == "tglf":
-        # TGLF's analytic model, and the default. SAT2's kx_width is a
-        # SATURATION length fitted to nonlinear runs -- it is independent of
-        # ky below kycut, which no linear mode width can be -- so measuring
-        # it from the eigenmode is substituting a different quantity.
         kycut = _SAT2_B0 * kymax
         kx_width = jnp.where(
             ky < kycut,
@@ -455,26 +392,15 @@ def ql_flux_sat2(
             kycut / grad_r0 + _SAT2_B1 * (ky - kycut) * gq,
         )
     else:
-        # NOT RECOMMENDED. The measured width of |phi|^2 over all kx is set
-        # by the chain comb, not by the mode: every theta0 chain is
-        # unit-normalised, so the width tracks the chain spacing ~shat*ky and
-        # runs down to 1e-7, which (kx_width*ky)^-2 turns into a blow-up.
-        # On adiabatic this gives test RMSE 1.8e9 against 166 for "tglf".
+        # measured width of |phi|^2 over all kx: follows the chain spacing, not the mode
         p_kx = phi2_kxy / jnp.maximum(jnp.sum(phi2_kxy, axis=0, keepdims=True), eps)
         kx_bar = jnp.sum(kxrh[:, None] * p_kx, axis=0)
         sig2_kx = jnp.sum((kxrh[:, None] - kx_bar[None, :]) ** 2 * p_kx, axis=0)
         kx_width = jnp.sqrt(jnp.maximum(sig2_kx, eps))
 
-    # TGLF's spectral shift is the ExB-driven radial offset kx0_e, not the
-    # eigenmode's own kx centroid: tglf_geometry.f90:59-73 leaves kx0_e at 0
-    # and sets it only from vexb_shear_kx0, so at zero rotation the
-    # suppression is exactly 1. Our runs carry no ExB shear.
+    # ExB spectral shift; kx0_e = 0 without rotation
     kx_hat = kx0_e * ky / kx_width
 
-    # SAT2 divides by kx_width*ky, NOT by <kperp^2>. Below kycut TGLF holds
-    # kx_width constant, so the denominator goes like ky and the intensity
-    # peaks where gamma/ky does; <kperp^2> ~ ky^2 would push the peak to the
-    # bottom of the grid instead.
     denom = jnp.maximum(kx_width * ky, eps)
 
     cnorm = 1.0 if dlnpdr is None else 12.0 / jnp.maximum(dlnpdr, 4.0)
@@ -483,15 +409,7 @@ def ql_flux_sat2(
         * cnorm
         * ((gamma_eff / denom) / (1.0 + _SAT2_AY * kx_hat**2)) ** 2
     )
-    # the exponent goes on the per-mode INTENSITY, not on the summed flux.
-    # on the sum it fits marginally better (joint test RMSE 29.6/18.5
-    # against 31.3/21.8) but it destroys linearity in the flux, and
-    # ql_flux_per_species then sums to 1.85x the species-summed call --
-    # which would silently corrupt Qe and Gamma_e on any kinetic run.
-    # branch-free throughout: flux_exponent arrives traced from the TORAX
-    # plugin's rule_options, so a Python comparison on it is a tracer bool.
-    # the where keeps a stable mode at EXACTLY zero: eps**p is not zero,
-    # and a gated-off mode must contribute nothing at any exponent
+    # exponent per mode keeps the rule linear in the flux; the where keeps stable modes at zero
     shaped = jnp.where(intensity > 0.0,
                        jnp.power(jnp.maximum(intensity, eps), flux_exponent), 0.0)
     return cn * jnp.sum(w * shaped * mask)
@@ -503,11 +421,10 @@ RULES = {
     "sat2": ql_flux_sat2,
 }
 
-# rules taking TGLF's pressure-gradient normalization
+# rules taking the pressure-gradient normalization dlnpdr
 RULES_WITH_DLNPDR = ("sat2",)
 
-# rules whose wavenumber thresholds are absolute in k_theta*rho and so need
-# the krho -> k_theta*rho conversion factor
+# rules whose thresholds are in k_theta rho, so need kthnorm
 RULES_WITH_KTHNORM = ("sat2",)
 
 
