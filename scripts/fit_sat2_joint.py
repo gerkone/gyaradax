@@ -1,14 +1,17 @@
 """Joint (cn, flux_exponent) fit of the sat2 rule on the summary tables, Qi only.
 
-One pair for the adiabatic and kinetic sets together, least squares on log(Q_rule / Qi_avg)
-over the train split, scored on the test split. Rows: saturated, with QL weights; kinetic
-rows collisionless unless --collisional.
+The rule is `ql_flux_sat2` itself, as the TORAX plugin evaluates it, with each row's own gq.
+Rows: saturated, settled QL weights; kinetic rows collisionless unless --collisional. Test
+rows: 10% per log-flux decile of each set (fit_sat2.stratified_test). One (cn, p) pair for
+both sets: p on a 0.01 grid, cn the log-mean ratio on the train rows, minimising log10 RMSE.
 
-    python scripts/fit_sat2_joint.py [--weight all|chain0] [--collisional] [--out fit.json]
+    python scripts/fit_sat2_joint.py [--gate-sharpness 20] [--collisional] [--out fit.json]
 """
 
 import argparse
 import json
+import os
+import sys
 
 import jax
 
@@ -16,82 +19,89 @@ jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
 import numpy as np
 import pandas as pd
-from scipy.optimize import least_squares
 
-from gyaradax.quasilinear.rules import CALIBRATION, dlnpdr_tglf, ql_flux_sat2
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from fit_sat2 import metrics, stratified_test  # noqa: E402
+
+from gyaradax.quasilinear.rules import CALIBRATION, ql_flux_sat2  # noqa: E402
 
 SUMMARY = "/restricteddata/ukaea/gyrokinetics/preprocessed/summary"
+GQ_DEFAULT = 0.826
 
 
-def load(kind, weight, collisional):
+def load(kind, collisional):
     df = pd.read_parquet(f"{SUMMARY}/{kind}.parquet")
-    df = df[(df["run_class"] == "saturated") & df["Qi_avg"].notna() & (df["Qi_avg"] > 0)]
-    if kind == "kinetic" and not collisional:
-        df = df[df["collisionality"].fillna(0.0) == 0.0]
     rows = []
     for _, r in df.iterrows():
-        # sat2 with TGLF's kx width needs no eigenmode, so rows without one stay in
-        wkey = "lin_weight_Qi_chain0" if weight == "chain0" else "lin_weight_Qi"
-        if r[wkey] is None or len(r[wkey]) == 0:
+        if r.run_class != "saturated" or not np.isfinite(r.get("Qi_avg", np.nan)):
             continue
-        ky, g, w = (np.asarray(r[k], float) for k in ("lin_ky", "lin_gamma", wkey))
+        if r.get("lin_weight_settled") is False:
+            continue
+        if kind == "kinetic" and not collisional and (r.get("collisionality") or 0.0) > 0.0:
+            continue
+        w = r.lin_weight_Qi
+        if w is None or np.size(w) == 0:
+            continue
+        ky, g, w = (np.asarray(x, float) for x in (r.lin_ky, r.lin_gamma, w))
         n = min(ky.size, g.size, w.size)
-        m = (ky[:n] > 0) & np.isfinite(g[:n]) & np.isfinite(w[:n])
-        if m.sum() < 4 or not (g[:n][m] > 0).any():
+        ky, g, w = ky[:n], g[:n], w[:n]
+        m = np.isfinite(ky) & (ky > 0) & np.isfinite(g) & np.isfinite(w)
+        if m.sum() < 4 or not (g[m] > 0).any():
             continue
-        ky, g, w = ky[:n][m], np.maximum(g[:n][m], 0.0), w[:n][m]
-        adiabatic = kind == "adiabatic"
-        rlt = r["rlt_i"] if adiabatic else np.array([r["rlt_i"], r["rlt_e"]])
-        rln = r["rln"] if adiabatic else np.array([r["rln"], r["rln"]])
-        dlnpdr = float(dlnpdr_tglf(rlt, rln, te_ti=r["te_ti"], adiabatic=adiabatic))
-        # the rules take gyaradax's krho = lin_ky / kthnorm
-        rows.append(dict(kind=kind, split=r["split"], Q=float(r["Qi_avg"]), ky=ky / r["kthnorm"], g=g, w=w,
-                         kthnorm=float(r["kthnorm"]), dlnpdr=dlnpdr))
+        o = np.argsort(ky[m])
+        gq = r.get("lin_gq")
+        gq = GQ_DEFAULT if gq is None or not np.isfinite(gq) else float(gq)
+        # lin_ky is k_theta*rho; with kthnorm = 1 the rule's physical axis is lin_ky itself
+        rows.append(dict(ky=ky[m][o], g=np.maximum(g[m], 0.0)[o], w=w[m][o],
+                         dlnpdr=float(r.dlnpdr_tglf), Q=float(r.Qi_avg), gq=gq))
     return rows
 
 
-def rule(r, cn, p):
-    n = r["ky"].size
-    return float(ql_flux_sat2(
-        jnp.asarray(r["g"]), None, jnp.ones((1, n)), jnp.asarray(r["w"])[None, :],
-        jnp.asarray(r["ky"]), jnp.zeros(1), None, None, cn=cn, dlnpdr=r["dlnpdr"],
-        kthnorm=r["kthnorm"], flux_exponent=p,
-    ))
-
-
-def score(rows, cn, p):
-    pred = np.array([rule(r, cn, p) for r in rows])
-    q = np.array([r["Q"] for r in rows])
-    return {"n": len(rows), "rmse": float(np.sqrt(np.mean((pred - q) ** 2))),
-            "med_rel": float(np.median(np.abs(pred / q - 1)))}
+def predict(rows, cn, p, gate_sharpness):
+    return np.array([
+        float(ql_flux_sat2(
+            jnp.asarray(r["g"]), None, jnp.ones((1, r["ky"].size)), jnp.asarray(r["w"])[None, :],
+            jnp.asarray(r["ky"]), jnp.zeros(1), None, None, cn=cn, dlnpdr=r["dlnpdr"],
+            kthnorm=1.0, grad_r0=1.0, gq=r["gq"], flux_exponent=p, gate_sharpness=gate_sharpness,
+        ))
+        for r in rows
+    ])
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--weight", default="all", choices=["all", "chain0"])
+    parser.add_argument("--gate-sharpness", type=float, default=20.0)
     parser.add_argument("--collisional", action="store_true")
     parser.add_argument("--out", default=None)
     args = parser.parse_args()
 
-    rows = load("adiabatic", args.weight, False) + load("kinetic", args.weight, args.collisional)
-    train = [r for r in rows if r["split"] == "train"]
-    test = {k: [r for r in rows if r["split"] == "test" and r["kind"] == k] for k in ("adiabatic", "kinetic")}
-
-    def resid(theta):
-        return np.array([np.log(max(rule(r, np.exp(theta[0]), theta[1]), 1e-30) / r["Q"]) for r in train])
-
-    fit = least_squares(resid, [np.log(0.7), 0.6])
-    cn, p = float(np.exp(fit.x[0])), float(fit.x[1])
+    sets = {k: load(k, args.collisional) for k in ("adiabatic", "kinetic")}
+    y = {k: np.array([r["Q"] for r in v]) for k, v in sets.items()}
+    best = None
+    for p in np.arange(0.30, 1.35, 0.01):
+        x = {k: predict(v, 1.0, p, args.gate_sharpness) for k, v in sets.items()}
+        ok = {k: np.isfinite(x[k]) & (x[k] > 0) & (y[k] > 0) for k in sets}
+        test = {k: stratified_test(np.where(ok[k], y[k], np.nan)) & ok[k] for k in sets}
+        train = {k: ok[k] & ~test[k] for k in sets}
+        xj = np.concatenate([x[k][train[k]] for k in sets])
+        yj = np.concatenate([y[k][train[k]] for k in sets])
+        cn = float(np.exp(np.mean(np.log(yj) - np.log(xj))))
+        err = float(np.sqrt(np.mean((np.log10(cn * xj) - np.log10(yj)) ** 2)))
+        if best is None or err < best[0]:
+            best = (err, float(p), cn, x, test, train)
+    err, p, cn, x, test, train = best
     stored = CALIBRATION["sat2"]
+    xs = {k: predict(v, stored["cn"], stored["flux_exponent"], args.gate_sharpness) for k, v in sets.items()}
     report = {
         "args": vars(args),
-        "n_train": {k: sum(r["kind"] == k for r in train) for k in ("adiabatic", "kinetic")},
-        "fit": {"cn": cn, "flux_exponent": p, **{k: score(v, cn, p) for k, v in test.items()}},
-        "stored": {**stored, **{k: score(v, stored["cn"], stored["flux_exponent"]) for k, v in test.items()}},
+        "n": {k: {"train": int(train[k].sum()), "test": int(test[k].sum())} for k in sets},
+        "fit": {"cn": cn, "flux_exponent": p, "train_rmse_log10": err,
+                **{k: metrics(y[k][test[k]], cn * x[k][test[k]]) for k in sets}},
+        "stored": {**stored, **{k: metrics(y[k][test[k]], xs[k][test[k]]) for k in sets}},
     }
-    print(json.dumps(report, indent=1))
+    print(json.dumps(report, indent=1, default=float))
     if args.out:
-        json.dump(report, open(args.out, "w"), indent=1)
+        json.dump(report, open(args.out, "w"), indent=1, default=float)
 
 
 if __name__ == "__main__":

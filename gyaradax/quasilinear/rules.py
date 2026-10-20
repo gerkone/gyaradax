@@ -46,20 +46,11 @@ _SAT2_CZ2 = 1.05
 # (joint test RMSE 98.6 against 18.7) and 1.4 on adiabatic.
 _SAT2_KYMIN = 0.173 * 2.0**0.5
 
-# Fitted jointly on 295 base-adiabatic + 112 kinetic GKW/gyaradax runs
-# (2026-10-17), one (cn, exponent) per rule across both sets, chain-0
-# <kperp2> for the rules that use it. Test RMSE / median |rel|:
-#   sat2       adi 31.3 / 21.0%   kin 21.8 / 47.5%
-# Fitted at fixed eps = 0.19, collisionless, Qi only. The exponent in
-# particular is NOT validated against collisionality -- Staebler (NF 61
-# 116007) kept gamma^2 precisely because gamma^1 spoiled his collision
-# scans, and ours contains none.
-# Only sat2 takes an exponent; canonical and sat0 have no such parameter,
-# so theirs is an amplitude alone.
+# sat2 from scripts/fit_sat2_joint.py on the summary tables (collisionless, Qi only, gate 20)
 CALIBRATION = {
     "canonical": {"cn": None},
     "sat0": {"cn": None},
-    "sat2": {"cn": 0.7351, "flux_exponent": 0.620},
+    "sat2": {"cn": 0.8499, "flux_exponent": 0.590},
 }
 _SAT2_FLUX_EXPONENT = CALIBRATION["sat2"]["flux_exponent"]
 
