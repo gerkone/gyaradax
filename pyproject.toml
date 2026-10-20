@@ -26,7 +26,7 @@ include = ["gyaradax*"]
 
 # ship the bundled saturation-rule calibrations as package data
 [tool.setuptools.package-data]
-"gyaradax.quasilinear.calibrations" = ["*.json"]
+"gyaradax.quasilinear" = ["weights/*.json"]
 
 [tool.ruff]
 line-length = 100

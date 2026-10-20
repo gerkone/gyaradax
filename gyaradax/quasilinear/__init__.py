@@ -4,11 +4,10 @@
   point_eval       linear solve + rule at one operating point, the entry point the TORAX
                    plugin calls; nl_at_point for the nonlinear ground truth
   linear_pipeline  QL inputs from a GKW run directory
-  calibration      fit_sat2 on the summary tables
-  calibrations     bundled calibrations (fitted parameters and their metrics), one JSON each
+  calibration      bundled calibrations (weights/*.json): load, save, and the sat2 fit
 """
 
-from . import calibrations
+from . import calibration
 from .linear_pipeline import linear_from_fds
 from .point_eval import nl_at_point, ql_at_point
 from .rules import (
@@ -26,7 +25,7 @@ from .rules import (
 )
 
 __all__ = [
-    "calibrations",
+    "calibration",
     "RULES",
     "RULES_WITH_DLNPDR",
     "RULES_WITH_KTHNORM",

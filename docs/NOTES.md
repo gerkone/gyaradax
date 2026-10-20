@@ -1745,13 +1745,13 @@ Not included: the sat_geo factor (the solve already uses the real flux surface) 
 
 ### 14.3 calibration
 
-Fitted parameters live in `quasilinear/calibrations/`, one JSON per fit: the rule, its fitted
+Fitted parameters live in `quasilinear/weights/`, one JSON per fit: the rule, its fitted
 `parameters` (`cn`, and `flux_exponent` for sat2), the rule `options` held fixed, optionally the
-`grid`, and the `fit` record with `test` and `cross_validation` metrics. `calibrations.load(name)`
-reads one (`"auto"` picks the rule's default, `calibrations.DEFAULTS`); `calibrations.rule_kwargs`
+`grid`, and the `fit` record with `test` and `cross_validation` metrics. `calibration.load(name)`
+reads one (`"auto"` picks the rule's default, `calibration.DEFAULTS`); `calibration.rule_kwargs`
 gives the rule's keyword arguments besides `cn`. No fitted number is hard-coded in the rules.
 
-`calibration.fit_sat2()` returns such a record (`calibrations.save` writes it); it fits one (cn, p)
+`calibration.fit_sat2()` returns such a record (`calibration.save` writes it); it fits one (cn, p)
 for both sets through `ql_flux_sat2` itself:
 
 - data: `/restricteddata/ukaea/gyrokinetics/preprocessed/summary/{adiabatic,kinetic}.parquet`,
