@@ -2,7 +2,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-
 from conftest import noisy_case  # type: ignore[import-not-found]
 
 from gyaradax.operators.poisson import _phi_kinetic, charge_density, precompute_phi_kinetic

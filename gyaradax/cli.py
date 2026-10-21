@@ -1,4 +1,5 @@
-"""gyaradax command-line interface: ``run``, ``bench``, ``info``.
+"""gyaradax command-line interface: ``run``, ``bench``, ``growth``, ``info``, ``build-cuda``,
+``datagen``.
 
 Run mode (adiabatic/kinetic), electromagnetic terms and velocity-space
 sharding all come from the YAML config; flags only override it. See docs/CLI.md.
@@ -11,6 +12,7 @@ initialises.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import glob
 import importlib.util
 import json
@@ -18,6 +20,7 @@ import math
 import os
 import re
 import shutil
+import signal
 import sys
 import time
 from dataclasses import replace
@@ -201,6 +204,7 @@ class RunSetup(TypedDict):
     block_size: int
     snapshot_every: int
     save_dumps: bool
+    dataset: dict[str, Any] | None
     previous_snapshot: str | None
     stale: list[str]
     name: str
@@ -212,10 +216,324 @@ class RunSetup(TypedDict):
     start_step: int
     telemetry: bool
     profile: bool
+    dump_dt: float | None
+    t_end: float | None
+    dump_origin: float | None
+    trajectory: str | None
+
+
+def _default_output_dir(cfg: Any, args: argparse.Namespace, run_dir: str | None) -> str:
+    kinetic = not bool((cfg.get("grid") or {}).get("adiabatic_electrons", True))
+    default = f"outputs_{'kinetic' if kinetic else 'adiabatic'}_{cfg.run.name}"
+    return args.output_dir or run_dir or default
+
+
+def _parse_sets(items: Sequence[str] | None) -> dict[str, Any]:
+    import yaml
+
+    out: dict[str, Any] = {}
+    for item in items or []:
+        key, sep, value = item.partition("=")
+        if not sep or not key.strip():
+            raise SystemExit(f"error: --set expects KEY=VALUE, got {item!r}")
+        out[key.strip()] = yaml.safe_load(value)
+    return out
+
+
+def _parse_ns_list(text: str) -> list[int]:
+    try:
+        values = [int(v) for v in text.replace(",", " ").split()]
+    except ValueError:
+        raise SystemExit(f"error: expected resolutions like 36 or 24,36, got {text!r}")
+    if not values or min(values) < 2:
+        raise SystemExit(f"error: expected resolutions like 36 or 24,36, got {text!r}")
+    return values
+
+
+def _progress(every: int = 10) -> Any:
+    count = [0]
+
+    def log(msg: str) -> None:
+        count[0] += 1
+        if count[0] % every == 0:
+            print(f"    {msg}", flush=True)
+
+    return log
+
+
+def _linear_check(args: argparse.Namespace, config_path: str, run_dir: str | None) -> int:
+    """Linear growth rates at the run's ns and the reference ones, cached in the run directory."""
+    from gyaradax.diagnostics import growth
+
+    cfg = OmegaConf.load(config_path)
+    output_dir = _default_output_dir(cfg, args, run_dir)
+    path = os.path.join(output_dir, "linear_check.json")
+    refs = _parse_ns_list(args.linear_check)
+    key = growth.config_key(growth.adjusted_config(cfg))
+    report = None
+    if os.path.isfile(path):
+        with open(path) as fh:
+            cached = json.load(fh)
+        have = {int(r["ns"]) for r in cached.get("runs", [])}
+        if cached.get("config_key") == key and set(refs) | {int(cfg.grid.ns)} <= have:
+            report = cached
+            print(f"linear check: {path} (computed before)")
+    if report is None:
+        print(f"linear check: growth rates at ns {int(cfg.grid.ns)} and reference ns {refs}")
+        report = growth.check(
+            cfg, refs, backend=args.backend, log=_progress(), t_end=args.linear_check_t_end
+        )
+        os.makedirs(output_dir, exist_ok=True)
+        tmp = path + ".tmp"
+        with open(tmp, "w") as fh:
+            json.dump(report, fh, indent=1)
+        os.replace(tmp, path)
+    print(growth.format_check(report))
+    own = report["comparison"][str(report["ns"])]
+    tol = args.linear_check_tol
+    if tol is not None and own["rel"] is not None and abs(own["rel"]) > tol:
+        print(
+            f"exit {growth.EXIT_LINEAR_CHECK}: γ at kθρ {own['ky']:.3f} is {own['gamma']:+.4f} "
+            f"at ns {report['ns']} against {own['gamma_ref']:+.4f} at ns {report['reference_ns']} "
+            f"({own['rel']:+.1%}, tolerance {tol:.1%}); not starting the nonlinear run"
+        )
+        return growth.EXIT_LINEAR_CHECK
+    return 0
+
+
+def _linear_gate(args: argparse.Namespace, config_path: str, run_dir: str | None) -> dict[str, Any]:
+    """Linear run of the config on its own grid, cached in the run directory with its eigenmode."""
+    import numpy as np
+
+    from gyaradax.diagnostics import growth, outcome
+
+    cfg = OmegaConf.load(config_path)
+    mesh = _mesh_request(args, _peek_config(config_path))
+    output_dir = _default_output_dir(cfg, args, run_dir)
+    path = os.path.join(output_dir, outcome.GATE_FILE)
+    mode_path = os.path.join(output_dir, outcome.MODE_FILE)
+    key = growth.config_key(growth.adjusted_config(cfg))
+    gate = None
+    if os.path.isfile(path) and os.path.isfile(mode_path):
+        with open(path) as fh:
+            cached = json.load(fh)
+        if cached.get("config_key") == key:
+            gate = cached
+            print(f"linear gate: {path} (computed before)")
+    if gate is None:
+        print(
+            f"linear gate: linear run on the config's grid (t_end {args.linear_gate_t_end:g}, "
+            f"mesh sp, vp, mu = {mesh})"
+        )
+        t0 = time.time()
+        result = growth.growth_rates(
+            cfg,
+            None,
+            backend=args.backend,
+            log=_progress(),
+            t_end=args.linear_gate_t_end,
+            ky_max=math.inf,
+            frequencies=True,
+            keep_mode=True,
+            mesh=mesh,
+        )
+        mode = result.pop("mode")
+        result["wall_s"] = time.time() - t0
+        os.makedirs(output_dir, exist_ok=True)
+        tmp = f"{mode_path}.tmp{os.getpid()}.npz"
+        np.savez(tmp, df=mode["df"].astype(np.complex64), phi=mode["phi"], time=mode["time"])
+        os.replace(tmp, mode_path)
+        gate = result
+    gate = outcome.gate_report(
+        gate, args.linear_gate_stable, args.linear_gate_gamma_min, args.linear_gate_low_ky
+    )
+    os.makedirs(output_dir, exist_ok=True)
+    outcome._atomic_json(path, gate)
+    print(outcome.format_gate(gate))
+    return gate
+
+
+def _linear_only(args: argparse.Namespace, config_path: str, run_dir: str | None) -> int:
+    """The linear gate alone: RUN_DIR/linear.json and the eigenmode as RUN_DIR/data/linear*.bin."""
+    import numpy as np
+
+    from gyaradax.diagnostics import growth, outcome
+    from gyaradax.io.dataset import LINEAR_FILES, linear_frames, write_linear_frames
+
+    cfg = OmegaConf.load(config_path)
+    output_dir = _default_output_dir(cfg, args, run_dir)
+    path = os.path.join(output_dir, outcome.LINEAR_FILE)
+    data_dir = os.path.join(output_dir, "data")
+    key = growth.config_key(growth.adjusted_config(cfg))
+    have = all(os.path.isfile(os.path.join(data_dir, n)) for n in LINEAR_FILES)
+    if have and os.path.isfile(path):
+        with open(path) as fh:
+            done = json.load(fh)
+        if done.get("config_key") == key:
+            print(f"linear only: {path} (computed before)")
+            print(outcome.format_gate(done))
+            return 0
+    gate = _linear_gate(args, config_path, run_dir)
+    mode_path = os.path.join(output_dir, outcome.MODE_FILE)
+    with np.load(mode_path) as mode:
+        frames = linear_frames(mode["df"], mode["phi"])
+        mode_time = float(mode["time"])
+    write_linear_frames(data_dir, frames)
+    doc = {
+        **gate,
+        "config": os.path.abspath(config_path),
+        "mode_time": mode_time,
+        "files": {f"data/{n}": list(a.shape) for n, a in zip(LINEAR_FILES, frames)},
+    }
+    outcome._atomic_json(path, doc)
+    outcome.gate_outcome(output_dir, gate, cls="linear_only")
+    # the eigenmode now lives in data/
+    os.remove(mode_path)
+    print(f"linear only: {path} and {data_dir}/linear*.bin; not starting the nonlinear run")
+    return 0
+
+
+def _stable_trajectory(
+    args: argparse.Namespace,
+    config_path: str,
+    run_dir: str | None,
+    gate: dict[str, Any],
+    doc: dict[str, Any],
+) -> None:
+    """Dataset trajectory of a run the linear gate skipped: its final linear state as the one frame.
+
+    The trajectory holds the run's static metadata, the linear results and eigenmode files, and
+    ``stable``; it gets no resume dump, since a nonlinear leg should not start from the eigenmode.
+    """
+    from types import SimpleNamespace
+
+    import jax.numpy as jnp
+    import numpy as np
+
+    from gyaradax.diagnostics.outcome import MODE_FILE
+    from gyaradax.io.rundir import save_run_metadata
+    from gyaradax.solver.driver import _dataset_frame
+
+    setup = _setup_run(config_path, args, run_dir=run_dir)
+    if setup["dataset"] is None:
+        return
+    save_run_metadata(setup["output_dir"], setup["effective_config"], setup["geometry"])
+    writer = _dataset_writer(setup, gate)
+    with np.load(os.path.join(setup["output_dir"], MODE_FILE)) as mode:
+        df = jnp.asarray(mode["df"]).astype(jnp.complex128)
+        phi = jnp.asarray(mode["phi"])
+        t = float(mode["time"])
+    run = {
+        "dataset": writer,
+        "geometry": setup["geometry"],
+        "params": setup["params"],
+        "pre": setup["pre"],
+    }
+    _, fluxes = _diagnostics_of(df, run)
+    state = SimpleNamespace(time=t, step=0, last_growth_rate=np.asarray(gate["gamma"]))
+    if writer.n_frames == 0:
+        _dataset_frame(run, df, phi, fluxes, state)
+    writer.update_static({"stable": True, "outcome": doc, "frame_source": "linear"})
+    writer.finalize()
+
+
+def _diagnostics_of(df: Any, run: dict[str, Any]) -> Any:
+    from gyaradax.solver.driver import _diagnostics
+
+    return _diagnostics(df, run["geometry"], run["params"], run["pre"])
+
+
+def _monitor_settings(args: argparse.Namespace) -> Any:
+    """Outcome tracking settings when a flag asks for it, else None."""
+    from gyaradax.diagnostics.outcome import MonitorSettings
+
+    wanted = (
+        args.linear_gate
+        or args.stop_on_decay
+        or args.stop_on_banding
+        or args.track_outcome
+        or args.dataset_from_flux is not None
+    )
+    if not wanted:
+        return None
+    return MonitorSettings(
+        stop_on_decay=args.stop_on_decay,
+        decay_t_min=args.decay_t_min,
+        decay_floor=args.decay_floor,
+        decay_rel_floor=args.decay_rel_floor,
+        decay_window=args.decay_window,
+        decay_keep_frames=args.decay_keep_frames,
+        banding_threshold=args.banding_threshold,
+        banding_window=args.banding_window,
+        stop_on_banding=args.stop_on_banding,
+        dataset_from_flux=args.dataset_from_flux,
+    )
+
+
+def _run_monitor(settings: Any, setup: RunSetup, gate: dict[str, Any] | None) -> Any:
+    if settings is None:
+        return None
+    import numpy as np
+
+    from gyaradax.diagnostics.outcome import RunMonitor
+
+    params = setup["params"]
+    signz = np.atleast_1d(np.asarray(params.signz, dtype=float))
+    kinetic = not params.adiabatic_electrons
+    return RunMonitor(
+        setup["output_dir"],
+        settings,
+        start_step=setup["start_step"],
+        ion=int(np.argmax(signz > 0)) if kinetic else 0,
+        electron=int(np.argmax(signz < 0)) if kinetic else None,
+        gate=gate,
+    )
+
+
+def _cmd_growth(args: argparse.Namespace) -> int:
+    if args.mem_fraction:
+        os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = str(args.mem_fraction)
+    facts = _peek_config(args.config)
+    mesh = _auto_mesh(args.n_gpus, facts) if args.n_gpus > 1 else (1, 1, 1)
+    _check_mesh(mesh, facts, _visible_gpus(args))
+    configure_runtime_env(
+        device=args.device if args.device is not None else -1,
+        device_list=args.device_list,
+        n_gpus_sp=mesh[0],
+        n_gpus_vp=mesh[1],
+        n_gpus_mu=mesh[2],
+    )
+    if args.n_gpus > 1:
+        append_xla_flags(_MULTI_GPU_XLA_FLAGS)
+    from gyaradax.diagnostics import growth
+
+    cfg = growth.adjusted_config(OmegaConf.load(args.config), sets=_parse_sets(args.set))
+    own = int(cfg.grid.ns)
+    runs = []
+    for ns in sorted(set(args.ns or [own])):
+        print(f"ns {ns}: linear run to settled growth rates (t_end {args.t_end:g})", flush=True)
+        runs.append(
+            growth.growth_rates(
+                cfg, ns, backend=args.backend, t_end=args.t_end, log=_progress(), mesh=mesh
+            )
+        )
+    report = growth.assemble(runs, own)
+    report["config"] = os.path.abspath(args.config)
+    report["sets"] = _parse_sets(args.set)
+    print(growth.format_check(report))
+    if args.output:
+        with open(args.output, "w") as fh:
+            json.dump(report, fh, indent=1)
+        print(f"wrote {args.output}")
+    return 0
 
 
 def _resolve_config(path: str) -> tuple[str, str | None]:
     """A run directory stands for its dumped ``config.yaml`` and is resumed in place."""
+    from gyaradax.io.dataset import is_trajectory
+
+    if is_trajectory(path):
+        raise SystemExit(f"error: {path} is a dataset trajectory; extend it alone with `gyaradax run {path}`")
     if os.path.isdir(path):
         config = os.path.join(path, "config.yaml")
         if not os.path.isfile(config):
@@ -341,9 +659,7 @@ def _setup_run(config_path: str, args: argparse.Namespace, run_dir: str | None =
     name = cfg.run.name
     kinetic = not facts["adiabatic"]
 
-    output_dir: str = (
-        args.output_dir or run_dir or f"outputs_{'kinetic' if kinetic else 'adiabatic'}_{name}"
-    )
+    output_dir = _default_output_dir(cfg, args, run_dir)
 
     overrides: dict[str, Any] = {}
     if args.mp:
@@ -370,10 +686,16 @@ def _setup_run(config_path: str, args: argparse.Namespace, run_dir: str | None =
     if not params.adiabatic_electrons:
         n_species = int(jnp.asarray(params.mas).shape[0])
 
+    from gyaradax.io.dataset import is_trajectory, resume_path
+
     snapshot = None
     rolling = False
+    trajectory = None
     if not args.from_scratch:
-        if args.resume_from and args.resume_from.endswith(".npz"):
+        if args.resume_from and is_trajectory(args.resume_from):
+            trajectory = os.path.abspath(args.resume_from)
+            snapshot = resume_path(trajectory)
+        elif args.resume_from and args.resume_from.endswith(".npz"):
             snapshot = args.resume_from
         elif run_dir is not None and not args.resume_from:
             snapshot = _latest_snapshot(run_dir)
@@ -382,6 +704,7 @@ def _setup_run(config_path: str, args: argparse.Namespace, run_dir: str | None =
     if not args.from_scratch and snapshot is None:
         k_path = _find_k_file(data_dir, args.resume_from)
 
+    dump_origin = None
     if snapshot is not None:
         if not os.path.isfile(snapshot):
             raise SystemExit(f"error: snapshot {snapshot} not found")
@@ -400,6 +723,8 @@ def _setup_run(config_path: str, args: argparse.Namespace, run_dir: str | None =
                 window_start_amp=jnp.asarray(ck["window_start_amp"], dtype=jnp.float64),
                 last_growth_rate=jnp.asarray(ck["last_growth_rate"], dtype=jnp.float64),
             )
+            if "dump_origin" in ck.files:
+                dump_origin = float(ck["dump_origin"])
         geometry = _ensure_species_arrays(geometry, params)
         print(f"  resumed from {snapshot} (step {int(state.step)}, t={float(state.time):.4f})")
     elif k_path is not None:
@@ -450,6 +775,20 @@ def _setup_run(config_path: str, args: argparse.Namespace, run_dir: str | None =
     else:
         pre = linear_precompute(geometry, params)
 
+    if params.dt_eig_cfl > 0:
+        import jax.numpy as jnp
+
+        from gyaradax.solver.cfl import estimate_linear_timestep
+        from gyaradax.solver.eig_dt import eig_dt_cap
+
+        dt_est = float(estimate_linear_timestep(pre, params=params))
+        cap = eig_dt_cap(geometry, params)
+        pre._items["dt_eig_cap"] = jnp.asarray(cap["dt_cap"], dtype=jnp.float64)
+        blocks = ", ".join(f"ky {k}: {abs(complex(*v)):.4g}" for k, v in cap["blocks"].items())
+        print(f"  eigenvalue dt cap: max|lambda| {cap['lam_max']:.4g} ({blocks}) -> dt <= "
+              f"{cap['dt_cap']:.4e} ({cap['dt_cap'] / dt_est:.2f}x the estimate {dt_est:.4e}; "
+              f"dt_eig_cfl {params.dt_eig_cfl:g}, {cap['seconds']:.0f} s)", flush=True)
+
     if not (params.adaptive_dt and params.non_linear):
         from gyaradax.cfl import estimate_linear_timestep
 
@@ -471,10 +810,17 @@ def _setup_run(config_path: str, args: argparse.Namespace, run_dir: str | None =
         dump_interval = int(getattr(cfg.solver, "dump_interval", 0) or 0)
         block_size = dump_interval * params.naverage if dump_interval else 120
 
+    # time mode: frames every dump_dt time units, the run ends on the first frame at or after t_end
+    dump_dt = float(getattr(args, "dump_dt", None) or getattr(cfg.solver, "dump_dt", 0) or 0) or None
+    t_end = _run_end_time(cfg, args, dump_dt, float(state.time))
+
     # steps: --n-steps more > --n-blocks > up to solver.n_steps (resumed) > solver.n_steps > heuristic
     start_step = int(state.step)
     cfg_steps = int(getattr(cfg.solver, "n_steps", 0) or 0)
-    if args.n_steps:
+    if t_end is not None:
+        # an estimate at the largest time step, for reports only
+        n_steps = max(int(np.ceil((t_end - float(state.time)) / params.dt)), 0)
+    elif args.n_steps:
         n_steps = args.n_steps
     elif args.n_blocks:
         n_steps = args.n_blocks * block_size
@@ -493,7 +839,7 @@ def _setup_run(config_path: str, args: argparse.Namespace, run_dir: str | None =
 
     # a run shorter than the checkpoint interval is one block
     saved_block_size = block_size
-    if 0 < n_steps < block_size:
+    if dump_dt is None and 0 < n_steps < block_size:
         print(f"  note: checkpoint interval {block_size} > n_steps {n_steps}; this run is one block")
         if _confirm(
             f"  keep {n_steps} as the checkpoint interval when this run is resumed "
@@ -506,6 +852,7 @@ def _setup_run(config_path: str, args: argparse.Namespace, run_dir: str | None =
     snapshot_every = int(
         getattr(args, "snapshot_every", 0) or getattr(cfg.run, "snapshot_every", 0) or 1
     )
+    dataset = _dataset_settings(cfg, args, name, trajectory)
     archived = bool(getattr(cfg.run, "save_dumps", False))
     save_dumps = archived if args.save_dumps is None else bool(args.save_dumps)
     # the rolling restart file this run continues from goes once a newer one exists
@@ -523,6 +870,7 @@ def _setup_run(config_path: str, args: argparse.Namespace, run_dir: str | None =
         "block_size": block_size,
         "snapshot_every": snapshot_every,
         "save_dumps": save_dumps,
+        "dataset": dataset,
         "previous_snapshot": previous_snapshot,
         "stale": stale,
         "name": name,
@@ -530,13 +878,98 @@ def _setup_run(config_path: str, args: argparse.Namespace, run_dir: str | None =
         "mesh": mesh,
         "config_path": config_path,
         "effective_config": _effective_config(
-            cfg, params, start_step + n_steps, saved_block_size, snapshot_every, save_dumps
+            cfg, params, start_step + n_steps, saved_block_size, snapshot_every, save_dumps, dataset,
+            dump_dt=dump_dt, t_end=t_end,
         ),
         "resumed_from": snapshot or k_path,
         "start_step": start_step,
         "telemetry": _debug_flag(cfg, args, "telemetry"),
         "profile": _debug_flag(cfg, args, "profile"),
+        "dump_dt": dump_dt,
+        "t_end": t_end,
+        "dump_origin": dump_origin,
+        "trajectory": trajectory,
     }
+
+
+def _run_end_time(cfg: Any, args: argparse.Namespace, dump_dt: float | None, t_now: float) -> float | None:
+    """End time of a time-mode run: --t-end > --n-blocks frames > (--n-steps: none) > solver.t_end."""
+    t_arg = getattr(args, "t_end", None)
+    if dump_dt is None:
+        if t_arg is not None or getattr(cfg.solver, "t_end", None) is not None:
+            raise SystemExit("error: an end time needs a dump spacing (--dump-dt or solver.dump_dt)")
+        return None
+    if t_arg is not None:
+        return float(t_arg)
+    if args.n_blocks:
+        return t_now + args.n_blocks * dump_dt
+    if args.n_steps:
+        return None
+    t_cfg = getattr(cfg.solver, "t_end", None)
+    return None if t_cfg is None else float(t_cfg)
+
+
+def _dataset_settings(
+    cfg: Any, args: argparse.Namespace, name: str, trajectory: str | None = None
+) -> dict[str, Any] | None:
+    """Preprocessed-dataset output: command-line flags over the config's ``dataset`` section.
+
+    A run extending a ``trajectory`` from its resume dump writes into it unless --dataset is given.
+    """
+    from gyaradax.io.dataset import frame_bits
+
+    section = cfg.get("dataset") or {}
+    stats_from = getattr(args, "dataset_stats_from", None)
+    out = {
+        "stats_from": float(section.get("stats_from", 0.0) if stats_from is None else stats_from),
+        "resume_dtype": getattr(args, "resume_dtype", None) or str(section.get("resume_dtype", "f32")),
+        "takeover": False,
+    }
+    if trajectory is not None and not getattr(args, "dataset", None):
+        suffix = "_ifft_realpotens"
+        base = os.path.basename(trajectory.rstrip(os.sep))
+        return {
+            **out,
+            "dir": os.path.dirname(trajectory.rstrip(os.sep)),
+            "bits": frame_bits(trajectory),
+            "name": base[: -len(suffix)] if base.endswith(suffix) else base,
+            "takeover": True,
+        }
+    root = getattr(args, "dataset", None) or section.get("dir")
+    if not root:
+        return None
+    return {
+        **out,
+        "dir": str(root),
+        "bits": getattr(args, "dataset_bits", None) or str(section.get("bits", "zstd16")),
+        "name": getattr(args, "dataset_name", None) or str(section.get("name", name)),
+    }
+
+
+def _dataset_writer(setup: RunSetup, gate: dict[str, Any] | None = None) -> Any:
+    if setup["dataset"] is None:
+        return None
+    from gyaradax.io.dataset import DatasetWriter
+
+    ds = setup["dataset"]
+    writer = DatasetWriter(
+        ds["dir"],
+        ds["name"],
+        setup["geometry"],
+        setup["params"],
+        os.path.join(setup["output_dir"], "config.yaml"),
+        bits=ds["bits"],
+        start_step=setup["start_step"],
+        stats_from=ds["stats_from"],
+        resume_dtype=ds["resume_dtype"],
+        takeover=ds["takeover"],
+    )
+    print(f"  dataset: {writer.path} ({ds['bits']}, {writer.n_frames} frames so far)")
+    if gate is not None:
+        from gyaradax.diagnostics.outcome import MODE_FILE
+
+        writer.add_linear(gate, os.path.join(setup["output_dir"], MODE_FILE))
+    return writer
 
 
 def _debug_flag(cfg: Any, args: argparse.Namespace, name: str) -> bool:
@@ -551,21 +984,33 @@ def _effective_config(
     block_size: int,
     snapshot_every: int,
     save_dumps: bool,
+    dataset: dict[str, Any] | None = None,
+    dump_dt: float | None = None,
+    t_end: float | None = None,
 ) -> Any:
     """The config with the command-line choices folded in, so the run directory reproduces it."""
     eff = OmegaConf.create(OmegaConf.to_container(cfg, resolve=True))
+    if dump_dt is not None:
+        OmegaConf.update(eff, "solver.dump_dt", float(dump_dt), force_add=True)
+        # the end time, or the step budget when the run has none
+        if t_end is not None:
+            OmegaConf.update(eff, "solver.t_end", float(t_end), force_add=True)
+        elif "t_end" in eff.solver:
+            eff.solver.pop("t_end")
     for key, value in (
         ("solver.backend", params.backend),
         ("solver.mixed_precision", bool(params.mixed_precision)),
         ("solver.use_z2z", bool(params.use_z2z)),
         ("solver.fused_linear", bool(params.fused_linear)),
         ("solver.dt", float(params.dt)),
-        ("solver.n_steps", int(target_step)),
+        ("solver.n_steps", int(target_step) if t_end is None else int(eff.solver.get("n_steps", 0) or 0)),
         ("run.block_size", int(block_size)),
         ("run.snapshot_every", int(snapshot_every)),
         ("run.save_dumps", bool(save_dumps)),
     ):
         OmegaConf.update(eff, key, value, force_add=True)
+    if dataset is not None:
+        eff.dataset = {k: v for k, v in dataset.items() if k != "takeover"}
     mesh = (params.n_gpus_sp, params.n_gpus_vp, params.n_gpus_mu)
     if "sharding" in eff or math.prod(mesh) > 1:
         eff.sharding = {"n_gpus_sp": mesh[0], "n_gpus_vp": mesh[1], "n_gpus_mu": mesh[2]}
@@ -590,7 +1035,7 @@ def _write_run_record(setup: RunSetup) -> None:
         "config": os.path.abspath(setup["config_path"]),
         "resumed_from": setup["resumed_from"],
         "start_step": setup["start_step"],
-        "target_step": setup["start_step"] + setup["n_steps"],
+        "target_step": None if setup["t_end"] is not None else setup["start_step"] + setup["n_steps"],
         "backend": params.backend,
         "mesh": [params.n_gpus_sp, params.n_gpus_vp, params.n_gpus_mu],
     }
@@ -624,7 +1069,10 @@ def _describe(setup: RunSetup, config_path: str) -> None:
     print(f"{mode}{' + EM(' + '+'.join(em) + ')' if em else ''}: {setup['name']} ({config_path})")
     print("=" * 88)
     print_params(params, grid_shape=setup["df"].shape)
-    print(f"  backend={params.backend}  mixed_precision={params.mixed_precision}")
+    backend = params.backend
+    if backend == "auto":
+        backend = f"auto ({'cuda' if _cuda_available() else 'jax'})"
+    print(f"  backend={backend}  mixed_precision={params.mixed_precision}")
     if params.backend == "jax" and _cuda_available():
         print("  note: the CUDA backend is built; --backend cuda runs ~3x faster per step")
     if mesh is not None:
@@ -642,10 +1090,21 @@ def _describe(setup: RunSetup, config_path: str) -> None:
     else:
         print(f"  sharding: none (single device {jax.devices()[0]})")
     every = setup["snapshot_every"]
-    print(
-        f"  n_steps={setup['n_steps']}, checkpoint_interval={setup['block_size']}, "
-        f"snapshot every {every} block{'s' if every > 1 else ''}"
-    )
+    if setup["dump_dt"] is not None:
+        end = (
+            f"until t={setup['t_end']:g}"
+            if setup["t_end"] is not None
+            else f"for {setup['n_steps']} steps"
+        )
+        print(
+            f"  frames every {setup['dump_dt']:g} time units {end}, "
+            f"snapshot every {every} frame{'s' if every > 1 else ''}"
+        )
+    else:
+        print(
+            f"  n_steps={setup['n_steps']}, checkpoint_interval={setup['block_size']}, "
+            f"snapshot every {every} block{'s' if every > 1 else ''}"
+        )
     print(f"  output: {setup['output_dir']}")
     debug = [n for n in ("telemetry", "profile") if setup[n]]
     if debug:
@@ -667,7 +1126,21 @@ def _cuda_available() -> bool:
 
 
 def _resolve_args(args: argparse.Namespace) -> list[str | None]:
-    """Replace run directories among ``args.configs`` by their config; return the run dirs."""
+    """Replace run directories among ``args.configs`` by their config; return the run dirs.
+
+    A single dataset trajectory stands for the config of its resume dump and is extended from it.
+    """
+    from gyaradax.io.dataset import RESUME_DIR, is_trajectory, resume_path
+
+    if len(args.configs) == 1 and is_trajectory(args.configs[0]):
+        traj = args.configs[0]
+        if not os.path.isfile(resume_path(traj)):
+            raise SystemExit(f"error: {traj} has no resume dump ({resume_path(traj)})")
+        if getattr(args, "resume_from", None) or getattr(args, "from_scratch", False):
+            raise SystemExit("error: extending a trajectory takes neither --resume-from nor --from-scratch")
+        args.resume_from = traj
+        args.configs = [os.path.join(traj, RESUME_DIR, "config.yaml")]
+        return [None]
     resolved = [_resolve_config(p) for p in args.configs]
     args.configs = [c for c, _ in resolved]
     return [d for _, d in resolved]
@@ -679,6 +1152,16 @@ def _cmd_run(args: argparse.Namespace) -> int:
     _configure_env(args, facts)
 
     if len(args.configs) > 1:
+        if args.linear_check:
+            raise SystemExit(
+                "error: --linear-check takes one config; run the configs one at a time"
+            )
+        if _monitor_settings(args) is not None or args.linear_only:
+            raise SystemExit(
+                "error: --linear-gate, --linear-only, --stop-on-decay, --stop-on-banding, "
+                "--track-outcome and --dataset-from-flux take one config; run the configs one "
+                "at a time"
+            )
         return _run_batched(args, run_dirs)
     return _run_single(args, args.configs[0], run_dirs[0])
 
@@ -737,7 +1220,49 @@ def _finish_run(setup: RunSetup) -> int:
     return 0
 
 
+@contextlib.contextmanager
+def _stop_on_sigterm() -> Any:
+    """SIGTERM ends the run after the running block and its snapshot; a second one exits at once."""
+    from gyaradax.solver.driver import STOP_REQUESTED
+
+    def handler(signum: int, frame: Any) -> None:
+        if STOP_REQUESTED.is_set():
+            raise SystemExit(128 + signum)
+        STOP_REQUESTED.set()
+        print("\nSIGTERM: stopping after the running block and its snapshot", flush=True)
+
+    STOP_REQUESTED.clear()
+    previous = signal.signal(signal.SIGTERM, handler)
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+        STOP_REQUESTED.clear()
+
+
+def _interrupted(setups: list[RunSetup], final_state: Any) -> bool:
+    import numpy as np
+
+    diverged = any(os.path.exists(os.path.join(s["output_dir"], "DIVERGED")) for s in setups)
+    t_end, dump_dt = setups[0]["t_end"], setups[0]["dump_dt"]
+    if t_end is not None:
+        return not diverged and bool(np.min(np.asarray(final_state.time)) < t_end - 1e-9 * dump_dt)
+    target = setups[0]["start_step"] + setups[0]["n_steps"]
+    return not diverged and bool(np.min(np.asarray(final_state.step)) < target)
+
+
+def _reached_end(setup: RunSetup) -> bool:
+    t_end, dump_dt = setup["t_end"], setup["dump_dt"]
+    return t_end is not None and float(setup["state"].time) >= t_end - 1e-9 * cast(float, dump_dt)
+
+
 def _nothing_to_run(setup: RunSetup) -> None:
+    if setup["t_end"] is not None:
+        print(
+            f"\nnothing to run ({setup['name']}): t={float(setup['state'].time):g} already reaches "
+            f"t_end={setup['t_end']:g}; pass --t-end T or --n-blocks N (frames) to continue."
+        )
+        return
     print(
         f"\nnothing to run ({setup['name']}): step {setup['start_step']} already reaches "
         "solver.n_steps; pass --n-steps N to continue N more steps."
@@ -747,39 +1272,73 @@ def _nothing_to_run(setup: RunSetup) -> None:
 def _run_single(args: argparse.Namespace, config_path: str, run_dir: str | None) -> int:
     import jax
 
-    from gyaradax.solver.driver import gksimulate
+    from gyaradax.solver.driver import EXIT_INTERRUPTED, gksimulate
 
+    from gyaradax.diagnostics import outcome
+
+    if args.linear_check and not args.dry_run:
+        code = _linear_check(args, config_path, run_dir)
+        if code:
+            return code
+    if args.linear_only and not args.dry_run:
+        return _linear_only(args, config_path, run_dir)
+    gate = None
+    if args.linear_gate and not args.dry_run:
+        gate = _linear_gate(args, config_path, run_dir)
+        if gate["decision"] == "stable":
+            out = _default_output_dir(OmegaConf.load(config_path), args, run_dir)
+            doc = outcome.gate_outcome(out, gate)
+            _stable_trajectory(args, config_path, run_dir, gate, doc)
+            print(
+                f"exit {outcome.EXIT_STABLE}: linearly stable (no ky grows); "
+                "not starting the nonlinear run"
+            )
+            return outcome.EXIT_STABLE
     setup = _setup_run(config_path, args, run_dir=run_dir)
     _describe(setup, config_path)
     if args.dry_run:
         print("\ndry run: setup complete, not stepping.")
         return 0
-    if setup["n_steps"] <= 0:
+    if setup["n_steps"] <= 0 or _reached_end(setup):
         _nothing_to_run(setup)
         return 0
 
     telemetry = _start_run(setup)
+    monitor = _run_monitor(_monitor_settings(args), setup, gate)
     t0 = time.time()
-    gksimulate(
-        setup["df"],
-        setup["geometry"],
-        setup["params"],
-        setup["state"],
-        setup["n_steps"],
-        pre=setup["pre"],
-        output_dir=setup["output_dir"],
-        checkpoint_interval=setup["block_size"],
-        save_snapshots=setup["save_dumps"],
-        stop_on_nan=args.stop_on_nan,
-        snapshot_f32=(args.snapshot_dtype == "c64"),
-        keep_latest_snapshot=True,
-        snapshot_every=setup["snapshot_every"],
-        previous_snapshot=setup["previous_snapshot"],
-        telemetry=telemetry,
-        profile=setup["profile"],
-    )
+    with _stop_on_sigterm():
+        _, _, _, final_state = gksimulate(
+            setup["df"],
+            setup["geometry"],
+            setup["params"],
+            setup["state"],
+            setup["n_steps"],
+            pre=setup["pre"],
+            output_dir=setup["output_dir"],
+            checkpoint_interval=setup["block_size"],
+            save_snapshots=setup["save_dumps"],
+            stop_on_nan=args.stop_on_nan,
+            snapshot_f32=(args.snapshot_dtype == "c64"),
+            keep_latest_snapshot=True,
+            snapshot_every=setup["snapshot_every"],
+            previous_snapshot=setup["previous_snapshot"],
+            telemetry=telemetry,
+            profile=setup["profile"],
+            dataset=_dataset_writer(setup, gate),
+            dump_dt=setup["dump_dt"],
+            t_end=setup["t_end"],
+            dump_origin=setup["dump_origin"],
+            monitor=monitor,
+        )
     jax.effects_barrier()
     runtime = time.time() - t0
+    if monitor is not None and monitor.stopped:
+        code = _finish_run(setup) or monitor.exit_code
+        print(f"exit {code}: {monitor.stopped} ({monitor.message}); see outcome.json")
+        return code
+    if _interrupted([setup], final_state):
+        print(f"exit {EXIT_INTERRUPTED}: interrupted; resuming {setup['output_dir']} continues it")
+        return EXIT_INTERRUPTED
     print(f"\ncompleted in {runtime:.1f}s ({setup['n_steps'] / runtime:.1f} steps/s)")
     return _finish_run(setup)
 
@@ -802,9 +1361,14 @@ def _batch_mismatch(setups: list[RunSetup]) -> str | None:
         ("block_size", "block sizes"),
         ("snapshot_every", "snapshot cadences"),
         ("save_dumps", "snapshot archiving"),
+        ("dump_dt", "dump spacings"),
+        ("t_end", "end times"),
+        ("dump_origin", "frame grids"),
     ):
         if len({s[key] for s in setups}) > 1:
             return f"{what} differ"
+    if setups[0]["dump_dt"] is not None and len({float(s["state"].time) for s in setups}) > 1:
+        return "start times differ"
     for key, what in (
         ("df", "grid shapes"),
         ("params", "static parameters"),
@@ -822,7 +1386,7 @@ def _run_batched(args: argparse.Namespace, run_dirs: list[str | None]) -> int:
     import jax
     import jax.numpy as jnp
 
-    from gyaradax.solver.driver import gksimulate_batched
+    from gyaradax.solver.driver import EXIT_INTERRUPTED, gksimulate_batched
 
     def member_args(path: str) -> argparse.Namespace:
         # --output-dir names the parent of the members' run directories
@@ -852,7 +1416,7 @@ def _run_batched(args: argparse.Namespace, run_dirs: list[str | None]) -> int:
     if args.dry_run:
         print("\ndry run: setup complete, not stepping.")
         return 0
-    if setups[0]["n_steps"] <= 0:
+    if setups[0]["n_steps"] <= 0 or _reached_end(setups[0]):
         for s in setups:
             _nothing_to_run(s)
         return 0
@@ -865,27 +1429,35 @@ def _run_batched(args: argparse.Namespace, run_dirs: list[str | None]) -> int:
 
     telemetries = [_start_run(s) for s in setups]
     t0 = time.time()
-    gksimulate_batched(
-        jnp.stack([s["df"] for s in setups]),
-        _stack([s["geometry"] for s in setups]),
-        _stack([s["params"] for s in setups]),
-        _stack([s["state"] for s in setups]),
-        setups[0]["n_steps"],
-        pre_batch=_stack([s["pre"] for s in setups]),
-        output_dirs=[s["output_dir"] for s in setups],
-        labels=names,
-        previous_snapshots=[s["previous_snapshot"] for s in setups],
-        telemetries=telemetries,
-        checkpoint_interval=setups[0]["block_size"],
-        save_snapshots=setups[0]["save_dumps"],
-        stop_on_nan=args.stop_on_nan,
-        snapshot_f32=(args.snapshot_dtype == "c64"),
-        keep_latest_snapshot=True,
-        snapshot_every=setups[0]["snapshot_every"],
-        profile=any(s["profile"] for s in setups),
-    )
+    with _stop_on_sigterm():
+        _, _, _, final_state = gksimulate_batched(
+            jnp.stack([s["df"] for s in setups]),
+            _stack([s["geometry"] for s in setups]),
+            _stack([s["params"] for s in setups]),
+            _stack([s["state"] for s in setups]),
+            setups[0]["n_steps"],
+            pre_batch=_stack([s["pre"] for s in setups]),
+            output_dirs=[s["output_dir"] for s in setups],
+            labels=names,
+            previous_snapshots=[s["previous_snapshot"] for s in setups],
+            telemetries=telemetries,
+            checkpoint_interval=setups[0]["block_size"],
+            save_snapshots=setups[0]["save_dumps"],
+            stop_on_nan=args.stop_on_nan,
+            snapshot_f32=(args.snapshot_dtype == "c64"),
+            keep_latest_snapshot=True,
+            snapshot_every=setups[0]["snapshot_every"],
+            profile=any(s["profile"] for s in setups),
+            datasets=[_dataset_writer(s) for s in setups],
+            dump_dt=setups[0]["dump_dt"],
+            t_end=setups[0]["t_end"],
+            dump_origin=setups[0]["dump_origin"],
+        )
     jax.effects_barrier()
     runtime = time.time() - t0
+    if _interrupted(setups, final_state):
+        print(f"exit {EXIT_INTERRUPTED}: interrupted; resuming the run directories continues them")
+        return EXIT_INTERRUPTED
     n_steps = setups[0]["n_steps"]
     print(f"\ncompleted {len(setups)} configs in {runtime:.1f}s ({n_steps / runtime:.1f} steps/s)")
     return max(_finish_run(s) for s in setups)
@@ -920,12 +1492,12 @@ def _cmd_bench(args: argparse.Namespace) -> int:
     devices = list(mesh.devices.flat) if mesh is not None else [jax.devices()[0]]
     times = []
     for i in range(args.blocks):
-        t0 = time.time()
-        df, _, state = gksolve(df, geometry, params, state, n_steps=args.steps, pre=pre)
-        jax.block_until_ready(df)
-        dt = time.time() - t0
-        times.append(dt)
-        print(
+            t0 = time.time()
+            df, _, state = gksolve(df, geometry, params, state, n_steps=args.steps, pre=pre)
+            jax.block_until_ready(df)
+            dt = time.time() - t0
+            times.append(dt)
+            print(
             f"  block {i + 1}/{args.blocks}: {dt:.3f}s "
             f"({args.steps / dt:.2f} steps/s, {dt * 1000 / args.steps:.2f} ms/step)"
         )
@@ -947,6 +1519,17 @@ def _cmd_bench(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_dataset_stats(args: argparse.Namespace) -> int:
+    """Recompute the df / phi statistics of preprocessed trajectories from a given time on."""
+    from gyaradax.io.dataset import write_statistics
+
+    for traj in args.trajectories:
+        meta = write_statistics(traj, args.from_time)
+        times = meta["timesteps"]
+        print(f"{traj}: statistics over t = {times[times >= args.from_time][0]:.3f}-{times[-1]:.3f}")
+    return 0
+
+
 def _cmd_convert(args: argparse.Namespace) -> int:
     """Write a gyaradax YAML config for a GKW run directory."""
     from gyaradax.io.gkw import gkw_to_yaml
@@ -957,6 +1540,27 @@ def _cmd_convert(args: argparse.Namespace) -> int:
         print(f"error: {exc}")
         return 1
     return 0
+
+
+def _cmd_build_cuda(args: argparse.Namespace) -> int:
+    from gyaradax.backends import cuda_lib
+
+    def caps(text: str | None) -> list[int]:
+        return [int(c.strip().replace(".", "")) for c in (text or "").split(",") if c.strip()]
+
+    archs = caps(args.archs) or cuda_lib.gpu_compute_caps()
+    if not archs:
+        raise SystemExit("error: no GPU visible here; pass --archs, e.g. --archs 80,90,103")
+    print(f"building {cuda_lib.KERNELS_DIR} for sm {archs} into {cuda_lib.env_build_dir(args.prefix)}")
+    lib = cuda_lib.build(archs, caps(args.lto_archs) or None, prefix=args.prefix, jobs=args.jobs)
+    print(f"installed {lib}")
+    return 0
+
+
+def _cmd_datagen(args: argparse.Namespace) -> int:
+    from gyaradax.datagen.campaign import main as datagen_main
+
+    return datagen_main(args.rest)
 
 
 def _cmd_info(args: argparse.Namespace) -> int:
@@ -985,7 +1589,17 @@ def _cmd_info(args: argparse.Namespace) -> int:
         cuda_ok = False
         print(f"cuda kernels: error — {exc}")
     print(f"cuda backend: {'available' if cuda_ok else 'not available (JAX backend only)'}")
+    from gyaradax.backends import cuda_lib
+
+    record = cuda_lib.build_info(_cuda.LIB_PATH)
     print(f"lib path    : {_cuda.LIB_PATH} ({'present' if _cuda.LIB_PATH.exists() else 'missing'})")
+    print(f"lib key     : {cuda_lib.build_key()} (kernel sources + jaxlib)")
+    if record:
+        print(f"lib build   : sm {record.get('archs')}, {record.get('nvcc')}, {record.get('built')}")
+    elif _cuda.LIB_PATH.exists():
+        print("lib build   : development build in the checkout (no build record)")
+    else:
+        print("lib build   : none; `gyaradax build-cuda` builds one for this environment")
     if cuda_ok:
         _cuda._register_ffi()
         forced = os.environ.get("GYARADAX_BRACKET")
@@ -1053,7 +1667,8 @@ def _report(output_dir: str, data_dir: str, name: str, kinetic: bool) -> None:
 def _add_common(p: argparse.ArgumentParser) -> None:
     p.add_argument(
         "configs", nargs="+", metavar="CONFIG",
-        help="YAML config path(s), or a previous run directory to resume",
+        help="YAML config path(s), a previous run directory to resume, or one dataset trajectory "
+             "to extend from its resume dump",
     )
     p.add_argument(
         "--backend", choices=["auto", "jax", "cuda"], default=None,
@@ -1105,7 +1720,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     run_p.add_argument(
         "--n-steps", type=int, default=0,
-        help="run N more steps (default: up to the config's solver.n_steps)",
+        help="run N more steps (default: up to the config's solver.n_steps); with --dump-dt the "
+             "run ends on the first frame at or after them",
+    )
+    run_p.add_argument(
+        "--dump-dt", type=float, default=None, metavar="DT",
+        help="time mode: a frame (diagnostics, dataset frame) every DT time units, the last step "
+             "before each shortened to land on it (overrides solver.dump_dt); --n-blocks counts frames",
+    )
+    run_p.add_argument(
+        "--t-end", type=float, default=None, metavar="T",
+        help="time mode: run to the first frame at or after time T (overrides solver.t_end)",
     )
     run_p.add_argument(
         "--from-scratch", action="store_true",
@@ -1113,7 +1738,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     run_p.add_argument(
         "--resume-from", type=str, default=None,
-        help="resume from a GKW K-file in data_dir (e.g. K03) or a step_*.npz snapshot",
+        help="resume from a GKW K-file in data_dir (e.g. K03), a step_*.npz snapshot, or the "
+             "resume dump of a dataset trajectory directory (frames go on into that trajectory)",
     )
     run_p.add_argument("--output-dir", type=str, default=None, help="override output directory")
     run_p.add_argument(
@@ -1127,6 +1753,25 @@ def build_parser() -> argparse.ArgumentParser:
              "the resumed step) instead of refusing to start",
     )
     run_p.add_argument(
+        "--dataset", type=str, default=None, metavar="DIR",
+        help="also write the run as a preprocessed dataset trajectory under "
+             "DIR/<name>_ifft_realpotens/ (quantized real-space frames every block + metadata)",
+    )
+    run_p.add_argument(
+        "--dataset-bits", choices=["zstd16", "bf16"], default=None,
+        help="dataset frame format (default zstd16: lossless zstd over bf16)",
+    )
+    run_p.add_argument("--dataset-name", type=str, default=None, help="trajectory name (default run.name)")
+    run_p.add_argument(
+        "--dataset-stats-from", type=float, default=None, metavar="T",
+        help="compute the dataset statistics over the frames from time T on (default 0)",
+    )
+    run_p.add_argument(
+        "--resume-dtype", choices=["f32", "f64"], default=None,
+        help="df precision of the trajectory's resume dump, replaced at the end of every leg "
+             "(default f32; f64 extends bitwise)",
+    )
+    run_p.add_argument(
         "--snapshot-dtype", choices=["c128", "c64"], default="c128",
         help="archive precision for df/phi in snapshots (solver stays FP64); "
              "c64 halves them (maps to gksimulate's snapshot_f32)",
@@ -1134,6 +1779,88 @@ def build_parser() -> argparse.ArgumentParser:
     run_p.add_argument(
         "--no-stop-on-nan", dest="stop_on_nan", action="store_false", default=True,
         help="keep integrating after df goes non-finite (default: stop and exit 2)",
+    )
+    run_p.add_argument(
+        "--linear-check", type=str, default=None, metavar="NS[,NS...]",
+        help="before the run, compare linear growth rates at the run's ns with these reference "
+             "resolutions (written to RUN_DIR/linear_check.json, reused on resume)",
+    )
+    run_p.add_argument(
+        "--linear-check-t-end", type=float, default=40.0, metavar="T",
+        help="with --linear-check: stop each linear run here if its growth rates have not settled "
+             "(default 40)",
+    )
+    run_p.add_argument(
+        "--linear-check-tol", type=float, default=None, metavar="X",
+        help="with --linear-check: exit 3 instead of running when γ at the reference's dominant "
+             "ky deviates by more than X (relative, e.g. 0.1)",
+    )
+    run_p.add_argument(
+        "--linear-gate", action="store_true",
+        help="before the run, a linear run on the config's grid (RUN_DIR/linear_gate.json, "
+             "linear_mode.npz, reused on resume); exit 4 instead of running when no ky grows",
+    )
+    run_p.add_argument(
+        "--linear-only", action="store_true",
+        help="the linear run of --linear-gate alone: RUN_DIR/linear.json (rates, frequencies, "
+             "per-ky eigenmode fluxes) and the eigenmode as RUN_DIR/data/linear*.bin; exit 0 "
+             "without the nonlinear run (outcome class linear_only)",
+    )
+    run_p.add_argument(
+        "--linear-gate-t-end", type=float, default=60.0, metavar="T",
+        help="with --linear-gate: end of the linear run if its growth rates have not settled "
+             "(default 60)",
+    )
+    run_p.add_argument(
+        "--linear-gate-stable", type=float, default=-0.01, metavar="G",
+        help="with --linear-gate: stable when the rates settled and the largest is below G "
+             "(default -0.01)",
+    )
+    run_p.add_argument(
+        "--linear-gate-gamma-min", type=float, default=0.02, metavar="G",
+        help="with --linear-gate: unstable when the largest rate exceeds G (default 0.02); in "
+             "between, or not settled, the nonlinear run goes ahead",
+    )
+    run_p.add_argument(
+        "--linear-gate-low-ky", type=float, default=1.0, metavar="K",
+        help="with --linear-gate: also report the largest γ over kθρ <= K (gamma_max_lowky, "
+             "default 1.0); the decision uses every ky",
+    )
+    run_p.add_argument(
+        "--track-outcome", action="store_true",
+        help="track the outcome per frame: RUN_DIR/outcome.json, monitor_series.npz (heat flux, "
+             "s-Nyquist share of phi, banding flag, flux averages, outcome class)",
+    )
+    run_p.add_argument(
+        "--stop-on-decay", action="store_true",
+        help="stop (exit 5) once the heat flux has decayed: after --decay-t-min, below the floor "
+             "and still falling over --decay-window frames",
+    )
+    run_p.add_argument("--decay-t-min", type=float, default=30.0, metavar="T",
+                       help="earliest time the run may stop on decay (default 30)")
+    run_p.add_argument("--decay-floor", type=float, default=1e-3, metavar="Q",
+                       help="absolute heat-flux floor, gyro-Bohm (default 1e-3)")
+    run_p.add_argument("--decay-rel-floor", type=float, default=1e-3, metavar="X",
+                       help="heat-flux floor relative to its peak (default 1e-3); the larger "
+                            "floor applies")
+    run_p.add_argument("--decay-window", type=int, default=5, metavar="N",
+                       help="frames the flux must stay below the floor and fall (default 5)")
+    run_p.add_argument(
+        "--decay-keep-frames", action="store_true",
+        help="keep every dataset frame of a decayed run (default: only the last)",
+    )
+    run_p.add_argument("--banding-threshold", type=float, default=0.3, metavar="X",
+                       help="zonal s-Nyquist share of phi that flags banding (default 0.3)")
+    run_p.add_argument("--banding-window", type=int, default=3, metavar="N",
+                       help="frames in a row over the threshold to flag banding (default 3)")
+    run_p.add_argument(
+        "--stop-on-banding", action="store_true",
+        help="stop (exit 6) once banding is flagged instead of only recording it",
+    )
+    run_p.add_argument(
+        "--dataset-from-flux", type=float, default=None, metavar="Q",
+        help="write dataset frames only once the total heat flux has reached Q; a run that never "
+             "does keeps its last frame",
     )
     run_p.add_argument("--dry-run", action="store_true", help="set up and report, do not step")
     run_p.add_argument(
@@ -1159,6 +1886,41 @@ def build_parser() -> argparse.ArgumentParser:
     bench_p.set_defaults(func=_cmd_bench, block_size=0, n_blocks=0, n_steps=0,
                          resume_from=None, save_dumps=False, dry_run=False)
 
+    growth_p = sub.add_parser(
+        "growth", help="linear growth rates of a config, at its own or other parallel resolutions"
+    )
+    growth_p.add_argument("config", metavar="CONFIG", help="YAML config (run linearly)")
+    growth_p.add_argument(
+        "--ns", type=int, nargs="+", default=None,
+        help="parallel resolutions to run (default: the config's); the finest is the reference",
+    )
+    growth_p.add_argument(
+        "--set", action="append", default=None, metavar="KEY=VALUE",
+        help="override a config entry, e.g. solver.disp_par=4.0 (repeatable)",
+    )
+    growth_p.add_argument(
+        "--t-end", type=float, default=40.0,
+        help="stop here if the growth rates have not settled (default 40)",
+    )
+    growth_p.add_argument(
+        "--output", type=str, default=None, metavar="FILE", help="write the report as JSON"
+    )
+    growth_p.add_argument("--backend", choices=["auto", "jax", "cuda"], default=None)
+    growth_p.add_argument("--device", type=int, default=None, help="pin to a single GPU index")
+    growth_p.add_argument(
+        "--device-list", type=str, default=None, help="comma-separated GPU indices"
+    )
+    growth_p.add_argument(
+        "--n-gpus", type=int, default=1, help="shard each linear run over N GPUs (default 1)"
+    )
+    growth_p.add_argument("--mem-fraction", type=float, default=None)
+    growth_p.set_defaults(func=_cmd_growth)
+
+    stats_p = sub.add_parser("dataset-stats", help="recompute the statistics of preprocessed trajectories")
+    stats_p.add_argument("trajectories", nargs="+", metavar="TRAJECTORY", help="trajectory directories")
+    stats_p.add_argument("--from-time", type=float, default=0.0, help="first time included (default 0)")
+    stats_p.set_defaults(func=_cmd_dataset_stats)
+
     convert_p = sub.add_parser("convert", help="write a YAML config for a GKW run directory")
     convert_p.add_argument("gkw_dir", help="GKW run directory (input.dat, geom.dat, ...)")
     convert_p.add_argument("output", help="YAML config to write")
@@ -1167,6 +1929,25 @@ def build_parser() -> argparse.ArgumentParser:
     info_p = sub.add_parser("info", help="show devices, backends and versions")
     info_p.add_argument("--device-list", type=str, default=None)
     info_p.set_defaults(func=_cmd_info)
+
+    build_p = sub.add_parser("build-cuda", help="build the CUDA kernels for this Python environment")
+    build_p.add_argument(
+        "--archs", type=str, default=None,
+        help="compute capabilities, e.g. 80,90,103 (default: the GPUs of this machine)",
+    )
+    build_p.add_argument(
+        "--lto-archs", type=str, default=None,
+        help="cuFFT LTO callback compute capabilities (default: the CMake default, 80,90,100)",
+    )
+    build_p.add_argument("--prefix", type=str, default=None, help="environment prefix (default: this one)")
+    build_p.add_argument("-j", "--jobs", type=int, default=None, help="parallel build jobs")
+    build_p.set_defaults(func=_cmd_build_cuda)
+
+    datagen_p = sub.add_parser(
+        "datagen", add_help=False, help="generate a dataset: run configs over an ssh GPU mesh"
+    )
+    datagen_p.add_argument("rest", nargs=argparse.REMAINDER)
+    datagen_p.set_defaults(func=_cmd_datagen)
 
     return parser
 

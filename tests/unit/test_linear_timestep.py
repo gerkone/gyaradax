@@ -9,10 +9,10 @@ import pytest
 from conftest import noisy_case  # type: ignore[import-not-found]
 from omegaconf import OmegaConf
 
-from gyaradax.cfl import estimate_linear_timestep
 from gyaradax.cli import main
-from gyaradax.precompute import linear_precompute
+from gyaradax.operators.precompute import linear_precompute
 from gyaradax.solver import gksolve
+from gyaradax.solver.cfl import estimate_linear_timestep
 
 GRID = dict(nvpar=8, nmu=2, ns=8, nkx=11, nky=5)
 N_STEPS = 6

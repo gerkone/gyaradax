@@ -1,8 +1,10 @@
 """Simulation runtime."""
 
 import contextlib
+import functools
 import os
 import shutil
+import threading
 import time
 from typing import Any, Dict, List, Literal, Optional, Sequence, Tuple, cast, overload
 
@@ -17,6 +19,7 @@ enable_x64()
 import gyaradax.diagnostics.telemetry as telemetry_mod
 from gyaradax.core.params import gkparams_from_config, load_config, GKParams
 from gyaradax.core.state import GKPre, GKState
+from gyaradax.diagnostics.diag import phi_spectra
 from gyaradax.diagnostics.fluxes import get_integrals
 from gyaradax.geometry import compute_geometry_from_config
 from gyaradax.io.gkw import load_geometry
@@ -25,7 +28,9 @@ from gyaradax.operators.fields import _compute_fields, g_to_f
 from gyaradax.operators.poisson import calculate_phi
 from gyaradax.operators.precompute import linear_precompute
 from gyaradax.solver.rk4 import (
+    DT_MIN,
     gksolve,
+    gksolve_until,
     init_f,
     default_state,
     mode_amplitude,
@@ -250,12 +255,69 @@ def gk_run_batched(
     return jax.vmap(_single)(df_batch, geometry_batch, params_batch, state_batch, pre_batch)
 
 
+def gk_run_until(df, geometry, params, state, t_end, max_steps: int, pre=None):
+    """Step until ``t_end`` (at most ``max_steps``): ``(df, phi, fluxes, state, dt_info)``, see ``gksolve_until``."""
+    if pre is None:
+        pre = linear_precompute(geometry, params)
+    final_df, (phi, fluxes), final_state, dt_info = gksolve_until(
+        df, geometry, params, state, t_end, max_steps=max_steps, pre=pre
+    )
+    return final_df, phi, fluxes, final_state, dt_info
+
+
+def gk_run_until_batched(df_batch, geometry_batch, params_batch, state_batch, t_end, max_steps: int, pre_batch):
+    def _single(df, geom, par, st, pre):
+        return gk_run_until(df, geom, par, st, t_end, max_steps, pre=pre)
+
+    return jax.vmap(_single)(df_batch, geometry_batch, params_batch, state_batch, pre_batch)
+
+
+def frame_step_cap(dump_dt: float, dt: Any) -> int:
+    # steps per compiled call in time mode: 8x a frame at the largest time step
+    return max(int(np.ceil(8.0 * dump_dt / float(np.min(np.asarray(dt))))), 1)
+
+
+def frame_target(t: float, origin: float, dump_dt: float) -> float:
+    k = int(np.floor((t - origin) / dump_dt + 1e-6))
+    return origin + (k + 1) * dump_dt
+
+
+def _advance(run_until, df, state, t_target: float):
+    # calls of at most max_steps steps until every member lands on t_target
+    parts, times = [], None
+    while True:
+        df, phi, fluxes, state, dt_info = run_until(df, state, t_target)
+        parts.append(dt_info)
+        prev, times = times, np.asarray(state.time)
+        if np.all(times >= t_target) or not np.all(np.isfinite(times)):
+            break
+        if prev is not None and np.array_equal(prev, times):
+            break
+    if len(parts) > 1:
+        dt_info = {
+            k: parts[0][k] if k == "dt_input" else jnp.concatenate([p[k] for p in parts], axis=-1)
+            for k in parts[0]
+        }
+    return df, phi, fluxes, state, dt_info
+
+
+def _steps_taken(dt_info: Dict[str, Any]) -> Dict[str, Any]:
+    taken = np.isfinite(np.asarray(dt_info["dt_used"]))
+    return {k: v if k == "dt_input" else np.asarray(v)[taken] for k, v in dt_info.items()}
+
+
 def _has_diagnostics_at(output_dir: str, step: int) -> bool:
     path = os.path.join(output_dir, "fluxes.npz")
     if not os.path.exists(path):
         return False
     with np.load(path) as data:
         return "step" in data.files and bool(np.any(data["step"] == step))
+
+
+# set from a signal handler: the running block finishes, is snapshotted, and the run stops
+STOP_REQUESTED = threading.Event()
+# exit code of a run stopped that way: resume it from its run directory
+EXIT_INTERRUPTED = 75
 
 
 def _diagnostics(df, geometry, params, pre):
@@ -292,6 +354,11 @@ def gksimulate(
     previous_snapshot: Optional[str] = None,
     telemetry: Any = None,
     profile: bool = False,
+    dataset: Any = None,
+    dump_dt: Optional[float] = None,
+    t_end: Optional[float] = None,
+    dump_origin: Optional[float] = None,
+    monitor: Any = None,
 ) -> Tuple[jnp.ndarray, jnp.ndarray, Any, GKState]:
     """Run n_steps with optional IO checkpointing and logging.
 
@@ -303,6 +370,18 @@ def gksimulate(
     snapshot a run resumed from, is removed once a newer one exists).
     ``telemetry`` (a ``telemetry.RunTelemetry``) records compile time and per-block
     timings; ``profile`` traces the first compiled block into ``output_dir/profile``.
+    ``dataset`` (a ``dataset.DatasetWriter``) stores one preprocessed frame per block,
+    computes the dataset statistics once the run ends and keeps the trajectory's resume
+    dump at the state the leg ends on.
+
+    ``dump_dt`` switches to time mode: each block integrates to the next frame time
+    ``dump_origin + k * dump_dt`` (default origin: the start time) and lands on it, and the
+    run ends on the first frame at or after ``t_end``, or without ``t_end`` on the first
+    frame at or after ``n_steps`` steps; ``checkpoint_interval`` is unused.
+
+    ``monitor`` (an ``outcome.RunMonitor``) sees every frame; when it reports a reason to stop
+    (decay, banding) the run ends on that frame with its snapshot, and it decides which frames
+    go to ``dataset``.
 
     Returns:
         (df, phi, fluxes, state)
@@ -313,6 +392,9 @@ def gksimulate(
     def run_block(d, s, steps):
         return gk_run(d, geometry, params, s, steps, pre=pre, return_dt_info=True)
 
+    def run_until(d, s, t):
+        return gk_run_until(d, geometry, params, s, t, frame_step_cap(dump_dt, params.dt), pre=pre)
+
     run = {
         "geometry": geometry,
         "params": params,
@@ -320,6 +402,8 @@ def gksimulate(
         "output_dir": output_dir,
         "previous_snapshot": previous_snapshot,
         "telemetry": telemetry,
+        "dataset": dataset,
+        "monitor": monitor,
         "label": None,
     }
     return _simulate(
@@ -337,7 +421,17 @@ def gksimulate(
         keep_latest_snapshot=keep_latest_snapshot,
         snapshot_every=snapshot_every,
         profile=profile,
+        run_until=run_until,
+        frames=_frames(dump_dt, t_end, dump_origin),
     )
+
+
+def _frames(dump_dt, t_end, dump_origin) -> Optional[Dict[str, Any]]:
+    if not dump_dt:
+        return None
+    if dump_dt <= 0:
+        raise ValueError(f"dump_dt must be positive, got {dump_dt}")
+    return {"dump_dt": float(dump_dt), "t_end": t_end, "origin": dump_origin}
 
 
 def gksimulate_batched(
@@ -360,12 +454,16 @@ def gksimulate_batched(
     keep_latest_snapshot: bool = False,
     snapshot_every: int = 1,
     profile: bool = False,
+    datasets: Optional[Sequence[Any]] = None,
+    dump_dt: Optional[float] = None,
+    t_end: Optional[float] = None,
+    dump_origin: Optional[float] = None,
 ) -> Tuple[jnp.ndarray, jnp.ndarray, Any, GKState]:
     """``gksimulate`` for configs stacked along a leading batch axis (``gk_run_batched``).
 
     Every member writes its own output directory exactly as ``gksimulate`` would; a
     member that diverges gets its ``DIVERGED`` marker and no further output while
-    the others continue.
+    the others continue. In time mode (``dump_dt``) the members share the frame times.
     """
     n = len(output_dirs)
 
@@ -373,6 +471,10 @@ def gksimulate_batched(
         return gk_run_batched(
             d, geometry_batch, params_batch, s, steps, pre_batch, return_dt_info=True
         )
+
+    def run_until(d, s, t):
+        cap = frame_step_cap(dump_dt, params_batch.dt)
+        return gk_run_until_batched(d, geometry_batch, params_batch, s, t, cap, pre_batch)
 
     runs = [
         {
@@ -382,6 +484,8 @@ def gksimulate_batched(
             "output_dir": output_dirs[i],
             "previous_snapshot": previous_snapshots[i] if previous_snapshots else None,
             "telemetry": telemetries[i] if telemetries else None,
+            "dataset": datasets[i] if datasets else None,
+            "monitor": None,
             "label": labels[i] if labels else str(i),
         }
         for i in range(n)
@@ -401,6 +505,8 @@ def gksimulate_batched(
         keep_latest_snapshot=keep_latest_snapshot,
         snapshot_every=snapshot_every,
         profile=profile,
+        run_until=run_until,
+        frames=_frames(dump_dt, t_end, dump_origin),
     )
 
 
@@ -424,14 +530,35 @@ def _simulate(
     keep_latest_snapshot: bool,
     snapshot_every: int,
     profile: bool,
+    run_until: Any = None,
+    frames: Optional[Dict[str, Any]] = None,
 ):
-    """Block loop shared by ``gksimulate`` and ``gksimulate_batched``; I/O is per run."""
+    """Block loop shared by ``gksimulate`` and ``gksimulate_batched``; I/O is per run.
+
+    With ``frames`` (time mode) a block ends on the next frame time instead of after a
+    fixed number of steps.
+    """
 
     def view(x, i):
         return _member(x, i) if batched else x
 
     interval = checkpoint_interval if checkpoint_interval else n_steps
     snapshot_every = max(int(snapshot_every), 1)
+    start_step = int(view(state, 0).step)
+    target_step = start_step + n_steps
+    origin = None
+    if frames is not None:
+        dump_dt, t_end = frames["dump_dt"], frames["t_end"]
+        origin = float(view(state, 0).time) if frames["origin"] is None else float(frames["origin"])
+    # the origin rides along in snapshots so a resumed run keeps the frame grid
+    grid = {} if origin is None else {"dump_origin": origin}
+
+    def done(st):
+        if frames is None:
+            return int(st.step) >= target_step
+        if t_end is not None:
+            return float(st.time) >= t_end - 1e-9 * dump_dt
+        return int(st.step) >= target_step
 
     # a resumed run keeps the history entry already written for its first step
     for i, run in enumerate(runs):
@@ -452,26 +579,32 @@ def _simulate(
                 params=run["params"],
                 pre=run["pre"],
                 snapshot_f32=snapshot_f32,
+                **grid,
             )
 
-    start_step = int(view(state, 0).step)
-    target_step = start_step + n_steps
     current_df = df
     current_state = state
     current_phi: Any = None
     current_fluxes: Any = None
     alive = [True] * len(runs)
+    # why a run left the loop early on its own: decayed, banded (None: diverged)
+    ended: List[Optional[str]] = [None] * len(runs)
     stopped: List[Optional[Tuple[int, float]]] = [None] * len(runs)
     previous = [run["previous_snapshot"] for run in runs]
     profile_next = profile and runs[0]["output_dir"] is not None
     blocks_done = 0
+    interrupted = False
 
     # warmup compile with the same return_dt_info as the body loop, otherwise
     # the first block hits a second cache miss for a different specialization
-    if n_steps > 0:
+    if not done(view(state, 0)) and (frames is not None or n_steps > 0):
         print("warmup (compilation)...")
         w_t0 = time.time()
-        _ = run_block(current_df, current_state, min(interval, n_steps))
+        if frames is None:
+            _ = run_block(current_df, current_state, min(interval, n_steps))
+        else:
+            # zero steps: compiles the time-mode solve without advancing
+            _ = run_until(current_df, current_state, float(view(current_state, 0).time))
         jax.block_until_ready(_[0])
         print(f"compilation: {time.time() - w_t0:.2f}s")
         for run in runs:
@@ -480,17 +613,22 @@ def _simulate(
 
     run_t0 = time.time()
 
-    while int(view(current_state, 0).step) < target_step and any(alive):
-        block_steps = min(interval, target_step - int(view(current_state, 0).step))
-        if block_steps <= 0:
-            break
-
+    while not done(view(current_state, 0)) and any(alive):
         block_start_step = int(view(current_state, 0).step)
+        if frames is None:
+            block_steps = min(interval, target_step - block_start_step)
+            if block_steps <= 0:
+                break
+        else:
+            t_target = frame_target(float(view(current_state, 0).time), cast(float, origin), dump_dt)
+
         block_start_time = [float(view(current_state, i).time) for i in range(len(runs))]
         profiled = profile_next
         profiler = (
             telemetry_mod.profile_block(
-                cast(str, runs[0]["output_dir"]), block_steps, block_start_step
+                cast(str, runs[0]["output_dir"]),
+                block_steps if frames is None else lambda: int(view(current_state, 0).step) - block_start_step,
+                block_start_step,
             )
             if profiled
             else contextlib.nullcontext()
@@ -498,23 +636,32 @@ def _simulate(
         profile_next = False
         t0 = time.time()
         with profiler:
-            run_result: Any = run_block(current_df, current_state, block_steps)
+            if frames is None:
+                run_result: Any = run_block(current_df, current_state, block_steps)
+            else:
+                run_result = _advance(run_until, current_df, current_state, t_target)
             current_df, current_phi, current_fluxes, current_state, dt_info = run_result
             jax.block_until_ready(current_df)
         wall_time = time.time() - t0
         blocks_done += 1
+        stop_now = STOP_REQUESTED.is_set()
         if profiled:
             _share_profile_summary(runs)
+        if frames is not None:
+            block_steps = int(view(current_state, 0).step) - block_start_step
 
         for i, run in enumerate(runs):
             if not alive[i]:
                 continue
             out = run["output_dir"]
             d, st = view(current_df, i), view(current_state, i)
+            dt_i = view(dt_info, i) if frames is None else _steps_taken(view(dt_info, i))
             # every step after the first NaN is wasted; keep the last good snapshot
-            if stop_on_nan and not bool(jnp.isfinite(d).all()):
+            collapsed = frames is not None and float(st.time) < t_target
+            if collapsed or (stop_on_nan and not bool(jnp.isfinite(d).all())):
+                cause = f"time step below dt_min {DT_MIN:g}" if collapsed else "non-finite df"
                 msg = (
-                    f"non-finite df at step {int(st.step)} (t={float(st.time):.4f}); "
+                    f"{cause} at step {int(st.step)} (t={float(st.time):.4f}); "
                     f"stopping after {int(st.step) - start_step} steps"
                 )
                 tag = f" ({run['label']})" if run["label"] else ""
@@ -526,9 +673,14 @@ def _simulate(
                 stopped[i] = (int(st.step) - start_step, time.time() - run_t0)
                 continue
 
+            steps_i = block_steps if frames is None else len(dt_i["dt_used"])
+            monitor = run["monitor"]
+            stop_reason = None
+            if monitor is not None:
+                stop_reason = monitor.observe(st, view(current_fluxes, i), view(current_phi, i))
             if out is not None:
-                is_final = int(st.step) >= target_step
-                due = blocks_done % snapshot_every == 0 or is_final
+                is_final = done(st) or stop_reason is not None
+                due = blocks_done % snapshot_every == 0 or is_final or stop_now
                 snapshot = (
                     (save_snapshots and due)
                     or (save_final and is_final)
@@ -544,10 +696,11 @@ def _simulate(
                     save_dumps=snapshot,
                     params=run["params"],
                     pre=run["pre"],
-                    dt_info=view(dt_info, i),
+                    dt_info=dt_i,
                     block_start_step=block_start_step,
                     block_start_time=block_start_time[i],
                     snapshot_f32=snapshot_f32,
+                    **grid,
                 )
 
                 if snapshot and keep_latest_snapshot and not save_snapshots:
@@ -557,27 +710,69 @@ def _simulate(
                             os.remove(previous[i])
                     previous[i] = latest
 
+            writes = run["dataset"] is not None and (
+                monitor is None
+                or monitor.write_frame(run["dataset"].n_frames, final=stop_reason is not None)
+            )
+            if writes:
+                _dataset_frame(run, d, view(current_phi, i), view(current_fluxes, i), st)
+
             log_step(
-                view(current_fluxes, i), st, wall_time, n_steps=block_steps, label=run["label"]
+                view(current_fluxes, i), st, wall_time, n_steps=steps_i, label=run["label"]
             )
             if run["telemetry"] is not None:
                 run["telemetry"].block(
                     int(st.step),
                     float(st.time),
-                    block_steps,
+                    steps_i,
                     wall_time,
-                    view(dt_info, i),
+                    dt_i,
                     profiled=profiled,
                 )
+            if stop_reason is not None:
+                tag = f" ({run['label']})" if run["label"] else ""
+                print(f"\n*** {stop_reason.upper()}{tag}: {monitor.message}; stopping")
+                alive[i] = False
+                ended[i] = stop_reason
+                stopped[i] = (int(st.step) - start_step, time.time() - run_t0)
+        if stop_now and not done(view(current_state, 0)):
+            interrupted = True
+            step = int(view(current_state, 0).step)
+            print(f"\nstop requested: stopped at step {step} after its snapshot")
+            break
 
-    if n_steps > 0:
+    if blocks_done or n_steps > 0:
         for i, run in enumerate(runs):
             if run["telemetry"] is not None:
                 steps, wall = stopped[i] or (
                     int(view(current_state, i).step) - start_step,
                     time.time() - run_t0,
                 )
-                run["telemetry"].close(wall, steps, "completed" if alive[i] else "diverged")
+                status = "completed" if alive[i] and not interrupted else "interrupted"
+                status = status if alive[i] else (ended[i] or "diverged")
+                run["telemetry"].close(wall, steps, status)
+    for i, run in enumerate(runs):
+        monitor = run["monitor"]
+        if monitor is not None:
+            writer = run["dataset"]
+            # a run whose frames waited for turbulence that never came keeps its last frame
+            if writer is not None and not interrupted and blocks_done and writer.n_frames == 0:
+                if alive[i] or ended[i]:
+                    _dataset_frame(
+                        run,
+                        view(current_df, i),
+                        view(current_phi, i),
+                        view(current_fluxes, i),
+                        view(current_state, i),
+                    )
+            monitor.finish(writer, final=not interrupted)
+        if run["dataset"] is None:
+            continue
+        # an interrupted run leaves the statistics to the leg that completes it
+        if not interrupted:
+            run["dataset"].finalize()
+        if blocks_done and (alive[i] or ended[i]):
+            run["dataset"].write_resume(view(current_df, i), view(current_state, i), dump_origin=origin)
 
     if current_phi is None:
         diags = [
@@ -591,6 +786,21 @@ def _simulate(
             current_phi, current_fluxes = diags[0]
 
     return current_df, current_phi, current_fluxes, current_state
+
+
+def _dataset_frame(run: Dict[str, Any], df, phi, fluxes, state) -> None:
+    ky_spec, kx_spec = phi_spectra(phi, run["geometry"])
+    run["dataset"].add(
+        df,
+        phi,
+        fluxes,
+        state,
+        ky_spec,
+        kx_spec,
+        integrals=functools.partial(
+            _diagnostics, geometry=run["geometry"], params=run["params"], pre=run["pre"]
+        ),
+    )
 
 
 def _share_profile_summary(runs: List[Dict[str, Any]]) -> None:
