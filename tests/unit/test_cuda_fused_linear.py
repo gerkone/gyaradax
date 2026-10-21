@@ -52,3 +52,22 @@ def test_fused_linear_matches_default(name):
     assert not np.array_equal(rhs, rhs_ref), "fused path did not run"
     assert np.max(np.abs(rhs - rhs_ref)) / np.max(np.abs(rhs_ref)) < 1e-14
     assert np.max(np.abs(out - out_ref)) / np.max(np.abs(out_ref)) < 1e-13
+
+
+@pytest.mark.parametrize("fused", [False, True])
+def test_vmap_matches_single_calls(fused):
+    df, geometry, params, _ = noisy_case(
+        "kinetic.yaml", GRID, {**CASES["kinetic"][1], "fused_linear": fused, "backend": "cuda"},
+        seed=7, mixed_precision=False,
+    )
+    pre = linear_precompute(geometry, params)
+    ops = create_ops(pre, backend="cuda", mixed_precision=False)
+    dfs = jax.numpy.stack([df, 0.5 * df[..., ::-1] + 0.1 * df])
+    phis = dfs[:, 0, 0, 0] * 0.1
+
+    def rhs(d, p):
+        return ops.linear_rhs(d, p, geometry, params, pre)
+
+    batched = np.asarray(jax.jit(jax.vmap(rhs))(dfs, phis))
+    single = np.stack([np.asarray(jax.jit(rhs)(dfs[i], phis[i])) for i in range(2)])
+    assert np.array_equal(batched, single)

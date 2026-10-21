@@ -2,6 +2,8 @@
 #include <cuda_runtime.h>
 #include <algorithm>
 
+#include "radius_batch.cuh"
+
 namespace xla_ffi = xla::ffi;
 
 // 9-point (vpar, mu) collision stencil, one thread per output point
@@ -70,9 +72,11 @@ xla_ffi::Error CollisionRhsImpl(
     const int threads = 256;
     const dim3 grid((unsigned)((ns * nxy + threads - 1) / threads),
                     (unsigned)(nsp * nmu * ((nv + COLL_VCH - 1) / COLL_VCH)));
-    collision_rhs_kernel<<<grid, threads, 0, stream>>>(
-        reinterpret_cast<const double2*>(df.untyped_data()), stencil.typed_data(),
-        reinterpret_cast<double2*>(out->untyped_data()), nsp, nv, nmu, ns, nxy);
+    const int64_t n = batch_count(*out, (int64_t)nsp * nv * nmu * ns * nxy);
+    for (int64_t i = 0; i < n; ++i)
+        collision_rhs_kernel<<<grid, threads, 0, stream>>>(
+            batch_at<const double2>(df, n, i), batch_at<const double>(stencil, n, i),
+            batch_at<double2>(*out, n, i), nsp, nv, nmu, ns, nxy);
     const cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess)
         return xla_ffi::Error(XLA_FFI_Error_Code_INTERNAL, cudaGetErrorString(err));

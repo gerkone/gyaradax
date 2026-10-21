@@ -2,6 +2,8 @@
 #include <cuda_runtime.h>
 #include <device_launch_parameters.h>
 
+#include "radius_batch.cuh"
+
 namespace xla_ffi = xla::ffi;
 
 // linear_rhs_fused_kernel:
@@ -451,45 +453,51 @@ xla_ffi::Error LinearRhsFusedImpl(
             "ns exceeds maximum CUDA block size of 1024");
     const int ky_tile = ns * nky <= 1024 ? nky : 1024 / ns;
 
-    LinearRhsArgs args = {
-        (const double2*)df.typed_data(), (const double2*)phi.typed_data(),
-        bessel.typed_data(), s_upar_tab.typed_data(), s_t7_tab.typed_data(),
-        par_class.typed_data(),
-        (const int2*)packed_maps.typed_data(),
-        utrap.typed_data(), abs_dum2_vp.typed_data(),
-        drift_x.typed_data(), drift_y.typed_data(),
-        dmaxwel_fm_ek.typed_data(), fmaxwl.typed_data(),
-        hyper.typed_data(), kx_vals.typed_data(), ky_vals.typed_data(),
-        signz0_buf.typed_data(), tmp0_buf.typed_data(),
-        (const double2*)apar.typed_data(), chi_vfac.typed_data(), g2f_vfac.typed_data(),
-        (const double2*)bpar.typed_data(), bpar_chi.typed_data(),
-        s_disp_tab.typed_data(),
-        (const double2*)dproj_m0.typed_data(), (const double2*)dproj_m1.typed_data(),
-        dproj_e0.typed_data(), dproj_e1.typed_data(),
-        (double2*)rhs_out->typed_data(),
-        nsp, nv, nmu, ns, nkx, nky, n_class, ky_tile,
-        c_d1_0, c_d1_1, c_d1_2, c_d1_3, c_d1_4,
-        c_d4_0, c_d4_1, c_d4_2, c_d4_3, c_d4_4,
-        dvp, disp_vp, drive_scale,
-        has_halo ? (const double2*)df_halo.typed_data() : nullptr,
-        has_halo ? fm_halo.typed_data() : nullptr,
-        has_halo ? g2f_halo.typed_data() : nullptr
-    };
+    const int64_t n = batch_count(*rhs_out, (int64_t)nsp * nv * nmu * ns * nkx * nky);
+    for (int64_t i = 0; i < n; ++i) {
+        LinearRhsArgs args = {
+            batch_at<const double2>(df, n, i), batch_at<const double2>(phi, n, i),
+            batch_at<const double>(bessel, n, i), batch_at<const double>(s_upar_tab, n, i),
+            batch_at<const double>(s_t7_tab, n, i),
+            batch_at<const int>(par_class, n, i),
+            batch_at<const int2>(packed_maps, n, i),
+            batch_at<const double>(utrap, n, i), batch_at<const double>(abs_dum2_vp, n, i),
+            batch_at<const double>(drift_x, n, i), batch_at<const double>(drift_y, n, i),
+            batch_at<const double>(dmaxwel_fm_ek, n, i), batch_at<const double>(fmaxwl, n, i),
+            batch_at<const double>(hyper, n, i), batch_at<const double>(kx_vals, n, i),
+            batch_at<const double>(ky_vals, n, i),
+            batch_at<const double>(signz0_buf, n, i), batch_at<const double>(tmp0_buf, n, i),
+            batch_at<const double2>(apar, n, i), batch_at<const double>(chi_vfac, n, i),
+            batch_at<const double>(g2f_vfac, n, i),
+            batch_at<const double2>(bpar, n, i), batch_at<const double>(bpar_chi, n, i),
+            batch_at<const double>(s_disp_tab, n, i),
+            batch_at<const double2>(dproj_m0, n, i), batch_at<const double2>(dproj_m1, n, i),
+            batch_at<const double>(dproj_e0, n, i), batch_at<const double>(dproj_e1, n, i),
+            batch_at<double2>(*rhs_out, n, i),
+            nsp, nv, nmu, ns, nkx, nky, n_class, ky_tile,
+            c_d1_0, c_d1_1, c_d1_2, c_d1_3, c_d1_4,
+            c_d4_0, c_d4_1, c_d4_2, c_d4_3, c_d4_4,
+            dvp, disp_vp, drive_scale,
+            has_halo ? batch_at<const double2>(df_halo, n, i) : nullptr,
+            has_halo ? batch_at<const double>(fm_halo, n, i) : nullptr,
+            has_halo ? batch_at<const double>(g2f_halo, n, i) : nullptr
+        };
 
-    cudaError_t err;
-    const int variant = (has_apar ? 4 : 0) | (has_bpar ? 2 : 0) | (has_dpc ? 1 : 0);
-    switch (variant) {
-        case 0: err = launch_linear_rhs<false, false, false>(args, stream); break;
-        case 1: err = launch_linear_rhs<false, false, true >(args, stream); break;
-        case 2: err = launch_linear_rhs<false, true,  false>(args, stream); break;
-        case 3: err = launch_linear_rhs<false, true,  true >(args, stream); break;
-        case 4: err = launch_linear_rhs<true,  false, false>(args, stream); break;
-        case 5: err = launch_linear_rhs<true,  false, true >(args, stream); break;
-        case 6: err = launch_linear_rhs<true,  true,  false>(args, stream); break;
-        default: err = launch_linear_rhs<true, true,  true >(args, stream); break;
+        cudaError_t err;
+        const int variant = (has_apar ? 4 : 0) | (has_bpar ? 2 : 0) | (has_dpc ? 1 : 0);
+        switch (variant) {
+            case 0: err = launch_linear_rhs<false, false, false>(args, stream); break;
+            case 1: err = launch_linear_rhs<false, false, true >(args, stream); break;
+            case 2: err = launch_linear_rhs<false, true,  false>(args, stream); break;
+            case 3: err = launch_linear_rhs<false, true,  true >(args, stream); break;
+            case 4: err = launch_linear_rhs<true,  false, false>(args, stream); break;
+            case 5: err = launch_linear_rhs<true,  false, true >(args, stream); break;
+            case 6: err = launch_linear_rhs<true,  true,  false>(args, stream); break;
+            default: err = launch_linear_rhs<true, true,  true >(args, stream); break;
+        }
+        if (err != cudaSuccess)
+            return xla_ffi::Error(XLA_FFI_Error_Code_INTERNAL, cudaGetErrorString(err));
     }
-    if (err != cudaSuccess)
-        return xla_ffi::Error(XLA_FFI_Error_Code_INTERNAL, cudaGetErrorString(err));
 
     return xla_ffi::Error::Success();
 }

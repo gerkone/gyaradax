@@ -1524,6 +1524,13 @@ Per evaluation, H100, 2 x 32 x 8 x 16 x 85 x 32, mixed precision (master = befor
   bindings in `docs/cuda_experiments/legacy/`.
 - **Field moments.** Up to two velocity moments per pass over g, with g -> f in-kernel and
   chunked (deterministic) partial sums.
+- **vmap.** The linear kernels (`linear_rhs_fused`, `linear_rhs_es[_rk]`, `field_moments`,
+  `collision_rhs`) use `vmap_method="expand_dims"`: a vmapped call, such as the TORAX plugin's radii,
+  reaches the handler as one call and launches the unchanged kernel once per element at pointer
+  offsets, instead of XLA slicing every operand per element. Bitwise equal to separate calls; 8
+  radii at 85 x 32 on an A40 cost 8 single solves (117 ms/step adiabatic, 352 kinetic) against
+  152 / 467 ms with the sequential method. One radius already fills the GPU, so merging radii into
+  one launch would not gain more; the bracket stays sequential.
 - **Bracket v5.** The EM potential is separable in vpar, so only the potentials A and B are
   transformed. On power-of-two dealiased planes with large batches cuFFT silently skips the FP32
   load callback (master returned an all-zero bracket on e.g. 9 x 5 mode boxes); a plan-time NaN
