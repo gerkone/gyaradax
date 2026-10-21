@@ -270,6 +270,7 @@ params = GKParams(
     n_gpus_sp=1,   # Shard species axis (for kinetic multi-species)
     n_gpus_vp=2,   # Shard vparallel axis
     n_gpus_mu=1,   # Shard mu axis
+    n_gpus_s=1,    # Shard the field-line coordinate s (opt-in)
     ...
 )
 ```
@@ -281,13 +282,14 @@ sharding:
   n_gpus_sp: 1
   n_gpus_vp: 2
   n_gpus_mu: 1
+  n_gpus_s: 1
 ```
 
 From the CLI, `--n-gpus N` (or a multi-GPU `--device-list`) picks the layout from
 the grid: species first, then mu, then vpar (`cli._auto_mesh`), and checks it
 before JAX starts. See docs/CLI.md.
 
-When `n_gpus_sp * n_gpus_vp * n_gpus_mu > 1`, the following automatically use
+When `n_gpus_sp * n_gpus_vp * n_gpus_mu * n_gpus_s > 1`, the following automatically use
 sharding:
 
 - `init_f()` - Creates df already distributed across devices (no single-GPU OOM)
@@ -298,6 +300,8 @@ The mesh is built automatically from available GPUs. Arrays are sharded as:
 - 5D df (vpar, mu, s, kx, ky): ("vp", "mu", None, None, None)
 - 6D df (sp, vpar, mu, s, kx, ky): ("sp", "vp", "mu", None, None, None)
 - Fields (phi, A_par): Replicated across all devices
+- With `n_gpus_s > 1` the mesh gains an "s" axis: df, the fields and the per-s
+  precompute are also sharded on s
 
 **Note**: Field solves require all-reduce operations over velocity axes,
 which can limit scaling for small grids. Sharding is most beneficial for
@@ -311,7 +315,13 @@ vpar stencil run on the local (sp, vp, mu) blocks via `sharding.velocity_map`
 edge per RK stage (`sharding.halo_planes`); species and mu need no halo,
 except for collisions, whose 9-point stencil exchanges one plane per sharded
 velocity axis (`collisions.collision_term`).
-All three axes run at about the same speed. Multi-GPU needs NCCL
+Sharding s exchanges two s planes per side per RK stage, periodic in s, so the
+end shards get the planes of the other end and `kx_shift` applies the
+connection (`JAXOps._parallel_s_sharded`, the CUDA `S_HALO` kernel variant);
+the field solve stays s-local and only the zonal flux-surface average, CFL and
+diagnostics reduce over s. s is opt-in, not GPU-benchmarked yet, and needs
+`ns % n_gpus_s == 0` with >= 2 s points per GPU.
+All three velocity axes run at about the same speed. Multi-GPU needs NCCL
 (`nvidia-nccl-cu13`, in the `cuda13` extra). See docs/NOTES.md §13.4.
 
 ## Skills

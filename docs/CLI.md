@@ -23,7 +23,7 @@ console script is not on `PATH` (`pip install -e .` installs it).
 | Adiabatic vs kinetic electrons | `grid.adiabatic_electrons` | run mode, species count, output dir name |
 | Electromagnetic `A_parallel` | `solver.nlapar` | mixed-variable `g` evolution, Ampere solve |
 | Electromagnetic `B_parallel` | `solver.nlbpar` | coupled Poisson–Bpar solve |
-| Velocity-space sharding | `sharding.n_gpus` or `sharding.n_gpus_{sp,vp,mu}` | device mesh, multi-GPU XLA flags, sharded precompute |
+| Grid sharding | `sharding.n_gpus` or `sharding.n_gpus_{sp,vp,mu,s}` | device mesh, multi-GPU XLA flags, sharded precompute |
 | Kernel backend | `solver.backend` | `jax` or `cuda` |
 | Total steps | `solver.n_steps` | run length |
 | Checkpoint cadence | `solver.dump_interval` x `solver.naverage` | steps between checkpoints |
@@ -141,6 +141,7 @@ sharding:
   # n_gpus_sp: 2    # species axis (kinetic multi-species only)
   # n_gpus_vp: 1    # vparallel axis
   # n_gpus_mu: 4    # mu axis
+  # n_gpus_s: 2     # field-line coordinate s (opt-in, not chosen automatically)
 ```
 
 The automatic layout fills the species axis first, then mu, then vparallel:
@@ -150,9 +151,12 @@ with each neighbour per RK stage, and with collisions on, vparallel and mu
 shards also exchange one plane for the collision stencil (each a fraction of
 the step). vparallel is the reserve when more GPUs are wanted than
 `nsp * nmu`. All three axes measure about the same speed, with or without
-collisions.
+collisions. The s axis is opt-in (`n_gpus_s` / `--n-gpus-s`, never picked by
+the automatic layout): s shards exchange two s planes with each neighbour per
+RK stage and must keep at least two s points per GPU; it is not yet
+benchmarked on GPUs.
 
-Precedence: `--n-gpus-{sp,vp,mu}` (each overrides the config's value for that
+Precedence: `--n-gpus-{sp,vp,mu,s}` (each overrides the config's value for that
 axis) > `--n-gpus` > the config's per-axis entries > `sharding.n_gpus` >
 a `--device-list` with several GPUs. Before JAX starts, the CLI checks that
 each axis divides its grid dimension (vparallel keeps at least two points per
@@ -181,7 +185,7 @@ is large or does not fit one GPU.
 | `--device N` | pin to one GPU (single-device runs only) |
 | `--device-list 0,1` | GPUs to use; several with no mesh given shard over them automatically |
 | `--n-gpus N` | shard over N GPUs, layout chosen from the grid |
-| `--n-gpus-{sp,vp,mu} N` | set the mesh per axis (overrides the config) |
+| `--n-gpus-{sp,vp,mu,s} N` | set the mesh per axis (overrides the config) |
 | `--mem-fraction F` | fraction of GPU memory XLA may use (e.g. 0.95 for grids near the limit) |
 | `--n-steps N` | run N more steps (default: up to the config's `solver.n_steps`) |
 | `--n-blocks` / `--block-size` | run length in blocks, checkpoint cadence |

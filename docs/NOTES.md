@@ -1651,6 +1651,15 @@ the CUDA kernels need. Multi-GPU runs need NCCL (`nvidia-nccl-cu13`, in the `cud
   (vpar), 1e-15 to 1e-14 over 3 EM steps (every axis), 3e-16 over 3 collisional steps (vpar or
   mu, with and without the conservation corrections); mixed precision: ~1e-9 in df after 40-100
   steps (FP32 bracket round-off amplified by the nonlinear dynamics).
+- **s axis (opt-in).** `n_gpus_s > 1` adds an "s" mesh axis that shards df, the fields and the
+  per-s precompute on s. The parallel stencils take two s planes from each neighbour per stage
+  (`JAXOps._parallel_s_sharded`; the CUDA kernel reads f, J0 phi + bpar_chi B_par and the
+  dissipation projection from s-halo buffers). As in GKW (`matdat.F90` `connect_parallel`) the
+  exchange is periodic, so the end shards get the planes of the other end and `kx_shift` applies
+  the kx shift of the connection. The field solve stays s-local; only the adiabatic zonal
+  flux-surface average, the CFL maxima and the diagnostics reduce over s. Needs
+  `ns % n_gpus_s == 0` with >= 2 s points per shard; `--n-gpus` never picks it. On CPU it matches
+  one device at the round-off of the velocity axes; not yet run or benchmarked on GPUs.
 
 On the 2 x 32 x 8 x 16 x 55 x 8 waltz A_par + B_par case on two B300 the step went from 19.1 to
 11.6 ms (CUDA, mu = 2) and from 55.5 to 31.9 ms (JAX, mu = 2).

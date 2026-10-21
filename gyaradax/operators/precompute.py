@@ -763,7 +763,8 @@ def linear_precompute(geometry: Dict[str, jnp.ndarray], params: GKParams) -> "GK
     n_gpus_sp = int(getattr(params, "n_gpus_sp", 1))
     n_gpus_vp = int(getattr(params, "n_gpus_vp", 1))
     n_gpus_mu = int(getattr(params, "n_gpus_mu", 1))
-    if n_gpus_sp * n_gpus_vp * n_gpus_mu > 1:
+    n_gpus_s = int(getattr(params, "n_gpus_s", 1))
+    if n_gpus_sp * n_gpus_vp * n_gpus_mu * n_gpus_s > 1:
         import gyaradax.sharding as sharding
 
         mesh = sharding.build_mesh(params)

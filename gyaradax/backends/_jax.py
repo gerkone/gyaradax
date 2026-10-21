@@ -139,7 +139,7 @@ class JAXOps(SolverOps):
 
         Same arithmetic as _apply_vpar_dual; df is 5D or 6D.
         """
-        vel = ("sp", "vp", "mu") if df.ndim == 6 else ("vp", "mu")
+        vel = sharding.df_axes(df.ndim, self.mesh)
         v_axis = 1 if df.ndim == 6 else 0
         n_vp = self.mesh.shape["vp"]
 
@@ -156,6 +156,62 @@ class JAXOps(SolverOps):
 
         spec = PartitionSpec(*vel)
         return sharding.velocity_map(local, self.mesh, (df,), (vel,), (spec, spec))
+
+    def _parallel_s_sharded(self, df, phi, pre, bpar=None) -> dict[str, jnp.ndarray]:
+        """Parallel-stencil terms of an s-sharded df, with the neighbour s planes as halo.
+
+        Same arithmetic as _apply_parallel(_dual). The halo is periodic in s: at the
+        global s ends it holds the planes of the other end, and kx_shift applies the
+        kx shift of the connection, as on one device. df is 5D or 6D.
+        """
+        mesh = self.mesh
+        vel, f_s = sharding.df_axes(df.ndim, mesh), sharding.with_s(mesh)
+        n_s = mesh.shape["s"]
+        lo, hi = _PAR_TAP_LO, _PAR_TAP_HI
+        # tap i reads plane s + i - 4
+        width = max(4 - lo, hi - 5, 1)
+        maps = sharding.with_s(mesh, (None,))
+        args = [df, phi, pre["bessel"], pre["s_upar_tab"], pre["s_t7_tab"]]
+        args += [self.pre["par_stencil_class"], self.pre["kx_shift"], self.pre["valid_shift"]]
+        axes = [vel, f_s, vel, vel, vel, f_s, maps, maps]
+        names = ["I", "VII"]
+        if bpar is not None:
+            args += [bpar, pre["bpar_chi_factor"]]
+            axes += [f_s, vel]
+            names.append("X")
+        if "s_disp_par_tab" in pre:
+            v_axes = (1, 2) if df.ndim == 6 else (0, 1)
+            m0 = jnp.sum(pre["dproj_w0"] * df, axis=v_axes, keepdims=True)
+            m1 = jnp.sum(pre["dproj_w1"] * df, axis=v_axes, keepdims=True)
+            args += [pre["dproj_e0"] * m0 + pre["dproj_e1"] * m1, pre["s_disp_par_tab"]]
+            axes += [vel, vel]
+            names.append("dpc")
+
+        def local(f, ph, bes, upar_tab, t7_tab, cls, kx_shift, valid, *opt):
+            s_idx = jnp.arange(f.shape[-3], dtype=jnp.int32)[:, None, None]
+            ky_idx = jnp.reshape(jnp.arange(f.shape[-1], dtype=jnp.int32), (1, 1, -1))
+
+            def stencil(field, coeffs):
+                ext = sharding.halo(field, field.ndim - 3, "s", n_s, width, periodic=True)
+                out = jnp.zeros_like(field)
+                for i in range(lo, hi):
+                    src = ext[..., s_idx + i - 4 + width, kx_shift[i], ky_idx]
+                    out = out + _mul_real(coeffs[i], jnp.where(valid[i], src, 0.0))
+                return out
+
+            t7 = _StencilTable(t7_tab, cls)
+            out = [stencil(f, _StencilTable(upar_tab, cls)), stencil(bes * ph, t7)]
+            rest = list(opt)
+            if bpar is not None:
+                bp, bpc = rest.pop(0), rest.pop(0)
+                out.append(stencil(bpc * bp, t7))
+            if rest:
+                out.append(-stencil(rest[0], _StencilTable(rest[1], cls)))
+            return tuple(out)
+
+        spec = PartitionSpec(*vel)
+        terms = sharding.velocity_map(local, mesh, args, axes, (spec,) * len(names))
+        return dict(zip(names, terms))
 
     def _apply_parallel(self, field: jnp.ndarray, coeffs: jnp.ndarray) -> jnp.ndarray:
         """Apply 9-point parallel stencil using precomputed shift maps."""
@@ -207,6 +263,7 @@ class JAXOps(SolverOps):
         exclude_zero_mode: bool = True,
         bessel: jnp.ndarray | None = None,
         chi_correction: jnp.ndarray | None = None,
+        dum_s: jnp.ndarray | None = None,
     ) -> jnp.ndarray:
         """Nonlinear ExB advection (term III) for 5D df. Shared skeleton for R2C and Z2Z.
 
@@ -220,7 +277,9 @@ class JAXOps(SolverOps):
         kx2d, ky2d = pre["nl_kx2d"], pre["nl_ky2d"]
         if bessel is None:
             bessel = pre["bessel"]
-        dum_s, ixzero, iyzero = pre["nl_dum_s"], pre["ixzero"], pre["iyzero"]
+        ixzero, iyzero = pre["ixzero"], pre["iyzero"]
+        if dum_s is None:
+            dum_s = pre["nl_dum_s"]
         nky = df.shape[-1]
 
         # chi_correction per-s slices: vmap axis 2 (s-axis in 5D arrays)
@@ -339,17 +398,19 @@ class JAXOps(SolverOps):
             return self._nonlinear_local(
                 df, phi, geometry, bessel=bessel, chi_correction=chi_correction, **kw
             )
-        # the bracket is per plane: run it on the local (sp, vp, mu) blocks
-        vel = ("sp", "vp", "mu") if df.ndim == 6 else ("vp", "mu")
-        args = (df, phi, self.pre["bessel"] if bessel is None else bessel)
+        # the bracket is per plane: run it on the local (sp, vp, mu, s) blocks
+        vel, f_s = sharding.df_axes(df.ndim, self.mesh), sharding.with_s(self.mesh)
+        args = (df, phi, self.pre["bessel"] if bessel is None else bessel, self.pre["nl_dum_s"])
         if chi_correction is not None:
             args = args + (chi_correction,)
 
-        def local(d, p, b, *chi):
+        def local(d, p, b, dum, *chi):
             c = chi[0] if chi else None
-            return self._nonlinear_local(d, p, geometry, bessel=b, chi_correction=c, **kw)
+            return self._nonlinear_local(
+                d, p, geometry, bessel=b, chi_correction=c, dum_s=dum, **kw
+            )
 
-        axes = (vel, (), vel, vel)[: len(args)]
+        axes = (vel, f_s, vel, f_s, vel)[: len(args)]
         return sharding.velocity_map(local, self.mesh, args, axes, PartitionSpec(*vel))
 
     def _nonlinear_local(
@@ -363,6 +424,7 @@ class JAXOps(SolverOps):
         exclude_zero_mode: bool,
         bessel: jnp.ndarray | None,
         chi_correction: jnp.ndarray | None,
+        dum_s: jnp.ndarray | None = None,
     ) -> jnp.ndarray:
         if df.ndim == 5:
             return self._nonlinear_term_iii_core(
@@ -374,6 +436,7 @@ class JAXOps(SolverOps):
                 exclude_zero_mode=exclude_zero_mode,
                 bessel=bessel,
                 chi_correction=chi_correction,
+                dum_s=dum_s,
             )
         elif df.ndim == 6:
             if bessel is None:
@@ -389,6 +452,7 @@ class JAXOps(SolverOps):
                     exclude_zero_mode=exclude_zero_mode,
                     bessel=bes_sp,
                     chi_correction=chi_sp if chi_correction is not None else None,
+                    dum_s=dum_s,
                 )
 
             args = (
@@ -418,6 +482,7 @@ class JAXOps(SolverOps):
         bpar: jnp.ndarray | None = None,
         vpar_d: Tuple[jnp.ndarray, jnp.ndarray] | None = None,
         coll_term: jnp.ndarray | None = None,
+        par_terms: dict[str, jnp.ndarray] | None = None,
     ) -> dict[str, jnp.ndarray]:
         """Return each linear-RHS term as a dict entry.
 
@@ -443,9 +508,12 @@ class JAXOps(SolverOps):
         # parallel stencil (fused: streaming + parallel dissipation + Landau)
         par_class = self.pre["par_stencil_class"]
         s_t7 = _StencilTable(pre["s_t7_tab"], par_class)
-        term_I_par, term_VII_landau = self._apply_parallel_dual(
-            df, gyro_phi, _StencilTable(pre["s_upar_tab"], par_class), s_t7
-        )
+        if par_terms is None:
+            term_I_par, term_VII_landau = self._apply_parallel_dual(
+                df, gyro_phi, _StencilTable(pre["s_upar_tab"], par_class), s_t7
+            )
+        else:
+            term_I_par, term_VII_landau = par_terms["I"], par_terms["VII"]
 
         # vpar stencil (trapping + vpar dissipation; 5-point central)
         if vpar_d is None:
@@ -482,7 +550,10 @@ class JAXOps(SolverOps):
         if bpar is not None and "bpar_chi_factor" in pre:
             bpar_b = bpar[None, None, :, :, :]
             gyro_bpar_scaled = pre["bpar_chi_factor"] * bpar_b
-            term_X_bpar_par = self._apply_parallel(gyro_bpar_scaled, s_t7)
+            if par_terms is None:
+                term_X_bpar_par = self._apply_parallel(gyro_bpar_scaled, s_t7)
+            else:
+                term_X_bpar_par = par_terms["X"]
             term_XI_curv_bpar = (
                 -1j
                 * params.drive_scale
@@ -499,7 +570,9 @@ class JAXOps(SolverOps):
         # disp_par sources neither Poisson nor Ampere (cures the EM low-ky
         # numerical instability, GKW issue #201).
         term_disp_proj = jnp.zeros_like(df)
-        if "s_disp_par_tab" in pre:
+        if par_terms is not None and "dpc" in par_terms:
+            term_disp_proj = par_terms["dpc"]
+        elif "s_disp_par_tab" in pre:
             m0 = jnp.sum(pre["dproj_w0"] * df, axis=(0, 1), keepdims=True)
             m1 = jnp.sum(pre["dproj_w1"] * df, axis=(0, 1), keepdims=True)
             proj = pre["dproj_e0"] * m0 + pre["dproj_e1"] * m1
@@ -538,6 +611,7 @@ class JAXOps(SolverOps):
         bpar: jnp.ndarray | None = None,
         vpar_d: Tuple[jnp.ndarray, jnp.ndarray] | None = None,
         coll_term: jnp.ndarray | None = None,
+        par_terms: dict[str, jnp.ndarray] | None = None,
     ) -> jnp.ndarray:
         """Total linear RHS = sum of all linear terms.
 
@@ -545,7 +619,15 @@ class JAXOps(SolverOps):
         the fused expression. JAX/XLA will fuse term computations under JIT.
         """
         terms = self._linear_rhs_terms(
-            df, phi, params, pre, apar=apar, bpar=bpar, vpar_d=vpar_d, coll_term=coll_term
+            df,
+            phi,
+            params,
+            pre,
+            apar=apar,
+            bpar=bpar,
+            vpar_d=vpar_d,
+            coll_term=coll_term,
+            par_terms=par_terms,
         )
         total = terms["I_par_streaming_plus_diss"]
         for k, v in terms.items():
@@ -576,6 +658,9 @@ class JAXOps(SolverOps):
             extra["vpar_d"] = self._vpar_dual_sharded(df)
         if sharding.splits_velocity(self.mesh) and collisions_on(params, pre):
             extra["coll_term"] = collision_term(df, params, pre, self.mesh)
+        if sharding.splits_s(self.mesh):
+            has_bpar = bpar is not None and "bpar_chi_factor" in pre
+            extra["par_terms"] = self._parallel_s_sharded(df, phi, pre, bpar if has_bpar else None)
         if df.ndim == 5:
             return self._linear_rhs_core(df, phi, params, pre, apar=apar, bpar=bpar, **extra)
         elif df.ndim == 6:

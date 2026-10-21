@@ -167,18 +167,14 @@ def init_f(
         n_gpus_sp = int(getattr(params, "n_gpus_sp", 1))
         n_gpus_vp = int(getattr(params, "n_gpus_vp", 1))
         n_gpus_mu = int(getattr(params, "n_gpus_mu", 1))
-        if n_gpus_sp * n_gpus_vp * n_gpus_mu > 1:
+        n_gpus_s = int(getattr(params, "n_gpus_s", 1))
+        if n_gpus_sp * n_gpus_vp * n_gpus_mu * n_gpus_s > 1:
             import gyaradax.sharding as sharding
-            from jax.sharding import NamedSharding, PartitionSpec
+            from jax.sharding import NamedSharding
 
             mesh = sharding.build_mesh(params)
             if mesh is not None:
-                if n_species > 1:
-                    spec = PartitionSpec(
-                        sharding._AXIS_SP, sharding._AXIS_VP, sharding._AXIS_MU, None, None, None
-                    )
-                else:
-                    spec = PartitionSpec(sharding._AXIS_VP, sharding._AXIS_MU, None, None, None)
+                spec = sharding.df_spec(6 if n_species > 1 else 5, mesh)
                 out_sharding = NamedSharding(mesh, spec)
 
     nv, nmu, ns, nkx, nky = (

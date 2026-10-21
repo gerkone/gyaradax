@@ -4,9 +4,10 @@ All sharding-specific logic lives here. Most of the codebase is unaware of
 the mesh — operations on `jax.Array`s with `NamedSharding` are partitioned
 automatically by XLA's GSPMD under `jit`. The exceptions are the opaque CUDA
 FFI kernels, the per-plane Poisson bracket and the stencils that couple velocity
-points (vpar derivatives, collisions): the backends get the mesh from
-``create_ops(mesh=...)`` and run those on the local blocks with ``velocity_map``,
-exchanging neighbour planes with ``halo_planes`` / ``halo``.
+points (vpar derivatives, collisions) or s points (parallel derivatives): the
+backends get the mesh from ``create_ops(mesh=...)`` and run those on the local
+blocks with ``velocity_map``, exchanging neighbour planes with ``halo_planes`` /
+``halo``.
 
 Public API
 ----------
@@ -16,7 +17,7 @@ Public API
 - ``is_active(mesh)`` — helper for single-device early return.
 
 Single-device path: all helpers are idempotent no-ops when
-``n_gpus_sp * n_gpus_vp * n_gpus_mu == 1``.
+``n_gpus_sp * n_gpus_vp * n_gpus_mu * n_gpus_s == 1``.
 
 Partition convention (velocity-space sharding on the adiabatic path):
 
@@ -26,7 +27,9 @@ Partition convention (velocity-space sharding on the adiabatic path):
     (9,     nvpar, nmu, ns)                   coll 5D: (None, "vp", "mu", None)
     (nsp,   9,     nvpar, nmu, ns)            coll 6D: (None, None, "vp", "mu", None)
 
-Arrays whose shape doesn't match any of the above stay replicated.
+Arrays whose shape doesn't match any of the above stay replicated. With
+``n_gpus_s > 1`` the mesh gains an "s" axis and every per-s array (df, the
+fields, the per-s precompute) is also sharded on its s dimension.
 """
 
 from typing import Any, NamedTuple, Optional, TypeVar, cast
@@ -51,6 +54,7 @@ class GridShape(NamedTuple):
 _AXIS_SP = "sp"
 _AXIS_VP = "vp"
 _AXIS_MU = "mu"
+_AXIS_S = "s"
 
 _P = TypeVar("_P", bound=Precompute)
 
@@ -61,27 +65,32 @@ def get_device_count() -> int:
 
 
 def build_mesh(params) -> Optional[Mesh]:
-    """Build a 3-axis device mesh from ``params.n_gpus_{sp,vp,mu}``.
+    """Build the device mesh from ``params.n_gpus_{sp,vp,mu,s}``.
 
-    Returns None when all three are 1 (single-device path). Errors out
+    Axes (sp, vp, mu), plus a trailing "s" axis when ``n_gpus_s > 1``.
+    Returns None when all are 1 (single-device path). Errors out
     when the requested mesh size exceeds the visible JAX devices.
     """
     p_sp = int(getattr(params, "n_gpus_sp", 1))
     p_vp = int(getattr(params, "n_gpus_vp", 1))
     p_mu = int(getattr(params, "n_gpus_mu", 1))
-    total = p_sp * p_vp * p_mu
+    p_s = int(getattr(params, "n_gpus_s", 1))
+    total = p_sp * p_vp * p_mu * p_s
     if total == 1:
         return None
     devices = jax.devices()
     if total > len(devices):
         raise RuntimeError(
-            f"requested {total} devices ({p_sp}×{p_vp}×{p_mu}) but "
+            f"requested {total} devices ({p_sp}×{p_vp}×{p_mu}×{p_s}) but "
             f"only {len(devices)} are visible to JAX"
         )
     import numpy as np
 
-    dev_np = np.asarray(devices[:total], dtype=object).reshape((p_sp, p_vp, p_mu))
-    return Mesh(dev_np, (_AXIS_SP, _AXIS_VP, _AXIS_MU))
+    shape, names = (p_sp, p_vp, p_mu), (_AXIS_SP, _AXIS_VP, _AXIS_MU)
+    if p_s > 1:
+        shape, names = shape + (p_s,), names + (_AXIS_S,)
+    dev_np = np.asarray(devices[:total], dtype=object).reshape(shape)
+    return Mesh(dev_np, names)
 
 
 def is_active(mesh: Optional[Mesh]) -> bool:
@@ -92,7 +101,7 @@ def is_active(mesh: Optional[Mesh]) -> bool:
 def velocity_map(fn, mesh: Mesh, args, axes, out_specs):
     """Run ``fn`` on the local blocks of ``args`` with ``shard_map``.
 
-    ``axes[i]`` names the mesh axis (``"sp"``, ``"vp"``, ``"mu"`` or None) of
+    ``axes[i]`` names the mesh axis (``"sp"``, ``"vp"``, ``"mu"``, ``"s"`` or None) of
     each leading dimension of ``args[i]``; size-1 (broadcast) dimensions and
     the remaining dimensions stay whole, ``()`` replicates the argument.
     Replicated inputs are sliced locally (no communication).
@@ -120,30 +129,86 @@ def splits_velocity(mesh: Mesh | None) -> bool:
     return mesh is not None and max(mesh.shape[_AXIS_VP], mesh.shape[_AXIS_MU]) > 1
 
 
-def halo_planes(x, axis: int, mesh_axis: str, n_shards: int, width: int = 2):
+def splits_s(mesh: Mesh | None) -> bool:
+    return mesh is not None and mesh.shape.get(_AXIS_S, 1) > 1
+
+
+def with_s(mesh: Mesh | None, axes=()) -> tuple:
+    """``axes`` followed by the "s" mesh axis when the mesh splits s."""
+    return tuple(axes) + ((_AXIS_S,) if splits_s(mesh) else ())
+
+
+def df_axes(ndim: int, mesh: Mesh | None) -> tuple:
+    """Mesh axes of the leading dimensions of a 5D or 6D df."""
+    vel = (_AXIS_SP, _AXIS_VP, _AXIS_MU) if ndim == 6 else (_AXIS_VP, _AXIS_MU)
+    return with_s(mesh, vel)
+
+
+def df_spec(ndim: int, mesh: Mesh | None) -> PartitionSpec:
+    """Partition spec of a 5D or 6D df."""
+    axes = df_axes(ndim, mesh)
+    return PartitionSpec(*axes, *([None] * (ndim - len(axes))))
+
+
+def halo_planes(x, axis: int, mesh_axis: str, n_shards: int, width: int = 2, periodic=False):
     """Inside ``shard_map``: the ``width`` planes before and after this shard along ``axis``.
 
     ``axis`` is sharded over ``mesh_axis`` (``n_shards`` devices). Returns the planes
-    stacked along ``axis`` (before, then after); planes beyond the global grid are zero.
+    stacked along ``axis`` (before, then after); planes beyond the global grid are zero,
+    or, with ``periodic``, those of the shard at the other end.
     """
     if x.shape[axis] < width:
         raise ValueError(f"a halo of {width} needs >= {width} local points along '{mesh_axis}'")
     lo = jax.lax.slice_in_dim(x, 0, width, axis=axis)
     hi = jax.lax.slice_in_dim(x, x.shape[axis] - width, x.shape[axis], axis=axis)
-    from_right = jax.lax.ppermute(lo, mesh_axis, [(i + 1, i) for i in range(n_shards - 1)])
-    from_left = jax.lax.ppermute(hi, mesh_axis, [(i, i + 1) for i in range(n_shards - 1)])
+    n = n_shards if periodic else n_shards - 1
+    from_right = jax.lax.ppermute(lo, mesh_axis, [((i + 1) % n_shards, i) for i in range(n)])
+    from_left = jax.lax.ppermute(hi, mesh_axis, [(i, (i + 1) % n_shards) for i in range(n)])
     return jax.numpy.concatenate([from_left, from_right], axis=axis)
 
 
-def halo(x, axis: int, mesh_axis: str, n_shards: int, width: int = 2):
+def halo(x, axis: int, mesh_axis: str, n_shards: int, width: int = 2, periodic=False):
     """Inside ``shard_map``: ``x`` extended by ``width`` planes of each neighbour along ``axis``."""
-    h = halo_planes(x, axis, mesh_axis, n_shards, width)
+    h = halo_planes(x, axis, mesh_axis, n_shards, width, periodic)
     lo = jax.lax.slice_in_dim(h, 0, width, axis=axis)
     hi = jax.lax.slice_in_dim(h, width, 2 * width, axis=axis)
     return jax.numpy.concatenate([lo, x, hi], axis=axis)
 
 
-def _spec_for_shape(shape, grid: GridShape) -> PartitionSpec:
+def _s_dim(shape, grid: GridShape) -> Optional[int]:
+    """Index of the s dimension of a per-s array, None for other arrays."""
+    s = tuple(shape)
+    # collision stencils and weights end in s
+    coll = (
+        (grid.nvpar, grid.nmu, grid.ns),
+        (grid.nsp, grid.nvpar, grid.nmu, grid.ns),
+        (9, grid.nvpar, grid.nmu, grid.ns),
+        (grid.nsp, 9, grid.nvpar, grid.nmu, grid.ns),
+    )
+    if s in coll:
+        return len(s) - 1
+    # (..., s, kx, ky) with broadcast kx / ky, and the (..., s, class, tap) stencil tables
+    d = len(s) - 3
+    if d < 0 or s[d] != grid.ns:
+        return None
+    if s[-1] == 9 or (s[-2] in (1, grid.nkx) and s[-1] in (1, grid.nky)):
+        return d
+    return None
+
+
+def _spec_for_shape(shape, grid: GridShape, split_s: bool = False) -> PartitionSpec:
+    """Partition spec of an array, by shape; ``split_s`` adds the "s" axis on per-s arrays."""
+    spec = _velocity_spec(shape, grid)
+    d = _s_dim(shape, grid) if split_s else None
+    if d is None:
+        return spec
+    dims = list(spec) + [None] * (len(shape) - len(spec))
+    if dims[d] is None:
+        dims[d] = _AXIS_S
+    return PartitionSpec(*dims)
+
+
+def _velocity_spec(shape, grid: GridShape) -> PartitionSpec:
     """Classify an array by shape and return its partition spec.
 
     Unmatched shapes fall back to replicated. The check is strictly
@@ -204,7 +269,7 @@ def shard_df(df, mesh: Optional[Mesh], grid: Optional[GridShape]):
     if mesh is None:
         return df
     assert grid is not None
-    spec = _spec_for_shape(df.shape, grid)
+    spec = _spec_for_shape(df.shape, grid, splits_s(mesh))
     return _place(df, spec, mesh)
 
 
@@ -221,7 +286,7 @@ def shard_pre(pre: _P, mesh: Optional[Mesh], grid: Optional[GridShape]) -> _P:
     def _maybe_shard(leaf):
         if not hasattr(leaf, "shape") or len(leaf.shape) == 0:
             return leaf
-        spec = _spec_for_shape(leaf.shape, grid)
+        spec = _spec_for_shape(leaf.shape, grid, splits_s(mesh))
         return _place(leaf, spec, mesh)
 
     return jax.tree_util.tree_map(_maybe_shard, pre)
@@ -290,7 +355,7 @@ def precompute_sharded(geometry, params, mesh: Optional[Mesh], grid: GridShape):
 
     def _leaf_sharding(leaf):
         if hasattr(leaf, "shape") and hasattr(leaf, "dtype") and len(leaf.shape) > 0:
-            return NamedSharding(mesh, _spec_for_shape(leaf.shape, grid))
+            return NamedSharding(mesh, _spec_for_shape(leaf.shape, grid, splits_s(mesh)))
         return None
 
     out_shardings = jax.tree_util.tree_map(_leaf_sharding, shapes)
@@ -315,6 +380,12 @@ def grid_shape_from(params, geometry) -> GridShape:
     else:
         mas = getattr(params, "mas", 1.0)
         nsp = int(jnp.atleast_1d(jnp.asarray(mas)).shape[0])
+    n_s = int(getattr(params, "n_gpus_s", 1))
+    if n_s > 1 and (ns % n_s or ns // n_s < 2):
+        raise ValueError(
+            f"n_gpus_s={n_s} must divide ns={ns} and leave >= 2 s points per device "
+            "(the parallel-derivative halo)"
+        )
     return GridShape(nsp=nsp, nvpar=nvpar, nmu=nmu, ns=ns, nkx=nkx, nky=nky)
 
 
@@ -336,15 +407,11 @@ def init_f_sharded(
 
     Returns sharded df with the same values as init_f would produce.
     """
-    from jax.sharding import NamedSharding, PartitionSpec
+    from jax.sharding import NamedSharding
     from gyaradax.solver.rk4 import init_f
 
     # Build output sharding from mesh and grid
-    if n_species > 1:
-        spec = PartitionSpec(_AXIS_SP, _AXIS_VP, _AXIS_MU, None, None, None)
-    else:
-        spec = PartitionSpec(_AXIS_VP, _AXIS_MU, None, None, None)
-    out_sharding = NamedSharding(cast(Mesh, mesh), spec)
+    out_sharding = NamedSharding(cast(Mesh, mesh), df_spec(6 if n_species > 1 else 5, mesh))
 
     # Delegate to unified init_f
     return init_f(

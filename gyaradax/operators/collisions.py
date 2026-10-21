@@ -634,8 +634,9 @@ def collision_term(df: jnp.ndarray, params, pre, mesh=None) -> jnp.ndarray:
     from jax.sharding import PartitionSpec
 
     lead = ("sp",) if df.ndim == 6 else ()
-    vel = lead + ("vp", "mu")
-    axes = (vel,) + (lead + (None, "vp", "mu"),) * len(stencils) + (vel,) * len(weights)
+    vel = sharding.with_s(mesh, lead + ("vp", "mu"))
+    st_axes = sharding.with_s(mesh, lead + (None, "vp", "mu"))
+    axes = (vel,) + (st_axes,) * len(stencils) + (vel,) * len(weights)
 
     def halo(f):
         # one plane per side in vpar then mu; the second exchange carries the corners

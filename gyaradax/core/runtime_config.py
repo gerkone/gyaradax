@@ -25,6 +25,7 @@ def configure_runtime_env(
     n_gpus_sp: int = 1,
     n_gpus_vp: int = 1,
     n_gpus_mu: int = 1,
+    n_gpus_s: int = 1,
 ) -> None:
     """Configure process environment that must be set before importing JAX.
 
@@ -39,6 +40,7 @@ def configure_runtime_env(
         n_gpus_sp: Number of devices requested on the species axis.
         n_gpus_vp: Number of devices requested on the vparallel axis.
         n_gpus_mu: Number of devices requested on the mu axis.
+        n_gpus_s: Number of devices requested on the s axis.
     """
     if device_list:
         os.environ["CUDA_VISIBLE_DEVICES"] = device_list
@@ -52,7 +54,7 @@ def configure_runtime_env(
             preallocate_value = preallocate
         os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", preallocate_value)
 
-    if n_gpus_sp * n_gpus_vp * n_gpus_mu > 1:
+    if n_gpus_sp * n_gpus_vp * n_gpus_mu * n_gpus_s > 1:
         append_xla_flags(_MULTI_GPU_XLA_FLAGS)
 
 
