@@ -1,4 +1,4 @@
-"""TORAX transport models backed by gyaradax: gyaradax-ql and gyaradax-nl.
+"""TORAX transport models backed by gyaradax: ql-gyx and nl-gyx.
 
 Importing this package registers both with TORAX; select them by `model_name` in
 `transport.core_transport_models`.

@@ -2,9 +2,9 @@
 
 `gyaradax.transport` adds two TORAX transport models. Importing it registers them.
 
-- **`gyaradax-ql`**: quasilinear. At each `rho_match` radius it runs one linear gyaradax solve
+- **`ql-gyx`**: quasilinear. At each `rho_match` radius it runs one linear gyaradax solve
   (all ky at once, stopped when the growth rates converge), then applies a saturation rule.
-- **`gyaradax-nl`**: nonlinear. At each `rho_match` radius it runs a nonlinear simulation and
+- **`nl-gyx`**: nonlinear. At each `rho_match` radius it runs a nonlinear simulation and
   averages the fluxes over its last blocks. This is ground truth for validation, not for routine
   transport runs.
 
@@ -21,14 +21,14 @@ python3.12 -m venv .venv
 .venv/bin/pip install "jax[cuda13]==<the installed jax version>"   # for a GPU
 ```
 
-## Example: ITER hybrid with gyaradax-ql
+## Example: ITER hybrid with ql-gyx
 
 `gyaradax/transport/cases/iterhybrid.py` is TORAX's `iterhybrid_predictor_corrector` example with
-gyaradax-ql in QLKNN's place:
+ql-gyx in QLKNN's place:
 
 ```python
 QL = {
-    "model_name": "gyaradax-ql",
+    "model_name": "ql-gyx",
     "rho_min": 0.25,
     "rho_max": 0.95,
     "rho_match": (0.3, 0.5, 0.7, 0.9),

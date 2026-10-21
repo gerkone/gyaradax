@@ -1,6 +1,6 @@
 """Evaluate the QL model at one operating point (params + geometry).
 
-jit/vmap-safe, the path the TORAX gyaradax-ql model takes: `initial_df`, `linear_early_stop`,
+jit/vmap-safe, the path the TORAX ql-gyx model takes: `initial_df`, `linear_early_stop`,
 `ql_at_point`; `nl_at_point` for the nonlinear ground truth.
 """
 

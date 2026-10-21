@@ -1,4 +1,4 @@
-"""gyaradax-nl: a nonlinear gyaradax run per radius, averaged over trailing blocks."""
+"""nl-gyx: a nonlinear gyaradax run per radius, averaged over trailing blocks."""
 
 import dataclasses
 from typing import Annotated, Any, Dict, Literal
@@ -23,7 +23,7 @@ class GyaradaxNLTransportModel(base.GyaradaxTransportModel):
     @classmethod
     def from_config(cls, cfg) -> "GyaradaxNLTransportModel":
         if cfg.kinetic:
-            raise NotImplementedError("gyaradax-nl runs adiabatic electrons only.")
+            raise NotImplementedError("nl-gyx runs adiabatic electrons only.")
         return cls(
             **cls._base_kwargs(cfg),
             n_steps_nl=cfg.n_steps_nl,
@@ -44,9 +44,9 @@ class GyaradaxNLTransportModel(base.GyaradaxTransportModel):
 
 
 class GyaradaxNLConfig(base.SolverConfig):
-    """Config of the gyaradax-nl transport model (fields in docs/TORAX.md)."""
+    """Config of the nl-gyx transport model (fields in docs/TORAX.md)."""
 
-    model_name: Annotated[Literal["gyaradax-nl"], STATIC] = "gyaradax-nl"
+    model_name: Annotated[Literal["nl-gyx"], STATIC] = "nl-gyx"
     n_steps_nl: Annotated[int, STATIC] = 30000
     nl_tail_blocks: Annotated[int, STATIC] = 12
     nl_block: Annotated[int, STATIC] = 500

@@ -1,4 +1,4 @@
-"""gyaradax-ql: a linear gyaradax solve per radius, saturated by a quasilinear rule."""
+"""ql-gyx: a linear gyaradax solve per radius, saturated by a quasilinear rule."""
 
 import dataclasses
 from typing import Annotated, Any, Dict, Literal, Optional, Tuple
@@ -75,9 +75,9 @@ class GyaradaxQLTransportModel(base.GyaradaxTransportModel):
 
 
 class GyaradaxQLConfig(base.SolverConfig):
-    """Config of the gyaradax-ql transport model (fields in docs/TORAX.md)."""
+    """Config of the ql-gyx transport model (fields in docs/TORAX.md)."""
 
-    model_name: Annotated[Literal["gyaradax-ql"], STATIC] = "gyaradax-ql"
+    model_name: Annotated[Literal["ql-gyx"], STATIC] = "ql-gyx"
     n_steps_linear: Annotated[int, STATIC] = 2000
     rule: Annotated[str, STATIC] = "canonical"
     rule_options: Annotated[Optional[Dict[str, Any]], STATIC] = None

@@ -1,4 +1,4 @@
-"""TORAX's iterhybrid_predictor_corrector example with gyaradax-ql in place of QLKNN.
+"""TORAX's iterhybrid_predictor_corrector example with ql-gyx in place of QLKNN.
 
 Use it as a TORAX config file (`run_torax --config=<this file>`), or
 `torax.ToraxConfig.from_dict(gyaradax.transport.cases.iterhybrid.CONFIG)`.
@@ -11,7 +11,7 @@ from torax.examples import iterhybrid_predictor_corrector
 import gyaradax.transport  # noqa: F401
 
 QL = {
-    "model_name": "gyaradax-ql",
+    "model_name": "ql-gyx",
     "rho_min": 0.25,
     "rho_max": 0.95,
     "rho_match": (0.3, 0.5, 0.7, 0.9),

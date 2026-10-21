@@ -1,4 +1,4 @@
-"""gyaradax.transport: the gyaradax-ql / gyaradax-nl TORAX transport models."""
+"""gyaradax.transport: the ql-gyx / nl-gyx TORAX transport models."""
 
 import math
 
@@ -53,13 +53,13 @@ def constant_flux(self, params, geom):
 
 def build(**fields):
     return GyaradaxQLConfig.from_dict(
-        {"model_name": "gyaradax-ql", **fields}
+        {"model_name": "ql-gyx", **fields}
     ).build_transport_model()
 
 
 def test_fluxes_reach_torax_in_its_units(monkeypatch):
     monkeypatch.setattr(GyaradaxQLTransportModel, "_per_radius", constant_flux)
-    _, coeffs, geo, cp = transport_call({"model_name": "gyaradax-ql", **GRID})
+    _, coeffs, geo, cp = transport_call({"model_name": "ql-gyx", **GRID})
     qli = units.build_quasilinear_inputs(cp, geo)
     # 1 GKW gyroBohm -> chi = 2 sqrt(2) chiGB / (R/L_T); the axis has R/L_T -> 0
     gkw = 2.0 * math.sqrt(2.0) * np.asarray(qli.chiGB)
@@ -79,7 +79,7 @@ def test_transport_run_with_cheap_flux(monkeypatch):
         return q_i, q_i, jnp.asarray(0.0), {}
 
     monkeypatch.setattr(GyaradaxQLTransportModel, "_per_radius", stiff_flux)
-    tc = torax_config({"model_name": "gyaradax-ql", "rho_match": (0.3, 0.6, 0.85), **GRID})
+    tc = torax_config({"model_name": "ql-gyx", "rho_match": (0.3, 0.6, 0.85), **GRID})
     history = torax.run_simulation(tc, progress_bar=False, max_steps=3)
     t_i = np.asarray(history.simulation_output_to_xr().profiles.T_i)
     assert history.times.shape[0] == 4 and np.all(np.isfinite(t_i)) and np.all(t_i > 0)
@@ -91,14 +91,14 @@ def test_batching_matches_devices(monkeypatch, batching):
         return params.rlt**1.5, params.rln, params.q, {}
 
     monkeypatch.setattr(GyaradaxQLTransportModel, "_per_radius", stiff_flux)
-    fields = {"model_name": "gyaradax-ql", "rho_match": (0.3, 0.5, 0.7), **GRID}
+    fields = {"model_name": "ql-gyx", "rho_match": (0.3, 0.5, 0.7), **GRID}
     _, ref, _, _ = transport_call(fields)
     _, out, _, _ = transport_call({**fields, "batching": batching})
     np.testing.assert_array_equal(np.asarray(out.chi_face_ion), np.asarray(ref.chi_face_ion))
 
 
 def test_config_and_grid():
-    tc = torax_config({"model_name": "gyaradax-nl", "rho_match": (0.3, 0.6)})
+    tc = torax_config({"model_name": "nl-gyx", "rho_match": (0.3, 0.6)})
     assert type(
         tc.transport.core_transport_models["gyaradax"].build_transport_model()
     ).__name__ == ("GyaradaxNLTransportModel")
@@ -118,7 +118,7 @@ def test_config_and_grid():
         build(nkx=192)
     with pytest.raises(NotImplementedError, match="adiabatic"):
         GyaradaxNLConfig.from_dict(
-            {"model_name": "gyaradax-nl", "kinetic": True}
+            {"model_name": "nl-gyx", "kinetic": True}
         ).build_transport_model()
 
 
@@ -135,7 +135,7 @@ def test_diagnostics_rows(monkeypatch, tmp_path):
     diagnostics.reset_sinks()
     path = str(tmp_path / "diag.jsonl")
     transport_call(
-        {"model_name": "gyaradax-ql", "rho_match": (0.3, 0.6), "diagnostics_path": path, **GRID}
+        {"model_name": "ql-gyx", "rho_match": (0.3, 0.6), "diagnostics_path": path, **GRID}
     )
     rows = diagnostics.load_jsonl(path)
     assert sorted((r["call"], r["radius"]) for r in rows) == [(0, 0), (0, 1)]
@@ -146,7 +146,7 @@ def test_diagnostics_rows(monkeypatch, tmp_path):
 @pytest.mark.slow
 def test_ql_linear_solve():
     _, coeffs, _, _ = transport_call(
-        {"model_name": "gyaradax-ql", "rho_match": (0.5, 0.7), "n_steps_linear": 300, **GRID}
+        {"model_name": "ql-gyx", "rho_match": (0.5, 0.7), "n_steps_linear": 300, **GRID}
     )
     chi = np.asarray(coeffs.chi_face_ion)
     assert np.all(np.isfinite(chi)) and np.all(chi >= 0.0) and chi.max() > 0.0
