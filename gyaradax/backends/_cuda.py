@@ -347,7 +347,7 @@ class CUDAOps(SolverOps):
             return ffi.ffi_call(
                 "linear_rhs_fused_ffi",
                 [jax.ShapeDtypeStruct(d.shape, jnp.complex128)],
-                vmap_method="sequential",
+                vmap_method="expand_dims",
             )(
                 *xs,
                 *halo,
@@ -460,7 +460,7 @@ class CUDAOps(SolverOps):
         return ffi.ffi_call(
             "linear_rhs_es_ffi",
             jax.ShapeDtypeStruct(df.shape, jnp.complex128),
-            vmap_method="sequential",
+            vmap_method="expand_dims",
         )(*args, **attrs)
 
     def _collision_cuda(self, df, params, pre):
@@ -475,7 +475,7 @@ class CUDAOps(SolverOps):
             return ffi.ffi_call(
                 "collision_rhs_ffi",
                 jax.ShapeDtypeStruct(f.shape, jnp.complex128),
-                vmap_method="sequential",
+                vmap_method="expand_dims",
             )(
                 f.astype(jnp.complex128),
                 jnp.broadcast_to(stencil, (nsp, 9, nv, nmu, ns)),
@@ -525,7 +525,7 @@ class CUDAOps(SolverOps):
                 jax.ShapeDtypeStruct(dg.shape, jnp.complex128),
                 jax.ShapeDtypeStruct(dg.shape if want_stage else (1,), jnp.complex128),
             ),
-            vmap_method="sequential",
+            vmap_method="expand_dims",
         )(
             *args,
             prev.astype(jnp.complex128),
@@ -560,7 +560,7 @@ class CUDAOps(SolverOps):
             partial = ffi.ffi_call(
                 "field_moments_ffi",
                 jax.ShapeDtypeStruct((n_chunks, n_w, n_spatial), jnp.complex128),
-                vmap_method="sequential",
+                vmap_method="expand_dims",
             )(
                 g_l,
                 w0,
