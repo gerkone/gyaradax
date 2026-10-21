@@ -246,8 +246,8 @@ The library belongs to the Python environment it links (CUDA runtime, cuFFT, nvJ
 gyaradax build-cuda --archs 80,90,103    # installs $PREFIX/lib/gyaradax/<key>/libgyaradax_cuda.so
 ```
 `key` hashes the kernel sources and the jaxlib version, so each checkout loads a build of its
-own kernels; rebuild after editing a kernel. One build for sm 80/90/103 in the shared env covers
-every local machine (A100 and B300). `gyaradax info` shows which library is loaded and its
+own kernels; rebuild after editing a kernel. Machines sharing one env need a build listing
+all their architectures (e.g. sm 80/90/103 for A100, H100 and B300). `gyaradax info` shows which library is loaded and its
 architectures; a build without the GPU's architecture is skipped (JAX backend).
 
 A development build next to the sources is still picked up when the env has none.

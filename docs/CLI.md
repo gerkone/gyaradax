@@ -130,11 +130,10 @@ gyaradax run outputs_kinetic_my_case --t-end 600        # extend to t = 600
 
 `--dataset DIR` also writes the run as a training-ready trajectory `DIR/<name>_ifft_realpotens/`,
 in the layout the neugk loaders read (`preprocessed_kvikio`), so no intermediate dumps or separate
-conversion are needed. The shared kinetic dataset is
-`/restricteddata/ukaea/gyrokinetics/preprocessed/kinetic`:
+conversion are needed:
 
 ```bash
-gyaradax run configs/kinetic_603.yaml --dataset /restricteddata/ukaea/gyrokinetics/preprocessed/kinetic \
+gyaradax run configs/kinetic_603.yaml --dataset /data/preprocessed/kinetic \
     --dataset-name iteration_603_dp4
 ```
 
@@ -164,7 +163,7 @@ gyaradax run configs/kinetic_603.yaml --dataset /restricteddata/ukaea/gyrokineti
   recompute them with:
 
   ```bash
-  gyaradax dataset-stats /restricteddata/ukaea/gyrokinetics/preprocessed/kinetic/iteration_603_dp4_ifft_realpotens --from-time 40
+  gyaradax dataset-stats /data/preprocessed/kinetic/iteration_603_dp4_ifft_realpotens --from-time 40
   ```
 
 - The settings are stored in the run's `config.yaml` (`dataset:` section): resuming the run
@@ -518,8 +517,8 @@ trajectory name and cost, and the scheduler places, follows, retries and resumes
 they are done.
 
 ```bash
-gyaradax datagen run configs/rerun/kinetic_*.yaml --campaign /system/user/publicwork/galletti/campaigns/rerun_dp4 \
-    --targets targets.yaml --dataset /restricteddata/ukaea/gyrokinetics/preprocessed/kinetic \
+gyaradax datagen run configs/rerun/kinetic_*.yaml --campaign /data/campaigns/rerun_dp4 \
+    --targets targets.yaml --dataset /data/preprocessed/kinetic \
     --name "iteration_{id}_dp4" --gpus all --detach
 gyaradax datagen status --campaign DIR             # jobs, slots, progress, ETAs
 gyaradax datagen add more/*.yaml --campaign DIR    # more configs, picked up at the next poll
@@ -629,48 +628,34 @@ A `hosts` section switches whole machines; a host without an entry is `on`:
 
 `gyaradax datagen host HOST SWITCH --campaign DIR` sets the switch in the campaign's
 `targets.yaml` (rewriting the file, so comments in it are dropped); a host name also matches its
-short form (`shark` matches `shark.example.org`). A stopped or killed job does not count as a
+short form (`node-b` matches `node-b.example.org`). A stopped or killed job does not count as a
 failure. Restart snapshots keep df and φ in complex128 (`--snapshot-dtype`, default `c128`)
 whatever the dataset's precision, so `kill` loses at most the frames since the last snapshot
 (`--snapshot-every`).
 
 ```yaml
-hosts: {shark: drain, coyote: kill}
+hosts: {node-b: drain, node-c: kill}
 ```
 
 Jobs with `--gpus all` go to the free slot with the largest `speed` × GPUs.
 
-Multi-GPU slots on lizard must be an NVLink pair (`[0, 1]`, `[2, 3]` or `[4, 5]`).
+A multi-GPU slot may span any GPUs of its host unless the pool lists the allowed sets under
+`gpu_groups` (for example the NVLink-connected pairs); slots that span other sets are skipped.
 
 ```yaml
-defaults: {python: /system/apps/userenv/galletti/gyaradax_env/bin/python}
-slots:   # one slot per GPU; speeds are placeholders, measure with `gyaradax bench` and adjust
-  - {host: scorpion, gpus: [0], speed: 2.0}   # 8 x B300
-  - {host: scorpion, gpus: [1], speed: 2.0}
-  - {host: scorpion, gpus: [2], speed: 2.0}
-  - {host: scorpion, gpus: [3], speed: 2.0}
-  - {host: scorpion, gpus: [4], speed: 2.0}
-  - {host: scorpion, gpus: [5], speed: 2.0}
-  - {host: scorpion, gpus: [6], speed: 2.0}
-  - {host: scorpion, gpus: [7], speed: 2.0}
-  - {host: shark, gpus: [0], speed: 1.0}      # 4 x A100 SXM
-  - {host: shark, gpus: [1], speed: 1.0}
-  - {host: shark, gpus: [2], speed: 1.0}
-  - {host: shark, gpus: [3], speed: 1.0}
-  - {host: lizard, gpus: [0], speed: 0.9}     # 6 x A100 PCIe
-  - {host: lizard, gpus: [1], speed: 0.9}
-  - {host: lizard, gpus: [2], speed: 0.9}
-  - {host: lizard, gpus: [3], speed: 0.9}
-  - {host: lizard, gpus: [4], speed: 0.9}
-  - {host: lizard, gpus: [5], speed: 0.9}
+defaults: {python: /path/to/env/bin/python}   # optional; the scheduler's own interpreter otherwise
+gpu_groups:
+  node-b: [[0, 1], [2, 3]]                     # NVLink pairs
+slots:   # one slot per GPU; speeds are relative, measure with `gyaradax bench` and adjust
+  - {host: node-a, gpus: [0], speed: 2.0}
+  - {host: node-a, gpus: [1], speed: 2.0}
+  - {host: node-b, gpus: [0, 1], speed: 1.0}   # one two-GPU slot for `--gpus all` jobs
+  - {host: node-b, gpus: [2], speed: 1.0}
+  - {host: node-b, gpus: [3], speed: 1.0}
 ```
 
-For two-GPU runs (`--gpus all`), replace two lizard entries with one NVLink pair, e.g.
-`{host: lizard, gpus: [0, 1], speed: 0.9}`.
-
-Scorpion runs no sshd, and the other hosts cannot resolve its name. Slots on the machine the
-scheduler runs on are launched locally, so a pool with scorpion slots needs the scheduler to run
-on scorpion.
+Slots on the machine the scheduler runs on are launched locally; every other host is reached over
+ssh, so it must accept non-interactive logins (keys, `BatchMode`) and see the same paths.
 
 ### CUDA library per environment
 
@@ -683,8 +668,8 @@ gyaradax build-cuda --archs 80,90,103     # once per environment and kernel vers
 
 - **Where it goes.** `$PREFIX/lib/gyaradax/<key>/`, where `key` hashes the kernel sources and the
   jaxlib version, so every checkout loads a library built from its own kernels. Without
-  `--archs`, the GPUs of the build machine are used. The local machines share one environment:
-  one build for sm 80, 90 and 103 covers the A100s and the B300s.
+  `--archs`, the GPUs of the build machine are used. Machines that share one environment need one build
+  listing all their architectures (e.g. `--archs 80,90,103` for A100, H100 and B300).
 - **Lookup order.** `$GYARADAX_CUDA_LIB`, then the environment's build for the key, then a
   development build next to the sources (`cuda_kernels/libgyaradax_cuda.so`).
 - **Missing architectures.** A build whose record lacks the GPU's architecture is not used, and

@@ -1,1 +1,1 @@
-"""Dataset generation: campaigns of gyaradax runs over an ssh GPU mesh or Slurm (``gyaradax datagen``)."""
+"""Dataset generation: campaigns of gyaradax runs over an ssh GPU mesh (``gyaradax datagen``)."""

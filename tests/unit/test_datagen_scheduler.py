@@ -320,6 +320,21 @@ def test_cancel_escalates_to_sigkill_and_resume_requeues(camp):
     assert len(legs) == 2 and legs[1]["start_step"] >= 3 and legs[1]["target_step"] == 50
 
 
+def test_resumed_job_launches_with_the_args_edited_while_it_was_held(camp):
+    camp.pool(slot("a", 0))
+    camp.add_job("held", steps=40, args=["--tag-old"])
+    sched = camp.scheduler()
+    camp.drive(sched, snapshot_at(camp.run_dir("held"), 3))
+    assert gs.main(["cancel", "held", "--state", camp.state_path]) == 0
+    camp.drive(sched, lambda: sched.jobs["held"].state == "cancelled")
+    camp.entries[0]["args"] = ["--tag-new"]
+    Path(camp.jobs_path).write_text(yaml.safe_dump({"jobs": camp.entries}))
+    assert gs.main(["resume", "held", "--state", camp.state_path]) == 0
+    camp.drive(sched, lambda: len(camp.legs("held")) == 2)
+    argv = camp.legs("held")[1]["argv"]
+    assert "--tag-new" in argv and "--tag-old" not in argv
+
+
 def test_failure_is_retried_from_the_run_directory_on_another_slot(camp):
     camp.pool(slot("a", 0, speed=2), slot("b", 1))
     camp.add_job("flaky", steps=10, fail_once_at=5)
@@ -528,42 +543,46 @@ def test_launch_command_runs_the_wrapper_on_the_slot_gpus(camp):
 def test_pool_validation(tmp_path):
     path = tmp_path / "pool.yaml"
     slots = [
-        {"host": "lizard", "gpus": [0, 1]},
-        {"host": "lizard", "gpus": [1, 2]},
-        {"host": "lizard", "gpus": [1]},
-        {"host": "shark", "gpus": [0], "speed": 2, "env": {"X": 1}},
+        {"host": "node-a", "gpus": [0, 1]},
+        {"host": "node-a", "gpus": [1, 2]},
+        {"host": "node-a", "gpus": [1]},
+        {"host": "node-b", "gpus": [0], "speed": 2, "env": {"X": 1}},
         {"gpus": [0]},
-        {"host": "shark", "gpus": [1], "drain": True, "name": None, "env": {}},
-        {"host": "shark", "gpus": [2], "name": "s2"},
+        {"host": "node-b", "gpus": [1], "drain": True, "name": None, "env": {}},
+        {"host": "node-b", "gpus": [2], "name": "s2"},
     ]
     defaults = {"env": {"HDISP": "0.01"}}
-    path.write_text(yaml.safe_dump({"defaults": defaults, "slots": slots, "gpu_groups": {}}))
+    groups = {"node-a": [[0, 1], [2, 3], [4, 5]]}
+    path.write_text(yaml.safe_dump({"defaults": defaults, "slots": slots, "gpu_groups": groups}))
     slots, problems = gs.load_pool(str(path))
-    assert list(slots) == ["lizard:0,1", "shark:1"]
-    assert slots["shark:1"].drain and slots["lizard:0,1"].python == gs.DEFAULT_PYTHON
-    assert slots["shark:1"].env == slots["lizard:0,1"].env == {"HDISP": "0.01"}
+    assert list(slots) == ["node-a:0,1", "node-b:1"]
+    assert slots["node-b:1"].drain and slots["node-a:0,1"].python == gs.DEFAULT_PYTHON
+    assert slots["node-b:1"].env == slots["node-a:0,1"].env == {"HDISP": "0.01"}
     assert len(problems) == 5 and any("must be one of" in p for p in problems)
     assert sum("no longer supported" in p for p in problems) == 2
     path.write_text(yaml.safe_dump({"defaults": {"env": {"BAD-NAME": 1}}, "slots": [{"host": "a", "gpus": [0]}]}))
     assert "invalid environment variable names" in gs.load_pool(str(path))[1][0]
-    for doc in ("", "slurm: {max_jobs: 2}\n", "gpu_groups: {shark: [[0, 1]]}\nslots: []\n"):
+    path.write_text(yaml.safe_dump({"gpu_groups": {"node-a": "0,1"}, "slots": [{"host": "node-a", "gpus": [0, 1]}]}))
+    slots, problems = gs.load_pool(str(path))
+    assert list(slots) == ["node-a:0,1"] and problems == ["gpu_groups: node-a: expected lists of GPU indices"]
+    for doc in ("", "slurm: {max_jobs: 2}\n"):
         path.write_text(doc)
         with pytest.raises(ValueError):
             gs.load_pool(str(path))
 
     slots = [
-        {"host": "shark", "gpus": [0]},
-        {"host": "shark.local", "gpus": [1]},
-        {"host": "coyote", "gpus": [0]},
-        {"host": "lizard", "gpus": [0], "busy_mib": 1500},
-        {"host": "scorpion", "gpus": [0], "busy_mib": -1},
+        {"host": "node-b", "gpus": [0]},
+        {"host": "node-b.local", "gpus": [1]},
+        {"host": "node-c", "gpus": [0]},
+        {"host": "node-a", "gpus": [0], "busy_mib": 1500},
+        {"host": "node-d", "gpus": [0], "busy_mib": -1},
     ]
-    hosts = {"shark": "drain", "coyote": "off", "lizard": "maybe"}
+    hosts = {"node-b": "drain", "node-c": "off", "node-a": "maybe"}
     path.write_text(yaml.safe_dump({"hosts": hosts, "slots": slots}))
     slots, problems = gs.load_pool(str(path))
-    assert list(slots) == ["shark:0", "shark.local:1", "lizard:0"]
-    assert slots["shark:0"].drain and slots["shark.local:1"].drain
-    assert not slots["lizard:0"].drain and slots["lizard:0"].busy_mib == 1500
+    assert list(slots) == ["node-b:0", "node-b.local:1", "node-a:0"]
+    assert slots["node-b:0"].drain and slots["node-b.local:1"].drain
+    assert not slots["node-a:0"].drain and slots["node-a:0"].busy_mib == 1500
     assert len(problems) == 2
     assert any("'maybe' is not one of" in p for p in problems)
     assert any("busy_mib" in p for p in problems)
@@ -701,16 +720,16 @@ def test_ssh_executor_runs_strict_batch_ssh_under_a_timeout(monkeypatch):
     ex = gs.SSHExecutor(timeout=7, local_hosts=["here"])
     fake_run.rc = 255
     with pytest.raises(gs.LaunchError, match="Connection refused"):
-        ex.launch("scorpion", "echo hi")
+        ex.launch("node-d", "echo hi")
     argv, kw = calls[-1]
-    assert argv[0] == "ssh" and "scorpion" in argv
+    assert argv[0] == "ssh" and "node-d" in argv
     assert "BatchMode=yes" in argv and "StrictHostKeyChecking=yes" in argv
     assert kw["timeout"] == 7 and kw["stdin"] == subprocess.DEVNULL
     assert argv[-1] == "bash -c 'echo hi'"
     for rc, alive in ((255, None), (1, False), (0, True)):
         fake_run.rc = rc
-        assert ex.alive("scorpion", 123, "tok") is alive
-    assert ex.signal("scorpion", 123, "KILL", group=True)
+        assert ex.alive("node-d", 123, "tok") is alive
+    assert ex.signal("node-d", 123, "KILL", group=True)
     assert calls[-1][0][-1] == "bash -c 'kill -KILL -- -123'"
     assert ex.argv("here", "true") == ["bash", "-c", "true"]
     assert gs.SSHExecutor().argv(socket.gethostname(), "true")[0] == "bash"

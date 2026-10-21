@@ -25,6 +25,7 @@ import signal
 import socket
 import sqlite3
 import subprocess
+import sys
 import time
 import uuid
 import zipfile
@@ -34,9 +35,8 @@ from typing import IO, Any, Callable, Sequence
 
 import yaml
 
-DEFAULT_PYTHON = "/system/apps/userenv/galletti/gyaradax_env/bin/python"
-# the only multi-GPU slots allowed per host (nvlink pairs)
-GPU_GROUPS: dict[str, list[list[int]]] = {"lizard": [[0, 1], [2, 3], [4, 5]]}
+# hosts share the scheduler's interpreter unless the pool names another
+DEFAULT_PYTHON = sys.executable
 DEFAULT_PROGRAM = ("{python}", "-m", "gyaradax")
 SCHED = ".sched"
 ACTIVE = ("starting", "running", "stopping")
@@ -452,14 +452,32 @@ def host_switches(doc: dict[str, Any]) -> tuple[dict[str, str], list[str]]:
     return switches, bad
 
 
+def gpu_groups(doc: dict[str, Any]) -> tuple[dict[str, list[list[int]]], list[str]]:
+    """The ``gpu_groups`` of a targets document (per host, the GPU sets a multi-GPU slot may span), plus problems."""
+    raw = doc.get("gpu_groups") or {}
+    if not isinstance(raw, dict):
+        return {}, ["gpu_groups: expected a mapping of host to lists of GPU indices"]
+    groups, bad = {}, []
+    for host, sets in raw.items():
+        if isinstance(sets, list) and all(
+            isinstance(g, list) and g and all(isinstance(i, int) and not isinstance(i, bool) for i in g) for g in sets
+        ):
+            groups[str(host)] = [list(g) for g in sets]
+        else:
+            bad.append(f"gpu_groups: {host}: expected lists of GPU indices")
+    return groups, bad
+
+
 def load_pool(path: str) -> tuple[dict[str, Slot], list[str]]:
     """Parse the pool file into slots by id, plus the entries skipped and why; raises on an unreadable file."""
     doc = _load_yaml(path, "slots")
-    _refuse(doc, ("slurm", "gpu_groups"), "targets")
+    _refuse(doc, ("slurm",), "targets")
     defaults = doc.get("defaults") or {}
     slots: dict[str, Slot] = {}
     used: dict[str, set[int]] = {}
     switches, problems = host_switches(doc)
+    groups, bad = gpu_groups(doc)
+    problems.extend(bad)
     for i, raw in enumerate(doc.get("slots") or []):
         try:
             slot = _slot(raw, defaults, f"pool slot {i}")
@@ -471,7 +489,7 @@ def load_pool(path: str) -> tuple[dict[str, Slot], list[str]]:
         if switch in ("off", "kill"):
             continue
         slot.drain = slot.drain or switch == "drain"
-        allowed = GPU_GROUPS.get(slot.host, GPU_GROUPS.get(short))
+        allowed = groups.get(slot.host, groups.get(short))
         if allowed and len(slot.gpus) > 1 and sorted(slot.gpus) not in [sorted(g) for g in allowed]:
             problems.append(
                 f"pool slot {slot.id}: multi-GPU slots on {slot.host} must be one of {allowed}"
@@ -781,6 +799,7 @@ class Scheduler:
         self._busy: set[str] = set()
         self.next_order = 0
         self._warned: set[str] = set()
+        self._specs: dict[str, JobSpec] = {}
         self._fresh = True
         self.load()
 
@@ -985,6 +1004,8 @@ class Scheduler:
                     self._kill(job, f"host {job.host} killed", now)
                 else:
                     self._stop(job, "slot removed", True, now)
+        # jobs resumed or requeued in this round launch with the current spec
+        self._sync_pending()
         self._place(now)
         for job in self._active():
             self._update_progress(job, now)
@@ -1034,12 +1055,20 @@ class Scheduler:
                 self.log(f"job {spec.name} added (cost {spec.cost:g}, {spec.gpus or 'all'} GPU)")
                 if not self._fresh:
                     self._adopt(job, now)
-            elif job.state == "pending" and job.spec != spec:
-                if job.base_legs is not None and spec.output_dir != job.spec.output_dir:
-                    self._warn(f"job {spec.name}: output_dir cannot change once the job has run")
-                    continue
-                job.spec = spec
-                self.log(f"job {spec.name} updated")
+        self._specs = {spec.name: spec for spec in specs}
+        self._sync_pending()
+
+    def _sync_pending(self) -> None:
+        """Give pending jobs the spec last read from the jobs file."""
+        for name, spec in self._specs.items():
+            job = self.jobs.get(name)
+            if job is None or job.state != "pending" or job.spec == spec:
+                continue
+            if job.base_legs is not None and spec.output_dir != job.spec.output_dir:
+                self._warn(f"job {name}: output_dir cannot change once the job has run")
+                continue
+            job.spec = spec
+            self.log(f"job {name} updated")
 
     def _adopt(self, job: Job, now: float) -> None:
         """Take over a still-running launch of the job's ``.sched`` files."""
