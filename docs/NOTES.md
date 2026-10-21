@@ -1790,41 +1790,22 @@ Not included: the sat_geo factor (the solve already uses the real flux surface) 
 ### 14.3 calibration
 
 Fitted parameters live in `quasilinear/weights/`, one JSON per fit: the rule, its fitted
-`parameters` (`cn`, and `flux_exponent` for sat2), the rule `options` held fixed, optionally the
-`grid`, and the `fit` record with `test` and `cross_validation` metrics. `calibration.load(name)`
-reads one (`"auto"` picks the rule's default, `calibration.DEFAULTS`); `calibration.rule_kwargs`
-gives the rule's keyword arguments besides `cn`. No fitted number is hard-coded in the rules.
+`parameters` (`cn`, and `flux_exponent` for sat2), the rule `options` held fixed, the `electrons`
+models it was fitted on, and the fit method and date. `calibration.load(name)` reads one (`"auto"`
+picks the rule's default, `calibration.DEFAULTS`); `calibration.rule_kwargs` gives the rule's
+keyword arguments besides `cn`. No fitted number is hard-coded in the rules.
 
-`calibration.fit_sat2()` returns such a record (`calibration.save` writes it); it fits one (cn, p)
-for both sets through `ql_flux_sat2` itself:
+`calibration.fit_canonical(summary)` and `calibration.fit_sat2(summary)` return `(record, metrics)`
+(`calibration.save` writes the record). Each fits one parameter set for the adiabatic and kinetic
+tables together, through the rule function itself:
 
-- data: `/restricteddata/ukaea/gyrokinetics/preprocessed/summary/{adiabatic,kinetic}.parquet`,
-  saturated rows with settled QL weights (`lin_ky`, `lin_gamma`, `lin_weight_Qi`, `lin_gq`,
-  `dlnpdr_tglf` against `Qi_avg`); kinetic collisionless unless `collisional=True`;
-- test rows: 10% per log-flux decile of each set; p on a 0.01 grid, cn the log-mean ratio over the
-  train rows, minimising log10 RMSE;
-- bundled: `sat2_v1` (tables of 18 Oct 2026, eps = 0.19, collisionless, Qi only; not final) and
-  `canonical_iter_hybrid_v1` (fitted at 43x16).
+- rows: saturated runs with settled QL weights, Qi only; kinetic collisionless unless
+  `collisional=True`;
+- test rows: 10% per log-flux decile of each set; cn the log-mean ratio over the train rows,
+  minimising log10 RMSE; sat2's p on a 0.01 grid; metrics on the test rows and under 10-fold
+  cross-validation;
+- canonical takes <k_perp^2> on the theta0 = 0 chain (`rules.kx_chain0`), as `point_eval` does.
+  Every chain is normalised to unit amplitude, so an all-chain average grows with ikxspace.
 
-`sat2_v1` under 10-fold cross-validation over all rows (294 adiabatic, 126 kinetic), each row
-predicted by a fit that did not see it:
-
-| set (Qi range) | n | mean Qi | RMSE | mean error | median rel. error | pred / true (geo mean) |
-|---|--:|--:|--:|--:|--:|--:|
-| adiabatic, all | 294 | 92.5 | 26.0 | +11.3 | +13.9% | 1.11 |
-| adiabatic, Qi <= 76 | 98 | 40.1 | 16.1 | +6.5 | +19.3% | 1.11 |
-| adiabatic, 76-116 | 98 | 94.3 | 29.7 | +19.4 | +21.1% | 1.17 |
-| adiabatic, Qi > 116 | 98 | 142.9 | 29.7 | +8.1 | +5.8% | 1.05 |
-| kinetic, all | 126 | 50.2 | 59.4 | -27.2 | -30.4% | 0.79 |
-| kinetic, Qi <= 15 | 42 | 5.5 | 4.4 | +0.9 | +29.9% | 2.08 |
-| kinetic, 15-43 | 42 | 26.1 | 13.1 | -8.9 | -29.3% | 0.58 |
-| kinetic, Qi > 43 | 42 | 119.1 | 101.9 | -73.6 | -59.8% | 0.40 |
-
-The errors are biased, not zero-mean: the shared (cn, p) overpredicts adiabatic by about 11% and
-underpredicts kinetic, and on kinetic the bias runs with the flux (low fluxes twice too high, high
-fluxes 2.5 times too low), i.e. the kinetic response is steeper than the joint exponent allows. A
-hard gate (the numpy kernel) gives the same picture (adiabatic RMSE 28.5, kinetic 59.0).
-
-The exponent is not validated against collisionality. Fitting the rule through a different
-implementation (e.g. a numpy copy with a hard gate) gives a different cn, so the fit must always
-call `ql_flux_sat2`.
+Fitting through a different implementation (e.g. a numpy copy with a hard gate) gives a different
+cn, so a fit must always call the rule. Bundled: `canonical_v2` and `sat2_v1`, neither final.

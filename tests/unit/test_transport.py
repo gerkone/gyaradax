@@ -52,9 +52,7 @@ def constant_flux(self, params, geom):
 
 
 def build(**fields):
-    return GyaradaxQLConfig.from_dict(
-        {"model_name": "ql-gyx", **fields}
-    ).build_transport_model()
+    return GyaradaxQLConfig.from_dict({"model_name": "ql-gyx", **fields}).build_transport_model()
 
 
 def test_fluxes_reach_torax_in_its_units(monkeypatch):
@@ -110,8 +108,10 @@ def test_config_and_grid():
     assert dict(model.rule_options) == calibration.rule_kwargs(sat2)
     with pytest.raises(ValueError, match="no calibration"):
         build(rule="sat0")
-    with pytest.raises(ValueError, match="no kinetic fit"):
-        build(rule="canonical", kinetic=True)
+    assert (
+        build(rule="canonical", kinetic=True).cn
+        == calibration.load("auto", "canonical")["parameters"]["cn"]
+    )
     with pytest.warns(RuntimeWarning, match="resolution floor"):
         assert build(**{**GRID, "nkx": 43}).nkx == 85
     with pytest.raises(ValueError, match="must be odd"):
@@ -124,10 +124,17 @@ def test_config_and_grid():
 
 def test_calibration_from_a_json_file(tmp_path):
     path = tmp_path / "mine.json"
-    calibration.save({"rule": "sat2", "parameters": {"cn": 2.0, "flux_exponent": 0.7}}, path)
+    cal = {
+        "rule": "sat2",
+        "parameters": {"cn": 2.0, "flux_exponent": 0.7},
+        "electrons": ["adiabatic"],
+    }
+    calibration.save(cal, path)
     model = build(rule="sat2", calibration=str(path), rule_options={"gate_sharpness": 50.0})
     assert model.cn == 2.0
     assert dict(model.rule_options) == {"flux_exponent": 0.7, "gate_sharpness": 50.0}
+    with pytest.raises(ValueError, match="no kinetic fit"):
+        build(rule="sat2", calibration=str(path), kinetic=True)
 
 
 def test_diagnostics_rows(monkeypatch, tmp_path):

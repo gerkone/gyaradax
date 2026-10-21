@@ -35,8 +35,7 @@ class GyaradaxQLTransportModel(base.GyaradaxTransportModel):
         cal = calibration.load(cfg.calibration or "", cfg.rule)
         if cfg.cn is None and cal is None:
             raise ValueError(f"no calibration for rule {cfg.rule!r}: set `calibration` or `cn`.")
-        fitted = cal.get("electrons", cal.get("test", {})) if cal else ()
-        if cfg.kinetic and cfg.cn is None and "kinetic" not in fitted:
+        if cfg.kinetic and cfg.cn is None and "kinetic" not in cal.get("electrons", ()):
             raise ValueError(f"calibration {cfg.calibration!r} has no kinetic fit: set `cn`.")
         cn = float(cfg.cn) if cfg.cn is not None else cal["parameters"]["cn"]
         options = {**(calibration.rule_kwargs(cal) if cal else {}), **(cfg.rule_options or {})}

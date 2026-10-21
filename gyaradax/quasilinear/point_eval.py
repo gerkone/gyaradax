@@ -18,8 +18,10 @@ from .rules import (
     RULES,
     RULES_WITH_DLNPDR,
     RULES_WITH_KTHNORM,
+    RULES_WITH_KX_CHAIN,
     geom_sat2_factors,
     dlnpdr_tglf,
+    kx_chain0,
     ql_flux_per_species,
 )
 
@@ -138,6 +140,8 @@ def ql_at_point(
     if rule in RULES_WITH_KTHNORM:
         extra["kthnorm"] = jnp.asarray(geom.get("kthnorm", 1.0), dtype=jnp.float64)
         extra["grad_r0"], extra["gq"] = geom_sat2_factors(geom)
+    if rule in RULES_WITH_KX_CHAIN:
+        extra["kx_chain"] = kx_chain0(jnp.asarray(geom["mode_label"]), spec["kxrh"])
     # caller-supplied knobs win, so a rule's own options need no plumbing here
     extra.update(dict(rule_options or {}))
 

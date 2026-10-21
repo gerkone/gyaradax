@@ -1,16 +1,15 @@
-"""Saturation-rule calibrations: the bundled JSON records and the sat2 fit that writes them.
+"""Saturation-rule calibrations: the bundled JSON records and the fits that write them.
 
 A calibration holds the rule it belongs to, the fitted `parameters` (always `cn`, plus e.g. sat2's
-`flux_exponent`), the rule `options` held fixed during the fit, optionally the flux-tube `grid`
-it was fitted at, and the `fit` record with its `test` and `cross_validation` metrics. The bundled
-ones live in `weights/`, one JSON each. `fit_sat2` fits the one (cn, flux_exponent) pair of
-`rules.ql_flux_sat2` for the adiabatic and kinetic sets together.
+`flux_exponent`), the rule `options` held fixed during the fit, the `electrons` models it was
+fitted on, and the `fit` method and date. The bundled ones live in `weights/`, one JSON each.
+`fit_canonical` and `fit_sat2` fit one parameter set of their rule for the adiabatic and kinetic
+sets together, and return the record with its test and cross-validation metrics alongside.
 """
 
 import datetime
 import functools
 import json
-import os
 import pathlib
 
 import numpy as np
@@ -18,7 +17,7 @@ import numpy as np
 _DIR = pathlib.Path(__file__).parent / "weights"
 
 # the calibration `auto` resolves to, per rule
-DEFAULTS = {"canonical": "canonical_iter_hybrid_v1", "sat2": "sat2_v1"}
+DEFAULTS = {"canonical": "canonical_v2", "sat2": "sat2_v1"}
 
 
 def names():
@@ -53,11 +52,10 @@ def save(cal, path):
         f.write("\n")
 
 
-SUMMARY = "/restricteddata/ukaea/gyrokinetics/preprocessed/summary"
 SETS = ("adiabatic", "kinetic")
 
 
-def summary_rows(kind, collisional=False, summary=SUMMARY):
+def summary_rows(kind, summary, collisional=False):
     """sat2 inputs and Qi of the saturated rows with settled QL weights in one summary table."""
     import pandas as pd
 
@@ -82,7 +80,8 @@ def summary_rows(kind, collisional=False, summary=SUMMARY):
         o = np.argsort(ky[m])
         # lin_ky is k_theta*rho, the rule's physical axis when kthnorm = 1
         rows.append(dict(ky=ky[m][o], g=np.maximum(g[m], 0.0)[o], w=w[m][o], Q=float(r.Qi_avg),
-                         dlnpdr=float(r.dlnpdr_tglf), gq=float(r.lin_gq), grad_r0=float(r.lin_grad_r0)))
+                         dlnpdr=float(r.dlnpdr_tglf), gq=float(r.lin_gq),
+                         grad_r0=float(r.lin_grad_r0), row=r))
     return rows
 
 
@@ -142,21 +141,48 @@ def _best(x_by_p, y, mask, exponents):
     return best[1], best[2]
 
 
-def fit_sat2(summary=SUMMARY, options=None, collisional=False, exponents=None, folds=10):
-    """Calibration record of ql_flux_sat2 fitted jointly on the adiabatic and kinetic tables, Qi only.
+def canonical_inputs(r):
+    """ql_flux inputs of one summary row, from its raw linear-eigenmode columns."""
+    from gyaradax.geometry.grids import _build_mode_label
 
-    The fit uses 90% of each set (the test rows are 10% of each log-flux decile): p over
-    `exponents`, cn the log-mean ratio over the train rows, minimising log10 RMSE. The record
-    also carries the test metrics and a `folds`-fold cross-validation over all rows.
-    """
-    options = dict(options or {"gate_sharpness": 20.0, "kx_width_model": "tglf"})
-    exponents = np.round(np.arange(0.30, 1.35, 0.01) if exponents is None else np.asarray(exponents), 4)
-    sets = {k: summary_rows(k, collisional, summary) for k in SETS}
-    kind = np.concatenate([[k] * len(v) for k, v in sets.items()])
-    rows = [r for k in SETS for r in sets[k]]
-    y = np.array([r["Q"] for r in rows])
-    x_by_p = np.array([sat2_predict(rows, 1.0, {**options, "flux_exponent": p}) for p in exponents])
+    from .rules import kx_chain0
 
+    def arr(key):
+        return np.asarray(r[key], float).reshape(np.asarray(r[f"{key}_shape"]).astype(int))
+
+    phi = arr("lin_phi")
+    phi2 = phi[0] ** 2 + phi[1] ** 2
+    ints, kxrh = arr("lin_ints"), arr("lin_kxrh")
+    nkx, nky = phi2.shape[1:]
+    gamma = np.asarray(r.lin_gamma, float)[:nky]
+    labels = _build_mode_label(nkx, nky, int(r.lin_ikxspace))
+    return dict(
+        growth_rate=np.where(np.isfinite(gamma), gamma, 0.0),
+        phi2=phi2,
+        phi2_kxy=np.sum(phi2 * ints[:, None, None], axis=0),
+        flux_kxy=arr("lin_flux_kxy"),
+        # little_g carries kthnorm^2, so the rule's krho is lin_ky / kthnorm
+        krho=np.asarray(r.lin_ky, float)[:nky] / float(r.kthnorm),
+        kxrh=kxrh,
+        little_g=arr("lin_little_g"),
+        ds=float(np.mean(ints)),
+        kx_chain=kx_chain0(labels, kxrh),
+    )
+
+
+def canonical_predict(rows, cn):
+    import jax.numpy as jnp
+
+    from .rules import ql_flux
+
+    return np.array([
+        float(ql_flux(cn=cn, **{k: jnp.asarray(v) for k, v in canonical_inputs(r["row"]).items()}))
+        for r in rows
+    ])
+
+
+def _fit(x_by_p, y, kind, exponents, folds):
+    """(p index, cn) on 90% of each set, with the test and `folds`-fold cross-validation metrics."""
     test = np.zeros(y.size, bool)
     for k in SETS:
         sel = kind == k
@@ -170,21 +196,55 @@ def fit_sat2(summary=SUMMARY, options=None, collisional=False, exponents=None, f
         j, c = _best(x_by_p, y, fold != f, exponents)
         cv[fold == f] = c * x_by_p[j][fold == f]
 
-    tables = {k: f"{summary}/{k}.parquet" for k in SETS}
-    return dict(
-        rule="sat2",
-        parameters=dict(cn=cn, flux_exponent=float(exponents[i])),
-        options=options,
-        fit=dict(
-            method="gyaradax.quasilinear.calibration.fit_sat2",
-            date=datetime.date.today().isoformat(),
-            tables={k: dict(file=os.path.basename(v), modified=datetime.datetime.fromtimestamp(
-                os.path.getmtime(v)).isoformat(timespec="seconds")) for k, v in tables.items()},
-            rows="saturated, settled QL weights, " + ("all" if collisional else "collisionless") + " kinetic",
-            channel="Qi",
-            n_train={k: int(((kind == k) & ~test).sum()) for k in SETS},
-            n_test={k: int(((kind == k) & test).sum()) for k in SETS},
-        ),
+    metrics = dict(
+        n_train={k: int(((kind == k) & ~test).sum()) for k in SETS},
         test={k: flux_metrics(y[(kind == k) & test], pred[(kind == k) & test]) for k in SETS},
-        cross_validation=dict(folds=folds, **{k: flux_metrics(y[kind == k], cv[kind == k]) for k in SETS}),
+        cross_validation={k: flux_metrics(y[kind == k], cv[kind == k]) for k in SETS},
     )
+    return i, cn, metrics
+
+
+def _record(rule, parameters, options, method):
+    return dict(
+        rule=rule,
+        parameters=parameters,
+        options=options,
+        electrons=list(SETS),
+        fit=dict(method=f"gyaradax.quasilinear.calibration.{method}",
+                 date=datetime.date.today().isoformat()),
+    )
+
+
+def _sets(summary, collisional):
+    sets = {k: summary_rows(k, summary, collisional) for k in SETS}
+    kind = np.concatenate([[k] * len(v) for k, v in sets.items()])
+    rows = [r for k in SETS for r in sets[k]]
+    return rows, kind, np.array([r["Q"] for r in rows])
+
+
+def fit_canonical(summary, collisional=False, folds=10):
+    """(record, metrics) of ql_flux fitted jointly on the adiabatic and kinetic tables, Qi only.
+
+    One cn, the log-mean ratio over 90% of each set (the test rows are 10% of each log-flux
+    decile), with <k_perp^2> on the kx = 0 chain as `point_eval` evaluates it.
+    """
+    rows, kind, y = _sets(summary, collisional)
+    x = canonical_predict(rows, 1.0)
+    _, cn, metrics = _fit(x[None], y, kind, [1.0], folds)
+    return _record("canonical", dict(cn=cn), {}, "fit_canonical"), metrics
+
+
+def fit_sat2(summary, options=None, collisional=False, exponents=None, folds=10):
+    """(record, metrics) of ql_flux_sat2 fitted on the adiabatic and kinetic tables, Qi only.
+
+    p over `exponents`, cn the log-mean ratio over 90% of each set (the test rows are 10% of each
+    log-flux decile), minimising log10 RMSE.
+    """
+    options = dict(options or {"gate_sharpness": 20.0, "kx_width_model": "tglf"})
+    exponents = np.arange(0.30, 1.35, 0.01) if exponents is None else np.asarray(exponents)
+    exponents = np.round(exponents, 4)
+    rows, kind, y = _sets(summary, collisional)
+    x_by_p = np.array([sat2_predict(rows, 1.0, {**options, "flux_exponent": p}) for p in exponents])
+    i, cn, metrics = _fit(x_by_p, y, kind, exponents, folds)
+    parameters = dict(cn=cn, flux_exponent=float(exponents[i]))
+    return _record("sat2", parameters, options, "fit_sat2"), metrics
