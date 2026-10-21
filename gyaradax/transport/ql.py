@@ -20,7 +20,7 @@ class GyaradaxQLTransportModel(base.GyaradaxTransportModel):
     """Quasilinear gyaradax transport model."""
 
     n_steps_linear: int = 2000
-    rule: str = "canonical"
+    rule: str = "sat2"
     rule_options: Tuple[Tuple[str, Any], ...] = ()
     cn: float = 1.0
     early_stop: bool = True
@@ -79,7 +79,7 @@ class GyaradaxQLConfig(base.SolverConfig):
 
     model_name: Annotated[Literal["ql-gyx"], STATIC] = "ql-gyx"
     n_steps_linear: Annotated[int, STATIC] = 2000
-    rule: Annotated[str, STATIC] = "canonical"
+    rule: Annotated[str, STATIC] = "sat2"
     rule_options: Annotated[Optional[Dict[str, Any]], STATIC] = None
     calibration: Annotated[Optional[str], STATIC] = "auto"
     cn: Annotated[Optional[float], STATIC] = None

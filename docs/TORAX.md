@@ -65,7 +65,7 @@ Any other TORAX config uses the models the same way, after `import gyaradax.tran
 | `batching` | both | `devices` | how the radii run: `devices` splits them evenly over the local GPUs and vmaps each share (the last radius is repeated to fill the final share and its result dropped), `vmap` vmaps all on one GPU, `loop` runs one at a time |
 | `kinetic`, `em` | both | false | kinetic electrons, A_par (experimental) |
 | `diagnostics_path` | both | | one jsonl row per call and radius (padding radii included): local parameters, fluxes, steps, time |
-| `rule`, `rule_options` | ql | `canonical` | saturation rule (`canonical`, `sat0`, `sat2`), and its options |
+| `rule`, `rule_options` | ql | `sat2` | saturation rule (`sat2`, `canonical`, `sat0`), and its options |
 | `calibration`, `cn` | ql | `auto` | calibration name or JSON path (`auto`: the rule's default in `gyaradax/quasilinear/weights/`); `cn` overrides its amplitude |
 | `n_steps_linear`, `early_stop` | ql | 2000, true | cap on RK4 steps, and stopping on converged growth rates |
 | `n_steps_nl`, `nl_tail_blocks`, `nl_block` | nl | 30000, 12, 500 | run length and averaging window |
