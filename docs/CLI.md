@@ -178,6 +178,7 @@ is large or does not fit one GPU.
 | `--backend {auto,jax,cuda}` | kernel backend (default: config, else `jax`) |
 | `--mp` / `--dp` | mixed precision (FP32 nonlinear FFTs) or full FP64 |
 | `--fused-linear` | CUDA: fused electrostatic linear kernel with collisions and RK4 stages (`solver.fused_linear`) |
+| `--linear-arith {fp64,ds}` | CUDA: double-single linear RHS for weak-FP64 GPUs such as B300 (`solver.linear_arith`) |
 | `--device N` | pin to one GPU (single-device runs only) |
 | `--device-list 0,1` | GPUs to use; several with no mesh given shard over them automatically |
 | `--n-gpus N` | shard over N GPUs, layout chosen from the grid |

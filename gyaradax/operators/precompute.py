@@ -752,6 +752,15 @@ def _linear_precompute_core(geometry: Dict[str, jnp.ndarray], params: GKParams) 
             out["g2f_vfac"] = -2.0 * signz_b * vthrat_b * vpgr_5
             out["apar_chi_vfac"] = -2.0 * vthrat_b * vpgr_5
 
+    if params.linear_arith not in ("fp64", "ds"):
+        raise ValueError(f"linear_arith must be 'fp64' or 'ds', got {params.linear_arith!r}")
+    if params.linear_arith == "ds" and params.backend == "jax":
+        raise ValueError("linear_arith='ds' needs backend='cuda' (or 'auto' on a GPU)")
+    if params.linear_arith == "ds":
+        from gyaradax.backends._ds import ds_tables
+
+        out.update(ds_tables(out, params.disp_vp, params.drive_scale))
+
     return GKPre(out)
 
 
