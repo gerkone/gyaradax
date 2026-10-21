@@ -20,6 +20,7 @@ gyaradax = "gyaradax.cli:main"
 [project.optional-dependencies]
 cuda13 = ["jax[cuda13-local]", "nvidia-mathdx", "nvidia-nccl-cu13"]
 dev = ["pytest", "ruff", "black"]
+torax = ["torax @ git+https://github.com/google-deepmind/torax.git"]
 
 [tool.setuptools.packages.find]
 include = ["gyaradax*"]
