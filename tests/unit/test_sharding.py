@@ -105,6 +105,18 @@ def test_spec_classification():
     assert sharding._spec_for_shape((9, 16, 8, 16), grid) == PartitionSpec(None, "vp", "mu", None)
     # unmatched shape (e.g. kx_b broadcast) → replicated
     assert sharding._spec_for_shape((1, 1, 1, 9, 1), grid) == PartitionSpec()
+    # with an s axis: df, fields, stencil tables and collision stencils add "s"
+    assert sharding._spec_for_shape((16, 8, 16, 9, 5), grid, True) == PartitionSpec(
+        "vp", "mu", "s", None, None
+    )
+    assert sharding._spec_for_shape((16, 9, 5), grid, True) == PartitionSpec("s", None, None)
+    assert sharding._spec_for_shape((16, 1, 16, 5, 9), grid, True) == PartitionSpec(
+        None, None, "s", None, None
+    )
+    assert sharding._spec_for_shape((9, 16, 8, 16), grid, True) == PartitionSpec(
+        None, "vp", "mu", "s"
+    )
+    assert sharding._spec_for_shape((1, 1, 1, 9, 1), grid, True) == PartitionSpec()
 
 
 @pytest.mark.skipif(len(jax.devices()) < 2, reason="requires ≥2 GPUs")
@@ -300,3 +312,17 @@ def test_collisions_sharded_matches_single_device(backend, axis, conserve):
     }
     df, geometry, params, state, _ = _build(coll)
     _assert_sharded_matches_single(df, geometry, params, state, replace(params, **{axis: 2}))
+
+
+@pytest.mark.skipif(len(jax.devices()) < 2, reason="requires ≥2 GPUs")
+@pytest.mark.parametrize("backend", ["cuda", "jax"])
+@pytest.mark.parametrize("adiabatic", [True, False])
+def test_s_sharded_matches_single_device(backend, adiabatic):
+    if adiabatic:
+        grid, overrides = dict(nvpar=16, nmu=4, ns=16, nkx=21, nky=5), dict(adaptive_dt=False)
+        df, geometry, params, state = noisy_case(
+            "iteration_13.yaml", grid, overrides, seed=7, backend=backend, mixed_precision=False
+        )
+    else:
+        df, geometry, params, state = _em_case(backend)
+    _assert_sharded_matches_single(df, geometry, params, state, replace(params, n_gpus_s=2))

@@ -47,10 +47,12 @@ class ConfigFacts(TypedDict):
     nsp: int
     nvpar: int
     nmu: int
+    ns: int
     n_gpus: int
     n_gpus_sp: int
     n_gpus_vp: int
     n_gpus_mu: int
+    n_gpus_s: int
 
 
 def _peek_config(path: str) -> ConfigFacts:
@@ -67,10 +69,12 @@ def _peek_config(path: str) -> ConfigFacts:
         "nsp": nsp,
         "nvpar": int(grid.get("nvpar", 0) or 0),
         "nmu": int(grid.get("nmu", 0) or 0),
+        "ns": int(grid.get("ns", 0) or 0),
         "n_gpus": int(shard.get("n_gpus", 0) or 0),
         "n_gpus_sp": int(shard.get("n_gpus_sp", 1)),
         "n_gpus_vp": int(shard.get("n_gpus_vp", 1)),
         "n_gpus_mu": int(shard.get("n_gpus_mu", 1)),
+        "n_gpus_s": int(shard.get("n_gpus_s", 1)),
     }
 
 
@@ -104,35 +108,37 @@ def _visible_gpus(args: argparse.Namespace) -> int | None:
     return len([d for d in listed.split(",") if d.strip()])
 
 
-def _mesh_request(args: argparse.Namespace, facts: ConfigFacts) -> tuple[int, int, int]:
-    """Resolve the device mesh (species, vpar, mu).
+def _mesh_request(args: argparse.Namespace, facts: ConfigFacts) -> tuple[int, int, int, int]:
+    """Resolve the device mesh (species, vpar, mu, s).
 
     Precedence: per-axis flags (each overrides the config's value) > ``--n-gpus``
     (automatic layout) > the config's per-axis ``sharding`` > its ``n_gpus`` >
     a multi-GPU ``--device-list`` (automatic layout over the listed GPUs).
+    The automatic layout does not shard s.
     """
-    axis_flags = (args.n_gpus_sp, args.n_gpus_vp, args.n_gpus_mu)
-    config_axes = (facts["n_gpus_sp"], facts["n_gpus_vp"], facts["n_gpus_mu"])
+    axis_flags = (args.n_gpus_sp, args.n_gpus_vp, args.n_gpus_mu, args.n_gpus_s)
+    config_axes = (facts["n_gpus_sp"], facts["n_gpus_vp"], facts["n_gpus_mu"], facts["n_gpus_s"])
     if any(axis_flags):
         return cast(
-            tuple[int, int, int], tuple(f if f else c for f, c in zip(axis_flags, config_axes))
+            tuple[int, int, int, int],
+            tuple(f if f else c for f, c in zip(axis_flags, config_axes)),
         )
     if getattr(args, "n_gpus", 0):
-        return _auto_mesh(args.n_gpus, facts)
+        return _auto_mesh(args.n_gpus, facts) + (1,)
     if math.prod(config_axes) > 1:
         return config_axes
     if facts["n_gpus"] > 1:
-        return _auto_mesh(facts["n_gpus"], facts)
+        return _auto_mesh(facts["n_gpus"], facts) + (1,)
     n_listed = len([d for d in (args.device_list or "").split(",") if d.strip()])
     if n_listed > 1:
-        return _auto_mesh(n_listed, facts)
-    return 1, 1, 1
+        return _auto_mesh(n_listed, facts) + (1,)
+    return 1, 1, 1, 1
 
 
-def _check_mesh(mesh: tuple[int, int, int], facts: ConfigFacts, visible: int | None) -> None:
+def _check_mesh(mesh: tuple[int, int, int, int], facts: ConfigFacts, visible: int | None) -> None:
     """Fail early, with the fix, when a mesh cannot shard the grid or the GPUs are missing."""
-    sp, vp, mu = mesh
-    n = sp * vp * mu
+    sp, vp, mu, s = mesh
+    n = sp * vp * mu * s
     problems = []
     if facts["nsp"] % sp:
         problems.append(f"n_gpus_sp={sp} does not divide the {facts['nsp']} species")
@@ -141,6 +147,10 @@ def _check_mesh(mesh: tuple[int, int, int], facts: ConfigFacts, visible: int | N
     if facts["nvpar"] and vp > 1 and (facts["nvpar"] % vp or facts["nvpar"] // vp < 2):
         problems.append(
             f"n_gpus_vp={vp} must divide nvpar={facts['nvpar']} and leave >= 2 vpar points per GPU"
+        )
+    if facts["ns"] and s > 1 and (facts["ns"] % s or facts["ns"] // s < 2):
+        problems.append(
+            f"n_gpus_s={s} must divide ns={facts['ns']} and leave >= 2 s points per GPU"
         )
     if visible is not None and n > visible:
         problems.append(
@@ -161,8 +171,8 @@ def _configure_env(args: argparse.Namespace, facts_list: Sequence[ConfigFacts]) 
     meshes = [_mesh_request(args, f) for f in facts_list]
     for m, f in zip(meshes, facts_list):
         _check_mesh(m, f, _visible_gpus(args))
-    mesh = max(meshes, key=lambda m: m[0] * m[1] * m[2])
-    n_devices = mesh[0] * mesh[1] * mesh[2]
+    mesh = max(meshes, key=math.prod)
+    n_devices = math.prod(mesh)
 
     if n_devices > 1 and args.device is not None and args.device >= 0:
         raise SystemExit(
@@ -178,6 +188,7 @@ def _configure_env(args: argparse.Namespace, facts_list: Sequence[ConfigFacts]) 
         n_gpus_sp=mesh[0],
         n_gpus_vp=mesh[1],
         n_gpus_mu=mesh[2],
+        n_gpus_s=mesh[3],
     )
     if n_devices > 1:
         # also needed when the mesh came from the config rather than the flags
@@ -357,8 +368,9 @@ def _setup_run(config_path: str, args: argparse.Namespace, run_dir: str | None =
         overrides["backend"] = backend
     if args.fused_linear:
         overrides["fused_linear"] = True
-    sp, vp, mu = _mesh_request(args, facts)
+    sp, vp, mu, n_s = _mesh_request(args, facts)
     overrides["n_gpus_sp"], overrides["n_gpus_vp"], overrides["n_gpus_mu"] = sp, vp, mu
+    overrides["n_gpus_s"] = n_s
     params = gkparams_from_config(cfg, **overrides)
 
     if _has_geom_dat(data_dir):
@@ -566,9 +578,14 @@ def _effective_config(
         ("run.save_dumps", bool(save_dumps)),
     ):
         OmegaConf.update(eff, key, value, force_add=True)
-    mesh = (params.n_gpus_sp, params.n_gpus_vp, params.n_gpus_mu)
+    mesh = (params.n_gpus_sp, params.n_gpus_vp, params.n_gpus_mu, params.n_gpus_s)
     if "sharding" in eff or math.prod(mesh) > 1:
-        eff.sharding = {"n_gpus_sp": mesh[0], "n_gpus_vp": mesh[1], "n_gpus_mu": mesh[2]}
+        eff.sharding = {
+            "n_gpus_sp": mesh[0],
+            "n_gpus_vp": mesh[1],
+            "n_gpus_mu": mesh[2],
+            "n_gpus_s": mesh[3],
+        }
     return eff
 
 
@@ -592,7 +609,7 @@ def _write_run_record(setup: RunSetup) -> None:
         "start_step": setup["start_step"],
         "target_step": setup["start_step"] + setup["n_steps"],
         "backend": params.backend,
-        "mesh": [params.n_gpus_sp, params.n_gpus_vp, params.n_gpus_mu],
+        "mesh": [params.n_gpus_sp, params.n_gpus_vp, params.n_gpus_mu, params.n_gpus_s],
     }
     with open(os.path.join(out, "run_info.jsonl"), "a") as fh:
         fh.write(json.dumps(record) + "\n")
@@ -629,13 +646,14 @@ def _describe(setup: RunSetup, config_path: str) -> None:
         print("  note: the CUDA backend is built; --backend cuda runs ~3x faster per step")
     if mesh is not None:
         shape = setup["df"].shape
-        axes: tuple[int, ...] = (params.n_gpus_vp, params.n_gpus_mu)
+        axes: tuple[int, ...] = (params.n_gpus_vp, params.n_gpus_mu, params.n_gpus_s)
         if len(shape) == 6:
             axes = (params.n_gpus_sp,) + axes
         local = tuple(n // k for n, k in zip(shape, axes)) + tuple(shape[len(axes) :])
         gib = math.prod(local) * 16 / 2**30
         print(
             f"  sharding: sp={params.n_gpus_sp} vp={params.n_gpus_vp} mu={params.n_gpus_mu} "
+            f"s={params.n_gpus_s} "
             f"over {math.prod(mesh.devices.shape)} device(s); df block {local} "
             f"({gib:.2f} GiB) per device"
         )
@@ -703,7 +721,7 @@ def _run_telemetry(setup: RunSetup) -> Any:
             "bracket": _bracket_name(params),
             "mixed_precision": bool(params.mixed_precision),
             "fused_linear": bool(params.fused_linear),
-            "mesh": [params.n_gpus_sp, params.n_gpus_vp, params.n_gpus_mu],
+            "mesh": [params.n_gpus_sp, params.n_gpus_vp, params.n_gpus_mu, params.n_gpus_s],
             "start_step": setup["start_step"],
             "n_steps": setup["n_steps"],
             "block_size": setup["block_size"],
@@ -1077,6 +1095,7 @@ def _add_common(p: argparse.ArgumentParser) -> None:
     p.add_argument("--n-gpus-sp", type=int, default=0, help="species-axis mesh size (overrides config)")
     p.add_argument("--n-gpus-vp", type=int, default=0, help="vpar-axis mesh size (overrides config)")
     p.add_argument("--n-gpus-mu", type=int, default=0, help="mu-axis mesh size (overrides config)")
+    p.add_argument("--n-gpus-s", type=int, default=0, help="s-axis mesh size (overrides config)")
     p.add_argument(
         "--mem-fraction", type=float, default=None,
         help="fraction of GPU memory XLA may use (sets XLA_PYTHON_CLIENT_MEM_FRACTION; "
