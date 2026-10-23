@@ -222,6 +222,35 @@ def test_nonlinear_scaling(backend, use_z2z, mixed_precision, nonlin_geom, nonli
     assert 3.9 <= ratio <= 4.1
 
 
+
+@pytest.mark.parametrize("backend, use_z2z, mixed_precision", CUDA_BACKENDS)
+@pytest.mark.skipif(not HAS_CUDA, reason="CUDA not available")
+def test_cuda_bracket_padded_size(
+    backend, use_z2z, mixed_precision, nonlin_geom, nonlin_shape, monkeypatch
+):
+    """any kx FFT size from the alias-free minimum up gives the native bracket; one below aliases"""
+    params = GKParams(dt=0.01, non_linear=True, backend=backend, mixed_precision=mixed_precision)
+    pre = linear_precompute(nonlin_geom, params)
+    ops = create_ops(pre, backend="cuda", mixed_precision=mixed_precision)
+    nkx, ixzero = nonlin_shape[3], int(pre["ixzero"])
+    m_min = max(2 * (nkx - 1 - ixzero) + ixzero, 2 * ixzero + (nkx - 1 - ixzero)) + 1
+    k1, k2 = jax.random.split(jax.random.PRNGKey(0))
+    df = jax.random.normal(k1, nonlin_shape) + 1j * jax.random.normal(k2, nonlin_shape)
+    # the ky = 0 column of a real field is Hermitian in kx
+    df = df.at[..., 0].set(0.5 * (df[..., 0] + jnp.conj(df[..., ::-1, 0])))
+    phi = df[0, 0]
+
+    def bracket(size):
+        monkeypatch.setenv("GYARADAX_BRACKET_MRAD", size)
+        return np.asarray(ops.nonlinear_term_iii(df, phi, nonlin_geom))
+
+    ref = bracket("native")
+    tol = 1e-5 if mixed_precision else 1e-12
+    for size in ("auto", str(m_min), str(pre["nl_mrad"] + 6)):
+        assert rel_l2(bracket(size), ref) < tol
+    with pytest.raises(ValueError, match="aliases"):
+        bracket(str(m_min - 1))
+
 # ── Kinetic electron tests ──────────────────────────────────────────────────
 
 

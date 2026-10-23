@@ -284,9 +284,16 @@ __global__ void v6_col_pack_kernel(typename V6Prec<T>::cplx* a, const V6ColInfo 
     }
 }
 
+// (sr + i si) * (x + i y) as XLA's complex multiply, uncontracted
+__device__ __forceinline__ double2 v6_scale_c(double sr, double si, double x, double y)
+{
+    return make_double2(__dsub_rn(__dmul_rn(sr, x), __dmul_rn(si, y)),
+                        __dadd_rn(__dmul_rn(sr, y), __dmul_rn(si, x)));
+}
+
 template <class T>
 __global__ void v6_unpack_kernel(const typename V6Prec<T>::cplx* __restrict__ b, const V6StoreInfo si,
-                                 const int* __restrict__ jind)
+                                 const int* __restrict__ jind, int fold, double sr, double si_)
 {
     // one thread per packed output element (gb, i_pack, k), k fastest
     const size_t n = (size_t)si.n_df * si.nkx * si.nky;
@@ -296,9 +303,16 @@ __global__ void v6_unpack_kernel(const typename V6Prec<T>::cplx* __restrict__ b,
         const int i_pack = (int)(r % si.nkx);
         const int gb = (int)(r / si.nkx);
         const typename V6Prec<T>::cplx v = b[((size_t)__ldg(&jind[i_pack]) * si.n_df + gb) * si.nky + k];
-        si.out_packed[t] = (i_pack == si.ixzero && k == si.iyzero) ? make_double2(0.0, 0.0)
-                                                                    : make_double2((double)v.x, (double)v.y);
+        const double2 u = (i_pack == si.ixzero && k == si.iyzero) ? make_double2(0.0, 0.0)
+                                                                  : make_double2((double)v.x, (double)v.y);
+        si.out_packed[t] = fold ? v6_scale_c(sr, si_, u.x, u.y) : u;
     }
+}
+
+__global__ void v6_scale_kernel(double2* __restrict__ out, size_t n, double sr, double si)
+{
+    for (size_t t = blockIdx.x * (size_t)blockDim.x + threadIdx.x; t < n; t += (size_t)gridDim.x * blockDim.x)
+        out[t] = v6_scale_c(sr, si, out[t].x, out[t].y);
 }
 
 struct V6Key {
@@ -353,10 +367,20 @@ xla_ffi::Error BracketV6Impl(
     xla_ffi::Buffer<xla_ffi::DataType::F64>  vfac,
     xla_ffi::Result<xla_ffi::Buffer<xla_ffi::DataType::C128>> out,
     int32_t batch, int32_t mrad, int32_t mphi, int32_t nkx, int32_t nky, int32_t nspec,
-    int32_t ixzero, int32_t iyzero, int32_t nsp, int32_t nv, int32_t b_inner, int32_t em)
+    int32_t ixzero, int32_t iyzero, int32_t nsp, int32_t nv, int32_t b_inner, int32_t em,
+    int32_t fold, double out_scale_re, double out_scale_im)
 {
     using Cplx = typename V6Prec<T>::cplx;
     constexpr bool fp64 = sizeof(T) == 8;
+    const size_t n_out = (size_t)batch * nspec * nkx * nky;
+    auto scale_out = [&]() -> xla_ffi::Error {
+        if (!fold) return xla_ffi::Error::Success();
+        const unsigned long long blocks = (n_out + 255) / 256;
+        v6_scale_kernel<<<(unsigned)(blocks < 65535ull * 64 ? blocks : 65535ull * 64), 256, 0, stream>>>(
+            (double2*)out->typed_data(), n_out, out_scale_re, out_scale_im);
+        return cudaGetLastError() == cudaSuccess ? xla_ffi::Error::Success()
+                                                 : xla_ffi::Error::Internal("bracket: output scale launch failed");
+    };
     int device = 0;
     cudaGetDevice(&device);
     int major = 0, minor = 0;
@@ -373,12 +397,15 @@ xla_ffi::Error BracketV6Impl(
     const bool supported = b_df % 2 == 0 && 2 * nky - 1 <= mphi && nsp > 0 && b_inner > 0
         && v6_dispatch_list<T>(V6Archs{}, arch, (unsigned)mphi, nullptr, stream, &no_err);
     if (!supported) {
+        xla_ffi::Error e = xla_ffi::Error::Success();
         if constexpr (fp64)
-            return CufftGraphBracketFp64Impl(stream, df, phi, kx, ky, jind, inverse_jind, dum_s, vfac, out,
+            e = CufftGraphBracketFp64Impl(stream, df, phi, kx, ky, jind, inverse_jind, dum_s, vfac, out,
                 batch, mrad, mphi, nkx, nky, nspec, ixzero, iyzero, nsp, nv, b_inner, em);
         else
-            return CufftGraphBracketTrueFp32Impl(stream, df, phi, kx, ky, jind, inverse_jind, dum_s, vfac, out,
+            e = CufftGraphBracketTrueFp32Impl(stream, df, phi, kx, ky, jind, inverse_jind, dum_s, vfac, out,
                 batch, mrad, mphi, nkx, nky, nspec, ixzero, iyzero, nsp, nv, b_inner, em);
+        if (e.failure()) return e;
+        return scale_out();
     }
     if (b_df % nsp != 0 || (b_df / nsp) % b_inner != 0 || b_phi != nsp * b_inner || (em && b_pot != 2 * b_phi))
         return xla_ffi::Error(XLA_FFI_Error_Code_INVALID_ARGUMENT,
@@ -476,10 +503,11 @@ xla_ffi::Error BracketV6Impl(
         const size_t n = (size_t)b_df * nkx * nky;
         const unsigned long long blocks = (n + 255) / 256;
         v6_unpack_kernel<T><<<(unsigned)(blocks < 65535ull * 64 ? blocks : 65535ull * 64), 256, 0, stream>>>(
-            (const Cplx*)s->b, h_store, jind.typed_data());
+            (const Cplx*)s->b, h_store, jind.typed_data(), fold, out_scale_re, out_scale_im);
         V6_CHECK_CUDA(cudaGetLastError());
+        return xla_ffi::Error::Success();
     }
-    return xla_ffi::Error::Success();
+    return scale_out();
 }
 
 }  // namespace
@@ -499,7 +527,36 @@ xla_ffi::Error BracketV6Impl(
         .Attr<int32_t>("batch").Attr<int32_t>("mrad").Attr<int32_t>("mphi")      \
         .Attr<int32_t>("nkx").Attr<int32_t>("nky").Attr<int32_t>("nspec")        \
         .Attr<int32_t>("ixzero").Attr<int32_t>("iyzero")                         \
-        .Attr<int32_t>("nsp").Attr<int32_t>("nv").Attr<int32_t>("b_inner").Attr<int32_t>("em")
+        .Attr<int32_t>("nsp").Attr<int32_t>("nv").Attr<int32_t>("b_inner").Attr<int32_t>("em")  \
+        .Attr<int32_t>("fold").Attr<double>("out_scale_re").Attr<double>("out_scale_im")
 
 XLA_FFI_DEFINE_HANDLER_SYMBOL(cufft_bracket_v6_fp32_ffi, BracketV6Impl<float>, V6_BIND);
 XLA_FFI_DEFINE_HANDLER_SYMBOL(cufft_bracket_v6_fp64_ffi, BracketV6Impl<double>, V6_BIND);
+
+// whether the v6 handler runs v6 for these planes on the current device instead of handing them to v5
+extern "C" int gyaradax_bracket_v6_supported(int fp64, int mphi, int b_df, int nky, int nsp, int b_inner)
+{
+    int device = 0, major = 0, minor = 0;
+    cudaGetDevice(&device);
+    cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, device);
+    cudaDeviceGetAttribute(&minor, cudaDevAttrComputeCapabilityMinor, device);
+    const unsigned arch = (unsigned)(major * 100 + minor * 10);
+    cudaError_t no_err = cudaSuccess;
+    if (!(b_df % 2 == 0 && 2 * nky - 1 <= mphi && nsp > 0 && b_inner > 0)) return 0;
+    return fp64 ? v6_dispatch_list<double>(V6Archs{}, arch, (unsigned)mphi, nullptr, nullptr, &no_err)
+                : v6_dispatch_list<float>(V6Archs{}, arch, (unsigned)mphi, nullptr, nullptr, &no_err);
+}
+
+// workspace cuFFT plans for the bracket's batched column transform of length m (0: one kernel); -1 on error
+extern "C" long long gyaradax_fft_workspace(int m, long long stride, int fp64)
+{
+    long long n[1] = {m};
+    const cudaDataType t = fp64 ? CUDA_C_64F : CUDA_C_32F;
+    cufftHandle plan = 0;
+    size_t ws = 0;
+    if (cufftCreate(&plan) != CUFFT_SUCCESS) return -1;
+    const bool ok = cufftSetAutoAllocation(plan, 0) == CUFFT_SUCCESS
+        && cufftXtMakePlanMany(plan, 1, n, n, stride, 1, t, n, stride, 1, t, stride, &ws, t) == CUFFT_SUCCESS;
+    cufftDestroy(plan);
+    return ok ? (long long)ws : -1;
+}
