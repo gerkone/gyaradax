@@ -315,6 +315,23 @@ __global__ void v6_scale_kernel(double2* __restrict__ out, size_t n, double sr, 
         out[t] = v6_scale_c(sr, si, out[t].x, out[t].y);
 }
 
+unsigned device_arch(int device)
+{
+    int major = 0, minor = 0;
+    cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, device);
+    cudaDeviceGetAttribute(&minor, cudaDevAttrComputeCapabilityMinor, device);
+    return (unsigned)(major * 100 + minor * 10);
+}
+
+// whether v6 instantiates these planes on this arch; otherwise the handler runs v5
+template <class T>
+bool v6_supported(unsigned arch, int mphi, int b_df, int nky, int nsp, int b_inner, cudaStream_t stream)
+{
+    cudaError_t no_err = cudaSuccess;
+    return b_df % 2 == 0 && 2 * nky - 1 <= mphi && nsp > 0 && b_inner > 0
+        && v6_dispatch_list<T>(V6Archs{}, arch, (unsigned)mphi, nullptr, stream, &no_err);
+}
+
 struct V6Key {
     int device, b_df, b_pot, mrad, mphi, nkx, nky, em, fp64;
     bool operator<(const V6Key& o) const {
@@ -383,20 +400,14 @@ xla_ffi::Error BracketV6Impl(
     };
     int device = 0;
     cudaGetDevice(&device);
-    int major = 0, minor = 0;
-    cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, device);
-    cudaDeviceGetAttribute(&minor, cudaDevAttrComputeCapabilityMinor, device);
-    const unsigned arch = (unsigned)(major * 100 + minor * 10);
+    const unsigned arch = device_arch(device);
 
     const int b_df = batch * nspec;
     size_t phi_elems = 1;
     for (auto d : phi.dimensions()) phi_elems *= d;
     const int b_pot = (int)(phi_elems / ((size_t)nkx * nky));
     const int b_phi = em ? b_pot / 2 : b_pot;
-    cudaError_t no_err = cudaSuccess;
-    const bool supported = b_df % 2 == 0 && 2 * nky - 1 <= mphi && nsp > 0 && b_inner > 0
-        && v6_dispatch_list<T>(V6Archs{}, arch, (unsigned)mphi, nullptr, stream, &no_err);
-    if (!supported) {
+    if (!v6_supported<T>(arch, mphi, b_df, nky, nsp, b_inner, stream)) {
         xla_ffi::Error e = xla_ffi::Error::Success();
         if constexpr (fp64)
             e = CufftGraphBracketFp64Impl(stream, df, phi, kx, ky, jind, inverse_jind, dum_s, vfac, out,
@@ -533,18 +544,14 @@ xla_ffi::Error BracketV6Impl(
 XLA_FFI_DEFINE_HANDLER_SYMBOL(cufft_bracket_v6_fp32_ffi, BracketV6Impl<float>, V6_BIND);
 XLA_FFI_DEFINE_HANDLER_SYMBOL(cufft_bracket_v6_fp64_ffi, BracketV6Impl<double>, V6_BIND);
 
-// whether the v6 handler runs v6 for these planes on the current device instead of handing them to v5
+// v6_supported for the current device, for the Python side
 extern "C" int gyaradax_bracket_v6_supported(int fp64, int mphi, int b_df, int nky, int nsp, int b_inner)
 {
-    int device = 0, major = 0, minor = 0;
+    int device = 0;
     cudaGetDevice(&device);
-    cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, device);
-    cudaDeviceGetAttribute(&minor, cudaDevAttrComputeCapabilityMinor, device);
-    const unsigned arch = (unsigned)(major * 100 + minor * 10);
-    cudaError_t no_err = cudaSuccess;
-    if (!(b_df % 2 == 0 && 2 * nky - 1 <= mphi && nsp > 0 && b_inner > 0)) return 0;
-    return fp64 ? v6_dispatch_list<double>(V6Archs{}, arch, (unsigned)mphi, nullptr, nullptr, &no_err)
-                : v6_dispatch_list<float>(V6Archs{}, arch, (unsigned)mphi, nullptr, nullptr, &no_err);
+    const unsigned arch = device_arch(device);
+    return fp64 ? v6_supported<double>(arch, mphi, b_df, nky, nsp, b_inner, nullptr)
+                : v6_supported<float>(arch, mphi, b_df, nky, nsp, b_inner, nullptr);
 }
 
 // workspace cuFFT plans for the bracket's batched column transform of length m (0: one kernel); -1 on error

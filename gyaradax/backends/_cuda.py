@@ -161,28 +161,35 @@ def _bracket_mrad(native: int, nkx: int, ixzero: int, strides: Tuple[int, int], 
     return _single_kernel_mrad(native, m_min, strides, fp64)
 
 
+def _probe(name: str, restype, argtypes):
+    fn = getattr(ctypes.cdll.LoadLibrary(str(LIB_PATH)), name, None)
+    if fn is not None:
+        fn.restype, fn.argtypes = restype, argtypes
+    return fn
+
+
 @functools.lru_cache(maxsize=None)
 def _v6_supported(fp64: bool, mphi: int, b_df: int, nky: int, nsp: int, b_inner: int) -> bool:
-    probe = getattr(ctypes.cdll.LoadLibrary(str(LIB_PATH)), "gyaradax_bracket_v6_supported", None)
+    probe = _probe("gyaradax_bracket_v6_supported", ctypes.c_int, (ctypes.c_int,) * 6)
     if probe is None:
         return False
-    probe.restype = ctypes.c_int
     return bool(probe(int(fp64), mphi, b_df, nky, nsp, b_inner))
 
 
 @functools.lru_cache(maxsize=None)
 def _single_kernel_mrad(native: int, m_min: int, strides: Tuple[int, int], fp64: bool) -> int:
-    probe = getattr(ctypes.cdll.LoadLibrary(str(LIB_PATH)), "gyaradax_fft_workspace", None)
+    probe = _probe(
+        "gyaradax_fft_workspace", ctypes.c_longlong, (ctypes.c_int, ctypes.c_longlong, ctypes.c_int)
+    )
     if probe is None:
         return native
-    probe.restype = ctypes.c_longlong
-    probe.argtypes = (ctypes.c_int, ctypes.c_longlong, ctypes.c_int)
     for m in range(m_min, native + 1):
         if prime_factors_smallereq_than(m, 7) and all(probe(m, s, int(fp64)) == 0 for s in strides):
             if m != native:
                 log.info("bracket: kx FFT size %d instead of %d (single cuFFT kernel)", m, native)
             return m
     return native
+
 
 @jax.tree_util.register_pytree_node_class
 class CUDAOps(SolverOps):
@@ -919,17 +926,17 @@ class CUDAOps(SolverOps):
             pot_apar = jnp.zeros((1,), dtype=jnp.complex128)
 
         jind, nl_scale = pre["nl_jind"], pre["nl_fft_scale"]
+        fp64, ixzero = not self.mixed_precision, int(pre["ixzero"])
         b_df, b_inner = nsp * nv * nmu * ns, n_pot_v * nmu * ns
-        v6 = kernel_name.startswith("cufft_bracket_v6") and _v6_supported(
-            not self.mixed_precision, mphi, b_df, nky, nsp, b_inner
-        )
+        v6_kernel = kernel_name.startswith("cufft_bracket_v6")
+        v6 = v6_kernel and _v6_supported(fp64, mphi, b_df, nky, nsp, b_inner)
         if v6:
             b_pot = nsp * b_inner * (1 + em)
             strides = ((b_df + b_pot) * (2 * nky - 1), b_df * nky)
-            m = _bracket_mrad(mrad, nkx, int(pre["ixzero"]), strides, not self.mixed_precision)
+            m = _bracket_mrad(mrad, nkx, ixzero, strides, fp64)
             if m != mrad:
                 mrad = m
-                jind = build_jind(nkx, mrad, int(pre["ixzero"]))
+                jind = build_jind(nkx, mrad, ixzero)
                 nl_scale = jnp.asarray(float(mrad * mphi), dtype=jnp.float64)
         inverse_jind = jnp.full((mrad,), -1, dtype=jnp.int32)
         inverse_jind = inverse_jind.at[jind].set(jnp.arange(jind.shape[0], dtype=jnp.int32))
@@ -940,14 +947,14 @@ class CUDAOps(SolverOps):
         # an FP32 value times an integer below 2^29 is exact in FP64, so the kernel can apply it
         fold = (
             v6
-            and self.mixed_precision
+            and not fp64
             and scale.imag == 0.0
             and float(scale.real).is_integer()
             and abs(scale.real) < 2**29
         )
         v6_attrs = (
             dict(fold=np.int32(fold), out_scale_re=scale.real, out_scale_im=scale.imag)
-            if kernel_name.startswith("cufft_bracket_v6")
+            if v6_kernel
             else {}
         )
 
