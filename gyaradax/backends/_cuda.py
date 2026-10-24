@@ -782,7 +782,7 @@ class CUDAOps(SolverOps):
             rhs = ffi.ffi_call(
                 "linear_rhs_ds_ffi",
                 jax.ShapeDtypeStruct(df.shape, jnp.complex128),
-                vmap_method="sequential",
+                vmap_method="expand_dims",
             )(*args, **attrs)
         elif params.fused_linear and self._es_ok(df, pre, has_em, dproj is not None):
             coll_done = self._fuse_collisions(params, pre)

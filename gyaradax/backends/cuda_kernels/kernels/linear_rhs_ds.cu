@@ -2,6 +2,7 @@
 #include <cuda_runtime.h>
 
 #include "ds_arith.cuh"
+#include "radius_batch.cuh"
 
 namespace xla_ffi = xla::ffi;
 
@@ -208,9 +209,6 @@ static cudaError_t launch_ds(const LinearRhsDsArgs& a, cudaStream_t stream) {
     return cudaGetLastError();
 }
 
-template <class T>
-static const T* as(const void* p) { return reinterpret_cast<const T*>(p); }
-
 #define DS_TABLE_ARGS                                       \
     xla_ffi::Buffer<xla_ffi::DataType::C128> df,            \
     xla_ffi::Buffer<xla_ffi::DataType::C128> phi,           \
@@ -229,23 +227,23 @@ static const T* as(const void* p) { return reinterpret_cast<const T*>(p); }
     xla_ffi::Buffer<xla_ffi::DataType::F32>  ky_vals,       \
     xla_ffi::Buffer<xla_ffi::DataType::F32>  coll
 
-#define DS_TABLE_FILL(a)                                       \
-    a.df = as<double2>(df.untyped_data());                     \
-    a.phi = as<double2>(phi.untyped_data());                   \
-    a.bessel = as<ds>(bessel.untyped_data());                  \
-    a.s_upar_tab = as<ds>(s_upar_tab.untyped_data());          \
-    a.s_t7_tab = as<ds>(s_t7_tab.untyped_data());              \
-    a.par_class = as<int>(par_class.untyped_data());           \
-    a.packed_maps = as<int2>(packed_maps.untyped_data());      \
-    a.wvp = as<ds>(wvp.untyped_data());                        \
-    a.drift_x = as<ds>(drift_x.untyped_data());                \
-    a.drift_y = as<ds>(drift_y.untyped_data());                \
-    a.drive_a = as<ds>(drive_a.untyped_data());                \
-    a.drive_b = as<ds>(drive_b.untyped_data());                \
-    a.hyper = as<ds>(hyper.untyped_data());                    \
-    a.kx_vals = as<ds>(kx_vals.untyped_data());                \
-    a.ky_vals = as<ds>(ky_vals.untyped_data());                \
-    a.coll = as<ds>(coll.untyped_data())
+#define DS_TABLE_FILL(a, n, i)                                \
+    a.df = batch_at<const double2>(df, n, i);                 \
+    a.phi = batch_at<const double2>(phi, n, i);               \
+    a.bessel = batch_at<const ds>(bessel, n, i);              \
+    a.s_upar_tab = batch_at<const ds>(s_upar_tab, n, i);      \
+    a.s_t7_tab = batch_at<const ds>(s_t7_tab, n, i);          \
+    a.par_class = batch_at<const int>(par_class, n, i);       \
+    a.packed_maps = batch_at<const int2>(packed_maps, n, i);  \
+    a.wvp = batch_at<const ds>(wvp, n, i);                    \
+    a.drift_x = batch_at<const ds>(drift_x, n, i);            \
+    a.drift_y = batch_at<const ds>(drift_y, n, i);            \
+    a.drive_a = batch_at<const ds>(drive_a, n, i);            \
+    a.drive_b = batch_at<const ds>(drive_b, n, i);            \
+    a.hyper = batch_at<const ds>(hyper, n, i);                \
+    a.kx_vals = batch_at<const ds>(kx_vals, n, i);            \
+    a.ky_vals = batch_at<const ds>(ky_vals, n, i);            \
+    a.coll = batch_at<const ds>(coll, n, i)
 
 static xla_ffi::Error run_ds(LinearRhsDsArgs& a, int nsp, int nv, int nmu, int ns, int nkx, int nky,
                              int n_class, int has_coll, cudaStream_t stream) {
@@ -277,10 +275,15 @@ xla_ffi::Error LinearRhsDsImpl(
     int32_t nsp, int32_t nv, int32_t nmu, int32_t ns, int32_t nkx, int32_t nky, int32_t n_class,
     int32_t has_coll)
 {
-    LinearRhsDsArgs a{};
-    DS_TABLE_FILL(a);
-    a.rhs_out = reinterpret_cast<double2*>(rhs_out->untyped_data());
-    return run_ds(a, nsp, nv, nmu, ns, nkx, nky, n_class, has_coll, stream);
+    const int64_t n = batch_count(*rhs_out, (int64_t)nsp * nv * nmu * ns * nkx * nky);
+    for (int64_t i = 0; i < n; ++i) {
+        LinearRhsDsArgs a{};
+        DS_TABLE_FILL(a, n, i);
+        a.rhs_out = batch_at<double2>(*rhs_out, n, i);
+        const xla_ffi::Error e = run_ds(a, nsp, nv, nmu, ns, nkx, nky, n_class, has_coll, stream);
+        if (e.failure()) return e;
+    }
+    return xla_ffi::Error::Success();
 }
 
 xla_ffi::Error LinearRhsDsRkImpl(
@@ -295,15 +298,20 @@ xla_ffi::Error LinearRhsDsRkImpl(
     int32_t nsp, int32_t nv, int32_t nmu, int32_t ns, int32_t nkx, int32_t nky, int32_t n_class,
     int32_t has_coll, int32_t has_extra, int32_t has_stage)
 {
-    LinearRhsDsArgs a{};
-    DS_TABLE_FILL(a);
-    a.prev = as<double2>(prev.untyped_data());
-    a.acc_in = as<double2>(acc_in.untyped_data());
-    a.extra = has_extra ? as<double2>(extra.untyped_data()) : nullptr;
-    a.coef = coef.typed_data();
-    a.acc_out = reinterpret_cast<double2*>(acc_out->untyped_data());
-    a.stage_out = has_stage ? reinterpret_cast<double2*>(stage_out->untyped_data()) : nullptr;
-    return run_ds(a, nsp, nv, nmu, ns, nkx, nky, n_class, has_coll, stream);
+    const int64_t n = batch_count(*acc_out, (int64_t)nsp * nv * nmu * ns * nkx * nky);
+    for (int64_t i = 0; i < n; ++i) {
+        LinearRhsDsArgs a{};
+        DS_TABLE_FILL(a, n, i);
+        a.prev = batch_at<const double2>(prev, n, i);
+        a.acc_in = batch_at<const double2>(acc_in, n, i);
+        a.extra = has_extra ? batch_at<const double2>(extra, n, i) : nullptr;
+        a.coef = batch_at<const double>(coef, n, i);
+        a.acc_out = batch_at<double2>(*acc_out, n, i);
+        a.stage_out = has_stage ? batch_at<double2>(*stage_out, n, i) : nullptr;
+        const xla_ffi::Error e = run_ds(a, nsp, nv, nmu, ns, nkx, nky, n_class, has_coll, stream);
+        if (e.failure()) return e;
+    }
+    return xla_ffi::Error::Success();
 }
 
 XLA_FFI_DEFINE_HANDLER_SYMBOL(
