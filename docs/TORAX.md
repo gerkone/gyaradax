@@ -61,7 +61,8 @@ Any other TORAX config uses the models the same way, after `import gyaradax.tran
 | `rho_match` | both | 0.35, 0.55, 0.75, 0.875 | the radii that run gyaradax |
 | `grid_preset` | both | from `kinetic` | `adiabatic` (32x8x16x85x32) or `kinetic` (32x12x18x191x32, two species) |
 | `nvpar`, `nmu`, `ns`, `nkx`, `nky`, `ikxspace`, `krhomax` | both | from the preset | flux-tube grid; never below nkx 85, nky 32 |
-| `backend`, `mixed_precision`, `fused_linear` | both | `jax`, true, false | `jax` keeps the call differentiable; `cuda` + `fused_linear` is the fastest |
+| `backend`, `mixed_precision`, `fused_linear` | both | `jax`, true, true | `jax` keeps the call differentiable; `cuda` + `fused_linear` is the fastest |
+| `linear_arith` | both | `fp64` | CUDA: `ds` runs the linear RHS in double-single arithmetic, faster on weak-FP64 GPUs such as B300 |
 | `batching` | both | `devices` | how the radii run: `devices` splits them evenly over the local GPUs and vmaps each share (the last radius is repeated to fill the final share and its result dropped), `vmap` vmaps all on one GPU, `loop` runs one at a time |
 | `kinetic`, `em` | both | false | kinetic electrons, A_par (experimental) |
 | `diagnostics_path` | both | | one jsonl row per call and radius (padding radii included): local parameters, fluxes, steps, time |

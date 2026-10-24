@@ -1753,7 +1753,8 @@ timings as the minimum over interleaved repeats when the GPU is shared.
 `point_eval.ql_at_point(params, geom, grid, cn=, rule=, rule_options=)` returns (Qi, Qe, Gamma_e) in
 GKW gyroBohm units at one flux tube:
 
-1. one linear initial-value solve from a seeded df, all ky at once (`disable_per_ky_norm`);
+1. one linear initial-value solve from a seeded df, all ky at once, each kx chain normalised to unit
+   amplitude every window as in CLI runs, so W(ky) does not depend on the seed;
 2. early stop when every ky's growth rate has settled: blocks of 100 steps, at least 200 steps,
    max |delta gamma| <= 1e-4 + 1e-3 max |gamma| twice in a row, capped at `n_steps_linear`;
 3. the saturation rule on the final eigenmode.

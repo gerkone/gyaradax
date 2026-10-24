@@ -169,11 +169,11 @@ def gkparams_for_radius(rho_idx, ql_inputs, core_profiles, geo, config) -> GKPar
         beta=beta,
         nlapar=config.em,
         non_linear=False,
-        disable_per_ky_norm=True,
         dt=config.gkparams_dt,
         backend=config.backend,
         mixed_precision=config.mixed_precision,
         fused_linear=config.fused_linear,
+        linear_arith=config.linear_arith,
         **species,
     )
 
@@ -207,7 +207,8 @@ class GyaradaxTransportModel(transport.ComponentTransportModel):
     rho_match: Tuple[float, ...] = (0.35, 0.55, 0.75, 0.875)
     backend: str = "jax"
     mixed_precision: bool = True
-    fused_linear: bool = False
+    fused_linear: bool = True
+    linear_arith: str = "fp64"
     batching: str = "devices"
     nvpar: int = 32
     nmu: int = 8
@@ -302,6 +303,7 @@ class GyaradaxTransportModel(transport.ComponentTransportModel):
             backend=cfg.backend,
             mixed_precision=cfg.mixed_precision,
             fused_linear=cfg.fused_linear,
+            linear_arith=cfg.linear_arith,
             batching=cfg.batching,
             nvpar=int(grid["nvpar"]),
             nmu=int(grid["nmu"]),
@@ -426,7 +428,8 @@ class SolverConfig(GyaradaxConfig):
 
     backend: Annotated[str, STATIC] = "jax"
     mixed_precision: Annotated[bool, STATIC] = True
-    fused_linear: Annotated[bool, STATIC] = False
+    fused_linear: Annotated[bool, STATIC] = True
+    linear_arith: Annotated[Literal["fp64", "ds"], STATIC] = "fp64"
     batching: Annotated[Literal["devices", "vmap", "loop"], STATIC] = "devices"
     nvpar: Annotated[Optional[int], STATIC] = None
     nmu: Annotated[Optional[int], STATIC] = None
