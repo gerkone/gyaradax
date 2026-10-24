@@ -12,7 +12,14 @@ import numpy as np
 import pytest
 
 from gyaradax.quasilinear import calibration
-from gyaradax.quasilinear.rules import RULES, dlnpdr_tglf, ql_flux, ql_flux_per_species
+from gyaradax.geometry.grids import _build_mode_label
+from gyaradax.quasilinear.rules import (
+    RULES,
+    dlnpdr_tglf,
+    kx_chain0,
+    ql_flux,
+    ql_flux_per_species,
+)
 
 NS, NKX, NKY = 8, 5, 6
 
@@ -418,6 +425,17 @@ class TestDlnpdr:
                 spec["ds"], dlnpdr=6.0, flux_exponent=p,
             ))
             assert q_on == pytest.approx(q_off * (12.0 / 6.0) ** p, rel=1e-10)
+
+
+def test_kx_chain0_selects_the_theta0_chain():
+    kxrh = jnp.linspace(-1.0, 1.0, 11)
+    chain = np.asarray(kx_chain0(jnp.asarray(_build_mode_label(11, 3, 2)), kxrh))
+    assert chain[:, 0].nonzero()[0].tolist() == [5]
+    assert chain[:, 1].nonzero()[0].tolist() == [1, 3, 5, 7, 9]
+    assert chain[:, 2].nonzero()[0].tolist() == [1, 5, 9]
+    spec = synthetic_spectrum()
+    full = jnp.ones(spec["phi2"].shape[1:])
+    assert float(call_rule(ql_flux, spec, kx_chain=full)) == pytest.approx(float(call_rule(ql_flux, spec)))
 
 
 @pytest.mark.parametrize("name", calibration.names())

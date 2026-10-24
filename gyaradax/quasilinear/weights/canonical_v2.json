@@ -1,0 +1,15 @@
+{
+ "rule": "canonical",
+ "parameters": {
+  "cn": 5.0083223845416525
+ },
+ "options": {},
+ "electrons": [
+  "adiabatic",
+  "kinetic"
+ ],
+ "fit": {
+  "method": "gyaradax.quasilinear.calibration.fit_canonical",
+  "date": "2026-10-21"
+ }
+}
