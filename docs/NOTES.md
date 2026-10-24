@@ -1530,6 +1530,21 @@ Per evaluation, H100, 2 x 32 x 8 x 16 x 85 x 32, mixed precision (master = befor
   bindings in `docs/cuda_experiments/legacy/`.
 - **Field moments.** Up to two velocity moments per pass over g, with g -> f in-kernel and
   chunked (deterministic) partial sums.
+- **Fused electrostatic step (`fused_linear`, default off).** One `linear_rhs_es` kernel per RK4
+  stage: a 5-plane vpar ring in shared memory, the 9-point collision stencil (without the
+  momentum / energy corrections) and the RK update in registers, so no k array; kinetic runs take
+  the field solve from `field_moments`. EM, conservative dissipation, sharded runs,
+  ns nky > 576, nv % 8 != 0 or >= 2^31 points fall back to the default kernel with a one-time
+  warning. ~1e-14 per RHS against the default path. B300 steps/s against it: linear kinetic 2.2x,
+  kinetic + collisions 2.7x, adiabatic 1.6x, NL kinetic mixed precision 1.5x; H100 linear
+  1.8-2.3x (#17).
+- **Double-single linear RHS (`linear_arith: ds`, default `fp64`).** For weak-FP64 GPUs (B300:
+  FP32 ~70x the FP64 rate) the electrostatic linear RHS runs on hi + lo FP32 pairs (~48 bits) on
+  the FP32 pipe; df, phi and the RHS stay complex128 and `linear_precompute` builds the (hi, lo)
+  tables. With `fused_linear` it also takes the collisions and the RK updates; same fallbacks
+  (to FP64). ~1e-14 per RHS against FP64, converged gamma <= 3e-13. B300 production linear
+  kinetic: 5.0x the default path together with `fused_linear` (2.3x over `fused_linear` alone);
+  about neutral on H100 (#18). Parked Ozaki experiments: `docs/cuda_experiments/ozaki/`.
 - **vmap.** The linear kernels (`linear_rhs_fused`, `linear_rhs_es[_rk]`, `field_moments`,
   `collision_rhs`) use `vmap_method="expand_dims"`: a vmapped call (e.g. a batch of flux tubes)
   reaches the handler as one call and launches the unchanged kernel once per element at pointer
@@ -1708,8 +1723,8 @@ timings as the minimum over interleaved repeats when the GPU is shared.
 
 ### 13.6 recommendations
 
-- Production runs: CUDA backend (`--backend cuda`), mixed precision, H100-class GPUs for the
-  FP64-heavy linear kernel.
+- Production runs: CUDA backend (`--backend cuda`), mixed precision (faster than FP64 on every GPU
+  since the kx padding), `--fused-linear`, and `--linear-arith ds` on weak-FP64 GPUs (B300).
 - Gradients and bitwise references: JAX backend.
 - Large grids: shard (`--n-gpus N`); close to the memory limit on one GPU, `--mem-fraction 0.95`.
 - `GYARADAX_BRACKET=v5` reproduces the v5 bracket bitwise (and the master CUDA ES results).
@@ -1717,6 +1732,19 @@ timings as the minimum over interleaved repeats when the GPU is shared.
 - `gyaradax run ... --telemetry` records per-block timings, dt and device memory in the run
   directory (`telemetry.jsonl`); `--profile` adds a profiler trace of one block and its GPU kernel
   breakdown (`profile_summary.json`). Both are off by default (docs/CLI.md).
+
+### 13.7 solver switches
+
+| switch | default | effect | scope | accuracy |
+|---|---|---|---|---|
+| `backend` (`--backend`) | `jax` | `cuda`: FFI kernels, Z2Z only; `auto`: CUDA when the library and a GPU are present | everything | linear <= 4e-16, FP64 bracket <= 2.2e-15 against JAX (§13.5) |
+| `mixed_precision` (`--mp` / `--dp`) | true in the CLI | FP32 FFTs in the bracket; linear terms and fields stay FP64 | nonlinear runs | ~1e-6 per bracket evaluation |
+| `use_z2z` | false | Z2Z instead of R2C FFTs in the JAX bracket | JAX backend | round-off |
+| `fused_linear` (`--fused-linear`) | false | fused electrostatic RK stage (§13.2) | ES, unsharded; else default kernel | ~1e-14 per RHS |
+| `linear_arith` (`--linear-arith`) | `fp64` | `ds`: double-single linear RHS (§13.2) | as `fused_linear`, CUDA only | ~1e-14 per RHS |
+| `n_gpus_{sp,vp,mu}` (`--n-gpus`) | 1 | velocity-space sharding (§13.4) | all runs; disables `fused_linear` / `ds` | round-off |
+| `GYARADAX_BRACKET=v5` | v6 | forces the v5 bracket | CUDA bracket | bitwise v5 |
+| `GYARADAX_BRACKET_MRAD=native\|auto\|N` | `auto` | kx length of the v6 column passes (§10.14) | CUDA v6 bracket | round-off |
 
 ## 14. quasilinear transport (`quasilinear/`)
 
