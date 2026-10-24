@@ -6,6 +6,7 @@ is not compiled.
 """
 
 import ctypes
+import functools
 import logging
 import os
 from pathlib import Path
@@ -28,6 +29,7 @@ from gyaradax.operators.collisions import (
     conservation_correction,
 )
 from gyaradax.operators.fields import g_to_f
+from gyaradax.operators.precompute import build_jind, prime_factors_smallereq_than
 
 log = logging.getLogger(__name__)
 
@@ -136,6 +138,57 @@ def _assert_dead_taps_zero(pre: GKPre) -> None:
                 f"does not sum (it covers {PAR_TAP_LO}..{PAR_TAP_HI - 1}). "
                 "A wider parallel stencil needs PAR_TAP_LO/HI widened in "
                 "kernels/linear_rhs_fused.cu and this guard updated.")
+
+
+def _bracket_mrad(native: int, nkx: int, ixzero: int, strides: Tuple[int, int], fp64: bool) -> int:
+    """Padded kx size of the v6 bracket: the smallest alias-free 7-smooth single-kernel length.
+
+    Retained modes -kn..kp alias below m_min = max(2 kp + kn, 2 kn + kp) + 1, and every size from
+    there up gives the same retained product. A plan that needs no workspace is a single kernel;
+    larger prime factors get single but slow kernels. GYARADAX_BRACKET_MRAD=native|auto|N overrides
+    the choice; native is kept when no candidate up to it qualifies or the probe is missing.
+    """
+    kn, kp = ixzero, nkx - 1 - ixzero
+    m_min = max(2 * kp + kn, 2 * kn + kp) + 1
+    choice = os.environ.get("GYARADAX_BRACKET_MRAD", "auto")
+    if choice == "native":
+        return native
+    if choice != "auto":
+        m = int(choice)
+        if m < m_min:
+            raise ValueError(f"GYARADAX_BRACKET_MRAD={m} aliases: the kx product needs {m_min}")
+        return m
+    return _single_kernel_mrad(native, m_min, strides, fp64)
+
+
+def _probe(name: str, restype, argtypes):
+    fn = getattr(ctypes.cdll.LoadLibrary(str(LIB_PATH)), name, None)
+    if fn is not None:
+        fn.restype, fn.argtypes = restype, argtypes
+    return fn
+
+
+@functools.lru_cache(maxsize=None)
+def _v6_supported(fp64: bool, mphi: int, b_df: int, nky: int, nsp: int, b_inner: int) -> bool:
+    probe = _probe("gyaradax_bracket_v6_supported", ctypes.c_int, (ctypes.c_int,) * 6)
+    if probe is None:
+        return False
+    return bool(probe(int(fp64), mphi, b_df, nky, nsp, b_inner))
+
+
+@functools.lru_cache(maxsize=None)
+def _single_kernel_mrad(native: int, m_min: int, strides: Tuple[int, int], fp64: bool) -> int:
+    probe = _probe(
+        "gyaradax_fft_workspace", ctypes.c_longlong, (ctypes.c_int, ctypes.c_longlong, ctypes.c_int)
+    )
+    if probe is None:
+        return native
+    for m in range(m_min, native + 1):
+        if prime_factors_smallereq_than(m, 7) and all(probe(m, s, int(fp64)) == 0 for s in strides):
+            if m != native:
+                log.info("bracket: kx FFT size %d instead of %d (single cuFFT kernel)", m, native)
+            return m
+    return native
 
 
 @jax.tree_util.register_pytree_node_class
@@ -822,10 +875,6 @@ class CUDAOps(SolverOps):
         if chi_correction is not None and (apar is not None or bpar is not None):
             raise ValueError("pass either chi_correction or apar/bpar, not both")
 
-        jind = pre["nl_jind"]
-        inverse_jind = jnp.full((mrad,), -1, dtype=jnp.int32)
-        inverse_jind = inverse_jind.at[jind].set(jnp.arange(jind.shape[0], dtype=jnp.int32))
-
         kx_vec = pre["nl_kx2d"][:, 0]
         ky_vec = pre["nl_ky2d"][0, :]
         dum_s = pre["nl_dum_s"]
@@ -875,7 +924,39 @@ class CUDAOps(SolverOps):
             vfac = vfac.reshape(nsp, nv)
         else:
             pot_apar = jnp.zeros((1,), dtype=jnp.complex128)
+
+        jind, nl_scale = pre["nl_jind"], pre["nl_fft_scale"]
+        fp64, ixzero = not self.mixed_precision, int(pre["ixzero"])
+        b_df, b_inner = nsp * nv * nmu * ns, n_pot_v * nmu * ns
+        v6_kernel = kernel_name.startswith("cufft_bracket_v6")
+        v6 = v6_kernel and _v6_supported(fp64, mphi, b_df, nky, nsp, b_inner)
+        if v6:
+            b_pot = nsp * b_inner * (1 + em)
+            strides = ((b_df + b_pot) * (2 * nky - 1), b_df * nky)
+            m = _bracket_mrad(mrad, nkx, ixzero, strides, fp64)
+            if m != mrad:
+                mrad = m
+                jind = build_jind(nkx, mrad, ixzero)
+                nl_scale = jnp.asarray(float(mrad * mphi), dtype=jnp.float64)
+        inverse_jind = jnp.full((mrad,), -1, dtype=jnp.int32)
+        inverse_jind = inverse_jind.at[jind].set(jnp.arange(jind.shape[0], dtype=jnp.int32))
         static = (kx_vec, ky_vec, jnp.asarray(jind, dtype=jnp.int32), inverse_jind, dum_s)
+
+        # output scale in the association XLA uses for fft_prefactor * scale * efun_sign
+        scale = complex(fft_prefactor) * complex(mrad * mphi, 0.0) * complex(efun_sign, 0.0)
+        # an FP32 value times an integer below 2^29 is exact in FP64, so the kernel can apply it
+        fold = (
+            v6
+            and not fp64
+            and scale.imag == 0.0
+            and float(scale.real).is_integer()
+            and abs(scale.real) < 2**29
+        )
+        v6_attrs = (
+            dict(fold=np.int32(fold), out_scale_re=scale.real, out_scale_im=scale.imag)
+            if v6_kernel
+            else {}
+        )
 
         def bracket(d, a_pot, b_pot, vf):
             nsp_l, nv_l, nmu_l = d.shape[:3] if d.ndim == 6 else (1,) + d.shape[:2]
@@ -906,6 +987,7 @@ class CUDAOps(SolverOps):
                 nv=np.int32(nv_l),
                 b_inner=np.int32(n_pot_v_l * nmu_l * ns),
                 em=np.int32(em),
+                **v6_attrs,
             )
             return out.reshape(d.shape)
 
@@ -918,5 +1000,7 @@ class CUDAOps(SolverOps):
             out = sharding.velocity_map(
                 bracket, self.mesh, args, (vel, pot_ax, pot_ax, ("sp", "vp")), PartitionSpec(*vel)
             )
+        if fold:
+            return out
         # bracket is linear in df: efun_sign folds into the output scale
-        return fft_prefactor * pre["nl_fft_scale"] * efun_sign * out
+        return fft_prefactor * nl_scale * efun_sign * out

@@ -1127,6 +1127,12 @@ potential planes are transformed and chi is formed in real space.
   real-space round trips between them. Row kernels are instantiated for
   mphi in {16, 32, 36, 40, 64, 96, 128, 144, 192}; other grids, odd plane counts or a build
   without cuFFTDx run v5. `GYARADAX_BRACKET=v5` forces v5.
+- v6 kx padding: the column passes run at the smallest alias-free length (>= max(2 Kp + Kn,
+  2 Kn + Kp) + 1 for the retained modes -Kn..Kp) that has prime factors <= 7 and a cuFFT plan
+  without workspace, i.e. one kernel; the native GKW length (e.g. 294 = 2 3 7^2 at nkx 191, three
+  cuFFT passes) is kept when no such length is smaller. Every alias-free length gives the same
+  retained product, so only FFT round-off changes. `GYARADAX_BRACKET_MRAD=native|auto|N` overrides.
+  The FP32 bracket applies its exact FP64 output scale in the unpack kernel (bitwise).
 
 Performance, memory use, multi-GPU sharding and the CUDA vs JAX parity checks are collected
 in §13.
@@ -1540,6 +1546,8 @@ Per evaluation, H100, 2 x 32 x 8 x 16 x 85 x 32, mixed precision (master = befor
   columns only, cuFFTDx row kernels fusing the inverse row FFT, the bracket and the forward row FFT,
   and a final column pass on the nky kept columns. This removes the zero ky band from the column
   FFTs and the real-space round trips between passes.
+- **kx padding.** The column passes pick a single-kernel cuFFT length instead of GKW's (§10.14).
+  Production kinetic NL, mixed precision: B300 137 -> 62.5 ms, H100 141 -> 68 ms, A100 334 -> 122 ms.
 - **Tried, not kept.** A vpar-fastest block order (more stack spills, EM linear 1.43 -> 1.98 ms);
   staged v6 row kernels (slower); hand-written FFTs (cuFFT / cuFFTDx are used instead).
 
