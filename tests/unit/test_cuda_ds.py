@@ -8,6 +8,7 @@ from conftest import HAS_CUDA, noisy_case, rel_l2  # type: ignore[import-not-fou
 
 from gyaradax.backends import create_ops
 from gyaradax.operators.precompute import linear_precompute
+from gyaradax.solver.driver import gk_run
 
 pytestmark = pytest.mark.skipif(not HAS_CUDA, reason="CUDA not available")
 
@@ -38,6 +39,25 @@ def test_ds_matches_fp64(name):
     assert not np.array_equal(ref, got), "ds path did not run"
     assert np.max(np.abs(got - ref)) / np.max(np.abs(ref)) < 1e-12
     assert rel_l2(got, ref) < 1e-12
+
+
+@pytest.mark.parametrize("fused", [False, True])
+def test_ds_vmap_matches_single_calls(fused):
+    df, geometry, params, state = noisy_case(
+        "kinetic.yaml", GRID,
+        {"linear_arith": "ds", "fused_linear": fused, "non_linear": False, "adaptive_dt": False,
+         "backend": "cuda"},
+        seed=5, mixed_precision=False,
+    )
+    pre = linear_precompute(geometry, params)
+    dfs = jax.numpy.stack([df, 0.5 * df[..., ::-1] + 0.1 * df])
+
+    def run(d):
+        return gk_run(d, geometry, params, state, 3, pre=pre)[0]
+
+    batched = np.asarray(jax.jit(jax.vmap(run))(dfs))
+    single = np.stack([np.asarray(jax.jit(run)(dfs[i])) for i in range(2)])
+    assert np.array_equal(batched, single)
 
 
 def test_ds_rejects_jax_backend():
