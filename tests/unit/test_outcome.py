@@ -242,7 +242,7 @@ def test_cached_stable_gate_skips_the_nonlinear_run(tmp_path, config, capsys):
     meta = _meta(traj)
     assert meta["stable"] is True and meta["frame_source"] == "linear"
     assert meta["outcome"]["class"] == "linear_stable" and meta["linear_gate"] == "stable"
-    assert meta["timesteps"].tolist() == [40.0] and meta["flux"].shape == (1, 6)
+    assert meta["timesteps"].tolist() == [40.0] and meta["flux"].shape == (1, 2, 3)
     assert meta["n_species"] == 2 and meta["q"].shape == (1,) and "phi_mean" in meta
     assert meta["linear_gamma"].tolist() == report["gamma"] and meta["linear_t"] == 40.0
     assert meta["linear_settled"] and meta["linear_peak_ky"] == 0.7
