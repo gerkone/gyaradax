@@ -219,20 +219,21 @@ def classify(
 ) -> str:
     """Outcome class of a nonlinear run from its total heat flux over the averaging window.
 
-    decayed (stopped on decay) > banded > flat (mean below ``floor``) > growing / decaying (a
+    decayed (stopped on decay) > banded > flat (mean below ``floor``, not rising) > growing / drifting (a
     drift beyond ``drift_tol`` of the mean, at two standard errors) > saturated.
     """
     if stopped == "decayed":
         return "decayed"
     if banded_flag:
         return "banded"
+    rising = math.isfinite(drift) and math.isfinite(drift_sigma) and drift > drift_tol and drift_sigma > 2
     if not math.isfinite(q_mean) or abs(q_mean) < floor:
-        return "flat"
+        return "growing" if rising else "flat"
     if math.isfinite(drift) and math.isfinite(drift_sigma) and abs(drift) > drift_tol:
         if drift > 0 and drift_sigma > 2:
             return "growing"
         if drift < 0 and drift_sigma < -2:
-            return "decaying"
+            return "drifting"
     return "saturated"
 
 
@@ -419,7 +420,7 @@ class RunMonitor:
             float(avg["drift_sigma"][-1]),
             floor=s.decay_floor,
         )
-        if not final and cls in ("saturated", "growing", "decaying", "flat"):
+        if not final and cls in ("saturated", "growing", "drifting", "flat"):
             cls = "running"
         doc["class"] = cls
         qi = avg["mean"][:-1].reshape(n_sp, 3)[self.ion, 1]

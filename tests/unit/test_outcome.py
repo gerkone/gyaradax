@@ -99,8 +99,9 @@ def test_flux_average_window_error_and_trend():
     cls = outcome.classify
     assert cls(None, False, 3.0, 0.01, 0.5, floor=1e-3) == "saturated"
     assert cls(None, False, 3.0, 0.5, 9.0, floor=1e-3) == "growing"
-    assert cls(None, False, 3.0, -0.5, -9.0, floor=1e-3) == "decaying"
+    assert cls(None, False, 3.0, -0.5, -9.0, floor=1e-3) == "drifting"
     assert cls(None, False, 1e-5, 0.0, 0.0, floor=1e-3) == "flat"
+    assert cls(None, False, 1e-5, 0.5, 9.0, floor=1e-3) == "growing"
     assert cls(None, True, 3.0, 0.0, 0.0, floor=1e-3) == "banded"
     assert cls("decayed", True, 3.0, 0.0, 0.0, floor=1e-3) == "decayed"
 
