@@ -328,47 +328,48 @@ def _static_metadata(geometry: dict, params: Any, config_path: str) -> dict:
     n_species = len(signz) if kinetic else 1
     ion = int(np.argmax(signz > 0))
     elec = int(np.argmax(signz < 0)) if kinetic else -1
-    df_shape = (2, n_species, *resolution) if kinetic else (2, *resolution)
+    names = {ion: "ion", elec: "electron"}
+    # the kinetic species; adiabatic electrons carry no species entry
+    kept = slice(None) if kinetic else [ion]
     meta = {
         "simulation_code": "gyaradax",
         "source_config": os.path.abspath(config_path),
         "ds": float(geom["ints"][0]),
         "resolution": resolution,
-        "df_shape": df_shape,
+        "df_shape": (2, n_species, *resolution),
         "phi_shape": (resolution[3], resolution[2], resolution[4]),
-        "axis_order": (
-            "df: (re/im, species, vpar, mu, s, x, y); phi: (x, s, y); x, y real space"
-            if kinetic
-            else "df: (re/im, vpar, mu, s, x, y); phi: (x, s, y); x, y real space"
-        ),
-        "channel_layout": "reim_species" if kinetic else "reim",
+        "axis_order": "df: (re/im, species, vpar, mu, s, x, y); phi: (x, s, y); x, y real space",
+        "channel_layout": "reim_species",
         "quantization": "bf16",
         "real_space_convention": "ifftn(fftshift(spec, axes=kx), axes=(kx, ky), norm='forward')",
         "n_species": n_species,
+        "species": tuple(names.get(i, f"s{i}") for i in range(n_species)),
         "ion_species_index": ion,
         "electron_species_index": elec,
         "ion_temp_grad": np.array([rlt[ion]]),
         "density_grad": np.array([rln[ion]]),
-        "rlt": rlt,
-        "rln": rln,
-        "tmp": tmp,
+        "electron_temp_grad": np.array([rlt[elec]]) if kinetic else np.zeros(1),
+        "temp_ratio": np.array([tmp[elec] / tmp[ion]]) if kinetic else np.ones(1),
+        "rlt": rlt[kept],
+        "rln": rln[kept],
+        "tmp": tmp[kept],
         "ion_temp": np.array([tmp[ion]]),
         "s_hat": np.array([float(params.shat)]),
         "q": np.array([float(params.q)]),
         "eps": np.array([float(params.eps)]),
         "coll_freq": np.array([_coll_freq(params, ion)]),
         "geometry": geom,
-        "flux_labels": [f"{f}_s{s}" for s in range(n_species) for f in ("pflux", "eflux", "vflux")],
-        # df moments are pooled over (vpar, s, x, y): one value per (re/im, [species,] mu)
-        "df_stats_agg_axes": (2, 4, 5, 6) if kinetic else (1, 3, 4, 5),
+        "flux_labels": FLUX_LABELS,
+        # df moments are pooled over (vpar, s, x, y): one value per (re/im, species, mu)
+        "df_stats_agg_axes": (2, 4, 5, 6),
     }
     if kinetic:
-        meta["electron_temp_grad"] = np.array([rlt[elec]])
         meta["electron_temp"] = np.array([tmp[elec]])
-        meta["temp_ratio"] = np.array([tmp[elec] / tmp[ion]])
     return meta
 
 
+# flux channels of the (T, species, 3) flux series, as in the neugk-jax metadata schema
+FLUX_LABELS = ("pflux", "eflux", "vflux")
 # per-frame metadata; the quant_* entries track the bf16 loss (quantization_loss)
 SERIES_KEYS = ("timesteps", "solver_steps", "flux", "kyspec", "kxspec", "growth",
                "quant_phi_err", "quant_phi_df_err", "quant_flux_err")
@@ -404,6 +405,8 @@ class DatasetWriter:
         self.static = _static_metadata(geometry, params, os.path.join(self.path, "config.yaml"))
         self.series: dict[str, list] = {k: [] for k in SERIES_KEYS}
         old = load_metadata(self.path)
+        if old is not None and "species" not in old:
+            raise ValueError(f"{self.path}: metadata predates the schema, migrate it first (neugk-jax scripts/migrate_metadata.py)")
         if old is not None and phi_layout(old) != "real":
             raise ValueError(f"{self.path}: complex poten frames (phi_layout {phi_layout(old)}), convert them first")
         self.potenc = bool(potenc)
@@ -435,13 +438,14 @@ class DatasetWriter:
         if self.potenc:
             _atomic_write(potenc_path(self.path, idx), phi_to_reim(phi).tobytes())
         loss = quantization_loss(df, frame, phi_real, phi_frame, integrals)
-        n_flux = np.asarray(fluxes).size
-        loss["quant_flux_err"] = np.broadcast_to(np.asarray(loss["quant_flux_err"], np.float64), (n_flux,)).copy()
+        flux = np.asarray(fluxes, np.float64).reshape(self.static["n_species"], len(FLUX_LABELS))
+        err = np.asarray(loss["quant_flux_err"], np.float64)
+        loss["quant_flux_err"] = np.broadcast_to(err.reshape(flux.shape) if err.size > 1 else err, flux.shape).copy()
         for k, v in loss.items():
             self.series[k].append(v)
         self.series["timesteps"].append(float(np.ravel(np.asarray(state.time))[0]))
         self.series["solver_steps"].append(int(np.ravel(np.asarray(state.step))[0]))
-        self.series["flux"].append(np.asarray(fluxes, np.float64).reshape(-1))
+        self.series["flux"].append(flux)
         self.series["kyspec"].append(np.asarray(ky_spec, np.float64))
         self.series["kxspec"].append(np.asarray(kx_spec, np.float64))
         self.series["growth"].append(np.asarray(state.last_growth_rate, np.float64))
@@ -541,7 +545,8 @@ def linear_metadata(gate: dict, frames, source: str, mode_time: float) -> dict:
     """The ``linear_*`` metadata of a linear gate document and its eigenmode frames.
 
     With the eigenmode fluxes of the gate (``growth.mode_fluxes``) it adds ``linear_flux``
-    (``flux_labels``) and, per ``flux_labels`` x ky, ``linear_flux_ky``, ``linear_flux_ky_chain0``,
+    (species x ``flux_labels``, flattened) and, per species x ``flux_labels`` x ky,
+    ``linear_flux_ky``, ``linear_flux_ky_chain0``,
     ``linear_weight_ky`` (the quasilinear weights of the kx = 0 chain) and
     ``linear_weight_ky_allkx``, plus ``linear_phi2_ky`` and ``linear_phi2_ky_chain0``, the
     kx-resolved ``linear_flux_kxy`` and ``linear_phi2_kxy``, and ``linear_kthnorm``,
@@ -665,8 +670,8 @@ def quantization_summary(meta: dict) -> str:
         warnings.simplefilter("ignore", RuntimeWarning)
         med = {k: np.nanmedian(np.abs(np.asarray(meta[k], np.float64)), axis=0)
                for k in ("quant_phi_err", "quant_phi_df_err", "quant_flux_err")}
-    eflux = ", ".join(f"{label} {err:.1e}" for label, err in zip(meta["flux_labels"], np.ravel(med["quant_flux_err"]))
-                      if label.startswith("eflux"))
+    heat = np.reshape(med["quant_flux_err"], (len(meta["species"]), -1))[:, FLUX_LABELS.index("eflux")]
+    eflux = ", ".join(f"eflux {name} {err:.1e}" for name, err in zip(meta["species"], heat))
     return (f"bf16 loss (median relative error): phi frame {med['quant_phi_err']:.1e}, "
             f"phi from df {med['quant_phi_df_err']:.1e}, {eflux}")
 
