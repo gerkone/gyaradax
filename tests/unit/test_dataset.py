@@ -67,11 +67,15 @@ def test_run_writes_preprocessed_trajectory(tmp_path, kind):
 
     # the last frame is the bf16 real-space transform of the final state
     with np.load(os.path.join(run, "step_000004.npz")) as ck:
-        want_df, want_phi = ds.df_frame_bits(ck["df"]), ds._to_bf16_bits(ds.phi_to_reim(ck["phi"]))
+        want_df, want_phi = ds.df_frame_bits(ck["df"]), ds._to_bf16_bits(ds.phi_to_real(ck["phi"]))
+        want_phic = ds.phi_to_reim(ck["phi"])
     got_df = ds.read_frame(ds.frame_path(traj, "timestep", 1, "zstd16"), meta["df_shape"])
-    got_phi = ds.read_frame(ds.frame_path(traj, "poten", 1, "zstd16"), meta["phi_shape"])
+    got_phi = ds.read_frame(ds.frame_path(traj, "poten", 1, "bf16"), meta["phi_shape"])
+    got_phic = np.fromfile(ds.potenc_path(traj, 1), np.float32).reshape(2, *meta["phi_shape"])
     np.testing.assert_array_equal(got_df.view(np.uint32).ravel() >> 16, want_df)
     np.testing.assert_array_equal(got_phi.view(np.uint32).ravel() >> 16, want_phi)
+    np.testing.assert_array_equal(got_phic, want_phic)
+    assert meta["phic_source"] == "solver_exact" and meta["phic_mean"].shape == want_phic.shape
 
     # resuming the run directory appends to the same trajectory
     assert main(["run", run, "--n-steps", "2"]) == 0
@@ -84,9 +88,11 @@ def test_run_writes_preprocessed_trajectory(tmp_path, kind):
     assert main(["dataset-stats", traj, "--from-time", str(float(meta["timesteps"][1]))]) == 0
     with open(os.path.join(traj, "metadata.pkl"), "rb") as fh:
         meta = pickle.load(fh)
-    phis = [ds.read_frame(ds.frame_path(traj, "poten", i, "zstd16"), meta["phi_shape"]) for i in (1, 2)]
+    phis = [ds.read_frame(ds.stored_frame(traj, "poten", i), meta["phi_shape"]) for i in (1, 2)]
     np.testing.assert_allclose(meta["phi_mean"], np.mean(phis, axis=0), rtol=1e-3, atol=1e-6)
     assert meta["phi_mean"].dtype == np.float32
+    phics = [np.fromfile(ds.potenc_path(traj, i), np.float32).reshape(2, *meta["phi_shape"]) for i in (1, 2)]
+    np.testing.assert_allclose(meta["phic_mean"], np.mean(phics, axis=0), rtol=1e-3, atol=1e-6)
 
 
 def test_reim_phi_frames_keep_every_ky_mode():
@@ -101,18 +107,19 @@ def test_reim_phi_frames_keep_every_ky_mode():
     assert real.shape[-1] == 4
 
 
-def test_writer_keeps_the_real_phi_layout_of_older_trajectories(tmp_path, monkeypatch):
-    static = {"phi_shape": (2, 6, 3, 5), "phi_layout": "reim", "phi_convention": "ifftn", "axis_order": "reim"}
-    monkeypatch.setattr(ds, "_static_metadata", lambda *args: dict(static))
+def test_writer_adds_potenc_and_refuses_complex_poten(tmp_path, monkeypatch):
+    monkeypatch.setattr(ds, "_static_metadata", lambda *args: {"phi_shape": (6, 3, 5)})
     config = tmp_path / "config.yaml"
     config.write_text("run: {}\n")
     root = str(tmp_path / "data")
+    plain = ds.DatasetWriter(root, "plain", {}, None, str(config))
+    assert plain.potenc and plain.static["phic_source"] == "solver_exact"
+    bare = ds.DatasetWriter(root, "bare", {}, None, str(config), potenc=False)
+    assert not bare.potenc and "phic_source" not in bare.static
     ds._claim(ds.trajectory_path(root, "old"), str(tmp_path))
-    ds.write_metadata(ds.trajectory_path(root, "old"), {"phi_shape": (6, 3, 5), "axis_order": "real"})
-    old = ds.DatasetWriter(root, "old", {}, None, str(config))
-    assert old.phi_layout == "real" and old.static["phi_shape"] == (6, 3, 5)
-    assert "phi_layout" not in old.static and old.static["axis_order"] == "real"
-    assert ds.DatasetWriter(root, "new", {}, None, str(config)).phi_layout == "reim"
+    ds.write_metadata(ds.trajectory_path(root, "old"), {"phi_shape": (2, 6, 3, 5), "phi_layout": "reim"})
+    with pytest.raises(ValueError, match="complex poten"):
+        ds.DatasetWriter(root, "old", {}, None, str(config))
 
 
 def test_writer_refuses_trajectories_of_other_runs(tmp_path):
@@ -172,9 +179,13 @@ def test_trajectory_extends_from_its_resume_dump(tmp_path):
     for i in range(len(meta["timesteps"])):
         for kind, shape in (("timestep", meta["df_shape"]), ("poten", meta["phi_shape"])):
             np.testing.assert_array_equal(
-                ds.read_frame(ds.frame_path(traj, kind, i, "zstd16"), shape),
-                ds.read_frame(ds.frame_path(ds.trajectory_path(root, "ref"), kind, i, "zstd16"), shape),
+                ds.read_frame(ds.stored_frame(traj, kind, i), shape),
+                ds.read_frame(ds.stored_frame(ds.trajectory_path(root, "ref"), kind, i), shape),
             )
+        np.testing.assert_array_equal(
+            np.fromfile(ds.potenc_path(traj, i), np.float32),
+            np.fromfile(ds.potenc_path(ds.trajectory_path(root, "ref"), i), np.float32),
+        )
     with np.load(ds.resume_path(traj)) as r, np.load(os.path.join(second, "step_000015.npz")) as ck:
         # the leg's own resume dump keeps the dtype its config carries
         assert r["df"].dtype == np.complex128 and int(r["frame"]) == 4

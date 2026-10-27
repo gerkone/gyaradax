@@ -4,9 +4,10 @@ A trajectory lives in ``<root>/<name>_ifft_realpotens/``::
 
     data/timestep_NNNNN.<bits>.bin   df in real space, (re/im, species, vpar, mu, s, x, y);
                                      adiabatic runs have no species axis
-    data/poten_NNNNN.<bits>.bin      phi in real space, (re/im, x, s, y), every ky mode
-                                     (``phi_layout: reim``); trajectories written before keep the
-                                     real (x, s, y) frame of ky <= nky / 2 (no ``phi_layout``)
+    data/poten_NNNNN.bf16.bin        legacy real phi, (x, s, y), ky <= nky / 2, raw bfloat16
+                                     (frames of older legs may be ``.zstd16.bin``)
+    data/potenc_NNNNN.bin            complex phi in real space, (re/im, x, s, y), every ky mode,
+                                     raw float32 (dataset ``potenc: false`` skips it)
     metadata.pkl                     everything below, including the statistics
     metadata_light.pkl               the same without the per-element df / phi moments
     config.yaml                      the run's effective config
@@ -19,7 +20,7 @@ A trajectory lives in ``<root>/<name>_ifft_realpotens/``::
     data/linear_poten.bin            its phi in real space, float32, the layout of a poten frame
                                      (``attach_linear`` adds them to an existing trajectory)
 
-``bits`` is ``zstd16`` (bfloat16 values byte-shuffled and zstd-compressed in 4 MiB chunks behind
+``bits`` (df frames) is ``zstd16`` (bfloat16 values byte-shuffled and zstd-compressed in 4 MiB chunks behind
 a 4 KiB header, ``neugk_jax.dataset.zframe`` v1) or ``bf16`` (the raw values); either way the
 metadata records ``quantization: bf16``, the precision of the values. Keys, transforms and
 rounding follow ``neugk_jax.dataset.preprocess.preprocess_gyaradax_kinetic``, so the neugk
@@ -232,11 +233,24 @@ def reim_to_phi(frame) -> np.ndarray:
     return np.moveaxis(spec, 1, 0)
 
 
-PHI_FRAMES = {"reim": phi_to_reim, "real": phi_to_real}
+POTEN_BITS = "bf16"
 
 
 def phi_layout(meta: dict) -> str:
     return meta.get("phi_layout", "real")
+
+
+def potenc_path(traj: str, index: int) -> str:
+    return os.path.join(traj, "data", f"potenc_{int(index):05d}.bin")
+
+
+def stored_frame(traj: str, kind: str, index: int) -> str:
+    """Path of the stored ``zstd16`` or ``bf16`` frame ``index`` of ``kind``."""
+    for bits in ("zstd16", "bf16"):
+        path = frame_path(traj, kind, index, bits)
+        if os.path.exists(path):
+            return path
+    raise FileNotFoundError(frame_path(traj, kind, index, "bf16"))
 
 
 class RunningStats:
@@ -287,6 +301,16 @@ def write_metadata(traj: str, metadata: dict) -> None:
     _atomic_write(os.path.join(traj, "metadata_light.pkl"), pickle.dumps(light))
 
 
+def _coll_freq(params: Any, ion: int) -> float:
+    """Ion-ion collision prefactor Gamma^(i/i) of a collisional run (the design coll_freq), 0 without collisions."""
+    if not getattr(params, "collisions", False):
+        return 0.0
+    from gyaradax.operators.collisions import collision_frequencies
+
+    _, gamma = collision_frequencies(params)
+    return float(np.asarray(gamma)[ion, ion])
+
+
 def _static_metadata(geometry: dict, params: Any, config_path: str) -> dict:
     kinetic = not params.adiabatic_electrons
     resolution = tuple(len(np.asarray(geometry[k])) for k in ("intvp", "intmu", "ints", "kxrh", "krho"))
@@ -311,13 +335,11 @@ def _static_metadata(geometry: dict, params: Any, config_path: str) -> dict:
         "ds": float(geom["ints"][0]),
         "resolution": resolution,
         "df_shape": df_shape,
-        "phi_shape": (2, resolution[3], resolution[2], resolution[4]),
-        "phi_layout": "reim",
-        "phi_convention": "ifftn(ifftshift(spec, axes=kx), axes=(kx, ky), norm='forward')",
+        "phi_shape": (resolution[3], resolution[2], resolution[4]),
         "axis_order": (
-            "df: (re/im, species, vpar, mu, s, x, y); phi: (re/im, x, s, y); x, y real space"
+            "df: (re/im, species, vpar, mu, s, x, y); phi: (x, s, y); x, y real space"
             if kinetic
-            else "df: (re/im, vpar, mu, s, x, y); phi: (re/im, x, s, y); x, y real space"
+            else "df: (re/im, vpar, mu, s, x, y); phi: (x, s, y); x, y real space"
         ),
         "channel_layout": "reim_species" if kinetic else "reim",
         "quantization": "bf16",
@@ -333,6 +355,8 @@ def _static_metadata(geometry: dict, params: Any, config_path: str) -> dict:
         "ion_temp": np.array([tmp[ion]]),
         "s_hat": np.array([float(params.shat)]),
         "q": np.array([float(params.q)]),
+        "eps": np.array([float(params.eps)]),
+        "coll_freq": np.array([_coll_freq(params, ion)]),
         "geometry": geom,
         "flux_labels": [f"{f}_s{s}" for s in range(n_species) for f in ("pflux", "eflux", "vflux")],
         # df moments are pooled over (vpar, s, x, y): one value per (re/im, [species,] mu)
@@ -359,12 +383,13 @@ class DatasetWriter:
     time ``stats_from`` on. The trajectory belongs to the run directory holding ``config_path``:
     an existing trajectory of another run, or one not written by a run, is refused unless
     ``takeover`` (the run extends it from its resume dump). ``write_resume`` replaces the
-    resume dump, with df in ``resume_dtype`` (f32 or f64).
+    resume dump, with df in ``resume_dtype`` (f32 or f64). ``potenc`` adds the fp32 complex phi
+    of every frame beside the legacy real one.
     """
 
     def __init__(self, root: str, name: str, geometry: dict, params: Any, config_path: str,
                  bits: str = "zstd16", start_step: int = 0, stats_from: float = 0.0,
-                 resume_dtype: str = "f32", takeover: bool = False):
+                 resume_dtype: str = "f32", takeover: bool = False, potenc: bool = True):
         if bits not in ("zstd16", "bf16"):
             raise ValueError(f"dataset bits must be zstd16 or bf16, got {bits!r}")
         if resume_dtype not in RESUME_DTYPES:
@@ -379,18 +404,16 @@ class DatasetWriter:
         self.static = _static_metadata(geometry, params, os.path.join(self.path, "config.yaml"))
         self.series: dict[str, list] = {k: [] for k in SERIES_KEYS}
         old = load_metadata(self.path)
-        if old is not None and phi_layout(old) == "real":
-            # an existing trajectory of real phi frames stays real
-            self.static.pop("phi_layout")
-            self.static.pop("phi_convention")
-            self.static["phi_shape"] = tuple(int(n) for n in old["phi_shape"])
-            self.static["axis_order"] = old["axis_order"]
-        self.phi_layout = phi_layout(self.static)
+        if old is not None and phi_layout(old) != "real":
+            raise ValueError(f"{self.path}: complex poten frames (phi_layout {phi_layout(old)}), convert them first")
+        self.potenc = bool(potenc)
+        if self.potenc:
+            self.static["phic_source"] = "solver_exact"
         if old is not None and len(old.get("timesteps", ())):
             keep = int(np.sum(np.asarray(old["solver_steps"]) <= start_step))
             for k in self.series:
                 self.series[k] = list(np.asarray(old[k])[:keep])
-            for kind in ("timestep", "poten"):
+            for kind in ("timestep", "poten", "potenc"):
                 for path in glob.glob(os.path.join(self.path, "data", f"{kind}_*.bin")):
                     if int(re.search(rf"{kind}_(\d+)", path).group(1)) >= keep:
                         os.remove(path)
@@ -406,9 +429,11 @@ class DatasetWriter:
         idx = self.n_frames
         frame = df_frame(df)
         _write_frame(frame_path(self.path, "timestep", idx, self.bits), np.asarray(frame).view(np.uint16).ravel(), self.bits)
-        phi_real = PHI_FRAMES[self.phi_layout](phi)
+        phi_real = phi_to_real(phi)
         phi_frame = np.asarray(jnp.asarray(phi_real).astype(jnp.bfloat16))
-        _write_frame(frame_path(self.path, "poten", idx, self.bits), phi_frame.view(np.uint16).ravel(), self.bits)
+        _write_frame(frame_path(self.path, "poten", idx, POTEN_BITS), phi_frame.view(np.uint16).ravel(), POTEN_BITS)
+        if self.potenc:
+            _atomic_write(potenc_path(self.path, idx), phi_to_reim(phi).tobytes())
         loss = quantization_loss(df, frame, phi_real, phi_frame, integrals)
         n_flux = np.asarray(fluxes).size
         loss["quant_flux_err"] = np.broadcast_to(np.asarray(loss["quant_flux_err"], np.float64), (n_flux,)).copy()
@@ -435,7 +460,7 @@ class DatasetWriter:
         linear eigenmodes, and the ``linear_*`` metadata keys.
         """
         with np.load(mode_path) as mode:
-            frames = linear_frames(mode["df"], mode["phi"], self.phi_layout)
+            frames = linear_frames(mode["df"], mode["phi"])
             mode_time = float(mode["time"])
         # a resumed leg finds the eigenmode of its first leg
         write_linear_frames(os.path.join(self.path, "data"), frames, keep_existing=True)
@@ -446,11 +471,15 @@ class DatasetWriter:
         n = self.n_frames
         if n <= 1:
             return
-        for kind in ("timestep", "poten"):
-            for i in range(n - 1):
-                with contextlib.suppress(FileNotFoundError):
-                    os.remove(frame_path(self.path, kind, i, self.bits))
-            os.replace(frame_path(self.path, kind, n - 1, self.bits), frame_path(self.path, kind, 0, self.bits))
+        for kind in ("timestep", "poten", "potenc"):
+            last = None
+            for path in glob.glob(os.path.join(self.path, "data", f"{kind}_*.bin")):
+                if int(re.search(rf"{kind}_(\d+)", path).group(1)) == n - 1:
+                    last = path
+                else:
+                    os.remove(path)
+            if last is not None:
+                os.replace(last, last.replace(f"{kind}_{n - 1:05d}", f"{kind}_00000"))
         for k in self.series:
             self.series[k] = self.series[k][-1:]
         write_metadata(self.path, self.metadata())
@@ -490,12 +519,12 @@ class DatasetWriter:
 LINEAR_FILES = ("linear.bin", "linear_k.bin", "linear_poten.bin")
 
 
-def linear_frames(df, phi, layout: str = "reim") -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """float32 frames of a linear eigenmode: real-space df, df as (re/im, ...), real-space phi of ``layout``."""
+def linear_frames(df, phi) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """float32 frames of a linear eigenmode: real-space df, df as (re/im, ...), real-space phi."""
     df = np.asarray(df)
     real = np.asarray(df_to_real(df), np.float32)
     spec = np.stack([df.real, df.imag]).astype(np.float32)
-    return real, spec, PHI_FRAMES[layout](phi)
+    return real, spec, phi_to_real(phi)
 
 
 def write_linear_frames(data_dir: str, frames, keep_existing: bool = False) -> None:
@@ -653,7 +682,9 @@ def write_statistics(traj: str, stats_from: float = 0.0) -> dict:
         raise ValueError(f"{traj}: no frame at or after t = {stats_from} (last t = {times[-1]:.3f})")
     bits = "zstd16" if os.path.exists(frame_path(traj, "timestep", first, "zstd16")) else "bf16"
     axes = tuple(int(a) for a in meta["df_stats_agg_axes"])
-    df_stats, phi_stats = RunningStats(), RunningStats()
+    df_stats, phi_stats, phic_stats = RunningStats(), RunningStats(), RunningStats()
+    potenc = all(os.path.exists(potenc_path(traj, i)) for i in range(first, len(times)))
+    phic_shape = (2, *meta["phi_shape"])
     for i in range(first, len(times)):
         df = read_frame(frame_path(traj, "timestep", i, bits), meta["df_shape"])
         count = float(np.prod([df.shape[a] for a in axes]))
@@ -661,8 +692,12 @@ def write_statistics(traj: str, stats_from: float = 0.0) -> dict:
             *(np.asarray(f(df, axis=axes, keepdims=True), np.float64) for f in (np.mean, np.var, np.min, np.max)),
             count,
         )
-        phi_stats.push(read_frame(frame_path(traj, "poten", i, bits), meta["phi_shape"]))
+        phi_stats.push(read_frame(stored_frame(traj, "poten", i), meta["phi_shape"]))
+        if potenc:
+            phic_stats.push(np.fromfile(potenc_path(traj, i), np.float32).reshape(phic_shape))
     stats = {**df_stats.moments("df"), **phi_stats.moments("phi")}
+    if potenc:
+        stats.update(phic_stats.moments("phic"))
     meta = {**{k: v for k, v in meta.items() if k not in stats}, **stats}
     write_metadata(traj, meta)
     return meta
