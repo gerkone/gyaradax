@@ -52,7 +52,12 @@ def test_run_writes_preprocessed_trajectory(tmp_path, kind):
     with open(os.path.join(traj, "metadata.pkl"), "rb") as fh:
         meta = pickle.load(fh)
     assert meta["solver_steps"].tolist() == [2, 4]
-    assert meta["n_species"] == (2 if kind == "kinetic" else 1)
+    n_species = 2 if kind == "kinetic" else 1
+    assert meta["n_species"] == n_species and len(meta["species"]) == n_species
+    assert meta["df_shape"][:2] == (2, n_species) and meta["flux"].shape == (2, n_species, 3)
+    assert meta["electron_species_index"] == (1 if kind == "kinetic" else -1)
+    for key in ("ion_temp_grad", "density_grad", "electron_temp_grad", "temp_ratio", "eps", "coll_freq"):
+        assert meta[key].shape == (1,)
     assert meta["df_mean"].ndim == len(meta["df_shape"]) and meta["phi_mean"].shape == meta["phi_shape"]
     assert meta["quantization"] == "bf16"
     assert set(meta["geometry"]) == {*ds.GEOMETRY_KEYS, "adiabatic", "beta", "nlapar", "nlbpar"}
@@ -62,8 +67,8 @@ def test_run_writes_preprocessed_trajectory(tmp_path, kind):
     assert meta["quant_flux_err"].shape == meta["flux"].shape
     assert np.all((meta["quant_phi_err"] > 1e-4) & (meta["quant_phi_err"] < 1e-2))
     assert np.all((meta["quant_phi_df_err"] > 1e-5) & (meta["quant_phi_df_err"] < 1e-1))
-    eflux = [i for i, label in enumerate(meta["flux_labels"]) if label.startswith("eflux")]
-    assert np.all(np.abs(meta["quant_flux_err"][:, eflux]) < 5e-2)
+    eflux = list(meta["flux_labels"]).index("eflux")
+    assert np.all(np.abs(meta["quant_flux_err"][..., eflux]) < 5e-2)
 
     # the last frame is the bf16 real-space transform of the final state
     with np.load(os.path.join(run, "step_000004.npz")) as ck:
@@ -107,7 +112,7 @@ def test_reim_phi_frames_keep_every_ky_mode():
     assert real.shape[-1] == 4
 
 
-def test_writer_adds_potenc_and_refuses_complex_poten(tmp_path, monkeypatch):
+def test_writer_adds_potenc_and_refuses_old_layouts(tmp_path, monkeypatch):
     monkeypatch.setattr(ds, "_static_metadata", lambda *args: {"phi_shape": (6, 3, 5)})
     config = tmp_path / "config.yaml"
     config.write_text("run: {}\n")
@@ -117,7 +122,11 @@ def test_writer_adds_potenc_and_refuses_complex_poten(tmp_path, monkeypatch):
     bare = ds.DatasetWriter(root, "bare", {}, None, str(config), potenc=False)
     assert not bare.potenc and "phic_source" not in bare.static
     ds._claim(ds.trajectory_path(root, "old"), str(tmp_path))
-    ds.write_metadata(ds.trajectory_path(root, "old"), {"phi_shape": (2, 6, 3, 5), "phi_layout": "reim"})
+    old = {"phi_shape": (2, 6, 3, 5), "phi_layout": "reim"}
+    ds.write_metadata(ds.trajectory_path(root, "old"), old)
+    with pytest.raises(ValueError, match="predates the schema"):
+        ds.DatasetWriter(root, "old", {}, None, str(config))
+    ds.write_metadata(ds.trajectory_path(root, "old"), {**old, "species": ("ion",)})
     with pytest.raises(ValueError, match="complex poten"):
         ds.DatasetWriter(root, "old", {}, None, str(config))
 
