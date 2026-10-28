@@ -436,9 +436,8 @@ class CUDAOps(SolverOps):
             return "conservative parallel dissipation is not supported"
         if self.mesh is not None:
             return "sharded runs are not supported"
-        nv, ns, nky = df.shape[-5], df.shape[-3], df.shape[-1]
-        if ns * nky > 576 or nv % 8 != 0:
-            return f"needs ns * nky <= 576 and nv % 8 == 0 (ns={ns}, nky={nky}, nv={nv})"
+        if df.shape[-3] > 576:
+            return f"needs ns <= 576 (ns={df.shape[-3]})"
         if df.size >= 2**31:
             return "grid exceeds 32-bit indexing"
         return None
@@ -493,7 +492,7 @@ class CUDAOps(SolverOps):
     def _es_ok(self, df, pre, has_em, has_dpc) -> bool:
         """Whether the fused electrostatic kernel can run this call; warns once when it cannot."""
         global _fused_fallback_logged
-        nv, ns, nky = df.shape[-5], df.shape[-3], df.shape[-1]
+        ns = df.shape[-3]
         reason = None
         if not _has_linear_es:
             reason = "the CUDA library has no linear_rhs_es kernel (rebuild it)"
@@ -503,8 +502,8 @@ class CUDAOps(SolverOps):
             reason = "conservative parallel dissipation is not supported"
         elif self.mesh is not None:
             reason = "sharded runs are not supported"
-        elif ns * nky > 576 or nv % 8 != 0:
-            reason = f"needs ns * nky <= 576 and nv % 8 == 0 (ns={ns}, nky={nky}, nv={nv})"
+        elif ns > 576:
+            reason = f"needs ns <= 576 (ns={ns})"
         elif df.size >= 2**31:
             reason = "grid exceeds 32-bit indexing"
         if reason is not None and not _fused_fallback_logged:
