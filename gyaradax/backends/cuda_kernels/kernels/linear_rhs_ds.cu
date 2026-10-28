@@ -6,7 +6,7 @@
 
 namespace xla_ffi = xla::ffi;
 
-// electrostatic linear rhs in double-single arithmetic, one block per (sp, mu, kx, vpar chunk)
+// electrostatic linear rhs in double-single arithmetic, one block per (sp, mu, kx, vpar chunk, ky tile)
 struct LinearRhsDsArgs {
     const double2* df;        // (nsp, nv, nmu, ns, nkx, nky)
     const double2* phi;       // (ns, nkx, nky)
@@ -33,6 +33,7 @@ struct LinearRhsDsArgs {
     double2* acc_out;
     double2* stage_out;
     int nsp, nv, nmu, ns, nkx, nky, n_class;
+    int ky_tile;
 };
 
 constexpr int TAP_LO = 2;
@@ -43,22 +44,28 @@ constexpr int MAX_THREADS = 576;
 
 template <int VCH, bool COLL>
 __global__ __launch_bounds__(MAX_THREADS, 2) void linear_rhs_ds_kernel(const LinearRhsDsArgs a) {
-    const int ns = a.ns, nky = a.nky, nv = a.nv, nmu = a.nmu, nkx = a.nkx;
-    const int nt = ns * nky;
+    const int ns = a.ns, nky = a.nky, nv = a.nv, nmu = a.nmu, nkx = a.nkx, kyt = a.ky_tile;
+    const int nt = ns * kyt;
 
     extern __shared__ unsigned char smem_raw[];
     cds* ring = reinterpret_cast<cds*>(smem_raw);
     cds* sm_gy = ring + RING * nt;
 
     const int tid = threadIdx.x;
-    const int n_vch = nv / VCH;
-    const int vch = blockIdx.x % n_vch;
-    const int mu = (blockIdx.x / n_vch) % nmu;
-    const int kx = (blockIdx.x / (n_vch * nmu)) % nkx;
-    const int sp = blockIdx.x / (n_vch * nmu * nkx);
-    const int s = tid / nky;
-    const int ky = tid % nky;
+    const int n_tiles = (nky + kyt - 1) / kyt;
+    const int n_vch = (nv + VCH - 1) / VCH;
+    const int tile = blockIdx.x % n_tiles;
+    const int vch = (blockIdx.x / n_tiles) % n_vch;
+    const int mu = (blockIdx.x / (n_tiles * n_vch)) % nmu;
+    const int kx = (blockIdx.x / (n_tiles * n_vch * nmu)) % nkx;
+    const int sp = blockIdx.x / (n_tiles * n_vch * nmu * nkx);
+    const int s = tid / kyt;
+    const int ky_local = tid % kyt;
+    // padding threads of a partial last tile load a valid ky and never store
+    const bool live = tile * kyt + ky_local < nky;
+    const int ky = live ? tile * kyt + ky_local : nky - 1;
     const int v0 = vch * VCH;
+    const int v1 = min(v0 + VCH, nv);
 
     const int nspat = ns * nkx * nky;
     const int spatial = s * (nkx * nky) + kx * nky + ky;
@@ -73,7 +80,7 @@ __global__ __launch_bounds__(MAX_THREADS, 2) void linear_rhs_ds_kernel(const Lin
     for (int i = 0; i < TAP_HI - TAP_LO; ++i) {
         const int2 m = __ldg(&a.packed_maps[(TAP_LO + i) * nspat + spatial]);
         tap[i] = m.x < 0 ? -1
-               : (m.y == kx ? m.x * nky + ky : (TAP_OFFKX | (m.x * (nkx * nky) + m.y * nky + ky)));
+               : (m.y == kx ? m.x * kyt + ky_local : (TAP_OFFKX | (m.x * (nkx * nky) + m.y * nky + ky)));
     }
     const ds bes = ds_ldg(&bessel_mu[spatial]);
     const cds phi_val = cds_load(a.phi, spatial);
@@ -94,7 +101,7 @@ __global__ __launch_bounds__(MAX_THREADS, 2) void linear_rhs_ds_kernel(const Lin
     }
 
     #pragma unroll 1
-    for (int v = v0; v < v0 + VCH; ++v) {
+    for (int v = v0; v < v1; ++v) {
         const int vn = v + 2;
         ring[(vn % RING) * nt + tid] = vn < nv ? cds_load(a.df, base0 + vn * plane) : z;
         __syncthreads();
@@ -179,6 +186,7 @@ __global__ __launch_bounds__(MAX_THREADS, 2) void linear_rhs_ds_kernel(const Lin
         rx.fma(ds_neg(drive_c), my_gyro.y);
         ry.fma(drive_c, my_gyro.x);
         double2 kk = make_double2(ds_to_d(rx.fin()), ds_to_d(ry.fin()));
+        if (!live) continue;
         if (a.acc_out == nullptr) {
             a.rhs_out[field] = kk;
             continue;
@@ -199,8 +207,8 @@ __global__ __launch_bounds__(MAX_THREADS, 2) void linear_rhs_ds_kernel(const Lin
 
 template <int VCH, bool COLL>
 static cudaError_t launch_ds(const LinearRhsDsArgs& a, cudaStream_t stream) {
-    const int nt = a.ns * a.nky;
-    const int blocks = a.nsp * a.nmu * a.nkx * (a.nv / VCH);
+    const int nt = a.ns * a.ky_tile;
+    const int blocks = a.nsp * a.nmu * a.nkx * ((a.nv + VCH - 1) / VCH) * ((a.nky + a.ky_tile - 1) / a.ky_tile);
     const size_t smem = (RING + 1) * (size_t)nt * sizeof(cds);
     cudaError_t e = cudaFuncSetAttribute(linear_rhs_ds_kernel<VCH, COLL>,
                                          cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem);
@@ -247,16 +255,15 @@ static cudaError_t launch_ds(const LinearRhsDsArgs& a, cudaStream_t stream) {
 
 static xla_ffi::Error run_ds(LinearRhsDsArgs& a, int nsp, int nv, int nmu, int ns, int nkx, int nky,
                              int n_class, int has_coll, cudaStream_t stream) {
-    if (ns * nky > MAX_THREADS)
-        return xla_ffi::Error(XLA_FFI_Error_Code_INVALID_ARGUMENT,
-                              "linear_rhs_ds: ns * nky must be <= 576");
-    if (nv % 8 != 0)
-        return xla_ffi::Error(XLA_FFI_Error_Code_INVALID_ARGUMENT,
-                              "linear_rhs_ds: nv must be a multiple of 8");
+    if (ns > MAX_THREADS)
+        return xla_ffi::Error(XLA_FFI_Error_Code_INVALID_ARGUMENT, "linear_rhs_ds: needs ns <= 576");
     if ((long long)nsp * nv * nmu * ns * nkx * nky >= (1LL << 31))
         return xla_ffi::Error(XLA_FFI_Error_Code_INVALID_ARGUMENT,
                               "linear_rhs_ds: grid too large for 32-bit indices");
     a.nsp = nsp; a.nv = nv; a.nmu = nmu; a.ns = ns; a.nkx = nkx; a.nky = nky; a.n_class = n_class;
+    // fewest ky tiles that fit the block, split evenly
+    const int n_tiles = (ns * nky + MAX_THREADS - 1) / MAX_THREADS;
+    a.ky_tile = (nky + n_tiles - 1) / n_tiles;
     const cudaError_t err = has_coll ? (nv % 32 == 0 ? launch_ds<32, true>(a, stream)
                                       : nv % 16 == 0 ? launch_ds<16, true>(a, stream)
                                       :                launch_ds<8, true>(a, stream))

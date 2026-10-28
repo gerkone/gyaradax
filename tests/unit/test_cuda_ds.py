@@ -21,10 +21,10 @@ CASES = {
 }
 
 
-def _rhs(name, linear_arith):
+def _rhs(name, linear_arith, grid=GRID):
     cfg_name, overrides = CASES[name]
     df, geometry, params, _ = noisy_case(
-        cfg_name, GRID, {**overrides, "linear_arith": linear_arith, "backend": "cuda"},
+        cfg_name, grid, {**overrides, "linear_arith": linear_arith, "backend": "cuda"},
         seed=5, mixed_precision=False,
     )
     pre = linear_precompute(geometry, params)
@@ -39,6 +39,13 @@ def test_ds_matches_fp64(name):
     assert not np.array_equal(ref, got), "ds path did not run"
     assert np.max(np.abs(got - ref)) / np.max(np.abs(ref)) < 1e-12
     assert rel_l2(got, ref) < 1e-12
+
+
+@pytest.mark.parametrize("grid", [{**GRID, "nky": 37}, {**GRID, "nvpar": 36}], ids=["ky_tiles", "vpar_tail"])
+def test_ds_any_grid(grid):
+    ref, got = _rhs("kinetic_collisions", "fp64", grid), _rhs("kinetic_collisions", "ds", grid)
+    assert not np.array_equal(ref, got), "ds path did not run"
+    assert np.max(np.abs(got - ref)) / np.max(np.abs(ref)) < 1e-12
 
 
 @pytest.mark.parametrize("fused", [False, True])
