@@ -8,16 +8,16 @@ A trajectory lives in ``<root>/<name>_ifft_realpotens/``::
                                      (frames of older legs may be ``.zstd16.bin``)
     data/potenc_NNNNN.bin            complex phi in real space, (re/im, x, s, y), every ky mode,
                                      raw float32 (dataset ``potenc: false`` skips it)
-    metadata.pkl                     everything below, including the statistics
+    metadata.pkl                     everything below, including the statistics, as the schema-3 tree
+                                     of :mod:`gyaradax.io.schema` (readers get the flat keys)
     metadata_light.pkl               the same without the per-element df / phi moments
     config.yaml                      the run's effective config
     .gyaradax_run                    the run directory that writes the trajectory
     resume/state.npz                 df (complex64, or complex128) and solver state of the last frame
     resume/config.yaml               the config of the leg that wrote it
-    data/linear.bin                  with ``run --linear-gate``: the linear eigenmode df in real space,
-                                     float32, the layout of a df frame (``linear_shape``)
-    data/linear_k.bin                the same df in spectral space (re/im, ..., kx, ky), float32
-    data/linear_poten.bin            its phi in real space, float32, the layout of a poten frame
+    data/linear.bin                  with ``run --linear-gate``: the linear eigenmode df in spectral
+                                     space, (re/im, species, vpar, mu, s, kx, ky), float32
+    data/linear_poten.bin            its phi, (re/im, s, kx, ky), float32
                                      (``attach_linear`` adds them to an existing trajectory)
 
 ``bits`` (df frames) is ``zstd16`` (bfloat16 values byte-shuffled and zstd-compressed in 4 MiB chunks behind
@@ -42,6 +42,8 @@ import warnings
 from typing import Any, Callable, Optional
 
 import numpy as np
+
+from gyaradax.io.schema import flatten_metadata, nest_metadata
 
 # geometry entries of the kinetic dataset (neugk_jax.dataset.preprocess.kinetic_geometry)
 GEOMETRY_KEYS = ("kxrh", "krho", "intvp", "vpgr", "intmu", "mugr", "ints", "bn", "bt_frac", "rfun", "efun",
@@ -289,16 +291,16 @@ def load_metadata(traj: str) -> Optional[dict]:
         path = os.path.join(traj, name)
         if os.path.exists(path):
             with open(path, "rb") as fh:
-                return pickle.load(fh)
+                return flatten_metadata(pickle.load(fh))
     return None
 
 
 def write_metadata(traj: str, metadata: dict) -> None:
-    _atomic_write(os.path.join(traj, "metadata.pkl"), pickle.dumps(metadata))
+    _atomic_write(os.path.join(traj, "metadata.pkl"), pickle.dumps(nest_metadata(metadata)))
     # metadata_light leaves out the per-element moments, as neugk does
     drop = {f"df_{m}" for m in ("mean", "var", "std", "min", "max")} | {"phi_min", "phi_max", "phi_var"}
     light = {k: v for k, v in metadata.items() if k not in drop}
-    _atomic_write(os.path.join(traj, "metadata_light.pkl"), pickle.dumps(light))
+    _atomic_write(os.path.join(traj, "metadata_light.pkl"), pickle.dumps(nest_metadata(light)))
 
 
 def _coll_freq(params: Any, ion: int) -> float:
@@ -459,9 +461,8 @@ class DatasetWriter:
     def add_linear(self, gate: dict, mode_path: str) -> None:
         """Store the linear eigenmode of ``mode_path`` (``linear_mode.npz``) and the linear results.
 
-        Writes ``data/linear.bin`` (real space), ``data/linear_k.bin`` (spectral) and
-        ``data/linear_poten.bin`` as raw float32, the layout of the adiabatic dataset's paired
-        linear eigenmodes, and the ``linear_*`` metadata keys.
+        Writes the spectral ``data/linear.bin`` and ``data/linear_poten.bin`` as raw float32 and the
+        ``linear_*`` metadata keys.
         """
         with np.load(mode_path) as mode:
             frames = linear_frames(mode["df"], mode["phi"])
@@ -520,15 +521,20 @@ class DatasetWriter:
             print(f"  dataset {os.path.basename(self.path)}: {quantization_summary(self.metadata())}")
 
 
-LINEAR_FILES = ("linear.bin", "linear_k.bin", "linear_poten.bin")
+LINEAR_FILES = ("linear.bin", "linear_poten.bin")
+LINEAR_SCHEMA = 2
+LINEAR_LAYOUT = "(re/im, species, vpar, mu, s, kx, ky), spectral"
+LINEAR_POTEN_LAYOUT = "(re/im, s, kx, ky), spectral"
+LINEAR_FLUX_LABELS = ("particle", "heat", "momentum")
 
 
-def linear_frames(df, phi) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """float32 frames of a linear eigenmode: real-space df, df as (re/im, ...), real-space phi."""
+def linear_frames(df, phi) -> tuple[np.ndarray, np.ndarray]:
+    """float32 spectral frames of a linear eigenmode: df ``(re/im, species, ...)`` and phi ``(re/im, s, kx, ky)``."""
     df = np.asarray(df)
-    real = np.asarray(df_to_real(df), np.float32)
-    spec = np.stack([df.real, df.imag]).astype(np.float32)
-    return real, spec, phi_to_real(phi)
+    if df.ndim == 5:
+        df = df[None]
+    phi = np.asarray(phi)
+    return np.stack([df.real, df.imag]).astype(np.float32), np.stack([phi.real, phi.imag]).astype(np.float32)
 
 
 def write_linear_frames(data_dir: str, frames, keep_existing: bool = False) -> None:
@@ -545,23 +551,25 @@ def linear_metadata(gate: dict, frames, source: str, mode_time: float) -> dict:
     """The ``linear_*`` metadata of a linear gate document and its eigenmode frames.
 
     With the eigenmode fluxes of the gate (``growth.mode_fluxes``) it adds ``linear_flux``
-    (species x ``flux_labels``, flattened) and, per species x ``flux_labels`` x ky,
+    (species x ``linear_flux_labels``) and, per species x ``linear_flux_labels`` x ky,
     ``linear_flux_ky``, ``linear_flux_ky_chain0``,
     ``linear_weight_ky`` (the quasilinear weights of the kx = 0 chain) and
     ``linear_weight_ky_allkx``, plus ``linear_phi2_ky`` and ``linear_phi2_ky_chain0``, the
     kx-resolved ``linear_flux_kxy`` and ``linear_phi2_kxy``, and ``linear_kthnorm``,
     ``linear_kxrh`` and ``linear_ky_convention``.
     """
-    real, spec, poten = frames
+    spec, poten = frames
     omega = gate.get("omega")
     out = {
+        "linear_schema": np.int64(LINEAR_SCHEMA),
+        "linear_code": "gyaradax",
         "linear_bin": "data/linear.bin",
-        "linear_shape": np.asarray(real.shape, np.int64),
-        "linear_space": "real",
-        "linear_k_bin": "data/linear_k.bin",
-        "linear_k_bin_shape": np.asarray(spec.shape, np.int64),
+        "linear_shape": np.asarray(spec.shape, np.int64),
+        "linear_space": "spectral",
+        "linear_layout": LINEAR_LAYOUT,
         "linear_poten_bin": "data/linear_poten.bin",
         "linear_poten_shape": np.asarray(poten.shape, np.int64),
+        "linear_poten_layout": LINEAR_POTEN_LAYOUT,
         "linear_source": source,
         "linear_time": float(mode_time),
         "linear_t": float(gate["t"]),
@@ -578,16 +586,15 @@ def linear_metadata(gate: dict, frames, source: str, mode_time: float) -> dict:
         "linear_gamma_max_lowky": np.float64(
             np.nan if gate.get("gamma_max_lowky") is None else gate["gamma_max_lowky"]
         ),
-        **linear_moments(real),
+        **linear_moments(spec),
     }
     if gate.get("dt") is not None:
         out["linear_dt"] = np.float64(gate["dt"])
     fluxes = gate.get("mode_fluxes")
     if fluxes:
-        nky = len(gate["ky"])
-        out["linear_flux"] = np.asarray(fluxes["flux"], np.float64).reshape(-1)
-        for key in ("flux_ky", "flux_ky_chain0", "weight_ky", "weight_ky_allkx"):
-            out[f"linear_{key}"] = np.asarray(fluxes[key], np.float64).reshape(-1, nky)
+        out["linear_flux_labels"] = np.asarray(LINEAR_FLUX_LABELS)
+        for key in ("flux", "flux_ky", "flux_ky_chain0", "weight_ky", "weight_ky_allkx"):
+            out[f"linear_{key}"] = np.asarray(fluxes[key], np.float64)
         for key in ("phi2_ky", "phi2_ky_chain0"):
             out[f"linear_{key}"] = np.asarray(fluxes[key], np.float64)
         for key in ("flux_kxy", "phi2_kxy"):
@@ -612,9 +619,8 @@ def attach_linear(traj: str, staged: str, gate: dict, mode_time: float, stamp: s
     meta = load_metadata(traj)
     df_shape = tuple(int(n) for n in meta["df_shape"])
     ns, nx, ny = df_shape[-3:]
-    reim = os.path.getsize(os.path.join(staged, "data", LINEAR_FILES[2])) == 8 * nx * ns * ny
-    # the spectral df has the shape of a real-space frame; phi staged before phi_layout is real
-    shapes = (df_shape, df_shape, (2, nx, ns, ny) if reim else (nx, ns, ny))
+    # the spectral df has the shape of a real-space frame
+    shapes = (df_shape, (2, ns, nx, ny))
     frames = [
         np.fromfile(os.path.join(staged, "data", name), np.float32).reshape(shape)
         for name, shape in zip(LINEAR_FILES, shapes)
@@ -635,9 +641,10 @@ def attach_linear(traj: str, staged: str, gate: dict, mode_time: float, stamp: s
         if not os.path.exists(backup):
             shutil.copy2(path, backup)
         with open(path, "rb") as fh:
-            doc = pickle.load(fh)
+            doc = flatten_metadata(pickle.load(fh))
+        doc = {k: v for k, v in doc.items() if not k.startswith("linear_k_bin")}
         doc.update(entries)
-        _atomic_write(path, pickle.dumps(doc))
+        _atomic_write(path, pickle.dumps(nest_metadata(doc)))
         _copy_mode(backup, path)
     return entries
 
@@ -648,7 +655,7 @@ def _copy_mode(src: str, dst: str) -> None:
 
 
 def linear_moments(arr: np.ndarray) -> dict:
-    """RMS of a linear eigenmode frame, overall and reduced to (y,), (re/im, y), (x, y), (re/im, x, y).
+    """RMS of a spectral linear eigenmode, overall and reduced to (ky,), (re/im, ky), (kx, ky), (re/im, kx, ky).
 
     The reductions of ``neugk_jax`` ``preprocess.linear_moments``; a species axis is reduced too.
     """
@@ -660,7 +667,7 @@ def linear_moments(arr: np.ndarray) -> dict:
         "linear_rms_cky": np.sqrt(sq.mean(axis=axes[1:-1])),
         "linear_rms_kxky": np.sqrt(sq.mean(axis=axes[:-2])),
         "linear_rms_ckxky": np.sqrt(sq.mean(axis=axes[1:-2])),
-        "linear_rms_count": np.int64(arr.size),
+        "linear_rms_count": np.int64(arr.size // arr.shape[0]),
     }
 
 
