@@ -9,6 +9,7 @@ import pytest
 from omegaconf import OmegaConf
 
 from gyaradax.io import dataset as ds
+from gyaradax.io.schema import SCHEMA3_PATHS, SCHEMA_VERSION, flatten_metadata, nest_metadata
 from gyaradax.cli import main
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -50,7 +51,11 @@ def test_run_writes_preprocessed_trajectory(tmp_path, kind):
 
     traj = ds.trajectory_path(root, f"tiny_{kind}")
     with open(os.path.join(traj, "metadata.pkl"), "rb") as fh:
-        meta = pickle.load(fh)
+        tree = pickle.load(fh)
+    assert tree["schema"] == SCHEMA_VERSION and "extra" not in tree
+    assert tree["frames"]["solver_steps"].tolist() == [2, 4] and tree["params"]["n_species"] in (1, 2)
+    meta = flatten_metadata(tree)
+    assert meta.keys() == ds.load_metadata(traj).keys()
     assert meta["solver_steps"].tolist() == [2, 4]
     n_species = 2 if kind == "kinetic" else 1
     assert meta["n_species"] == n_species and len(meta["species"]) == n_species
@@ -62,7 +67,7 @@ def test_run_writes_preprocessed_trajectory(tmp_path, kind):
     assert meta["quantization"] == "bf16"
     assert set(meta["geometry"]) == {*ds.GEOMETRY_KEYS, "adiabatic", "beta", "nlapar", "nlbpar"}
     with open(os.path.join(traj, "metadata_light.pkl"), "rb") as fh:
-        assert not {"df_mean", "phi_var"} & set(pickle.load(fh))
+        assert not {"df_mean", "phi_var"} & set(flatten_metadata(pickle.load(fh)))
     # bf16 loss tracker: phi frame rounding, and phi / heat fluxes recomputed from the stored df
     assert meta["quant_flux_err"].shape == meta["flux"].shape
     assert np.all((meta["quant_phi_err"] > 1e-4) & (meta["quant_phi_err"] < 1e-2))
@@ -85,14 +90,14 @@ def test_run_writes_preprocessed_trajectory(tmp_path, kind):
     # resuming the run directory appends to the same trajectory
     assert main(["run", run, "--n-steps", "2"]) == 0
     with open(os.path.join(traj, "metadata.pkl"), "rb") as fh:
-        meta = pickle.load(fh)
+        meta = flatten_metadata(pickle.load(fh))
     assert meta["solver_steps"].tolist() == [2, 4, 6]
     assert OmegaConf.load(os.path.join(run, "config.yaml")).dataset.name == f"tiny_{kind}"
 
     # statistics can be recomputed over a later window: frames 1 and 2 only
     assert main(["dataset-stats", traj, "--from-time", str(float(meta["timesteps"][1]))]) == 0
     with open(os.path.join(traj, "metadata.pkl"), "rb") as fh:
-        meta = pickle.load(fh)
+        meta = flatten_metadata(pickle.load(fh))
     phis = [ds.read_frame(ds.stored_frame(traj, "poten", i), meta["phi_shape"]) for i in (1, 2)]
     np.testing.assert_allclose(meta["phi_mean"], np.mean(phis, axis=0), rtol=1e-3, atol=1e-6)
     assert meta["phi_mean"].dtype == np.float32
@@ -234,3 +239,17 @@ def test_linear_frames_are_spectral_with_a_species_axis(tmp_path):
     np.testing.assert_array_equal(lin[0, 0] + 1j * lin[1, 0], df.astype(np.complex64))
     pot = np.fromfile(tmp_path / "linear_poten.bin", np.float32).reshape((2, *phi.shape))
     np.testing.assert_array_equal(pot[0] + 1j * pot[1], phi.astype(np.complex64))
+
+
+def test_schema_tree_round_trips_and_matches_neugk():
+    flat = {"timesteps": np.arange(2.0), "ion_temp_grad": np.ones(1), "ds": 0.1, "geometry": {"kxrh": np.ones(3)},
+            "linear_hist_t": np.zeros(0), "linear_rms": np.float64(1.0), "df_mean": np.zeros(2),
+            "df_stats_agg_axes": (2, 4), "sus_underresolved": True, "odd_key": 1}
+    tree = nest_metadata(flat)
+    assert tree["schema"] == SCHEMA_VERSION and tree["geometry"]["ds"] == 0.1 and "ds" not in flat["geometry"]
+    assert tree["linear"]["history"]["t"].size == 0 and tree["stats"]["df"]["agg_axes"] == (2, 4)
+    assert tree["flags"]["sus_underresolved"] and tree["extra"] == {"odd_key": 1}
+    back = flatten_metadata(tree)
+    assert back.keys() == flat.keys() and back["geometry"].keys() == flat["geometry"].keys()
+    neugk = pytest.importorskip("neugk_jax.dataset.schema")
+    assert neugk.SCHEMA_VERSION == SCHEMA_VERSION and neugk.SCHEMA3_PATHS == SCHEMA3_PATHS

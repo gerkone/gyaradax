@@ -8,7 +8,8 @@ A trajectory lives in ``<root>/<name>_ifft_realpotens/``::
                                      (frames of older legs may be ``.zstd16.bin``)
     data/potenc_NNNNN.bin            complex phi in real space, (re/im, x, s, y), every ky mode,
                                      raw float32 (dataset ``potenc: false`` skips it)
-    metadata.pkl                     everything below, including the statistics
+    metadata.pkl                     everything below, including the statistics, as the schema-3 tree
+                                     of :mod:`gyaradax.io.schema` (readers get the flat keys)
     metadata_light.pkl               the same without the per-element df / phi moments
     config.yaml                      the run's effective config
     .gyaradax_run                    the run directory that writes the trajectory
@@ -39,6 +40,8 @@ import warnings
 from typing import Any, Callable, Optional
 
 import numpy as np
+
+from gyaradax.io.schema import flatten_metadata, nest_metadata
 
 # geometry entries of the kinetic dataset (neugk_jax.dataset.preprocess.kinetic_geometry)
 GEOMETRY_KEYS = ("kxrh", "krho", "intvp", "vpgr", "intmu", "mugr", "ints", "bn", "bt_frac", "rfun", "efun",
@@ -286,16 +289,16 @@ def load_metadata(traj: str) -> Optional[dict]:
         path = os.path.join(traj, name)
         if os.path.exists(path):
             with open(path, "rb") as fh:
-                return pickle.load(fh)
+                return flatten_metadata(pickle.load(fh))
     return None
 
 
 def write_metadata(traj: str, metadata: dict) -> None:
-    _atomic_write(os.path.join(traj, "metadata.pkl"), pickle.dumps(metadata))
+    _atomic_write(os.path.join(traj, "metadata.pkl"), pickle.dumps(nest_metadata(metadata)))
     # metadata_light leaves out the per-element moments, as neugk does
     drop = {f"df_{m}" for m in ("mean", "var", "std", "min", "max")} | {"phi_min", "phi_max", "phi_var"}
     light = {k: v for k, v in metadata.items() if k not in drop}
-    _atomic_write(os.path.join(traj, "metadata_light.pkl"), pickle.dumps(light))
+    _atomic_write(os.path.join(traj, "metadata_light.pkl"), pickle.dumps(nest_metadata(light)))
 
 
 def _coll_freq(params: Any, ion: int) -> float:
