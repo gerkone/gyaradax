@@ -358,7 +358,13 @@ def _linear_only(args: argparse.Namespace, config_path: str, run_dir: str | None
     import numpy as np
 
     from gyaradax.diagnostics import growth, outcome
-    from gyaradax.io.dataset import LINEAR_FILES, linear_frames, write_linear_frames
+    from gyaradax.io.dataset import (
+        LINEAR_FILES,
+        LINEAR_LAYOUT,
+        LINEAR_POTEN_LAYOUT,
+        linear_frames,
+        write_linear_frames,
+    )
 
     cfg = OmegaConf.load(config_path)
     output_dir = _default_output_dir(cfg, args, run_dir)
@@ -383,7 +389,10 @@ def _linear_only(args: argparse.Namespace, config_path: str, run_dir: str | None
         **gate,
         "config": os.path.abspath(config_path),
         "mode_time": mode_time,
-        "files": {f"data/{n}": list(a.shape) for n, a in zip(LINEAR_FILES, frames)},
+        "files": {
+            f"data/{n}": {"shape": list(a.shape), "dtype": "float32", "layout": layout}
+            for n, a, layout in zip(LINEAR_FILES, frames, (LINEAR_LAYOUT, LINEAR_POTEN_LAYOUT))
+        },
     }
     outcome._atomic_json(path, doc)
     outcome.gate_outcome(output_dir, gate, cls="linear_only")
