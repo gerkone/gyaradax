@@ -8,7 +8,7 @@ A trajectory lives in ``<root>/<name>_ifft_realpotens/``::
                                      (frames of older legs may be ``.zstd16.bin``)
     data/potenc_NNNNN.bin            complex phi in real space, (re/im, x, s, y), every ky mode,
                                      raw float32 (dataset ``potenc: false`` skips it)
-    metadata.pkl                     everything below, including the statistics, as the schema-3 tree
+    metadata.pkl                     everything below, including the statistics, as the metadata tree
                                      of :mod:`gyaradax.io.schema` (readers get the flat keys)
     metadata_light.pkl               the same without the per-element df / phi moments
     config.yaml                      the run's effective config

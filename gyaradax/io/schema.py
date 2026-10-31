@@ -1,12 +1,12 @@
-"""Schema 3 of the trajectory metadata: the flat keys grouped by meaning.
+"""The trajectory metadata as a tree: the flat keys grouped by meaning.
 
-A verbatim copy of the schema-3 part of ``neugk_jax.dataset.schema``, which reads the same files;
+A verbatim copy of the tree part of ``neugk_jax.dataset.schema``, which reads the same files;
 ``tests/unit/test_dataset.py`` checks the two agree when neugk_jax is installed.
 """
 
 from __future__ import annotations
 
-# schema 3: the keys grouped by meaning; readers see the flat layout through flatten_metadata
+# grouped layout: the keys arranged by meaning; readers see the flat layout through flatten_metadata
 SCHEMA_VERSION = 3
 _GROUPS = {
     "run": "simulation_code source_config stable outcome quantization hdisp_rerun_of appended_from hand_label",
@@ -47,15 +47,15 @@ def _paths() -> dict:
     return paths
 
 
-SCHEMA3_PATHS = _paths()
+TREE_PATHS = _paths()
 
 
 def unplaced_keys(flat: dict) -> list:
-    return sorted(set(flat) - set(SCHEMA3_PATHS))
+    return sorted(set(flat) - set(TREE_PATHS))
 
 
 def nest_metadata(flat: dict) -> dict:
-    """Schema-3 tree of flat metadata; keys without a place in :data:`SCHEMA3_PATHS` go to ``extra``."""
+    """Grouped tree of flat metadata; keys without a place in :data:`TREE_PATHS` go to ``extra``."""
     if flat.get("schema") == SCHEMA_VERSION:
         return flat
     tree = {"schema": SCHEMA_VERSION}
@@ -70,22 +70,22 @@ def nest_metadata(flat: dict) -> dict:
     for key, value in flat.items():
         if key == "geometry" or key in extra:
             continue
-        *parents, leaf = SCHEMA3_PATHS[key]
+        *parents, leaf = TREE_PATHS[key]
         node = tree
         for p in parents:
             node = node.setdefault(p, {})
         if leaf in node:
-            raise KeyError(f"{key} collides at {'.'.join(SCHEMA3_PATHS[key])}")
+            raise KeyError(f"{key} collides at {'.'.join(TREE_PATHS[key])}")
         node[leaf] = value
     return tree
 
 
 def flatten_metadata(meta: dict) -> dict:
-    """Flat view of schema-3 metadata (earlier layouts are returned unchanged)."""
+    """Flat view of grouped metadata (flat layouts are returned unchanged)."""
     if meta.get("schema") != SCHEMA_VERSION:
         return meta
     flat = {}
-    for key, path in SCHEMA3_PATHS.items():
+    for key, path in TREE_PATHS.items():
         node = meta
         for p in path:
             if not isinstance(node, dict) or p not in node:

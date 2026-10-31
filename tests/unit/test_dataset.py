@@ -9,7 +9,7 @@ import pytest
 from omegaconf import OmegaConf
 
 from gyaradax.io import dataset as ds
-from gyaradax.io.schema import SCHEMA3_PATHS, SCHEMA_VERSION, flatten_metadata, nest_metadata
+from gyaradax.io.schema import TREE_PATHS, SCHEMA_VERSION, flatten_metadata, nest_metadata
 from gyaradax.cli import main
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -294,4 +294,4 @@ def test_schema_tree_round_trips_and_matches_neugk():
     back = flatten_metadata(tree)
     assert back.keys() == flat.keys() and back["geometry"].keys() == flat["geometry"].keys()
     neugk = pytest.importorskip("neugk_jax.dataset.schema")
-    assert neugk.SCHEMA_VERSION == SCHEMA_VERSION and neugk.SCHEMA3_PATHS == SCHEMA3_PATHS
+    assert neugk.SCHEMA_VERSION == SCHEMA_VERSION and neugk.TREE_PATHS == TREE_PATHS
