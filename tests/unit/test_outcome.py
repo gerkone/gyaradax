@@ -11,6 +11,7 @@ from omegaconf import OmegaConf
 from gyaradax.cli import main
 from gyaradax.diagnostics import growth, outcome
 from gyaradax.io import dataset as ds
+from gyaradax.io.schema import SCHEMA_VERSION, flatten_metadata
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 GRID = dict(nvpar=8, nmu=2, ns=8, nkx=11, nky=5)
@@ -169,7 +170,7 @@ def config(tmp_path):
 
 def _meta(traj):
     with open(os.path.join(traj, "metadata.pkl"), "rb") as fh:
-        return pickle.load(fh)
+        return flatten_metadata(pickle.load(fh))
 
 
 COMMON = ["--from-scratch", "--backend", "jax", "--block-size", "2"]
@@ -192,9 +193,8 @@ def test_linear_gate_keeps_the_eigenmode_and_runs_the_ambiguous_case(tmp_path, c
     traj = ds.trajectory_path(root, "tiny")
     meta = _meta(traj)
     assert tuple(meta["linear_shape"]) == tuple(meta["df_shape"]) == (2, *shape)
-    real = np.fromfile(os.path.join(traj, meta["linear_bin"]), np.float32)
-    k = np.fromfile(os.path.join(traj, meta["linear_k_bin"]), np.float32)
-    assert real.size == k.size == 2 * np.prod(shape) and meta["linear_space"] == "real"
+    k = np.fromfile(os.path.join(traj, meta["linear_bin"]), np.float32)
+    assert k.size == 2 * np.prod(shape) and meta["linear_space"] == "spectral" and "linear_k_bin" not in meta
     assert meta["linear_rms_ckxky"].shape == (2, 11, 5) and meta["linear_rms"] > 0
     assert meta["linear_gamma"].tolist() == pytest.approx(gate["gamma"])
     assert meta["linear_gate"] == gate["decision"]
@@ -242,25 +242,22 @@ def test_cached_stable_gate_skips_the_nonlinear_run(tmp_path, config, capsys):
     meta = _meta(traj)
     assert meta["stable"] is True and meta["frame_source"] == "linear"
     assert meta["outcome"]["class"] == "linear_stable" and meta["linear_gate"] == "stable"
-    assert meta["timesteps"].tolist() == [40.0] and meta["flux"].shape == (1, 6)
+    assert meta["timesteps"].tolist() == [40.0] and meta["flux"].shape == (1, 2, 3)
     assert meta["n_species"] == 2 and meta["q"].shape == (1,) and "phi_mean" in meta
     assert meta["linear_gamma"].tolist() == report["gamma"] and meta["linear_t"] == 40.0
     assert meta["linear_settled"] and meta["linear_peak_ky"] == 0.7
     assert meta["linear_gamma_max"] == -0.03 and meta["linear_gamma_max_lowky"] == -0.03
     assert sorted(os.listdir(os.path.join(traj, "data"))) == [
         "linear.bin",
-        "linear_k.bin",
         "linear_poten.bin",
         "poten_00000.bf16.bin",
         "potenc_00000.bin",
         "timestep_00000.zstd16.bin",
     ]
-    k = np.fromfile(os.path.join(traj, "data", "linear_k.bin"), np.float32).reshape(2, *shape)
-    np.testing.assert_array_equal(k[0] + 1j * k[1], df)
-    real = np.fromfile(os.path.join(traj, "data", "linear.bin"), np.float32)
-    np.testing.assert_allclose(real.reshape(meta["linear_shape"]), ds.df_to_real(df), atol=1e-5)
-    poten = np.fromfile(os.path.join(traj, "data", "linear_poten.bin"), np.float32)
-    np.testing.assert_array_equal(poten.reshape(meta["phi_shape"]), ds.phi_to_real(phi))
+    k = np.fromfile(os.path.join(traj, "data", "linear.bin"), np.float32).reshape(meta["linear_shape"])
+    np.testing.assert_array_equal(k[0] + 1j * k[1], df.reshape(k.shape[1:]))
+    poten = np.fromfile(os.path.join(traj, "data", "linear_poten.bin"), np.float32).reshape(2, *phi.shape)
+    np.testing.assert_array_equal(poten[0] + 1j * poten[1], phi.astype(np.complex64))
     frame = ds.read_frame(ds.stored_frame(traj, "poten", 0), meta["phi_shape"])
     np.testing.assert_allclose(frame, ds.phi_to_real(phi), rtol=1e-2, atol=1e-2)
     assert not os.path.exists(ds.resume_path(traj))
@@ -315,16 +312,15 @@ def test_linear_only_writes_the_linear_outputs_and_stops(tmp_path, config, capsy
         doc = json.load(fh)
     shape = (2, 2, 8, 2, 8, 11, 5)
     assert doc["files"] == {
-        "data/linear.bin": list(shape),
-        "data/linear_k.bin": list(shape),
-        "data/linear_poten.bin": [11, 8, 5],
+        "data/linear.bin": {"shape": list(shape), "dtype": "float32", "layout": ds.LINEAR_LAYOUT},
+        "data/linear_poten.bin": {"shape": [2, 8, 11, 5], "dtype": "float32", "layout": ds.LINEAR_POTEN_LAYOUT},
     }
     assert len(doc["omega"]) == len(doc["gamma"]) == GRID["nky"] and doc["dt"] > 0
     fluxes = doc["mode_fluxes"]
     assert np.shape(fluxes["flux_ky"]) == (2, 3, GRID["nky"])
     atol = 1e-12 * np.abs(fluxes["flux"]).max()
     np.testing.assert_allclose(np.sum(fluxes["flux_ky"], -1), fluxes["flux"], atol=atol)
-    for name, size in (("linear.bin", np.prod(shape)), ("linear_poten.bin", 11 * 8 * 5)):
+    for name, size in (("linear.bin", np.prod(shape)), ("linear_poten.bin", 2 * 11 * 8 * 5)):
         assert os.path.getsize(os.path.join(run, "data", name)) == 4 * size
     with open(os.path.join(run, outcome.OUTCOME_FILE)) as fh:
         assert json.load(fh)["class"] == "linear_only"
