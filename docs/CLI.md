@@ -430,8 +430,7 @@ shift), and the nonlinear run decides that.
   no trajectory: `RUN_DIR/linear.json` (the `linear_gate.json` document plus the config, the
   eigenmode time and the file shapes) and the eigenmode as `RUN_DIR/data/linear.bin`,
   `linear_k.bin` and `linear_poten.bin` (the trajectory layout above; `linear_mode.npz` is removed
-  once they are written). `outcome.json` gets class `linear_only` and the run exits 0, so the
-  datagen scheduler marks it `done` with the gate results in its `outcomes` table. A repeat with
+  once they are written). `outcome.json` gets class `linear_only` and the run exits 0. A repeat with
   the outputs present returns at once. `gyaradax.io.dataset.attach_linear` adds such a staged
   eigenmode to an existing trajectory (files and `linear_*` keys only, metadata backed up).
 - **Low-ky peak.** `gamma_max` and the decision use every ky > 0 of the grid. `gamma_max_lowky`
@@ -455,8 +454,7 @@ shift), and the nonlinear run decides that.
 - `RUN_DIR/outcome.json`, rewritten every frame: the outcome class, a one-line `label`, the
   stop reason, frames and time reached, the heat-flux peak and last value, the banding flag and
   the time it was first flagged, the last and largest zonal s-Nyquist share, and the flux
-  averages. The flags are command-line only, so the next leg needs them again (the datagen
-  scheduler passes every job's arguments to every leg).
+  averages. The flags are command-line only, so the next leg needs them again.
 
 | Class | Meaning |
 |---|---|
@@ -511,222 +509,19 @@ These flags take one config: they are refused for batched runs.
 
 ## Data generation (`gyaradax datagen`)
 
-`gyaradax datagen` runs a list of configs over an ssh GPU mesh and collects their trajectories
-into a dataset. Everything else is derived: each config becomes a job with its own run directory,
-trajectory name and cost, and the scheduler places, follows, retries and resumes the jobs until
-they are done.
+`gyaradax datagen` runs a list of configs on the GPUs of this machine, one `gyaradax run` per
+config and one config per GPU at a time, and collects their trajectories in a dataset:
 
 ```bash
-gyaradax datagen run configs/rerun/kinetic_*.yaml --campaign /data/campaigns/rerun_dp4 \
-    --targets targets.yaml --dataset /data/preprocessed/kinetic \
-    --name "iteration_{id}_dp4" --gpus all --detach
-gyaradax datagen status --campaign DIR             # jobs, slots, progress, ETAs
-gyaradax datagen add more/*.yaml --campaign DIR    # more configs, picked up at the next poll
-gyaradax datagen cancel NAME --campaign DIR        # stop and hold (--requeue: stop and queue again)
-gyaradax datagen resume NAME --campaign DIR        # queue a cancelled / failed / diverged job again
-gyaradax datagen probe --campaign DIR              # the CUDA library on every target host
+gyaradax datagen configs/scan/*.yaml --out runs/scan --gpus 0,1,2,3 --dataset /data/kinetic \
+    --args "--backend cuda --linear-gate --stop-on-decay"
 ```
 
-Run it from the checkout whose code the campaign should use: the jobs are launched from it.
-`--detach` keeps the scheduler going after the terminal closes (log in `DIR/datagen.log`). The
-scheduler exits once every job has finished; `--keep-running` keeps it polling for added jobs.
-Running `gyaradax datagen run --campaign DIR` again (no configs) restarts the scheduler; it
-reattaches to the running jobs.
-
-**Campaign directory.** Created on first use:
-
-| Path | Content |
-|---|---|
-| `campaign.yaml` | settings fixed at creation: `--dataset`, `--name`, `--args`, `--gpus`, the outcome switches, the code (checkout and commit) |
-| `targets.yaml` | where jobs run (copied from `--targets`); edit it while the campaign runs |
-| `configs/<name>.yaml` | each config as run, with `run.name` set to the job name |
-| `runs/<name>/` | the run directories |
-| `jobs.yaml`, `state.json` | the generated job list and the scheduler state |
-| `state.sqlite` | the run database (below), rebuilt on every poll |
-
-- **Names.** `--name` is a template over `{run}` (the config's `run.name`, the default), `{stem}`
-  (the file name) and `{id}` (the last number in the file name). The name is used for the job, its
-  run directory and its trajectory. `iteration_{id}_dp4` turns `kinetic_534.yaml` into
-  `iteration_534_dp4`.
-- **Dataset.** With `--dataset DIR`, every run writes `DIR/<name>_ifft_realpotens` (see
-  "Preprocessed dataset output"). A name that already exists in DIR, and is not this campaign's,
-  is refused before anything starts.
-- **Cost.** Grid points times species times `solver.n_steps`, used to place the longest jobs first;
-  in time mode the steps are `solver.t_end / solver.dt`.
-- **Equally spaced frames.** Configs with `solver.dump_dt` and `solver.t_end` run in time mode (see
-  "Equally spaced frames"); the end time stays in each run's `config.yaml`, so resumed legs run to
-  it.
-- **GPUs per job.** 1 by default. `--gpus all` gives every job all the GPUs of the slot it lands
-  on, and each leg sizes its mesh (`--n-gpus`) to that slot, so a run can resume on a slot with a
-  different GPU count. A config whose `sharding` asks for several GPUs is refused unless `--gpus`
-  is given. Sharding is close to linear (kinetic, 192 × 32 × 18 × 32 × 12: 1.93× on 2 A100s,
-  3.78× on 4), so wide slots return runs sooner at almost no cost in throughput.
-- **Run database.** `state.sqlite` next to `state.json` mirrors the queue for SQL queries: `runs`
-  (state, slot, legs, start and finish times, dataset frames written, simulation time, ETA, the
-  config's `geometry`/`physics`/`grid` as JSON in `params`, the outcome class and banding flag),
-  `legs` (one row per launch: slot, times, exit code, outcome), `slots` (drain, busy, current job),
-  `outcomes` (below) and `meta`. It is rebuilt and swapped in whole on every poll, so a reader on
-  any host sees a complete file; read it, do not write it. Example: `sqlite3 state.sqlite "SELECT
-  name, state, frames, frames_total, eta_h, json_extract(params, '$.geometry.eps') FROM runs ORDER
-  BY state"`.
-- **Outcome switches.** `--linear-gate`, `--stop-on-decay`, `--stop-on-banding` and
-  `--track-outcome` add the `gyaradax run` flag of the same name to every job (see "Run
-  outcome"); their thresholds go in `--args`, e.g. `--args "--decay-t-min 40"`. A linearly
-  stable job ends as `stable`, a decayed one as `decayed`, a run stopped on banding as `banded`;
-  none is retried, and `resume` does not requeue them (continue such a run by hand with
-  `gyaradax run RUN_DIR` and no stop flag). `status` adds an OUTCOME column with each run's
-  `outcome.json` label once one exists.
-- **Outcome table.** `outcomes` has one row per job, from the config and the run's
-  `linear_gate.json` / `outcome.json` (filled as far as they exist, the scheduler reads them
-  without numpy):
-
-  | Columns | Content |
-  |---|---|
-  | `name`, `state`, `class`, `label` | job, scheduler state, outcome class (see "Run outcome") |
-  | `rlt`, `rln`, `tmp`, `mas` | per-species lists (JSON) from `physics` |
-  | `rlt_i`, `rlt_e`, `rln_i`, `temp_ratio` | ion and electron gradients, Te/Ti (species from `signz`) |
-  | `q`, `shat`, `eps`, `grid` | geometry, and the `grid` section (JSON) |
-  | `gate`, `settled`, `gamma_max`, `peak_ky`, `omega_peak`, `linear_t` | linear gate decision and results |
-  | `gamma_max_lowky`, `peak_ky_lowky`, `low_ky` | the largest γ over kθρ <= `low_ky` and its kθρ |
-  | `ky`, `gamma`, `gamma_std`, `omega`, `omega_std` | linear spectra (JSON lists) |
-  | `t`, `frames`, `dataset_frames`, `stopped` | time and frames reached, frames in the trajectory, stop reason |
-  | `banded`, `banded_t`, `nyq_zonal`, `nyq_nonzonal`, `nyq_zonal_max` | banding flag, its first time, last and largest s-Nyquist shares |
-  | `q_peak`, `q_last` | total heat flux, peak and last frame |
-  | `avg_t0`, `avg_t1`, `avg_frames` | averaging window (last 30% of the run) |
-  | `qi`, `qi_err`, `qe`, `qe_err`, `gi`, `gi_err` | mean ion / electron heat flux and ion particle flux, batch-means errors |
-  | `q_drift`, `q_drift_sigma`, `fluxes` | trend of the total heat flux; every average as JSON |
-  | `cost`, `gpu_hours` | the job's cost estimate, GPU hours over all legs |
-
-  Example: `sqlite3 state.sqlite "SELECT name, class, gamma_max, qi, qi_err, q_drift FROM
-  outcomes ORDER BY class"`.
-- **Unchanged configs.** Adding a config that is already in the campaign is a no-op. Adding a
-  changed config under an existing name, or changing the settings, is refused: start another
-  campaign for that.
-
-### Targets: ssh mesh
-
-One entry per slot: `host`, `gpus`, and optionally `speed` (throughput per GPU, relative), `python`
-(default: the gyaradax env), `drain` and `busy_mib`. A `defaults` mapping applies to every slot,
-and its `env` (a mapping of environment variables for every run) can only be set there. The file
-is re-read on every poll:
-
-- an added slot gets work at the next poll;
-- a removed slot has its job stopped and queued again;
-- `drain: true` lets the slot finish its job and then gives it nothing new;
-- `busy_mib: N` (0, the default, turns it off) places nothing on a slot while one of its GPUs holds
-  more than N MiB, i.e. while someone else uses it (`nvidia-smi` on the host, once per poll);
-- a file that does not parse, or is empty, is ignored and the previous pool kept.
-
-A `hosts` section switches whole machines; a host without an entry is `on`:
-
-| Switch | Effect at the next poll |
-|---|---|
-| `on` | the host's slots take jobs |
-| `drain` | its jobs run to the end; nothing new is placed there |
-| `off` | its jobs get SIGTERM, write a snapshot and exit (up to `--grace`), then go back in the queue |
-| `kill` | its jobs get SIGKILL at once and go back in the queue; the next leg resumes from the last snapshot |
-
-`gyaradax datagen host HOST SWITCH --campaign DIR` sets the switch in the campaign's
-`targets.yaml` (rewriting the file, so comments in it are dropped); a host name also matches its
-short form (`node-b` matches `node-b.example.org`). A stopped or killed job does not count as a
-failure. Restart snapshots keep df and φ in complex128 (`--snapshot-dtype`, default `c128`)
-whatever the dataset's precision, so `kill` loses at most the frames since the last snapshot
-(`--snapshot-every`).
-
-```yaml
-hosts: {node-b: drain, node-c: kill}
-```
-
-Jobs with `--gpus all` go to the free slot with the largest `speed` × GPUs.
-
-A multi-GPU slot may span any GPUs of its host unless the pool lists the allowed sets under
-`gpu_groups` (for example the NVLink-connected pairs); slots that span other sets are skipped.
-
-```yaml
-defaults: {python: /path/to/env/bin/python}   # optional; the scheduler's own interpreter otherwise
-gpu_groups:
-  node-b: [[0, 1], [2, 3]]                     # NVLink pairs
-slots:   # one slot per GPU; speeds are relative, measure with `gyaradax bench` and adjust
-  - {host: node-a, gpus: [0], speed: 2.0}
-  - {host: node-a, gpus: [1], speed: 2.0}
-  - {host: node-b, gpus: [0, 1], speed: 1.0}   # one two-GPU slot for `--gpus all` jobs
-  - {host: node-b, gpus: [2], speed: 1.0}
-  - {host: node-b, gpus: [3], speed: 1.0}
-```
-
-Slots on the machine the scheduler runs on are launched locally; every other host is reached over
-ssh, so it must accept non-interactive logins (keys, `BatchMode`) and see the same paths.
-
-### CUDA library per environment
-
-The CUDA library links the CUDA runtime, cuFFT and nvJitLink of the Python environment it is
-built in, so it belongs to that environment rather than to a machine:
-
-```bash
-gyaradax build-cuda --archs 80,90,103     # once per environment and kernel version
-```
-
-- **Where it goes.** `$PREFIX/lib/gyaradax/<key>/`, where `key` hashes the kernel sources and the
-  jaxlib version, so every checkout loads a library built from its own kernels. Without
-  `--archs`, the GPUs of the build machine are used. Machines that share one environment need one build
-  listing all their architectures (e.g. `--archs 80,90,103` for A100, H100 and B300).
-- **Lookup order.** `$GYARADAX_CUDA_LIB`, then the environment's build for the key, then a
-  development build next to the sources (`cuda_kernels/libgyaradax_cuda.so`).
-- **Missing architectures.** A build whose record lacks the GPU's architecture is not used, and
-  `--backend auto` falls back to JAX.
-- **Backend of a job.** Jobs whose `--args` do not set `--backend` run with `--backend auto`,
-  overriding the config's `solver.backend`: CUDA where the host's library serves its GPU, JAX
-  elsewhere. Before its first launch on a host, the scheduler probes that host's library. Where
-  it is missing or lacks the GPU's architecture, the jobs there get `--backend jax`, and `status`
-  lists the host. `gyaradax info` and `gyaradax datagen probe` show the same.
-
-### Placement, monitoring and preemption
-
-**Placement.** At each poll, pending jobs are taken by decreasing `cost`. A one-GPU job gets the
-fastest free one-GPU slot, or else the fastest wider slot, where it runs on the slot's first GPU.
-A `--gpus all` job gets the free slot with the largest `speed` × GPUs. A job that failed prefers
-another slot for its retry.
-
-**Launch and monitoring.** The scheduler starts each run detached, through the `wrap` command of
-`gyaradax/datagen/scheduler.py`. The wrapper writes `RUN_DIR/.sched/`:
-
-- `pid`, `host`, `slot`, `gpus` and `launch`;
-- a `heartbeat`, refreshed every 30 seconds;
-- then `exit`.
-
-The run's output goes to `.sched/log`. The scheduler reads these files and uses ssh only to
-launch, to signal, and to check a process whose heartbeat has stopped changing.
-
-| Outcome | Result |
-|---|---|
-| exit 0 | done |
-| exit 75 (stopped by SIGTERM after a snapshot) | queued again, not a failure |
-| nonzero exit, or no heartbeat for 300 s and no process | retried up to `--max-retries` times, resuming from the run directory |
-| exit 2 with a `DIVERGED` marker | diverged, not retried (a resume would diverge again) |
-| exit 4 (`--linear-gate`: linearly stable) | stable, not retried |
-| exit 5 (`--stop-on-decay`) | decayed, not retried |
-| exit 6 (`--stop-on-banding`) | banded, not retried |
-| `gyaradax run` cannot even start | the slot is paused for 300 s |
-
-A retry or a requeued job continues with `gyaradax run RUN_DIR`, dropping `--n-steps`,
-`--n-blocks`, `--from-scratch`, `--resume-from` and `--overwrite`, so the leg runs to the target
-stored in the run's `config.yaml`. A run stopped before its first snapshot starts over with
-`--overwrite`; that flag is only added once the job has written to the directory itself.
-
-**Preemption.** Removing a slot, switching its host `off`, `cancel` and `--requeue` send SIGTERM.
-`gyaradax run` finishes the running block, writes a snapshot and exits 75, so nothing is lost.
-The dataset statistics are left to the leg that completes the run. The scheduler sends SIGKILL
-only after `--grace` seconds (default 900); keep `--block-size` small enough for a block
-to finish within that. A kill during a snapshot write leaves a truncated `step_*.npz`; the
-scheduler moves it to `.sched/broken/` and resumes from the previous snapshot. A truncated
-diagnostics file (`fluxes.npz`, ...) makes gyaradax fail on resume, so the job is marked failed
-with a note instead of using up its retries.
-
-**Restarts.** The state file is rewritten atomically after every poll. A restarted scheduler
-picks up its running jobs from the state file and their `.sched` files, without relaunching
-them. Even without a state file, it reattaches to any live launch it finds in a job's `.sched`.
-A lock file (`state.json.lock`) keeps a second scheduler off the same campaign. `cancel` and
-`resume` drop request files next to the state file, which the scheduler applies at its next poll.
+Each config runs in `OUT/<name>` (`<name>` is the file name without `.yaml`) and, with
+`--dataset`, writes the trajectory `<name>`; its output goes to `OUT/<name>.log`. Running the same
+command again skips the configs whose `outcome.json` is final and continues the others from their
+last snapshot (`gyaradax run OUT/<name>`). Scheduling over several machines is left to the
+cluster's own tools: each `gyaradax run` is self-contained and resumable.
 
 ## Legacy entry point
 

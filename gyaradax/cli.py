@@ -1556,7 +1556,7 @@ def _cmd_build_cuda(args: argparse.Namespace) -> int:
 
 
 def _cmd_datagen(args: argparse.Namespace) -> int:
-    from gyaradax.datagen.campaign import main as datagen_main
+    from gyaradax.datagen import main as datagen_main
 
     return datagen_main(args.rest)
 
@@ -1938,7 +1938,7 @@ def build_parser() -> argparse.ArgumentParser:
     build_p.set_defaults(func=_cmd_build_cuda)
 
     datagen_p = sub.add_parser(
-        "datagen", add_help=False, help="generate a dataset: run configs over an ssh GPU mesh"
+        "datagen", add_help=False, help="generate a dataset: run configs on the GPUs of this machine"
     )
     datagen_p.add_argument("rest", nargs=argparse.REMAINDER)
     datagen_p.set_defaults(func=_cmd_datagen)

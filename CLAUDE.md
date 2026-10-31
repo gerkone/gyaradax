@@ -39,9 +39,7 @@ gyaradax/
     gkw.py            — GKW I/O (K-dumps, geom.dat, input.dat parsing, load_geometry, gkw_to_yaml)
     rundir.py         — run directory output (save_dumps, save_run_metadata, checkpoints)
     dataset.py        — preprocessed dataset output (`run --dataset`): quantized real-space frames + neugk metadata + resume dump
-  datagen/
-    campaign.py       — `gyaradax datagen`: campaign directory, configs -> named jobs, dataset collisions
-    scheduler.py      — job placement over an ssh GPU mesh, run wrapper, resume / retry (stdlib + PyYAML only)
+  datagen.py          — `gyaradax datagen`: run a list of configs on the local GPUs, one run per config
   geometry/           — geometry models (circular, s-alpha, Miller, loaded geom.dat), metric and drift tensors
   quasilinear/        — quasilinear transport: linear harvest, saturation rules, calibration
   sharding.py         — device mesh, sharded precompute / init, shard_map helpers for the kernels
@@ -210,7 +208,7 @@ gyaradax growth my_case.yaml --ns 18 36              # linear growth rates, ns 3
 gyaradax bench configs/adiabatic_a.yaml --backend=cuda
 gyaradax convert /path/to/gkw_run configs/my_case.yaml
 gyaradax info
-gyaradax datagen run CONFIGS... --campaign DIR --targets targets.yaml --dataset DIR   # dataset campaigns
+gyaradax datagen CONFIGS... --out DIR --gpus 0,1 --dataset DIR   # dataset generation on this machine
 ```
 
 A run directory holds the effective `config.yaml`, `geometry.pkl`, the
@@ -227,12 +225,12 @@ Add `--block-size=300` for faster checkpoint cadence.
 With `--dataset`, every leg replaces the trajectory's `resume/` dump (`--resume-dtype f32|f64`).
 Add `--backend=cuda` to force CUDA backend.
 SIGTERM stops a run after the running block and its snapshot, with exit code 75;
-`gyaradax run RUN_DIR` continues it (this is how datagen preempts and resumes).
+`gyaradax run RUN_DIR` continues it (this is how datagen resumes).
 `scripts/run.py` is a back-compat shim that forwards to `gyaradax run`.
 `run --linear-check 36` (off by default) compares linear growth rates at the run's ns with a
 finer reference before the run (docs/CLI.md, "Linear growth check").
-`gyaradax datagen` (docs/CLI.md, "Data generation") runs a list of configs over an ssh GPU
-mesh, with run directories, trajectory names and resumes handled per campaign directory.
+`gyaradax datagen` (docs/CLI.md, "Data generation") runs a list of configs on the GPUs of one
+machine, one run directory and trajectory per config, resumable.
 
 ## Building the CUDA backend
 

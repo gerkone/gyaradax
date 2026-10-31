@@ -9,7 +9,7 @@
     monitor_series.npz   per frame: time, step, fluxes, growth rate, s-Nyquist shares of phi
     outcome.json         summary: outcome class, flux averages, banding, stop reason
 
-The datagen scheduler reads the JSON files without numpy (``scheduler.write_db``).
+External schedulers can read the JSON files without numpy.
 """
 
 from __future__ import annotations
@@ -23,7 +23,7 @@ from typing import Any, Mapping, Optional
 
 import numpy as np
 
-# exit codes of `gyaradax run`, mirrored in gyaradax/datagen/scheduler.py
+# exit codes of `gyaradax run`
 EXIT_STABLE = 4
 EXIT_DECAYED = 5
 EXIT_BANDED = 6
