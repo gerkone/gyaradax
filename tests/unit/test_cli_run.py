@@ -2,6 +2,10 @@
 
 import json
 import os
+import signal
+import subprocess
+import sys
+import time
 
 import numpy as np
 import pytest
@@ -139,3 +143,114 @@ def test_batched_run_matches_single_runs(tmp_path, tiny_config):
             np.testing.assert_array_equal(fb["fluxes"], fs["fluxes"])
         with open(os.path.join(member, "run_info.jsonl")) as fh:
             assert [json.loads(line)["start_step"] for line in fh] == [0, 4]
+
+
+def _flux_steps(run_dir):
+    try:
+        with np.load(os.path.join(run_dir, "fluxes.npz")) as f:
+            return np.asarray(f["step"])
+    except (OSError, ValueError, KeyError):
+        return np.zeros(0)
+
+
+def test_sigterm_snapshots_and_the_run_directory_resumes_bitwise(tmp_path, tiny_config):
+    a, b = str(tmp_path / "a"), str(tmp_path / "b")
+    common = ["--from-scratch", "--block-size", "2", "--backend", "jax", "--n-steps", "400"]
+    _run(tiny_config, *common, "--output-dir", a)
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "gyaradax", "run", tiny_config, *common, "--output-dir", b],
+        cwd=REPO_ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+    )
+    deadline = time.time() + 600
+    while time.time() < deadline and proc.poll() is None and _flux_steps(b).max(initial=0) < 2:
+        time.sleep(0.2)
+    proc.send_signal(signal.SIGTERM)
+    out, _ = proc.communicate(timeout=600)
+    assert proc.returncode == 75, out[-2000:]
+    snaps = [f for f in os.listdir(b) if f.startswith("step_")]
+    assert len(snaps) == 1 and 2 <= int(snaps[0][5:11]) < 400, snaps
+    _run(b)
+    with np.load(os.path.join(a, "step_000400.npz")) as ca, np.load(os.path.join(b, "step_000400.npz")) as cb:
+        for key in STATE_KEYS:
+            np.testing.assert_array_equal(cb[key], ca[key])
+
+
+def _grid_times(run_dir):
+    with np.load(os.path.join(run_dir, "fluxes.npz")) as f:
+        return np.asarray(f["time"]), np.asarray(f["step"])
+
+
+def test_dump_dt_puts_frames_on_an_equally_spaced_time_grid(tmp_path, tiny_config):
+    out = str(tmp_path / "t")
+    # dt 0.005: each frame takes two full steps and one shortened to 0.003
+    _run(tiny_config, "--from-scratch", "--backend", "jax", "--dump-dt", "0.013", "--t-end", "0.06", "--output-dir", out)
+    times, steps = _grid_times(out)
+    np.testing.assert_array_equal(times, np.arange(6) * 0.013)
+    assert steps.tolist() == [0, 3, 6, 9, 12, 15]
+    with np.load(os.path.join(out, "dt_history.npz")) as h:
+        np.testing.assert_allclose(h["dt_used"][:3], [0.005, 0.005, 0.003], rtol=1e-12)
+    with np.load(os.path.join(out, "step_000015.npz")) as ck:
+        assert float(ck["dump_origin"]) == 0.0 and float(ck["time"]) == 5 * 0.013
+    eff = OmegaConf.load(os.path.join(out, "config.yaml"))
+    assert eff.solver.dump_dt == 0.013 and eff.solver.t_end == 0.06
+    with open(os.path.join(out, "run_info.jsonl")) as fh:
+        assert json.loads(fh.readline())["target_step"] is None
+    # the run directory already reached t_end
+    assert main(["run", out]) == 0
+    assert _grid_times(out)[1].tolist() == steps.tolist()
+
+
+def test_time_mode_resume_continues_the_grid_bitwise(tmp_path, tiny_config):
+    a, b = str(tmp_path / "a"), str(tmp_path / "b")
+    common = ["--from-scratch", "--backend", "jax", "--dump-dt", "0.013"]
+    _run(tiny_config, *common, "--t-end", "0.065", "--output-dir", a)
+    _run(tiny_config, *common, "--t-end", "0.026", "--output-dir", b)
+    # two more frames: --n-blocks counts frames in time mode
+    _run(b, "--n-blocks", "2")
+    _run(b, "--t-end", "0.065")
+    (ta, sa), (tb, sb) = _grid_times(a), _grid_times(b)
+    np.testing.assert_array_equal(tb, ta)
+    np.testing.assert_array_equal(sb, sa)
+    with np.load(os.path.join(a, "step_000015.npz")) as ca, np.load(os.path.join(b, "step_000015.npz")) as cb:
+        for key in STATE_KEYS:
+            np.testing.assert_array_equal(cb[key], ca[key])
+    with open(os.path.join(b, "run_info.jsonl")) as fh:
+        assert [json.loads(line)["start_step"] for line in fh] == [0, 6, 12]
+
+
+def test_sigterm_in_time_mode_stops_on_a_frame_and_resumes_the_grid(tmp_path, tiny_config):
+    from gyaradax.io import dataset as ds
+
+    cfg = OmegaConf.load(tiny_config)
+    cfg.solver.nlapar = False
+    config = str(tmp_path / "es.yaml")
+    OmegaConf.save(cfg, config)
+    run, root = str(tmp_path / "b"), str(tmp_path / "data")
+    common = ["--from-scratch", "--backend", "jax", "--dump-dt", "0.013", "--t-end", "1.3", "--dataset", root]
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "gyaradax", "run", config, *common, "--output-dir", run],
+        cwd=REPO_ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+    )
+    deadline = time.time() + 600
+    while time.time() < deadline and proc.poll() is None and _flux_steps(run).max(initial=0) < 6:
+        time.sleep(0.2)
+    proc.send_signal(signal.SIGTERM)
+    out, _ = proc.communicate(timeout=600)
+    assert proc.returncode == 75, out[-2000:]
+    snaps = [f for f in os.listdir(run) if f.startswith("step_")]
+    with np.load(os.path.join(run, snaps[0])) as ck:
+        t_stop = float(ck["time"])
+    k = round(t_stop / 0.013)
+    assert len(snaps) == 1 and 2 <= k < 100 and t_stop == k * 0.013, (snaps, t_stop)
+    # the trajectory's resume dump holds the state of its last frame
+    traj = ds.trajectory_path(root, cfg.run.name)
+    meta = ds.load_metadata(traj)
+    with np.load(ds.resume_path(traj)) as r:
+        assert r["df"].dtype == np.complex64 and float(r["time"]) == t_stop
+        assert int(r["frame"]) == len(meta["timesteps"]) - 1 and int(r["step"]) == int(meta["solver_steps"][-1])
+
+    _run(run, "--t-end", str(t_stop + 3 * 0.013))
+    times, _ = _grid_times(run)
+    np.testing.assert_allclose(times, np.arange(k + 4) * 0.013, rtol=0, atol=1e-12)
+    meta = ds.load_metadata(traj)
+    np.testing.assert_allclose(meta["timesteps"], np.arange(1, k + 4) * 0.013, rtol=0, atol=1e-12)

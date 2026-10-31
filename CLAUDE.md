@@ -24,7 +24,7 @@ gyaradax/
     fields.py         — field solve wrapper (_compute_fields: phi, A_par, B_par), g <-> f transforms
     collisions.py     — Fokker-Planck stencil precompute + apply (9-point in (vpar, mu))
   solver/
-    rk4.py            — RK4 step (gkstep_single), multi-step driver (gksolve), init_f
+    rk4.py            — RK4 step (gkstep_single), multi-step driver (gksolve; gksolve_until to a target time), init_f
     cfl.py            — adaptive CFL timestep estimates
     driver.py         — high-level entry points (gk_init, gk_run, gksimulate, gksimulate_batched, gk_run_batched)
     eigenvalue.py     — linear eigenvalue solver (GKW eiv_integration)
@@ -32,14 +32,18 @@ gyaradax/
     fluxes.py         — flux integrals, EM flux diagnostics, get_integrals
     diag.py           — diagnostics: growth rates, spectra (phi_spectra), term_iii_rhs
     telemetry.py      — run telemetry, profiler summaries
+    growth.py         — linear growth rates per resolution (`gyaradax growth`, `run --linear-check`)
+    outcome.py        — run outcome: linear gate decision, decay / s-Nyquist banding detectors, outcome.json
     plot_utils.py     — publication-quality plotting functions
   io/
     gkw.py            — GKW I/O (K-dumps, geom.dat, input.dat parsing, load_geometry, gkw_to_yaml)
     rundir.py         — run directory output (save_dumps, save_run_metadata, checkpoints)
+    dataset.py        — preprocessed dataset output (`run --dataset`): quantized real-space frames + neugk metadata + resume dump
+  datagen.py          — `gyaradax datagen`: run a list of configs on the local GPUs, one run per config
   geometry/           — geometry models (circular, s-alpha, Miller, loaded geom.dat), metric and drift tensors
   quasilinear/        — quasilinear transport: linear harvest, saturation rules, calibration
   sharding.py         — device mesh, sharded precompute / init, shard_map helpers for the kernels
-  cli.py              — `gyaradax` console script: run/bench/info (see docs/CLI.md)
+  cli.py              — `gyaradax` console script: run/bench/growth/info/build-cuda/datagen (see docs/CLI.md)
   _compat.py          — old module paths (gyaradax.params, .integrals, .utils, .simulate, ...) -> new modules
 
   backends/
@@ -47,6 +51,7 @@ gyaradax/
     ops.py       — SolverOps ABC: compute_fields, linear_rhs(_from_g), nonlinear_term_iii
     _jax.py      — pure JAX backend: stencils, R2C/Z2Z FFT bracket
     _cuda.py     — CUDA FFI backend: fused kernels via libgyaradax_cuda.so
+    cuda_lib.py  — the library per Python env: lookup, `build-cuda`, host probe (stdlib only)
     cuda_kernels/
       CMakeLists.txt — build system (NVCC + cuFFT + LTO callbacks, optional cuFFTDx)
       kernels/       — .cu files: linear_rhs_fused, field_moments, v5 / v6 Poisson brackets
@@ -203,9 +208,13 @@ gyaradax run configs/iteration_13.yaml --device=N     # adiabatic
 gyaradax run configs/kinetic.yaml --device=N          # kinetic (auto-detected)
 gyaradax run configs/nl_em_apar.yaml --n-gpus 4      # EM, sharded over 4 GPUs (layout from the grid)
 gyaradax run outputs_kinetic_my_case                 # resume / extend a previous run directory
+gyaradax run my_case.yaml --dump-dt 1.4 --t-end 400  # frames on an equally spaced time grid
+gyaradax run DIR/name_ifft_realpotens --t-end 600    # extend a dataset trajectory from its resume dump
+gyaradax growth my_case.yaml --ns 18 36              # linear growth rates, ns 36 as ground truth
 gyaradax bench configs/adiabatic_a.yaml --backend=cuda
 gyaradax convert /path/to/gkw_run configs/my_case.yaml
 gyaradax info
+gyaradax datagen CONFIGS... --out DIR --gpus 0,1 --dataset DIR   # dataset generation on this machine
 ```
 
 A run directory holds the effective `config.yaml`, `geometry.pkl`, the
@@ -217,8 +226,17 @@ same CLI.
 Add `--from-scratch` to cold-start instead of resuming from K-files or snapshots
 (`--overwrite` when the output directory already holds another run).
 Add `--block-size=300` for faster checkpoint cadence.
+`--dump-dt DT` (`solver.dump_dt`) is time mode: each block ends exactly on the next frame time
+(last step shortened, `gksolve_until`), the run ends on the first frame at or after `--t-end`.
+With `--dataset`, every leg replaces the trajectory's `resume/` dump (`--resume-dtype f32|f64`).
 Add `--backend=cuda` to force CUDA backend.
+SIGTERM stops a run after the running block and its snapshot, with exit code 75;
+`gyaradax run RUN_DIR` continues it (this is how datagen resumes).
 `scripts/run.py` is a back-compat shim that forwards to `gyaradax run`.
+`run --linear-check 36` (off by default) compares linear growth rates at the run's ns with a
+finer reference before the run (docs/CLI.md, "Linear growth check").
+`gyaradax datagen` (docs/CLI.md, "Data generation") runs a list of configs on the GPUs of one
+machine, one run directory and trajectory per config, resumable.
 
 ## Building the CUDA backend
 
@@ -227,6 +245,16 @@ The base package depends on CPU-compatible `jax`. Install the CUDA extra before 
 pip install -e ".[cuda13]"
 ```
 
+The library belongs to the Python environment it links (CUDA runtime, cuFFT, nvJitLink):
+```bash
+gyaradax build-cuda --archs 80,90,103    # installs $PREFIX/lib/gyaradax/<key>/libgyaradax_cuda.so
+```
+`key` hashes the kernel sources and the jaxlib version, so each checkout loads a build of its
+own kernels; rebuild after editing a kernel. Machines sharing one env need a build listing
+all their architectures (e.g. sm 80/90/103 for A100, H100 and B300). `gyaradax info` shows which library is loaded and its
+architectures; a build without the GPU's architecture is skipped (JAX backend).
+
+A development build next to the sources is still picked up when the env has none.
 From `gyaradax/backends/cuda_kernels/`:
 ```bash
 mkdir -p _build && cd _build

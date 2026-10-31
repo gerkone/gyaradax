@@ -24,6 +24,7 @@ def save_dumps(
     block_start_step: int = 0,
     block_start_time: float = 0.0,
     snapshot_f32: bool = False,
+    dump_origin: Any = None,
 ):
     """Handle simulation output. Saves heavy 5D distribution snapshots if requested
     and appends diagnostic history to persistent files.
@@ -33,7 +34,8 @@ def save_dumps(
     the final (f, A_par, B_par). When ``dt_info`` is supplied (dict with per-step
     ``dt_used``/``dt_nl``/``dt_lin`` arrays and scalar ``dt_input``), also
     appends a per-step ``dt_history.npz`` matching GKW's debug4 columns:
-    step, time, dt_used, dt_nl, dt_lin, dt_input.
+    step, time, dt_used, dt_nl, dt_lin, dt_input. ``dump_origin`` (time mode: the time the
+    frame grid starts from) is stored in the snapshot so a resumed run keeps the grid.
     """
     os.makedirs(output_dir, exist_ok=True)
 
@@ -157,6 +159,8 @@ def save_dumps(
         # saturated state instead of params.dt.
         if last_dt is not None:
             checkpoint["dt_last"] = np.array(last_dt, dtype=np.float64)
+        if dump_origin is not None:
+            checkpoint["dump_origin"] = np.array(dump_origin, dtype=np.float64)
         np.savez(path, **cast(Any, checkpoint))
 
 
