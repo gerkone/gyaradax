@@ -1533,11 +1533,11 @@ Per evaluation, H100, 2 x 32 x 8 x 16 x 85 x 32, mixed precision (master = befor
 - **Fused electrostatic step (`fused_linear`, default off).** One `linear_rhs_es` kernel per RK4
   stage: a 5-plane vpar ring in shared memory, the 9-point collision stencil (without the
   momentum / energy corrections) and the RK update in registers, so no k array; kinetic runs take
-  the field solve from `field_moments`. EM, conservative dissipation, sharded runs,
-  ns nky > 576, nv % 8 != 0 or >= 2^31 points fall back to the default kernel with a one-time
-  warning. ~1e-14 per RHS against the default path. B300 steps/s against it: linear kinetic 2.2x,
-  kinetic + collisions 2.7x, adiabatic 1.6x, NL kinetic mixed precision 1.5x; H100 linear
-  1.8-2.3x (#17).
+  the field solve from `field_moments`. EM, conservative dissipation, ns nky > 576, nv % 8 != 0
+  or >= 2^31 points per device fall back to the default kernel with a one-time warning; sharded
+  runs use HALO instantiations (§13.4). ~1e-14 per RHS against the default path. B300 steps/s
+  against it: linear kinetic 2.2x, kinetic + collisions 2.7x, adiabatic 1.6x, NL kinetic mixed
+  precision 1.5x; H100 linear 1.8-2.3x (#17).
 - **Double-single linear RHS (`linear_arith: ds`, default `fp64`).** For weak-FP64 GPUs (B300:
   FP32 ~70x the FP64 rate) the electrostatic linear RHS runs on hi + lo FP32 pairs (~48 bits) on
   the FP32 pipe; df, phi and the RHS stay complex128 and `linear_precompute` builds the (hi, lo)
@@ -1638,8 +1638,18 @@ moments are all-reduced (a few MiB per step). Sharding vpar exchanges the two vp
 each shard edge per stage (`sharding.halo_planes`): df, plus F_M and the g2f factor for the
 in-kernel g -> f. The CUDA kernel reads them from separate halo buffers, the JAX stencil from a
 halo-extended block; planes past the grid ends are zero, so interior points are computed exactly
-as on one device. The sharded precompute keeps scalar entries (`dvp`, `sgr_dist`) concrete, which
-the CUDA kernels need. Multi-GPU runs need NCCL (`nvidia-nccl-cu13`, in the `cuda13` extra).
+as on one device. `fused_linear` / `linear_arith: ds` (`linear_rhs_es`, `linear_rhs_ds`) and
+`collision_rhs` do the same (`kernels/shard_halo.cuh`): the two vpar planes past each edge and,
+for the collision stencil, the mu plane past each edge over the vpar range plus one plane per
+side, so the corners come with the vpar halo. Their RHS and RK stages are bitwise equal to one
+device; only the momentum / energy collision corrections differ (all-reduced moments). Two A100
+(NVLink), `--fused-linear`, mixed precision, ms per step against the fallback before: kinetic
+2 x 32 x 12 x 18 x 192 x 32 sp/vp/mu 58/66/58 (82/90/82), with collisions 62/73/75
+(88/128/132); adiabatic 48 x 16 x 24 x 256 x 64 vp/mu 208/183 (278/264). The HALO
+instantiations run ~30 % (with collisions ~50 %) slower per point than the plain ones, which sit
+at the 56-register limit. The sharded precompute keeps scalar entries (`dvp`, `sgr_dist`)
+concrete, which the CUDA kernels need.
+Multi-GPU runs need NCCL (`nvidia-nccl-cu13`, in the `cuda13` extra).
 
 - **Which axis.** Without collisions, species and mu shards need nothing from their neighbours;
   vpar shards receive 4 nmu ns nkx nky complex values per device and stage (178 MB on the large
@@ -1740,9 +1750,9 @@ timings as the minimum over interleaved repeats when the GPU is shared.
 | `backend` (`--backend`) | `jax` | `cuda`: FFI kernels, Z2Z only; `auto`: CUDA when the library and a GPU are present | everything | linear <= 4e-16, FP64 bracket <= 2.2e-15 against JAX (§13.5) |
 | `mixed_precision` (`--mp` / `--dp`) | true in the CLI | FP32 FFTs in the bracket; linear terms and fields stay FP64 | nonlinear runs | ~1e-6 per bracket evaluation |
 | `use_z2z` | false | Z2Z instead of R2C FFTs in the JAX bracket | JAX backend | round-off |
-| `fused_linear` (`--fused-linear`) | false | fused electrostatic RK stage (§13.2) | ES, unsharded; else default kernel | ~1e-14 per RHS |
+| `fused_linear` (`--fused-linear`) | false | fused electrostatic RK stage (§13.2) | ES; else default kernel | ~1e-14 per RHS |
 | `linear_arith` (`--linear-arith`) | `fp64` | `ds`: double-single linear RHS (§13.2) | as `fused_linear`, CUDA only | ~1e-14 per RHS |
-| `n_gpus_{sp,vp,mu}` (`--n-gpus`) | 1 | velocity-space sharding (§13.4) | all runs; disables `fused_linear` / `ds` | round-off |
+| `n_gpus_{sp,vp,mu}` (`--n-gpus`) | 1 | velocity-space sharding (§13.4) | all runs | round-off |
 | `GYARADAX_BRACKET=v5` | v6 | forces the v5 bracket | CUDA bracket | bitwise v5 |
 | `GYARADAX_BRACKET_MRAD=native\|auto\|N` | `auto` | kx length of the v6 column passes (§10.14) | CUDA v6 bracket | round-off |
 
