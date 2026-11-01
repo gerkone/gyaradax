@@ -357,6 +357,8 @@ def _setup_run(config_path: str, args: argparse.Namespace, run_dir: str | None =
         overrides["backend"] = backend
     if args.fused_linear:
         overrides["fused_linear"] = True
+    if args.fused_bracket:
+        overrides["fused_bracket"] = True
     if args.linear_arith:
         overrides["linear_arith"] = args.linear_arith
     sp, vp, mu = _mesh_request(args, facts)
@@ -561,6 +563,7 @@ def _effective_config(
         ("solver.mixed_precision", bool(params.mixed_precision)),
         ("solver.use_z2z", bool(params.use_z2z)),
         ("solver.fused_linear", bool(params.fused_linear)),
+        ("solver.fused_bracket", bool(params.fused_bracket)),
         ("solver.linear_arith", params.linear_arith),
         ("solver.dt", float(params.dt)),
         ("solver.n_steps", int(target_step)),
@@ -718,6 +721,7 @@ def _run_telemetry(setup: RunSetup) -> Any:
             "bracket": _bracket_name(params, setup["df"].shape),
             "mixed_precision": bool(params.mixed_precision),
             "fused_linear": bool(params.fused_linear),
+            "fused_bracket": bool(params.fused_bracket),
             "linear_arith": params.linear_arith,
             "mesh": [params.n_gpus_sp, params.n_gpus_vp, params.n_gpus_mu],
             "start_step": setup["start_step"],
@@ -1084,6 +1088,10 @@ def _add_common(p: argparse.ArgumentParser) -> None:
     p.add_argument(
         "--fused-linear", action="store_true",
         help="CUDA: fused electrostatic linear kernel (collisions, rk4 stages, field moments)",
+    )
+    p.add_argument(
+        "--fused-bracket", action="store_true",
+        help="CUDA: mixed-precision bracket packs/unpacks inside the cuFFT passes (faster on B300)",
     )
     p.add_argument(
         "--linear-arith", choices=["fp64", "ds"], default=None,

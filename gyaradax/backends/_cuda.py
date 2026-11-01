@@ -44,6 +44,10 @@ _has_collision_rhs = False
 _has_linear_ds = False
 
 
+# kernel-side fallbacks (e.g. a cuFFT callback the plan-time probe found skipped) report here
+_WARN_HOOK = ctypes.CFUNCTYPE(None, ctypes.c_char_p)(lambda msg: warn_once(log, msg.decode()))
+
+
 def _cuda_zero_mode_index(pre: GKPre, key: str, size: int) -> np.int32:
     idx = int(pre[key])
     if not 0 <= idx < size:
@@ -94,6 +98,8 @@ def _register_ffi():
             ffi.register_ffi_target(name, ffi.pycapsule(symbol), platform="CUDA")
         except (AttributeError, RuntimeError):
             pass
+    if hasattr(_lib, "gyaradax_set_warn_hook"):
+        _lib.gyaradax_set_warn_hook(_WARN_HOOK)
 
     _ffi_registered = True
     return True
@@ -259,14 +265,31 @@ class CUDAOps(SolverOps):
     is ignored for CUDA operations and will emit a warning if set to True.
     """
 
-    def __init__(self, pre: GKPre, use_z2z: bool = False, mixed_precision: bool = True, mesh=None):
+    def __init__(
+        self,
+        pre: GKPre,
+        use_z2z: bool = False,
+        mixed_precision: bool = True,
+        mesh=None,
+        fused_bracket: bool = False,
+    ):
         _register_ffi()
         if use_z2z:
             log.warning("CUDA backend: use_z2z=True ignored (CUDA is Z2Z-only)")
 
         super().__init__(pre, use_z2z, mixed_precision, mesh)
+        self.fused_bracket = fused_bracket
         _assert_dead_taps_zero(pre)
         _assert_vpar_centre_zero()
+
+    def tree_flatten(self):
+        children, aux = super().tree_flatten()
+        return children, aux + (self.fused_bracket,)
+
+    @classmethod
+    def tree_unflatten(cls, aux_data, children):
+        use_z2z, mixed_precision, mesh, fused_bracket = aux_data
+        return cls(children[0], use_z2z, mixed_precision, mesh, fused_bracket)
 
     def _pack_shift_maps(self):
         """Pack precomputed shift maps into (9, ns, nkx, nky, 2) int32 array."""
@@ -1014,7 +1037,12 @@ class CUDAOps(SolverOps):
         )
         v6_attrs = {}
         if v6:
-            v6_attrs = dict(fold=np.int32(fold), out_scale_re=scale.real, out_scale_im=scale.imag)
+            v6_attrs = dict(
+                fold=np.int32(fold),
+                out_scale_re=scale.real,
+                out_scale_im=scale.imag,
+                fused=np.int32(self.fused_bracket),
+            )
 
         def bracket(d, a_pot, b_pot, vf):
             nsp_l, nv_l, nmu_l = d.shape[:3] if d.ndim == 6 else (1,) + d.shape[:2]

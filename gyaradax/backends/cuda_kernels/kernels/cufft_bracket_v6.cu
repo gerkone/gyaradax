@@ -1,11 +1,12 @@
 // v6 Poisson bracket: cuFFT column passes along mrad on the retained ky columns only, with the
 // inverse row transform, the bracket and the forward real row transform fused in cuFFTDx kernels.
 //
-//   P1   cuFFT C2C inverse along mrad, A = [mrad][planes][2 nky - 1], packed by a load callback (FP64)
-//        or by an explicit pack kernel (FP32)
+//   P1   cuFFT C2C inverse along mrad, A = [mrad][planes][2 nky - 1], packed by a load callback (FP64,
+//        or FP32 with fused) or by an explicit pack kernel
 //   rows cuFFTDx: potential rows -> real space; df row pairs -> inverse, bracket, 2-for-1 forward
 //   P3   cuFFT C2C forward along mrad, B = [mrad][b_df][nky], unpacked to [b_df, nkx, nky] by a store
-//        callback (FP64) or an explicit unpack kernel (FP32); both forms give bit-identical results
+//        callback (FP64, or FP32 with fused) or by an explicit unpack kernel; a callback cuFFT skips
+//        runs as the explicit kernel instead
 //
 // Same FFI signature as the v5 bracket; row kernels for the GYX_DX_SIZES that need no cuFFTDx workspace.
 
@@ -14,6 +15,7 @@
 #include <map>
 #include <mutex>
 #include <string>
+#include <type_traits>
 #include <utility>
 #include "xla/ffi/api/ffi.h"
 #include <cuda_runtime.h>
@@ -277,16 +279,9 @@ __global__ void v6_col_pack_kernel(typename V6Prec<T>::cplx* a, const V6ColInfo 
     }
 }
 
-// (sr + i si) * (x + i y) as XLA's complex multiply, uncontracted
-__device__ __forceinline__ double2 v6_scale_c(double sr, double si, double x, double y)
-{
-    return make_double2(__dsub_rn(__dmul_rn(sr, x), __dmul_rn(si, y)),
-                        __dadd_rn(__dmul_rn(sr, y), __dmul_rn(si, x)));
-}
-
 template <class T>
 __global__ void v6_unpack_kernel(const typename V6Prec<T>::cplx* __restrict__ b, const V6StoreInfo si,
-                                 const int* __restrict__ jind, int fold, double sr, double si_)
+                                 const int* __restrict__ jind)
 {
     // one thread per packed output element (gb, i_pack, k), k fastest
     const size_t n = (size_t)si.n_df * si.nkx * si.nky;
@@ -298,14 +293,8 @@ __global__ void v6_unpack_kernel(const typename V6Prec<T>::cplx* __restrict__ b,
         const typename V6Prec<T>::cplx v = b[((size_t)__ldg(&jind[i_pack]) * si.n_df + gb) * si.nky + k];
         const double2 u = (i_pack == si.ixzero && k == si.iyzero) ? make_double2(0.0, 0.0)
                                                                   : make_double2((double)v.x, (double)v.y);
-        si.out_packed[t] = fold ? v6_scale_c(sr, si_, u.x, u.y) : u;
+        si.out_packed[t] = si.fold ? v6_scale_c(si.scale_re, si.scale_im, u.x, u.y) : u;
     }
-}
-
-__global__ void v6_scale_kernel(double2* __restrict__ out, size_t n, double sr, double si)
-{
-    for (size_t t = blockIdx.x * (size_t)blockDim.x + threadIdx.x; t < n; t += (size_t)gridDim.x * blockDim.x)
-        out[t] = v6_scale_c(sr, si, out[t].x, out[t].y);
 }
 
 unsigned device_arch(int device)
@@ -326,11 +315,11 @@ bool v6_supported(unsigned arch, int mphi, int b_df, int nky, int nsp, int b_inn
 }
 
 struct V6Key {
-    int device, b_df, b_pot, mrad, mphi, nkx, nky, em, fp64;
+    int device, b_df, b_pot, mrad, mphi, nkx, nky, em, fp64, fused;
     bool operator<(const V6Key& o) const {
-        const int l[9] = {device, b_df, b_pot, mrad, mphi, nkx, nky, em, fp64};
-        const int r[9] = {o.device, o.b_df, o.b_pot, o.mrad, o.mphi, o.nkx, o.nky, o.em, o.fp64};
-        for (int k = 0; k < 9; ++k)
+        const int l[10] = {device, b_df, b_pot, mrad, mphi, nkx, nky, em, fp64, fused};
+        const int r[10] = {o.device, o.b_df, o.b_pot, o.mrad, o.mphi, o.nkx, o.nky, o.em, o.fp64, o.fused};
+        for (int k = 0; k < 10; ++k)
             if (l[k] != r[k]) return l[k] < r[k];
         return false;
     }
@@ -356,6 +345,7 @@ struct V6State {
 
 static std::map<V6Key, V6State*> g_v6_cache;
 static std::mutex g_v6_mutex;
+static void (*g_warn)(const char*) = nullptr;
 
 #define V6_CHECK_CUDA(call) do { cudaError_t err_ = (call); \
     if (err_ != cudaSuccess) return xla_ffi::Error::Internal(std::string("CUDA ") + cudaGetErrorString(err_)); \
@@ -378,19 +368,10 @@ xla_ffi::Error BracketV6Impl(
     xla_ffi::Result<xla_ffi::Buffer<xla_ffi::DataType::C128>> out,
     int32_t batch, int32_t mrad, int32_t mphi, int32_t nkx, int32_t nky, int32_t nspec,
     int32_t ixzero, int32_t iyzero, int32_t nsp, int32_t nv, int32_t b_inner, int32_t em,
-    int32_t fold, double out_scale_re, double out_scale_im)
+    int32_t fold, double out_scale_re, double out_scale_im, int32_t fused)
 {
     using Cplx = typename V6Prec<T>::cplx;
     constexpr bool fp64 = sizeof(T) == 8;
-    const size_t n_out = (size_t)batch * nspec * nkx * nky;
-    auto scale_out = [&]() -> xla_ffi::Error {
-        if (!fold) return xla_ffi::Error::Success();
-        const unsigned long long blocks = (n_out + 255) / 256;
-        v6_scale_kernel<<<(unsigned)(blocks < 65535ull * 64 ? blocks : 65535ull * 64), 256, 0, stream>>>(
-            (double2*)out->typed_data(), n_out, out_scale_re, out_scale_im);
-        return cudaGetLastError() == cudaSuccess ? xla_ffi::Error::Success()
-                                                 : xla_ffi::Error::Internal("bracket: output scale launch failed");
-    };
     int device = 0;
     cudaGetDevice(&device);
     const unsigned arch = device_arch(device);
@@ -412,7 +393,7 @@ xla_ffi::Error BracketV6Impl(
     const int n_cols = 2 * nky - 1;
     const size_t n_a = (size_t)mrad * n_planes * n_cols;
 
-    V6Key key = {device, b_df, b_pot, mrad, mphi, nkx, nky, em, fp64};
+    V6Key key = {device, b_df, b_pot, mrad, mphi, nkx, nky, em, fp64, fused};
     std::lock_guard<std::mutex> lock(g_v6_mutex);
     V6State* s = g_v6_cache[key];
 
@@ -420,7 +401,7 @@ xla_ffi::Error BracketV6Impl(
                         kx.typed_data(), ky.typed_data(), inverse_jind.typed_data(),
                         mrad, mphi, nkx, nky, b_df, b_pot}, n_planes, n_cols};
     V6StoreInfo h_store = {(double2*)out->typed_data(), inverse_jind.typed_data(),
-                           mrad, b_df, nkx, nky, ixzero, iyzero};
+                           mrad, b_df, nkx, nky, ixzero, iyzero, fold, out_scale_re, out_scale_im};
 
     if (!s) {
         s = new V6State();
@@ -434,45 +415,70 @@ xla_ffi::Error BracketV6Impl(
         long long n_ll[1] = {mrad};
         long long emb[1] = {mrad};
         size_t ws = 0;
-        // FP32: explicit pack/unpack kernels and plain plans; FP64: cuFFT callbacks
-        s->explicit_pack = s->explicit_unpack = !fp64;
-        const long long col_stride = (long long)n_planes * n_cols;
-        V6_CHECK_CUFFT(cufftCreate(&s->plan_col));
-        if (!s->explicit_pack)
-            V6_CHECK_CUFFT(cufftXtSetJITCallback(s->plan_col, V6Prec<T>::load_name,
-                (void*)bracket_v5_z2z_load_cb_fatbin, bracket_v5_z2z_load_cb_fatbin_bytes,
-                V6Prec<T>::load_type, &s->d_col_ptr));
-        V6_CHECK_CUFFT(cufftXtMakePlanMany(s->plan_col, 1, n_ll, emb, col_stride, 1, V6Prec<T>::data_type,
-            emb, col_stride, 1, V6Prec<T>::data_type, col_stride, &ws, V6Prec<T>::data_type));
-        V6_CHECK_CUFFT(cufftSetStream(s->plan_col, stream));
+        auto make_plan = [&](cufftHandle* plan, long long stride, const char* cb_name, const void* fatbin,
+                             size_t bytes, cufftXtCallbackType cb_type, void** info) -> xla_ffi::Error {
+            V6_CHECK_CUFFT(cufftCreate(plan));
+            if (cb_name)
+                V6_CHECK_CUFFT(cufftXtSetJITCallback(*plan, cb_name, (void*)fatbin, bytes, cb_type, info));
+            V6_CHECK_CUFFT(cufftXtMakePlanMany(*plan, 1, n_ll, emb, stride, 1, V6Prec<T>::data_type,
+                emb, stride, 1, V6Prec<T>::data_type, stride, &ws, V6Prec<T>::data_type));
+            V6_CHECK_CUFFT(cufftSetStream(*plan, stream));
+            return xla_ffi::Error::Success();
+        };
+        // cuFFT can skip a callback silently: a NaN-filled probe that stays NaN switches to the explicit kernel
+        auto ends_finite = [&](const auto* buf, size_t n, bool* ok) -> xla_ffi::Error {
+            std::remove_const_t<std::remove_pointer_t<decltype(buf)>> v[2];
+            V6_CHECK_CUDA(cudaMemcpyAsync(&v[0], buf, sizeof(v[0]), cudaMemcpyDeviceToHost, stream));
+            V6_CHECK_CUDA(cudaMemcpyAsync(&v[1], buf + n - 1, sizeof(v[1]), cudaMemcpyDeviceToHost, stream));
+            V6_CHECK_CUDA(cudaStreamSynchronize(stream));
+            *ok = std::isfinite((double)v[0].x) && std::isfinite((double)v[1].x);
+            return xla_ffi::Error::Success();
+        };
+        bool ok = false;
+        xla_ffi::Error e = xla_ffi::Error::Success();
+        const bool callbacks = fp64 || fused;
+        s->explicit_pack = s->explicit_unpack = !callbacks;
 
-        if (!s->explicit_pack) {
-            // fall back to the explicit pack if cuFFT skips the load callback (probed on a NaN-filled A)
+        const long long col_stride = (long long)n_planes * n_cols;
+        if ((e = make_plan(&s->plan_col, col_stride, callbacks ? V6Prec<T>::load_name : nullptr,
+                           bracket_v5_z2z_load_cb_fatbin, bracket_v5_z2z_load_cb_fatbin_bytes,
+                           V6Prec<T>::load_type, &s->d_col_ptr)).failure())
+            return e;
+        if (callbacks) {
             V6_CHECK_CUDA(cudaMemcpyAsync(s->d_col, &h_col, sizeof(V6ColInfo), cudaMemcpyHostToDevice, stream));
             V6_CHECK_CUDA(cudaMemsetAsync(s->a, 0xFF, n_a * sizeof(Cplx), stream));
             V6_CHECK_CUFFT(cufftXtExec(s->plan_col, s->a, s->a, CUFFT_INVERSE));
-            Cplx probe[2];
-            V6_CHECK_CUDA(cudaMemcpyAsync(&probe[0], s->a, sizeof(Cplx), cudaMemcpyDeviceToHost, stream));
-            V6_CHECK_CUDA(cudaMemcpyAsync(&probe[1], (Cplx*)s->a + n_a - 1, sizeof(Cplx),
-                                          cudaMemcpyDeviceToHost, stream));
-            V6_CHECK_CUDA(cudaStreamSynchronize(stream));
-            if (!(std::isfinite((double)probe[0].x) && std::isfinite((double)probe[1].x))) {
+            if ((e = ends_finite((const Cplx*)s->a, n_a, &ok)).failure()) return e;
+            if (!ok) {
                 V6_CHECK_CUFFT(cufftDestroy(s->plan_col));
-                V6_CHECK_CUFFT(cufftCreate(&s->plan_col));
-                V6_CHECK_CUFFT(cufftXtMakePlanMany(s->plan_col, 1, n_ll, emb, col_stride, 1, V6Prec<T>::data_type,
-                    emb, col_stride, 1, V6Prec<T>::data_type, col_stride, &ws, V6Prec<T>::data_type));
+                e = make_plan(&s->plan_col, col_stride, nullptr, nullptr, 0, V6Prec<T>::load_type, nullptr);
+                if (e.failure()) return e;
                 s->explicit_pack = true;
+                if (g_warn) g_warn("bracket v6: cuFFT skipped the pack callback, the explicit pack kernel runs");
             }
         }
 
         const long long out_stride = (long long)b_df * nky;
-        V6_CHECK_CUFFT(cufftCreate(&s->plan_out));
-        if (!s->explicit_unpack)
-            V6_CHECK_CUFFT(cufftXtSetJITCallback(s->plan_out, V6Prec<T>::store_name,
-                (void*)bracket_v5_store_cb_fatbin, bracket_v5_store_cb_fatbin_bytes,
-                V6Prec<T>::store_type, &s->d_store_ptr));
-        V6_CHECK_CUFFT(cufftXtMakePlanMany(s->plan_out, 1, n_ll, emb, out_stride, 1, V6Prec<T>::data_type,
-            emb, out_stride, 1, V6Prec<T>::data_type, out_stride, &ws, V6Prec<T>::data_type));
+        const size_t n_out = (size_t)b_df * nkx * nky;
+        if ((e = make_plan(&s->plan_out, out_stride, callbacks ? V6Prec<T>::store_name : nullptr,
+                           bracket_v5_store_cb_fatbin, bracket_v5_store_cb_fatbin_bytes,
+                           V6Prec<T>::store_type, &s->d_store_ptr)).failure())
+            return e;
+        if (callbacks) {
+            V6_CHECK_CUDA(cudaMemcpyAsync(s->d_store, &h_store, sizeof(V6StoreInfo), cudaMemcpyHostToDevice,
+                                          stream));
+            V6_CHECK_CUDA(cudaMemsetAsync(s->b, 0, (size_t)mrad * b_df * nky * sizeof(Cplx), stream));
+            V6_CHECK_CUDA(cudaMemsetAsync(h_store.out_packed, 0xFF, n_out * sizeof(double2), stream));
+            V6_CHECK_CUFFT(cufftXtExec(s->plan_out, s->b, s->b, CUFFT_FORWARD));
+            if ((e = ends_finite((const double2*)h_store.out_packed, n_out, &ok)).failure()) return e;
+            if (!ok) {
+                V6_CHECK_CUFFT(cufftDestroy(s->plan_out));
+                e = make_plan(&s->plan_out, out_stride, nullptr, nullptr, 0, V6Prec<T>::store_type, nullptr);
+                if (e.failure()) return e;
+                s->explicit_unpack = true;
+                if (g_warn) g_warn("bracket v6: cuFFT skipped the unpack callback, the explicit unpack kernel runs");
+            }
+        }
     }
 
     V6_CHECK_CUFFT(cufftSetStream(s->plan_col, stream));
@@ -500,11 +506,10 @@ xla_ffi::Error BracketV6Impl(
         const size_t n = (size_t)b_df * nkx * nky;
         const unsigned long long blocks = (n + 255) / 256;
         v6_unpack_kernel<T><<<(unsigned)(blocks < 65535ull * 64 ? blocks : 65535ull * 64), 256, 0, stream>>>(
-            (const Cplx*)s->b, h_store, jind.typed_data(), fold, out_scale_re, out_scale_im);
+            (const Cplx*)s->b, h_store, jind.typed_data());
         V6_CHECK_CUDA(cudaGetLastError());
-        return xla_ffi::Error::Success();
     }
-    return scale_out();
+    return xla_ffi::Error::Success();
 }
 
 }  // namespace
@@ -525,7 +530,8 @@ xla_ffi::Error BracketV6Impl(
         .Attr<int32_t>("nkx").Attr<int32_t>("nky").Attr<int32_t>("nspec")        \
         .Attr<int32_t>("ixzero").Attr<int32_t>("iyzero")                         \
         .Attr<int32_t>("nsp").Attr<int32_t>("nv").Attr<int32_t>("b_inner").Attr<int32_t>("em")  \
-        .Attr<int32_t>("fold").Attr<double>("out_scale_re").Attr<double>("out_scale_im")
+        .Attr<int32_t>("fold").Attr<double>("out_scale_re").Attr<double>("out_scale_im")       \
+        .Attr<int32_t>("fused")
 
 XLA_FFI_DEFINE_HANDLER_SYMBOL(cufft_bracket_v6_fp32_ffi, BracketV6Impl<float>, V6_BIND);
 XLA_FFI_DEFINE_HANDLER_SYMBOL(cufft_bracket_v6_fp64_ffi, BracketV6Impl<double>, V6_BIND);
@@ -538,6 +544,12 @@ extern "C" int gyaradax_bracket_v6_supported(int fp64, int mphi, int b_df, int n
     const unsigned arch = device_arch(device);
     return fp64 ? v6_supported<double>(arch, mphi, b_df, nky, nsp, b_inner, nullptr)
                 : v6_supported<float>(arch, mphi, b_df, nky, nsp, b_inner, nullptr);
+}
+
+// python-side warning for kernel fallbacks found at plan time
+extern "C" void gyaradax_set_warn_hook(void (*hook)(const char*))
+{
+    g_warn = hook;
 }
 
 // SM values (e.g. 800, 1030) the v6 row kernels are built for

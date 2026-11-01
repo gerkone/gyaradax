@@ -374,6 +374,7 @@ def gkstep_single(
             use_z2z=params.use_z2z,
             mixed_precision=params.mixed_precision,
             mesh=build_mesh(params),
+            fused_bracket=params.fused_bracket,
         )
 
     dt = dt_override if dt_override is not None else jnp.array(params.dt, dtype=jnp.float64)
@@ -569,6 +570,7 @@ def _gksolve(
         use_z2z=params.use_z2z,
         mixed_precision=params.mixed_precision,
         mesh=build_mesh(params),
+        fused_bracket=params.fused_bracket,
     )
 
     dt_input_scalar = jnp.array(params.dt, dtype=jnp.float64)

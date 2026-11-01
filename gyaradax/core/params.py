@@ -94,6 +94,8 @@ class GKParams:
     use_z2z: bool = False
     # cuda backend: fused electrostatic linear kernel (collisions, rk4 stage updates, field moments)
     fused_linear: bool = False
+    # cuda backend: mixed-precision v6 bracket packs and unpacks inside the cuFFT column passes
+    fused_bracket: bool = False
     # "ds": double-single electrostatic linear rhs on the CUDA backend
     linear_arith: str = "fp64"
 
@@ -187,6 +189,7 @@ class GKParams:
         "backend",
         "use_z2z",
         "fused_linear",
+        "fused_bracket",
         "linear_arith",
         "nlapar",
         "nlbpar",
@@ -293,6 +296,7 @@ def gkparams_from_runtime(runtime: Dict[str, Any], **overrides: Any) -> GKParams
         "spectral_radius": bool(runtime.get("spectral_radius", True)),
         "backend": str(runtime.get("backend", "jax")),
         "fused_linear": bool(runtime.get("fused_linear", False)),
+        "fused_bracket": bool(runtime.get("fused_bracket", False)),
         "linear_arith": str(runtime.get("linear_arith", "fp64")),
         "nlapar": bool(runtime.get("nlapar", False)),
         "nlbpar": bool(runtime.get("nlbpar", False)),
@@ -534,6 +538,7 @@ def gkparams_from_config(config: Any, **overrides: Any) -> GKParams:
         "mixed_precision": bool(getattr(solver_cfg, "mixed_precision", True)),
         "use_z2z": bool(getattr(solver_cfg, "use_z2z", False)),
         "fused_linear": bool(getattr(solver_cfg, "fused_linear", False)),
+        "fused_bracket": bool(getattr(solver_cfg, "fused_bracket", False)),
         "linear_arith": str(getattr(solver_cfg, "linear_arith", "fp64")),
         "disable_per_ky_norm": bool(getattr(solver_cfg, "disable_per_ky_norm", False)),
         "beta": float(getattr(physics_cfg, "beta", 0.0)),

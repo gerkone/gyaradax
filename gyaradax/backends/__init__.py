@@ -26,7 +26,12 @@ def _load_cuda_backend():
 
 
 def create_ops(
-    pre, backend: str = "auto", use_z2z: bool = False, mixed_precision: bool = True, mesh=None
+    pre,
+    backend: str = "auto",
+    use_z2z: bool = False,
+    mixed_precision: bool = True,
+    mesh=None,
+    fused_bracket: bool = False,
 ) -> SolverOps:
     """Create a SolverOps instance for the given backend.
 
@@ -39,6 +44,7 @@ def create_ops(
                         Set to False for full FP64 accuracy.
         mesh: Device mesh of a sharded run (``sharding.build_mesh``); the
               bracket and the CUDA kernels then run on the local blocks.
+        fused_bracket: CUDA mixed-precision bracket packs and unpacks inside the cuFFT passes.
     """
     if backend == "jax":
         z2z_str = " (z2z)" if use_z2z else ""
@@ -65,7 +71,13 @@ def create_ops(
                 if is_available():
                     mp_str = " (mixed)" if mixed_precision else " (fp64)"
                     log.info("Backend: CUDA%s [Z2Z-only]", mp_str)
-                    return CUDAOps(pre, use_z2z=use_z2z, mixed_precision=mixed_precision, mesh=mesh)
+                    return CUDAOps(
+                        pre,
+                        use_z2z=use_z2z,
+                        mixed_precision=mixed_precision,
+                        mesh=mesh,
+                        fused_bracket=fused_bracket,
+                    )
                 if backend == "cuda":
                     raise RuntimeError("backend='cuda' but extensions not compiled")
                 warn_once(log, "backend 'auto' runs JAX on a GPU: the CUDA library is not built")
