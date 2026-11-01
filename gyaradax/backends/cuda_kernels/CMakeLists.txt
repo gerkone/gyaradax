@@ -124,6 +124,8 @@ target_link_libraries(gyaradax_cuda PRIVATE
 
 # ── Optional cuFFTDx (pip install nvidia-mathdx): v6 bracket ──────
 set(CUFFTDX_INCLUDE_DIR "" CACHE PATH "cuFFTDx include directory; empty = detect from Python")
+set(BRACKET_V6_NKY_MAX 192 CACHE STRING
+    "v6 bracket row kernels are built for the dealiased ky length of every nky up to this")
 if(NOT CUFFTDX_INCLUDE_DIR)
     execute_process(
         COMMAND ${Python3_EXECUTABLE} -c
@@ -155,14 +157,32 @@ if(CUFFTDX_INCLUDE_DIR AND EXISTS "${CUFFTDX_INCLUDE_DIR}/cufftdx.hpp")
     endforeach()
     list(REMOVE_DUPLICATES _dx_archs)
     string(REPLACE ";" ", " _dx_archs_csv "${_dx_archs}")
-    # nvcc splits -D values at commas, so the list goes through a generated header
-    file(WRITE ${CMAKE_BINARY_DIR}/gyx_dx_archs.h "#define GYX_DX_ARCHS ${_dx_archs_csv}\n")
+    # row FFT lengths: nl_mphi of every nky up to the max, plus a power of two all of them can pad to
+    execute_process(
+        COMMAND ${Python3_EXECUTABLE} -c
+            "import sys; sys.path.insert(0, sys.argv[1]); from gyaradax.operators.precompute import extended_firstdim_fft_size as f; m = int(sys.argv[2]); s = {f(n)[0] for n in range(1, m + 1)} | {max(4, 1 << (3 * m - 3).bit_length())}; print(', '.join(map(str, sorted(s))))"
+            ${CMAKE_CURRENT_SOURCE_DIR}/../../.. ${BRACKET_V6_NKY_MAX}
+        OUTPUT_VARIABLE _dx_sizes_csv
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        RESULT_VARIABLE _dx_sizes_exit)
+    if(NOT _dx_sizes_exit EQUAL 0 OR NOT _dx_sizes_csv)
+        message(FATAL_ERROR "Could not generate the v6 bracket sizes (BRACKET_V6_NKY_MAX=${BRACKET_V6_NKY_MAX})")
+    endif()
+    # nvcc splits -D values at commas, so the lists go through a generated header
+    file(CONFIGURE OUTPUT ${CMAKE_BINARY_DIR}/gyx_dx_config.h
+        CONTENT "#define GYX_DX_ARCHS ${_dx_archs_csv}\n#define GYX_DX_SIZES ${_dx_sizes_csv}\n")
 
     target_sources(gyaradax_cuda PRIVATE kernels/cufft_bracket_v6.cu)
+    # one nvcc thread per architecture for the many row kernels
+    set_source_files_properties(kernels/cufft_bracket_v6.cu PROPERTIES COMPILE_OPTIONS "--threads=0")
     target_include_directories(gyaradax_cuda PRIVATE
         ${CUFFTDX_INCLUDE_DIR}
         ${CUFFTDX_INCLUDE_DIR}/../external/cutlass/include)
-    message(STATUS "cuFFTDx:            ${CUFFTDX_INCLUDE_DIR} (v6 bracket for SM ${_dx_archs_csv})")
+    message(STATUS "cuFFTDx:            ${CUFFTDX_INCLUDE_DIR}")
+    message(STATUS "v6 bracket SM:      ${_dx_archs_csv}")
+    message(STATUS "v6 bracket nky:     <= ${BRACKET_V6_NKY_MAX} (BRACKET_V6_NKY_MAX), row FFT sizes")
+    message(STATUS "                    ${_dx_sizes_csv}")
+    message(STATUS "                    less those cuFFTDx needs a workspace for; `gyaradax info` lists the built ones")
 else()
     message(STATUS "cuFFTDx:            not found, v6 bracket disabled (pip install nvidia-mathdx)")
 endif()

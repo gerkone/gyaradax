@@ -7,7 +7,7 @@
 //   P3   cuFFT C2C forward along mrad, B = [mrad][b_df][nky], unpacked to [b_df, nkx, nky] by a store
 //        callback (FP64) or an explicit unpack kernel (FP32); both forms give bit-identical results
 //
-// Same FFI signature as the v5 bracket; unsupported sizes run the v5 pipeline.
+// Same FFI signature as the v5 bracket; row kernels for the GYX_DX_SIZES that need no cuFFTDx workspace.
 
 #include <cmath>
 #include <cstdio>
@@ -23,31 +23,15 @@
 
 #include "bracket_v5_lto_fatbins_decl.h"
 #include "bracket_v6_info.cuh"
-#include "gyx_dx_archs.h"
+#include "gyx_dx_config.h"
 
 namespace xla_ffi = xla::ffi;
-
-// v5 pipelines, used for configurations v6 does not instantiate
-xla_ffi::Error CufftGraphBracketTrueFp32Impl(
-    cudaStream_t, xla_ffi::Buffer<xla_ffi::DataType::C128>, xla_ffi::Buffer<xla_ffi::DataType::C128>,
-    xla_ffi::Buffer<xla_ffi::DataType::F64>, xla_ffi::Buffer<xla_ffi::DataType::F64>,
-    xla_ffi::Buffer<xla_ffi::DataType::S32>, xla_ffi::Buffer<xla_ffi::DataType::S32>,
-    xla_ffi::Buffer<xla_ffi::DataType::F64>, xla_ffi::Buffer<xla_ffi::DataType::F64>,
-    xla_ffi::Result<xla_ffi::Buffer<xla_ffi::DataType::C128>>,
-    int32_t, int32_t, int32_t, int32_t, int32_t, int32_t, int32_t, int32_t, int32_t, int32_t, int32_t, int32_t);
-xla_ffi::Error CufftGraphBracketFp64Impl(
-    cudaStream_t, xla_ffi::Buffer<xla_ffi::DataType::C128>, xla_ffi::Buffer<xla_ffi::DataType::C128>,
-    xla_ffi::Buffer<xla_ffi::DataType::F64>, xla_ffi::Buffer<xla_ffi::DataType::F64>,
-    xla_ffi::Buffer<xla_ffi::DataType::S32>, xla_ffi::Buffer<xla_ffi::DataType::S32>,
-    xla_ffi::Buffer<xla_ffi::DataType::F64>, xla_ffi::Buffer<xla_ffi::DataType::F64>,
-    xla_ffi::Result<xla_ffi::Buffer<xla_ffi::DataType::C128>>,
-    int32_t, int32_t, int32_t, int32_t, int32_t, int32_t, int32_t, int32_t, int32_t, int32_t, int32_t, int32_t);
 
 namespace {
 
 template <unsigned... Ns> struct V6List {};
 using V6Archs = V6List<GYX_DX_ARCHS>;
-using V6Sizes = V6List<16, 32, 36, 40, 64, 96, 128, 144, 192>;
+using V6Sizes = V6List<GYX_DX_SIZES>;
 
 template <class T> struct V6Prec;
 template <> struct V6Prec<float> {
@@ -79,11 +63,17 @@ struct V6RowArgs {
 };
 
 template <unsigned Arch, unsigned N, class T>
-struct V6Fft {
+struct V6Desc {
     using Base = decltype(cufftdx::Size<N>() + cufftdx::Precision<T>() +
                           cufftdx::Type<cufftdx::fft_type::c2c>() + cufftdx::Block() + cufftdx::SM<Arch>());
     using Probe = decltype(Base() + cufftdx::Direction<cufftdx::fft_direction::inverse>() +
                            cufftdx::FFTsPerBlock<1>());
+};
+
+template <unsigned Arch, unsigned N, class T>
+struct V6Fft {
+    using Base = typename V6Desc<Arch, N, T>::Base;
+    using Probe = typename V6Desc<Arch, N, T>::Probe;
     static constexpr unsigned fpb = Probe::block_dim.x >= 128 ? 1 : 128 / Probe::block_dim.x;
     using Inv = decltype(Base() + cufftdx::Direction<cufftdx::fft_direction::inverse>() +
                          cufftdx::ElementsPerThread<Probe::elements_per_thread>() + cufftdx::FFTsPerBlock<fpb>());
@@ -237,9 +227,12 @@ cudaError_t v6_launch_rows(const V6RowArgs<T>& args, cudaStream_t stream)
 template <class T, unsigned Arch, unsigned N, unsigned... Ns>
 bool v6_dispatch_size(unsigned mphi, const V6RowArgs<T>* args, cudaStream_t stream, cudaError_t* err)
 {
-    if (mphi == N) {
-        if (args) *err = v6_launch_rows<Arch, N, T>(*args, stream);
-        return true;
+    // sizes cuFFTDx runs only with a global workspace get no row kernels
+    if constexpr (!V6Desc<Arch, N, T>::Probe::requires_workspace) {
+        if (mphi == N) {
+            if (args) *err = v6_launch_rows<Arch, N, T>(*args, stream);
+            return true;
+        }
     }
     if constexpr (sizeof...(Ns) > 0) return v6_dispatch_size<T, Arch, Ns...>(mphi, args, stream, err);
     return false;
@@ -323,7 +316,7 @@ unsigned device_arch(int device)
     return (unsigned)(major * 100 + minor * 10);
 }
 
-// whether v6 instantiates these planes on this arch; otherwise the handler runs v5
+// whether v6 instantiates these planes on this arch; otherwise the caller runs v5
 template <class T>
 bool v6_supported(unsigned arch, int mphi, int b_df, int nky, int nsp, int b_inner, cudaStream_t stream)
 {
@@ -407,17 +400,10 @@ xla_ffi::Error BracketV6Impl(
     for (auto d : phi.dimensions()) phi_elems *= d;
     const int b_pot = (int)(phi_elems / ((size_t)nkx * nky));
     const int b_phi = em ? b_pot / 2 : b_pot;
-    if (!v6_supported<T>(arch, mphi, b_df, nky, nsp, b_inner, stream)) {
-        xla_ffi::Error e = xla_ffi::Error::Success();
-        if constexpr (fp64)
-            e = CufftGraphBracketFp64Impl(stream, df, phi, kx, ky, jind, inverse_jind, dum_s, vfac, out,
-                batch, mrad, mphi, nkx, nky, nspec, ixzero, iyzero, nsp, nv, b_inner, em);
-        else
-            e = CufftGraphBracketTrueFp32Impl(stream, df, phi, kx, ky, jind, inverse_jind, dum_s, vfac, out,
-                batch, mrad, mphi, nkx, nky, nspec, ixzero, iyzero, nsp, nv, b_inner, em);
-        if (e.failure()) return e;
-        return scale_out();
-    }
+    if (!v6_supported<T>(arch, mphi, b_df, nky, nsp, b_inner, stream))
+        return xla_ffi::Error(XLA_FFI_Error_Code_INVALID_ARGUMENT,
+            "bracket v6: no row kernel for mphi " + std::to_string(mphi) + ", SM " + std::to_string(arch) + ", "
+            + std::to_string(b_df) + " planes");
     if (b_df % nsp != 0 || (b_df / nsp) % b_inner != 0 || b_phi != nsp * b_inner || (em && b_pot != 2 * b_phi))
         return xla_ffi::Error(XLA_FFI_Error_Code_INVALID_ARGUMENT,
             "bracket: potential planes inconsistent with nsp/b_inner");
@@ -552,6 +538,30 @@ extern "C" int gyaradax_bracket_v6_supported(int fp64, int mphi, int b_df, int n
     const unsigned arch = device_arch(device);
     return fp64 ? v6_supported<double>(arch, mphi, b_df, nky, nsp, b_inner, nullptr)
                 : v6_supported<float>(arch, mphi, b_df, nky, nsp, b_inner, nullptr);
+}
+
+// SM values (e.g. 800, 1030) the v6 row kernels are built for
+extern "C" int gyaradax_bracket_v6_archs(int* out, int cap)
+{
+    const int archs[] = {GYX_DX_ARCHS};
+    int n = 0;
+    for (const int a : archs)
+        if (n < cap) out[n++] = a;
+    return n;
+}
+
+// row FFT sizes with v6 row kernels on SM sm (none when sm is not built)
+extern "C" int gyaradax_bracket_v6_sizes(int sm, int fp64, int* out, int cap)
+{
+    const int sizes[] = {GYX_DX_SIZES};
+    int n = 0;
+    cudaError_t no_err = cudaSuccess;
+    for (const int m : sizes) {
+        const bool ok = fp64 ? v6_dispatch_list<double>(V6Archs{}, (unsigned)sm, (unsigned)m, nullptr, nullptr, &no_err)
+                             : v6_dispatch_list<float>(V6Archs{}, (unsigned)sm, (unsigned)m, nullptr, nullptr, &no_err);
+        if (ok && n < cap) out[n++] = m;
+    }
+    return n;
 }
 
 // workspace cuFFT plans for the bracket's batched column transform of length m (0: one kernel); -1 on error

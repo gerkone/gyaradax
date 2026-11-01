@@ -12,6 +12,14 @@ import jax.numpy as jnp
 from gyaradax.core.state import GKPre
 from gyaradax.operators.fields import _compute_fields, g_to_f
 
+_warned = set()
+
+
+def warn_once(logger, msg: str) -> None:
+    if msg not in _warned:
+        _warned.add(msg)
+        logger.warning(msg)
+
 
 def em_chi_correction(ndim: int, pre, apar=None, bpar=None):
     """Velocity-dependent EM part of chi = J0*phi + chi_correction, or None."""

@@ -52,6 +52,25 @@ H100 and Blackwell, and the cuFFTDx bracket is instantiated for every kernel arc
 prints the target architectures, jaxlib and CUDA toolkit versions, and whether cuFFTDx was found;
 `gyaradax info` shows what the installed library provides (CUDA kernels, v6 bracket, NCCL).
 
+**cuFFTDx bracket.** With `nvidia-mathdx` (part of the `cuda13` extra) the library also gets the
+faster v6 Poisson bracket, whose row FFT kernels are generated for every `nky` up to
+`BRACKET_V6_NKY_MAX` (default 192) and every kernel architecture:
+```bash
+cmake .. -DCMAKE_BUILD_TYPE=Release -DGPU_ARCHITECTURES="80;90;103" -DBRACKET_V6_NKY_MAX=256
+```
+The default builds 38 row sizes; each costs ~3 s of compile time and ~0.3 MB of library for two
+architectures (the whole library: ~2 min with `-j`, 27 MB). Larger `nky`, a GPU architecture
+missing from the build, or a library built without cuFFTDx run the v5 bracket and log a warning
+saying why. `gyaradax info` lists the built architectures and sizes, e.g.
+```
+bracket     : v6 (cuFFTDx, SM 80, 103; v5 with a warning elsewhere)
+v6 sizes    : 4, 8, 16, 32, 36, 40, 64, 80, ..., 512, 576, 1024 (nky <= 342)
+```
+These row sizes are the only build-time grid limit. At run time, `--fused-linear` and
+`--linear-arith ds` (with their fused collisions) need ns <= 576 and fewer than 2^31 grid points per
+device, and otherwise fall back to the default kernels with a warning; every other kernel takes its
+sizes at run time.
+
 ## Structure
 
 - **`core/`**: Configuration and state pytrees (`params.py`, `state.py`), constants, JAX / XLA runtime setup.
