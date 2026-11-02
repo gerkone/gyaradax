@@ -254,3 +254,23 @@ def test_sigterm_in_time_mode_stops_on_a_frame_and_resumes_the_grid(tmp_path, ti
     np.testing.assert_allclose(times, np.arange(k + 4) * 0.013, rtol=0, atol=1e-12)
     meta = ds.load_metadata(traj)
     np.testing.assert_allclose(meta["timesteps"], np.arange(1, k + 4) * 0.013, rtol=0, atol=1e-12)
+
+
+def test_linear_run_with_a_dataset_writes_only_the_eigenmode_files(tmp_path, tiny_config):
+    from gyaradax.io import dataset as ds
+
+    cfg = OmegaConf.load(tiny_config)
+    cfg.solver.non_linear = False
+    path = tmp_path / "linear.yaml"
+    OmegaConf.save(cfg, path)
+    out, root = str(tmp_path / "lin"), str(tmp_path / "data")
+    _run(str(path), "--from-scratch", "--backend", "jax", "--n-steps", "12", "--block-size", "6",
+         "--output-dir", out, "--dataset", root, "--dataset-name", "case")
+    traj = ds.trajectory_path(root, "case")
+    assert os.listdir(traj) == ["data"]
+    assert sorted(os.listdir(os.path.join(traj, "data"))) == sorted(ds.LINEAR_FILES)
+    with np.load(os.path.join(out, "step_000012.npz")) as ck:
+        df = ck["df"]
+    shape = df.shape if df.ndim == 6 else (1, *df.shape)
+    lin = np.fromfile(os.path.join(traj, "data", "linear.bin"), np.float32).reshape((2, *shape))
+    np.testing.assert_allclose(lin[0] + 1j * lin[1], df.reshape(shape).astype(np.complex64), rtol=1e-6, atol=1e-30)

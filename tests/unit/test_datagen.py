@@ -1,6 +1,5 @@
 """gyaradax datagen: configs on the local GPUs, one run each, finished runs skipped."""
 
-import json
 import os
 import subprocess
 
@@ -25,7 +24,7 @@ def test_configs_run_one_per_gpu_and_finished_runs_are_skipped(tmp_path, monkeyp
         configs.append(str(path))
     out = tmp_path / "out"
     (out / "c").mkdir(parents=True)
-    (out / "c" / "outcome.json").write_text(json.dumps({"final": True}))
+    (out / "c" / datagen.EXIT_FILE).write_text("0\n")
     (out / "b").mkdir()
     (out / "b" / "config.yaml").write_text("run: {}\n")
     argv = [*configs, "--out", str(out), "--gpus", "0,1", "--dataset", str(tmp_path / "data"), "--poll", "0"]
@@ -36,3 +35,5 @@ def test_configs_run_one_per_gpu_and_finished_runs_are_skipped(tmp_path, monkeyp
     assert by_name["a"][4] == configs[0] and by_name["a"][by_name["a"].index("--dataset-name") + 1] == "a"
     assert by_name["b"][4] == str(out / "b") and "--dataset" not in by_name["b"]
     assert {c[c.index("--device") + 1] for c in calls} <= {"0", "1"}
+    # every run leaves its exit code; a finished run is skipped next time
+    assert (out / "a" / datagen.EXIT_FILE).read_text() == "0\n"

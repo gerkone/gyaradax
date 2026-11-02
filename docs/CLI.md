@@ -63,7 +63,6 @@ Every run writes into its output directory (`--output-dir`, default
 | `step_NNNNNN.npz` | restart snapshot (df, phi, state), refreshed every `--snapshot-every` blocks and after the last; `--save-dumps` keeps them all |
 | `run_info.jsonl` | one line per invocation: command, host, git revision, start and target step |
 | `telemetry.jsonl`, `profile/`, `profile_summary.json` | debug output, see below |
-| `linear_gate.json`, `linear_mode.npz`, `outcome.json`, `monitor_series.npz` | run outcome, with the flags of "Run outcome" below |
 
 SIGTERM stops a run after the block in progress and its snapshot, with exit code 75 (a second
 SIGTERM exits at once); resuming the directory continues it from there. The dataset statistics
@@ -134,7 +133,7 @@ conversion are needed:
 
 ```bash
 gyaradax run configs/kinetic_603.yaml --dataset /data/preprocessed/kinetic \
-    --dataset-name iteration_603_dp4
+    --dataset-name my_case
 ```
 
 - The trajectory belongs to the run directory that created it (`.gyaradax_run`). An existing
@@ -163,7 +162,7 @@ gyaradax run configs/kinetic_603.yaml --dataset /data/preprocessed/kinetic \
   recompute them with:
 
   ```bash
-  gyaradax dataset-stats /data/preprocessed/kinetic/iteration_603_dp4_ifft_realpotens --from-time 40
+  gyaradax dataset-stats /data/preprocessed/kinetic/my_case_ifft_realpotens --from-time 40
   ```
 
 - The settings are stored in the run's `config.yaml` (`dataset:` section): resuming the run
@@ -178,8 +177,8 @@ gyaradax run configs/kinetic_603.yaml --dataset /data/preprocessed/kinetic \
 - A trajectory can be extended from its resume dump without its run directory:
 
   ```bash
-  gyaradax run DIR/iteration_603_dp4_ifft_realpotens --t-end 600 --output-dir outputs_603_more
-  gyaradax run my_case.yaml --resume-from DIR/iteration_603_dp4_ifft_realpotens --n-blocks 50
+  gyaradax run DIR/my_case_ifft_realpotens --t-end 600 --output-dir outputs_my_case_more
+  gyaradax run my_case.yaml --resume-from DIR/my_case_ifft_realpotens --n-blocks 50
   ```
 
   The first form runs the dump's own config; the second a config of your choice. Frames are
@@ -188,8 +187,11 @@ gyaradax run configs/kinetic_603.yaml --dataset /data/preprocessed/kinetic \
   continuation into a new trajectory instead. From an `f64` dump the continuation is bitwise the
   run that never stopped; from `f32` it starts from df rounded to complex64.
 - Electromagnetic fields (A_par, B_par) are not written yet.
-- With `--linear-gate` the trajectory also holds the linear eigenmode and the linear results, and
-  with any outcome flag the full per-frame traces and the outcome (see "Run outcome").
+- A linear config (`solver.non_linear: false`) writes no frames: when the run completes, its final
+  state, the eigenmode, goes into the trajectory as `data/linear.bin` (df, (re/im, species, vpar,
+  mu, s, kx, ky)) and `data/linear_poten.bin` (phi, (re/im, s, kx, ky)), float32, in spectral
+  space. Nothing else of the trajectory changes, so a linear run with the `--dataset-name` of a
+  nonlinear trajectory adds its eigenmode to it.
 
 ## Debugging: telemetry and profiling
 
@@ -337,175 +339,14 @@ process started (setup included), for the busiest GPU of a mesh.
   bracket are available, and whether NCCL is installed.
 - Details and measurements: `docs/NOTES.md` §13.
 
-## Linear growth check
+## Banding stop
 
-A linear run of a config gives per-ky growth rates γ(kθρ). Run at a finer parallel resolution, it
-is a ground truth for the production grid and dissipation: if γ at the production `ns` matches
-γ at `ns 36`, the parallel direction is resolved for that parameter point; if a dissipation
-change (e.g. `solver.disp_par`) moves γ away from it, the change alters the physics.
-
-```bash
-gyaradax growth my_case.yaml --ns 18 36                      # one linear run per resolution
-gyaradax growth my_case.yaml --ns 18 36 --set solver.disp_par=4.0 --output growth.json
-gyaradax run my_case.yaml --linear-check 36                  # check, then the nonlinear run
-gyaradax run my_case.yaml --linear-check 24,36 --linear-check-tol 0.1
-```
-
-- **Linear run.** `solver.non_linear` is switched off, the geometry is computed from the
-  config, and `--ns N` sets `grid.ns` (with `geometry.sgr_dist` scaled to keep the field-line
-  length). `--set KEY=VALUE` overrides any other entry. The run is unsharded on one GPU.
-- **Time step.** Capped at the linear stability estimate (`estimate_linear_timestep`), as GKW does
-  for every explicit run; the input `solver.dt` is kept when it is below the estimate.
-- **Stop.** After `t ≥ 15`, once the unstable ky (kθρ ≤ 1, γ > 0.02) vary by less than 0.005
-  over 6 time units, or at `--t-end` (default 40). γ is the mean over those last 6 time units; a
-  row marked "not settled" reached `--t-end` first.
-- **Report.** Per resolution: the peak γ and its kθρ, γ at the dominant kθρ of the finest
-  resolution (the reference), and the relative deviation from it.
-- **`run --linear-check NS[,NS...]`** (off by default) runs this before the nonlinear run, at the
-  run's own `ns` and the listed ones, writes `RUN_DIR/linear_check.json` and prints the table.
-  A resumed run reuses the file while the physics of the config is unchanged (its name, length,
-  backend and layout do not count). With `--linear-check-tol X` the run exits with code 3,
-  without starting, when the deviation exceeds `X`; without it the check only reports.
-  `--linear-check-t-end` caps each linear run.
-
-## Run outcome: linear gate, decay and banding
-
-For campaigns near the turbulence threshold, `gyaradax run` can skip linearly stable configs,
-stop runs whose turbulence has died out, and flag (or stop) runs with the s-Nyquist banding
-mode. All of it is off by default; without these flags a run is bitwise what it was.
-
-```bash
-gyaradax run my_case.yaml --linear-gate --stop-on-decay --dataset DIR    # the low-drive campaign
-gyaradax run my_case.yaml --track-outcome                                # record only
-gyaradax run my_case.yaml --stop-on-banding --banding-threshold 0.3
-```
-
-**Linear gate** (`--linear-gate`). Before the nonlinear run, a linear run of the config on its own
-grid (`solver.non_linear` off, unsharded, time step capped at the linear stability estimate, as
-`gyaradax growth`). It stops once the growth rates of every ky > 0 vary by less than 0.005 over
-6 time units after t = 15, or at `--linear-gate-t-end` (default 60).
-
-| Decision | Condition | Effect |
-|---|---|---|
-| `stable` | settled, and the largest γ is below `--linear-gate-stable` (default -0.01) | exit 4, no nonlinear run |
-| `unstable` | the largest γ is above `--linear-gate-gamma-min` (default 0.02) | the nonlinear run goes ahead |
-| `ambiguous` | anything else: between the two, or not settled | the nonlinear run goes ahead |
-
-The gate only ever skips stable configs: linearly unstable does not mean turbulent (Dimits
-shift), and the nonlinear run decides that.
-
-- `RUN_DIR/linear_gate.json`: ky, γ(ky) and its spread over the last 6 time units, the real
-  frequency ω(ky) and its spread, `settled`, `gamma_max`, `peak_ky`, `omega_peak`,
-  `gamma_max_lowky`, `peak_ky_lowky`, the end time,
-  time steps and wall time, and the decision. ω = d arg(Σ φ)/dt with GKW's sign
-  (`diagnos_growth_freq`), the sum over s and the kx chain through kx = 0, measured over four
-  10-step blocks after the growth rates settled.
-- `RUN_DIR/linear_mode.npz`: the final linear eigenmode, df (complex64) and φ, normalized per
-  connected kx chain as the linear solver keeps it.
-- Both are reused on resume while the physics of the config is unchanged (as `--linear-check`);
-  changed thresholds re-decide from the cached rates.
-- With `--dataset`, the trajectory gets the eigenmode in the layout of the adiabatic dataset's
-  paired linear runs (`data/linear.bin`, `data/linear_k.bin`): raw float32, `linear.bin` in real
-  space with the shape of a df frame (`linear_shape`, here with the species axis), `linear_k.bin`
-  the spectral df as re/im (`linear_k_bin_shape`), plus `data/linear_poten.bin`, φ in real space
-  (x, s, y). The metadata carries `linear_bin`, `linear_space: real`, `linear_k_bin`, the
-  `linear_rms*` moments of neugk's `linear_moments` (a species axis is reduced with the others),
-  and `linear_ky`, `linear_gamma`, `linear_gamma_std`, `linear_omega`, `linear_omega_std`,
-  `linear_settled`, `linear_peak_ky`, `linear_gamma_max`, `linear_gamma_max_lowky`,
-  `linear_low_ky`, `linear_gate` (the decision), `linear_t` (end of the linear run),
-  `linear_time` (time of the stored eigenmode), `linear_source`, `linear_dt` (the linear time
-  step), and the fluxes of the final eigenmode below.
-- **Eigenmode fluxes.** `linear_gate.json` also holds `mode_fluxes`: the flux integrals of the
-  solver diagnostics on the final eigenmode (physical f, plus the A_par / B_par flutter parts),
-  per species, channel (particle, heat, momentum) and ky. In the metadata, in the `flux_labels`
-  layout: `linear_flux` (the sum over ky and kx), `linear_flux_ky` (`flux_labels` x ky, summed
-  over kx), `linear_phi2_ky` (|φ|² averaged over the flux surface, summed over kx), the same over
-  the kx chain through kx = 0 alone (`linear_flux_ky_chain0`, `linear_phi2_ky_chain0`: the mode
-  whose γ and ω are reported), and the quasilinear weights `linear_weight_ky` =
-  `linear_flux_ky_chain0 / linear_phi2_ky_chain0` and `linear_weight_ky_allkx` =
-  `linear_flux_ky / linear_phi2_ky` (nan where |φ|² is 0). The linear run normalizes every kx
-  chain to unit amplitude on its own, so fluxes and |φ|² have arbitrary size and only their
-  ratios within a chain are physical; the all-kx weight averages the chains with equal weight.
-- **Linear only** (`--linear-only`). The linear run of the gate alone, with no nonlinear run and
-  no trajectory: `RUN_DIR/linear.json` (the `linear_gate.json` document plus the config, the
-  eigenmode time and the file shapes) and the eigenmode as `RUN_DIR/data/linear.bin`,
-  `linear_k.bin` and `linear_poten.bin` (the trajectory layout above; `linear_mode.npz` is removed
-  once they are written). `outcome.json` gets class `linear_only` and the run exits 0. A repeat with
-  the outputs present returns at once. `gyaradax.io.dataset.attach_linear` adds such a staged
-  eigenmode to an existing trajectory (files and `linear_*` keys only, metadata backed up).
-- **Low-ky peak.** `gamma_max` and the decision use every ky > 0 of the grid. `gamma_max_lowky`
-  and `peak_ky_lowky` are the same over kθρ <= `--linear-gate-low-ky` (default 1.0), reported
-  alongside (in `linear_gate.json`, the trajectory metadata and the `outcomes` table) to see
-  whether a high-ky branch, possibly spurious on the coarse grid, is what keeps a case unstable.
-- **Stable jobs still get a trajectory** (with `--dataset`): the static metadata of any
-  trajectory, the linear results and eigenmode files above, `stable: True`, `frame_source:
-  linear` and `outcome`, and one data frame (`timestep_00000` / `poten_00000` and the per-frame
-  series) holding the final linear state: df and φ of `linear_mode.npz`, at the linear run's end
-  time, solver step 0, its fluxes (of the normalized eigenmode, so their size is arbitrary) and
-  γ(ky) as the growth rate. Like the stored stable runs (e.g. `iteration_502`, a single frame) it
-  gives the loaders no training pairs; no zero-frame trajectory is written. It has no resume
-  dump: a nonlinear leg should not start from the eigenmode.
-
-**Outcome tracking.** Any of `--linear-gate`, `--stop-on-decay`, `--stop-on-banding`,
-`--track-outcome` or `--dataset-from-flux` follows the run frame by frame:
-
-- `RUN_DIR/monitor_series.npz`: per frame the time, step, fluxes, growth rates and the s-Nyquist
-  shares of φ. A resumed leg continues it from its start step.
-- `RUN_DIR/outcome.json`, rewritten every frame: the outcome class, a one-line `label`, the
-  stop reason, frames and time reached, the heat-flux peak and last value, the banding flag and
-  the time it was first flagged, the last and largest zonal s-Nyquist share, and the flux
-  averages. The flags are command-line only, so the next leg needs them again.
-
-| Class | Meaning |
-|---|---|
-| `linear_stable` | skipped by the linear gate |
-| `linear_only` | `--linear-only`: the linear run alone |
-| `decayed` | stopped by `--stop-on-decay` |
-| `banded` | banding flagged (stopped or not) |
-| `flat` | mean heat flux over the averaging window below `--decay-floor` |
-| `growing` / `decaying` | the heat flux drifts by more than 20% of its mean over the window, at two standard errors |
-| `saturated` | none of the above |
-| `running` | the run has not finished (an interrupted leg) |
-
-**Flux averages.** Over the last 30% of the run time (the whole series, all legs): the mean of
-every flux (per species: particle, heat, momentum) and of the total heat flux, the batch-means
-error (5 consecutive batches, standard error of their means), and the trend: a line fitted to the
-batch means, its change over the window relative to the mean (`drift`) and that change in
-standard errors (`drift_sigma`).
-
-**Stop on decay** (`--stop-on-decay`, exit 5). After `--decay-t-min` (default 30) the run stops
-once the total heat flux has stayed below the floor for `--decay-window` frames (default 5) and
-still falls over them (negative slope of log Q, and the last frame below the first). The floor is
-the larger of `--decay-floor` (default 1e-3, gyro-Bohm) and `--decay-rel-floor` (default 1e-3)
-times the peak heat flux. The falling condition keeps a slow linear phase, small but rising, from
-counting. The stop frame gets a snapshot, so the run directory can still be extended (without the
-flag). With `--dataset` the trajectory then keeps only that last frame (renumbered 0, as the
-stored stable runs), unless `--decay-keep-frames`.
-
-**Banding** (`--track-outcome`, `--stop-on-banding`). Per frame, φ in real space (x, s, y), the
-stored-frame transform: zonal part = mean over y; its FFT along s; the zonal share is the power at
-index ns // 2 summed over x, over the total zonal power. The non-zonal share is the same for φ
-minus its zonal part. Banding is flagged once the zonal share exceeds `--banding-threshold`
-(default 0.3) for `--banding-window` frames in a row (default 3). With `--stop-on-banding` the run
-stops there (exit 6); otherwise it is only recorded.
-
-**Deferred dataset frames** (`--dataset-from-flux Q`). Dataset frames are written only from the
-first frame whose total heat flux reaches Q. A run that never does, or stops first, still writes
-its last frame. The run directory diagnostics are complete either way.
-
-**Trajectory metadata.** With any of these flags and `--dataset`, the metadata also holds the
-full per-frame traces of the run (including frames not stored): `trace_timesteps`,
-`trace_solver_steps`, `trace_flux` (frames x `flux_labels`), `trace_growth`, `trace_nyq_zonal`,
-`trace_nyq_nonzonal`, plus `outcome` (the `outcome.json` document) and `stable` (class
-`linear_stable`, `decayed` or `flat`).
-
-| Exit code | Meaning |
-|---|---|
-| 4 | linearly stable, nonlinear run skipped (`--linear-gate`) |
-| 5 | stopped on decay (`--stop-on-decay`) |
-| 6 | stopped on banding (`--stop-on-banding`) |
-
-These flags take one config: they are refused for batched runs.
+`--stop-on-banding` stops a run whose zonal potential piles up at the parallel Nyquist mode. Per
+frame, phi in real space (x, s, y) is split into its zonal part (the y mean) and the rest; the
+zonal share of the power at the s-Nyquist index (ns / 2) over the zonal power is checked against
+0.3. Above it for 3 frames in a row, the run ends on that frame with its snapshot, logs an error
+with the share and the time, and exits with code 6. The flag takes one config: it is refused for
+batched runs.
 
 ## Data generation (`gyaradax datagen`)
 
@@ -514,13 +355,15 @@ config and one config per GPU at a time, and collects their trajectories in a da
 
 ```bash
 gyaradax datagen configs/scan/*.yaml --out runs/scan --gpus 0,1,2,3 --dataset /data/kinetic \
-    --args "--backend cuda --linear-gate --stop-on-decay"
+    --args "--backend cuda --stop-on-banding"
 ```
 
 Each config runs in `OUT/<name>` (`<name>` is the file name without `.yaml`) and, with
 `--dataset`, writes the trajectory `<name>`; its output goes to `OUT/<name>.log`. Running the same
-command again skips the configs whose `outcome.json` is final and continues the others from their
-last snapshot (`gyaradax run OUT/<name>`). Scheduling over several machines is left to the
+command again skips the configs whose last run completed, diverged or banded (exit code 0, 2 or 6,
+kept in `OUT/<name>/datagen_exit`) and continues the others from their last snapshot
+(`gyaradax run OUT/<name>`). Linear configs run the same way and leave their eigenmode in the
+trajectory. Scheduling over several machines is left to the
 cluster's own tools: each `gyaradax run` is self-contained and resumable.
 
 ## Legacy entry point

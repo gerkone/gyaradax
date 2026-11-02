@@ -379,9 +379,8 @@ def gksimulate(
     run ends on the first frame at or after ``t_end``, or without ``t_end`` on the first
     frame at or after ``n_steps`` steps; ``checkpoint_interval`` is unused.
 
-    ``monitor`` (an ``outcome.RunMonitor``) sees every frame; when it reports a reason to stop
-    (decay, banding) the run ends on that frame with its snapshot, and it decides which frames
-    go to ``dataset``.
+    ``monitor`` (e.g. a ``banding.BandingStop``) sees every frame; when it reports a reason to
+    stop the run ends on that frame with its snapshot.
 
     Returns:
         (df, phi, fluxes, state)
@@ -587,7 +586,7 @@ def _simulate(
     current_phi: Any = None
     current_fluxes: Any = None
     alive = [True] * len(runs)
-    # why a run left the loop early on its own: decayed, banded (None: diverged)
+    # why a run left the loop early on its own, e.g. banded (None: diverged)
     ended: List[Optional[str]] = [None] * len(runs)
     stopped: List[Optional[Tuple[int, float]]] = [None] * len(runs)
     previous = [run["previous_snapshot"] for run in runs]
@@ -710,11 +709,7 @@ def _simulate(
                             os.remove(previous[i])
                     previous[i] = latest
 
-            writes = run["dataset"] is not None and (
-                monitor is None
-                or monitor.write_frame(run["dataset"].n_frames, final=stop_reason is not None)
-            )
-            if writes:
+            if run["dataset"] is not None:
                 _dataset_frame(run, d, view(current_phi, i), view(current_fluxes, i), st)
 
             log_step(
@@ -752,20 +747,6 @@ def _simulate(
                 status = status if alive[i] else (ended[i] or "diverged")
                 run["telemetry"].close(wall, steps, status)
     for i, run in enumerate(runs):
-        monitor = run["monitor"]
-        if monitor is not None:
-            writer = run["dataset"]
-            # a run whose frames waited for turbulence that never came keeps its last frame
-            if writer is not None and not interrupted and blocks_done and writer.n_frames == 0:
-                if alive[i] or ended[i]:
-                    _dataset_frame(
-                        run,
-                        view(current_df, i),
-                        view(current_phi, i),
-                        view(current_fluxes, i),
-                        view(current_state, i),
-                    )
-            monitor.finish(writer, final=not interrupted)
         if run["dataset"] is None:
             continue
         # an interrupted run leaves the statistics to the leg that completes it

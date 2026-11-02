@@ -1,30 +1,32 @@
 """``gyaradax datagen``: run a list of configs on the GPUs of this machine and collect a dataset.
 
 One ``gyaradax run`` per config, one config per GPU at a time. Each config gets the run
-directory ``OUT/<name>`` and, with ``--dataset``, the trajectory ``<name>``. A repeat skips the
-configs whose run finished and continues the others from their last snapshot.
+directory ``OUT/<name>`` and, with ``--dataset``, the trajectory ``<name>`` (frames of a nonlinear
+config, the eigenmode files of a linear one). A repeat skips the configs whose run finished,
+diverged or banded and continues the others from their last snapshot.
 """
 
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import shlex
 import subprocess
 import sys
 import time
 
-# outcome.json of a finished run
-OUTCOME_FILE = "outcome.json"
+# exit code of the run's last leg, written by datagen
+EXIT_FILE = "datagen_exit"
+# completed, diverged or banded: a repeat skips them; any other code (75: interrupted) resumes
+FINAL_CODES = (0, 2, 6)
 
 
 def _finished(run_dir: str) -> bool:
-    path = os.path.join(run_dir, OUTCOME_FILE)
+    path = os.path.join(run_dir, EXIT_FILE)
     if not os.path.isfile(path):
         return False
     with open(path) as fh:
-        return bool(json.load(fh).get("final"))
+        return int(fh.read().strip() or -1) in FINAL_CODES
 
 
 def _command(config: str, run_dir: str, gpu: str, args: argparse.Namespace) -> list[str]:
@@ -43,7 +45,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--out", required=True, help="directory of the run directories and logs")
     p.add_argument("--gpus", default="0", help="comma-separated GPU indices to use (default 0)")
     p.add_argument("--dataset", default=None, help="write each run's trajectory under this directory")
-    p.add_argument("--args", default=None, help="extra `gyaradax run` arguments, e.g. '--linear-gate'")
+    p.add_argument("--args", default=None, help="extra `gyaradax run` arguments, e.g. '--stop-on-banding'")
     p.add_argument("--poll", type=float, default=10.0, help="seconds between checks (default 10)")
     args = p.parse_args(argv)
 
@@ -74,6 +76,10 @@ def main(argv: list[str] | None = None) -> int:
                 continue
             del running[name]
             free.append(gpu)
+            run_dir = os.path.join(args.out, name)
+            os.makedirs(run_dir, exist_ok=True)
+            with open(os.path.join(run_dir, EXIT_FILE), "w") as fh:
+                fh.write(f"{code}\n")
             failed += code != 0
             print(f"{name}: exit {code}", flush=True)
     return 1 if failed else 0

@@ -19,7 +19,6 @@ from jax.sharding import PartitionSpec
 
 import gyaradax.operators.stencils as stencils
 import gyaradax.sharding as sharding
-from gyaradax.backends import cuda_lib
 from gyaradax.backends.ops import SolverOps
 from gyaradax.core.state import GKPre
 from gyaradax.operators.collisions import collision_term, collisions_on
@@ -27,7 +26,8 @@ from gyaradax.operators.fields import g_to_f
 
 log = logging.getLogger(__name__)
 
-LIB_PATH = cuda_lib.resolve()
+_CUDA_KERNELS_DIR = Path(__file__).parent / "cuda_kernels"
+LIB_PATH = _CUDA_KERNELS_DIR / "libgyaradax_cuda.so"
 _ffi_registered = False
 # set when the library carries the cuFFTDx (v6) bracket; GYARADAX_BRACKET=v5 forces the v5 pipeline
 _has_bracket_v6 = False
@@ -77,20 +77,8 @@ def _register_ffi():
 
 
 def is_available():
-    """Check if CUDA FFI kernels are compiled for the GPU present."""
-    if not LIB_PATH.exists():
-        return False
-    try:
-        devices = jax.devices("cuda")
-    except RuntimeError:
-        return False
-    archs = cuda_lib.build_info(LIB_PATH).get("archs")
-    if archs and devices:
-        cc = int(str(getattr(devices[0], "compute_capability", "0")).replace(".", ""))
-        if cc not in archs:
-            log.warning("%s is built for sm %s, not this GPU's sm %d", LIB_PATH, archs, cc)
-            return False
-    return bool(devices)
+    """Check if CUDA FFI kernels are compiled and a GPU is present."""
+    return LIB_PATH.exists() and bool(jax.devices("cuda"))
 
 
 @jax.tree_util.register_pytree_node_class

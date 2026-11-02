@@ -1,4 +1,4 @@
-"""gyaradax command-line interface: ``run``, ``bench``, ``growth``, ``info``, ``build-cuda``,
+"""gyaradax command-line interface: ``run``, ``bench``, ``info``, ``convert``, ``dataset-stats``,
 ``datagen``.
 
 Run mode (adiabatic/kinetic), electromagnetic terms and velocity-space
@@ -226,306 +226,6 @@ def _default_output_dir(cfg: Any, args: argparse.Namespace, run_dir: str | None)
     kinetic = not bool((cfg.get("grid") or {}).get("adiabatic_electrons", True))
     default = f"outputs_{'kinetic' if kinetic else 'adiabatic'}_{cfg.run.name}"
     return args.output_dir or run_dir or default
-
-
-def _parse_sets(items: Sequence[str] | None) -> dict[str, Any]:
-    import yaml
-
-    out: dict[str, Any] = {}
-    for item in items or []:
-        key, sep, value = item.partition("=")
-        if not sep or not key.strip():
-            raise SystemExit(f"error: --set expects KEY=VALUE, got {item!r}")
-        out[key.strip()] = yaml.safe_load(value)
-    return out
-
-
-def _parse_ns_list(text: str) -> list[int]:
-    try:
-        values = [int(v) for v in text.replace(",", " ").split()]
-    except ValueError:
-        raise SystemExit(f"error: expected resolutions like 36 or 24,36, got {text!r}")
-    if not values or min(values) < 2:
-        raise SystemExit(f"error: expected resolutions like 36 or 24,36, got {text!r}")
-    return values
-
-
-def _progress(every: int = 10) -> Any:
-    count = [0]
-
-    def log(msg: str) -> None:
-        count[0] += 1
-        if count[0] % every == 0:
-            print(f"    {msg}", flush=True)
-
-    return log
-
-
-def _linear_check(args: argparse.Namespace, config_path: str, run_dir: str | None) -> int:
-    """Linear growth rates at the run's ns and the reference ones, cached in the run directory."""
-    from gyaradax.diagnostics import growth
-
-    cfg = OmegaConf.load(config_path)
-    output_dir = _default_output_dir(cfg, args, run_dir)
-    path = os.path.join(output_dir, "linear_check.json")
-    refs = _parse_ns_list(args.linear_check)
-    key = growth.config_key(growth.adjusted_config(cfg))
-    report = None
-    if os.path.isfile(path):
-        with open(path) as fh:
-            cached = json.load(fh)
-        have = {int(r["ns"]) for r in cached.get("runs", [])}
-        if cached.get("config_key") == key and set(refs) | {int(cfg.grid.ns)} <= have:
-            report = cached
-            print(f"linear check: {path} (computed before)")
-    if report is None:
-        print(f"linear check: growth rates at ns {int(cfg.grid.ns)} and reference ns {refs}")
-        report = growth.check(
-            cfg, refs, backend=args.backend, log=_progress(), t_end=args.linear_check_t_end
-        )
-        os.makedirs(output_dir, exist_ok=True)
-        tmp = path + ".tmp"
-        with open(tmp, "w") as fh:
-            json.dump(report, fh, indent=1)
-        os.replace(tmp, path)
-    print(growth.format_check(report))
-    own = report["comparison"][str(report["ns"])]
-    tol = args.linear_check_tol
-    if tol is not None and own["rel"] is not None and abs(own["rel"]) > tol:
-        print(
-            f"exit {growth.EXIT_LINEAR_CHECK}: γ at kθρ {own['ky']:.3f} is {own['gamma']:+.4f} "
-            f"at ns {report['ns']} against {own['gamma_ref']:+.4f} at ns {report['reference_ns']} "
-            f"({own['rel']:+.1%}, tolerance {tol:.1%}); not starting the nonlinear run"
-        )
-        return growth.EXIT_LINEAR_CHECK
-    return 0
-
-
-def _linear_gate(args: argparse.Namespace, config_path: str, run_dir: str | None) -> dict[str, Any]:
-    """Linear run of the config on its own grid, cached in the run directory with its eigenmode."""
-    import numpy as np
-
-    from gyaradax.diagnostics import growth, outcome
-
-    cfg = OmegaConf.load(config_path)
-    mesh = _mesh_request(args, _peek_config(config_path))
-    output_dir = _default_output_dir(cfg, args, run_dir)
-    path = os.path.join(output_dir, outcome.GATE_FILE)
-    mode_path = os.path.join(output_dir, outcome.MODE_FILE)
-    key = growth.config_key(growth.adjusted_config(cfg))
-    gate = None
-    if os.path.isfile(path) and os.path.isfile(mode_path):
-        with open(path) as fh:
-            cached = json.load(fh)
-        if cached.get("config_key") == key:
-            gate = cached
-            print(f"linear gate: {path} (computed before)")
-    if gate is None:
-        print(
-            f"linear gate: linear run on the config's grid (t_end {args.linear_gate_t_end:g}, "
-            f"mesh sp, vp, mu = {mesh})"
-        )
-        t0 = time.time()
-        result = growth.growth_rates(
-            cfg,
-            None,
-            backend=args.backend,
-            log=_progress(),
-            t_end=args.linear_gate_t_end,
-            ky_max=math.inf,
-            frequencies=True,
-            keep_mode=True,
-            mesh=mesh,
-        )
-        mode = result.pop("mode")
-        result["wall_s"] = time.time() - t0
-        os.makedirs(output_dir, exist_ok=True)
-        tmp = f"{mode_path}.tmp{os.getpid()}.npz"
-        np.savez(tmp, df=mode["df"].astype(np.complex64), phi=mode["phi"], time=mode["time"])
-        os.replace(tmp, mode_path)
-        gate = result
-    gate = outcome.gate_report(
-        gate, args.linear_gate_stable, args.linear_gate_gamma_min, args.linear_gate_low_ky
-    )
-    os.makedirs(output_dir, exist_ok=True)
-    outcome._atomic_json(path, gate)
-    print(outcome.format_gate(gate))
-    return gate
-
-
-def _linear_only(args: argparse.Namespace, config_path: str, run_dir: str | None) -> int:
-    """The linear gate alone: RUN_DIR/linear.json and the eigenmode as RUN_DIR/data/linear*.bin."""
-    import numpy as np
-
-    from gyaradax.diagnostics import growth, outcome
-    from gyaradax.io.dataset import LINEAR_FILES, linear_frames, write_linear_frames
-
-    cfg = OmegaConf.load(config_path)
-    output_dir = _default_output_dir(cfg, args, run_dir)
-    path = os.path.join(output_dir, outcome.LINEAR_FILE)
-    data_dir = os.path.join(output_dir, "data")
-    key = growth.config_key(growth.adjusted_config(cfg))
-    have = all(os.path.isfile(os.path.join(data_dir, n)) for n in LINEAR_FILES)
-    if have and os.path.isfile(path):
-        with open(path) as fh:
-            done = json.load(fh)
-        if done.get("config_key") == key:
-            print(f"linear only: {path} (computed before)")
-            print(outcome.format_gate(done))
-            return 0
-    gate = _linear_gate(args, config_path, run_dir)
-    mode_path = os.path.join(output_dir, outcome.MODE_FILE)
-    with np.load(mode_path) as mode:
-        frames = linear_frames(mode["df"], mode["phi"])
-        mode_time = float(mode["time"])
-    write_linear_frames(data_dir, frames)
-    doc = {
-        **gate,
-        "config": os.path.abspath(config_path),
-        "mode_time": mode_time,
-        "files": {f"data/{n}": list(a.shape) for n, a in zip(LINEAR_FILES, frames)},
-    }
-    outcome._atomic_json(path, doc)
-    outcome.gate_outcome(output_dir, gate, cls="linear_only")
-    # the eigenmode now lives in data/
-    os.remove(mode_path)
-    print(f"linear only: {path} and {data_dir}/linear*.bin; not starting the nonlinear run")
-    return 0
-
-
-def _stable_trajectory(
-    args: argparse.Namespace,
-    config_path: str,
-    run_dir: str | None,
-    gate: dict[str, Any],
-    doc: dict[str, Any],
-) -> None:
-    """Dataset trajectory of a run the linear gate skipped: its final linear state as the one frame.
-
-    The trajectory holds the run's static metadata, the linear results and eigenmode files, and
-    ``stable``; it gets no resume dump, since a nonlinear leg should not start from the eigenmode.
-    """
-    from types import SimpleNamespace
-
-    import jax.numpy as jnp
-    import numpy as np
-
-    from gyaradax.diagnostics.outcome import MODE_FILE
-    from gyaradax.io.rundir import save_run_metadata
-    from gyaradax.solver.driver import _dataset_frame
-
-    setup = _setup_run(config_path, args, run_dir=run_dir)
-    if setup["dataset"] is None:
-        return
-    save_run_metadata(setup["output_dir"], setup["effective_config"], setup["geometry"])
-    writer = _dataset_writer(setup, gate)
-    with np.load(os.path.join(setup["output_dir"], MODE_FILE)) as mode:
-        df = jnp.asarray(mode["df"]).astype(jnp.complex128)
-        phi = jnp.asarray(mode["phi"])
-        t = float(mode["time"])
-    run = {
-        "dataset": writer,
-        "geometry": setup["geometry"],
-        "params": setup["params"],
-        "pre": setup["pre"],
-    }
-    _, fluxes = _diagnostics_of(df, run)
-    state = SimpleNamespace(time=t, step=0, last_growth_rate=np.asarray(gate["gamma"]))
-    if writer.n_frames == 0:
-        _dataset_frame(run, df, phi, fluxes, state)
-    writer.update_static({"stable": True, "outcome": doc, "frame_source": "linear"})
-    writer.finalize()
-
-
-def _diagnostics_of(df: Any, run: dict[str, Any]) -> Any:
-    from gyaradax.solver.driver import _diagnostics
-
-    return _diagnostics(df, run["geometry"], run["params"], run["pre"])
-
-
-def _monitor_settings(args: argparse.Namespace) -> Any:
-    """Outcome tracking settings when a flag asks for it, else None."""
-    from gyaradax.diagnostics.outcome import MonitorSettings
-
-    wanted = (
-        args.linear_gate
-        or args.stop_on_decay
-        or args.stop_on_banding
-        or args.track_outcome
-        or args.dataset_from_flux is not None
-    )
-    if not wanted:
-        return None
-    return MonitorSettings(
-        stop_on_decay=args.stop_on_decay,
-        decay_t_min=args.decay_t_min,
-        decay_floor=args.decay_floor,
-        decay_rel_floor=args.decay_rel_floor,
-        decay_window=args.decay_window,
-        decay_keep_frames=args.decay_keep_frames,
-        banding_threshold=args.banding_threshold,
-        banding_window=args.banding_window,
-        stop_on_banding=args.stop_on_banding,
-        dataset_from_flux=args.dataset_from_flux,
-    )
-
-
-def _run_monitor(settings: Any, setup: RunSetup, gate: dict[str, Any] | None) -> Any:
-    if settings is None:
-        return None
-    import numpy as np
-
-    from gyaradax.diagnostics.outcome import RunMonitor
-
-    params = setup["params"]
-    signz = np.atleast_1d(np.asarray(params.signz, dtype=float))
-    kinetic = not params.adiabatic_electrons
-    return RunMonitor(
-        setup["output_dir"],
-        settings,
-        start_step=setup["start_step"],
-        ion=int(np.argmax(signz > 0)) if kinetic else 0,
-        electron=int(np.argmax(signz < 0)) if kinetic else None,
-        gate=gate,
-    )
-
-
-def _cmd_growth(args: argparse.Namespace) -> int:
-    if args.mem_fraction:
-        os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = str(args.mem_fraction)
-    facts = _peek_config(args.config)
-    mesh = _auto_mesh(args.n_gpus, facts) if args.n_gpus > 1 else (1, 1, 1)
-    _check_mesh(mesh, facts, _visible_gpus(args))
-    configure_runtime_env(
-        device=args.device if args.device is not None else -1,
-        device_list=args.device_list,
-        n_gpus_sp=mesh[0],
-        n_gpus_vp=mesh[1],
-        n_gpus_mu=mesh[2],
-    )
-    if args.n_gpus > 1:
-        append_xla_flags(_MULTI_GPU_XLA_FLAGS)
-    from gyaradax.diagnostics import growth
-
-    cfg = growth.adjusted_config(OmegaConf.load(args.config), sets=_parse_sets(args.set))
-    own = int(cfg.grid.ns)
-    runs = []
-    for ns in sorted(set(args.ns or [own])):
-        print(f"ns {ns}: linear run to settled growth rates (t_end {args.t_end:g})", flush=True)
-        runs.append(
-            growth.growth_rates(
-                cfg, ns, backend=args.backend, t_end=args.t_end, log=_progress(), mesh=mesh
-            )
-        )
-    report = growth.assemble(runs, own)
-    report["config"] = os.path.abspath(args.config)
-    report["sets"] = _parse_sets(args.set)
-    print(growth.format_check(report))
-    if args.output:
-        with open(args.output, "w") as fh:
-            json.dump(report, fh, indent=1)
-        print(f"wrote {args.output}")
-    return 0
 
 
 def _resolve_config(path: str) -> tuple[str, str | None]:
@@ -945,8 +645,8 @@ def _dataset_settings(
     }
 
 
-def _dataset_writer(setup: RunSetup, gate: dict[str, Any] | None = None) -> Any:
-    if setup["dataset"] is None:
+def _dataset_writer(setup: RunSetup) -> Any:
+    if setup["dataset"] is None or not setup["params"].non_linear:
         return None
     from gyaradax.io.dataset import DatasetWriter
 
@@ -965,10 +665,6 @@ def _dataset_writer(setup: RunSetup, gate: dict[str, Any] | None = None) -> Any:
         potenc=ds["potenc"],
     )
     print(f"  dataset: {writer.path} ({ds['bits']}, {writer.n_frames} frames so far)")
-    if gate is not None:
-        from gyaradax.diagnostics.outcome import MODE_FILE
-
-        writer.add_linear(gate, os.path.join(setup["output_dir"], MODE_FILE))
     return writer
 
 
@@ -1151,16 +847,8 @@ def _cmd_run(args: argparse.Namespace) -> int:
     _configure_env(args, facts)
 
     if len(args.configs) > 1:
-        if args.linear_check:
-            raise SystemExit(
-                "error: --linear-check takes one config; run the configs one at a time"
-            )
-        if _monitor_settings(args) is not None or args.linear_only:
-            raise SystemExit(
-                "error: --linear-gate, --linear-only, --stop-on-decay, --stop-on-banding, "
-                "--track-outcome and --dataset-from-flux take one config; run the configs one "
-                "at a time"
-            )
+        if args.stop_on_banding:
+            raise SystemExit("error: --stop-on-banding takes one config; run the configs one at a time")
         return _run_batched(args, run_dirs)
     return _run_single(args, args.configs[0], run_dirs[0])
 
@@ -1267,31 +955,26 @@ def _nothing_to_run(setup: RunSetup) -> None:
     )
 
 
+def _write_linear(setup: RunSetup, df: Any, phi: Any) -> None:
+    """A linear run with a dataset leaves its final state, the eigenmode, as the trajectory's linear files."""
+    ds = setup["dataset"]
+    if ds is None or setup["params"].non_linear:
+        return
+    if os.path.exists(os.path.join(setup["output_dir"], "DIVERGED")):
+        return
+    from gyaradax.io.dataset import linear_frames, trajectory_path, write_linear_frames
+
+    data_dir = os.path.join(trajectory_path(ds["dir"], ds["name"]), "data")
+    write_linear_frames(data_dir, linear_frames(df, phi))
+    print(f"  dataset: linear eigenmode in {data_dir}/linear.bin, linear_poten.bin")
+
+
 def _run_single(args: argparse.Namespace, config_path: str, run_dir: str | None) -> int:
     import jax
 
+    from gyaradax.diagnostics.banding import BandingStop
     from gyaradax.solver.driver import EXIT_INTERRUPTED, gksimulate
 
-    from gyaradax.diagnostics import outcome
-
-    if args.linear_check and not args.dry_run:
-        code = _linear_check(args, config_path, run_dir)
-        if code:
-            return code
-    if args.linear_only and not args.dry_run:
-        return _linear_only(args, config_path, run_dir)
-    gate = None
-    if args.linear_gate and not args.dry_run:
-        gate = _linear_gate(args, config_path, run_dir)
-        if gate["decision"] == "stable":
-            out = _default_output_dir(OmegaConf.load(config_path), args, run_dir)
-            doc = outcome.gate_outcome(out, gate)
-            _stable_trajectory(args, config_path, run_dir, gate, doc)
-            print(
-                f"exit {outcome.EXIT_STABLE}: linearly stable (no ky grows); "
-                "not starting the nonlinear run"
-            )
-            return outcome.EXIT_STABLE
     setup = _setup_run(config_path, args, run_dir=run_dir)
     _describe(setup, config_path)
     if args.dry_run:
@@ -1302,10 +985,10 @@ def _run_single(args: argparse.Namespace, config_path: str, run_dir: str | None)
         return 0
 
     telemetry = _start_run(setup)
-    monitor = _run_monitor(_monitor_settings(args), setup, gate)
+    monitor = BandingStop() if args.stop_on_banding else None
     t0 = time.time()
     with _stop_on_sigterm():
-        _, _, _, final_state = gksimulate(
+        final_df, final_phi, _, final_state = gksimulate(
             setup["df"],
             setup["geometry"],
             setup["params"],
@@ -1322,7 +1005,7 @@ def _run_single(args: argparse.Namespace, config_path: str, run_dir: str | None)
             previous_snapshot=setup["previous_snapshot"],
             telemetry=telemetry,
             profile=setup["profile"],
-            dataset=_dataset_writer(setup, gate),
+            dataset=_dataset_writer(setup),
             dump_dt=setup["dump_dt"],
             t_end=setup["t_end"],
             dump_origin=setup["dump_origin"],
@@ -1330,14 +1013,15 @@ def _run_single(args: argparse.Namespace, config_path: str, run_dir: str | None)
         )
     jax.effects_barrier()
     runtime = time.time() - t0
-    if monitor is not None and monitor.stopped:
+    if monitor is not None and monitor.message:
         code = _finish_run(setup) or monitor.exit_code
-        print(f"exit {code}: {monitor.stopped} ({monitor.message}); see outcome.json")
+        print(f"exit {code}: stopped, {monitor.message}", file=sys.stderr)
         return code
     if _interrupted([setup], final_state):
         print(f"exit {EXIT_INTERRUPTED}: interrupted; resuming {setup['output_dir']} continues it")
         return EXIT_INTERRUPTED
     print(f"\ncompleted in {runtime:.1f}s ({setup['n_steps'] / runtime:.1f} steps/s)")
+    _write_linear(setup, final_df, final_phi)
     return _finish_run(setup)
 
 
@@ -1428,7 +1112,7 @@ def _run_batched(args: argparse.Namespace, run_dirs: list[str | None]) -> int:
     telemetries = [_start_run(s) for s in setups]
     t0 = time.time()
     with _stop_on_sigterm():
-        _, _, _, final_state = gksimulate_batched(
+        final_df, final_phi, _, final_state = gksimulate_batched(
             jnp.stack([s["df"] for s in setups]),
             _stack([s["geometry"] for s in setups]),
             _stack([s["params"] for s in setups]),
@@ -1458,6 +1142,8 @@ def _run_batched(args: argparse.Namespace, run_dirs: list[str | None]) -> int:
         return EXIT_INTERRUPTED
     n_steps = setups[0]["n_steps"]
     print(f"\ncompleted {len(setups)} configs in {runtime:.1f}s ({n_steps / runtime:.1f} steps/s)")
+    for i, s in enumerate(setups):
+        _write_linear(s, final_df[i], final_phi[i])
     return max(_finish_run(s) for s in setups)
 
 
@@ -1490,12 +1176,12 @@ def _cmd_bench(args: argparse.Namespace) -> int:
     devices = list(mesh.devices.flat) if mesh is not None else [jax.devices()[0]]
     times = []
     for i in range(args.blocks):
-            t0 = time.time()
-            df, _, state = gksolve(df, geometry, params, state, n_steps=args.steps, pre=pre)
-            jax.block_until_ready(df)
-            dt = time.time() - t0
-            times.append(dt)
-            print(
+        t0 = time.time()
+        df, _, state = gksolve(df, geometry, params, state, n_steps=args.steps, pre=pre)
+        jax.block_until_ready(df)
+        dt = time.time() - t0
+        times.append(dt)
+        print(
             f"  block {i + 1}/{args.blocks}: {dt:.3f}s "
             f"({args.steps / dt:.2f} steps/s, {dt * 1000 / args.steps:.2f} ms/step)"
         )
@@ -1540,21 +1226,6 @@ def _cmd_convert(args: argparse.Namespace) -> int:
     return 0
 
 
-def _cmd_build_cuda(args: argparse.Namespace) -> int:
-    from gyaradax.backends import cuda_lib
-
-    def caps(text: str | None) -> list[int]:
-        return [int(c.strip().replace(".", "")) for c in (text or "").split(",") if c.strip()]
-
-    archs = caps(args.archs) or cuda_lib.gpu_compute_caps()
-    if not archs:
-        raise SystemExit("error: no GPU visible here; pass --archs, e.g. --archs 80,90,103")
-    print(f"building {cuda_lib.KERNELS_DIR} for sm {archs} into {cuda_lib.env_build_dir(args.prefix)}")
-    lib = cuda_lib.build(archs, caps(args.lto_archs) or None, prefix=args.prefix, jobs=args.jobs)
-    print(f"installed {lib}")
-    return 0
-
-
 def _cmd_datagen(args: argparse.Namespace) -> int:
     from gyaradax.datagen import main as datagen_main
 
@@ -1587,17 +1258,6 @@ def _cmd_info(args: argparse.Namespace) -> int:
         cuda_ok = False
         print(f"cuda kernels: error — {exc}")
     print(f"cuda backend: {'available' if cuda_ok else 'not available (JAX backend only)'}")
-    from gyaradax.backends import cuda_lib
-
-    record = cuda_lib.build_info(_cuda.LIB_PATH)
-    print(f"lib path    : {_cuda.LIB_PATH} ({'present' if _cuda.LIB_PATH.exists() else 'missing'})")
-    print(f"lib key     : {cuda_lib.build_key()} (kernel sources + jaxlib)")
-    if record:
-        print(f"lib build   : sm {record.get('archs')}, {record.get('nvcc')}, {record.get('built')}")
-    elif _cuda.LIB_PATH.exists():
-        print("lib build   : development build in the checkout (no build record)")
-    else:
-        print("lib build   : none; `gyaradax build-cuda` builds one for this environment")
     if cuda_ok:
         _cuda._register_ffi()
         forced = os.environ.get("GYARADAX_BRACKET")
@@ -1775,86 +1435,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="keep integrating after df goes non-finite (default: stop and exit 2)",
     )
     run_p.add_argument(
-        "--linear-check", type=str, default=None, metavar="NS[,NS...]",
-        help="before the run, compare linear growth rates at the run's ns with these reference "
-             "resolutions (written to RUN_DIR/linear_check.json, reused on resume)",
-    )
-    run_p.add_argument(
-        "--linear-check-t-end", type=float, default=40.0, metavar="T",
-        help="with --linear-check: stop each linear run here if its growth rates have not settled "
-             "(default 40)",
-    )
-    run_p.add_argument(
-        "--linear-check-tol", type=float, default=None, metavar="X",
-        help="with --linear-check: exit 3 instead of running when γ at the reference's dominant "
-             "ky deviates by more than X (relative, e.g. 0.1)",
-    )
-    run_p.add_argument(
-        "--linear-gate", action="store_true",
-        help="before the run, a linear run on the config's grid (RUN_DIR/linear_gate.json, "
-             "linear_mode.npz, reused on resume); exit 4 instead of running when no ky grows",
-    )
-    run_p.add_argument(
-        "--linear-only", action="store_true",
-        help="the linear run of --linear-gate alone: RUN_DIR/linear.json (rates, frequencies, "
-             "per-ky eigenmode fluxes) and the eigenmode as RUN_DIR/data/linear*.bin; exit 0 "
-             "without the nonlinear run (outcome class linear_only)",
-    )
-    run_p.add_argument(
-        "--linear-gate-t-end", type=float, default=60.0, metavar="T",
-        help="with --linear-gate: end of the linear run if its growth rates have not settled "
-             "(default 60)",
-    )
-    run_p.add_argument(
-        "--linear-gate-stable", type=float, default=-0.01, metavar="G",
-        help="with --linear-gate: stable when the rates settled and the largest is below G "
-             "(default -0.01)",
-    )
-    run_p.add_argument(
-        "--linear-gate-gamma-min", type=float, default=0.02, metavar="G",
-        help="with --linear-gate: unstable when the largest rate exceeds G (default 0.02); in "
-             "between, or not settled, the nonlinear run goes ahead",
-    )
-    run_p.add_argument(
-        "--linear-gate-low-ky", type=float, default=1.0, metavar="K",
-        help="with --linear-gate: also report the largest γ over kθρ <= K (gamma_max_lowky, "
-             "default 1.0); the decision uses every ky",
-    )
-    run_p.add_argument(
-        "--track-outcome", action="store_true",
-        help="track the outcome per frame: RUN_DIR/outcome.json, monitor_series.npz (heat flux, "
-             "s-Nyquist share of phi, banding flag, flux averages, outcome class)",
-    )
-    run_p.add_argument(
-        "--stop-on-decay", action="store_true",
-        help="stop (exit 5) once the heat flux has decayed: after --decay-t-min, below the floor "
-             "and still falling over --decay-window frames",
-    )
-    run_p.add_argument("--decay-t-min", type=float, default=30.0, metavar="T",
-                       help="earliest time the run may stop on decay (default 30)")
-    run_p.add_argument("--decay-floor", type=float, default=1e-3, metavar="Q",
-                       help="absolute heat-flux floor, gyro-Bohm (default 1e-3)")
-    run_p.add_argument("--decay-rel-floor", type=float, default=1e-3, metavar="X",
-                       help="heat-flux floor relative to its peak (default 1e-3); the larger "
-                            "floor applies")
-    run_p.add_argument("--decay-window", type=int, default=5, metavar="N",
-                       help="frames the flux must stay below the floor and fall (default 5)")
-    run_p.add_argument(
-        "--decay-keep-frames", action="store_true",
-        help="keep every dataset frame of a decayed run (default: only the last)",
-    )
-    run_p.add_argument("--banding-threshold", type=float, default=0.3, metavar="X",
-                       help="zonal s-Nyquist share of phi that flags banding (default 0.3)")
-    run_p.add_argument("--banding-window", type=int, default=3, metavar="N",
-                       help="frames in a row over the threshold to flag banding (default 3)")
-    run_p.add_argument(
         "--stop-on-banding", action="store_true",
-        help="stop (exit 6) once banding is flagged instead of only recording it",
-    )
-    run_p.add_argument(
-        "--dataset-from-flux", type=float, default=None, metavar="Q",
-        help="write dataset frames only once the total heat flux has reached Q; a run that never "
-             "does keeps its last frame",
+        help="stop with exit 6 and an error once the zonal phi piles up at the s-Nyquist mode "
+             "(share above 0.3 for 3 frames)",
     )
     run_p.add_argument("--dry-run", action="store_true", help="set up and report, do not step")
     run_p.add_argument(
@@ -1880,36 +1463,6 @@ def build_parser() -> argparse.ArgumentParser:
     bench_p.set_defaults(func=_cmd_bench, block_size=0, n_blocks=0, n_steps=0,
                          resume_from=None, save_dumps=False, dry_run=False)
 
-    growth_p = sub.add_parser(
-        "growth", help="linear growth rates of a config, at its own or other parallel resolutions"
-    )
-    growth_p.add_argument("config", metavar="CONFIG", help="YAML config (run linearly)")
-    growth_p.add_argument(
-        "--ns", type=int, nargs="+", default=None,
-        help="parallel resolutions to run (default: the config's); the finest is the reference",
-    )
-    growth_p.add_argument(
-        "--set", action="append", default=None, metavar="KEY=VALUE",
-        help="override a config entry, e.g. solver.disp_par=4.0 (repeatable)",
-    )
-    growth_p.add_argument(
-        "--t-end", type=float, default=40.0,
-        help="stop here if the growth rates have not settled (default 40)",
-    )
-    growth_p.add_argument(
-        "--output", type=str, default=None, metavar="FILE", help="write the report as JSON"
-    )
-    growth_p.add_argument("--backend", choices=["auto", "jax", "cuda"], default=None)
-    growth_p.add_argument("--device", type=int, default=None, help="pin to a single GPU index")
-    growth_p.add_argument(
-        "--device-list", type=str, default=None, help="comma-separated GPU indices"
-    )
-    growth_p.add_argument(
-        "--n-gpus", type=int, default=1, help="shard each linear run over N GPUs (default 1)"
-    )
-    growth_p.add_argument("--mem-fraction", type=float, default=None)
-    growth_p.set_defaults(func=_cmd_growth)
-
     stats_p = sub.add_parser("dataset-stats", help="recompute the statistics of preprocessed trajectories")
     stats_p.add_argument("trajectories", nargs="+", metavar="TRAJECTORY", help="trajectory directories")
     stats_p.add_argument("--from-time", type=float, default=0.0, help="first time included (default 0)")
@@ -1923,19 +1476,6 @@ def build_parser() -> argparse.ArgumentParser:
     info_p = sub.add_parser("info", help="show devices, backends and versions")
     info_p.add_argument("--device-list", type=str, default=None)
     info_p.set_defaults(func=_cmd_info)
-
-    build_p = sub.add_parser("build-cuda", help="build the CUDA kernels for this Python environment")
-    build_p.add_argument(
-        "--archs", type=str, default=None,
-        help="compute capabilities, e.g. 80,90,103 (default: the GPUs of this machine)",
-    )
-    build_p.add_argument(
-        "--lto-archs", type=str, default=None,
-        help="cuFFT LTO callback compute capabilities (default: the CMake default, 80,90,100)",
-    )
-    build_p.add_argument("--prefix", type=str, default=None, help="environment prefix (default: this one)")
-    build_p.add_argument("-j", "--jobs", type=int, default=None, help="parallel build jobs")
-    build_p.set_defaults(func=_cmd_build_cuda)
 
     datagen_p = sub.add_parser(
         "datagen", add_help=False, help="generate a dataset: run configs on the GPUs of this machine"
