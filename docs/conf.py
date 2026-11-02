@@ -22,7 +22,7 @@ extensions = [
 
 default_role = "literal"
 source_suffix = {".rst": "restructuredtext", ".md": "markdown"}
-exclude_patterns = ["_build", "PROMPT.md"]
+exclude_patterns = ["_build", "PROMPT.md", "cuda_experiments"]
 
 myst_enable_extensions = ["dollarmath", "amsmath", "colon_fence", "deflist"]
 myst_heading_anchors = 3
