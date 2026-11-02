@@ -11,16 +11,18 @@ KINETIC = dict(
     nsp=2,
     nvpar=64,
     nmu=16,
+    ns=16,
     n_gpus=0,
     n_gpus_sp=1,
     n_gpus_vp=1,
     n_gpus_mu=1,
+    n_gpus_s=1,
 )
 ADIABATIC = dict(KINETIC, adiabatic=True, nsp=1, nvpar=32, nmu=8)
 
 
 def _args(**kw):
-    base = dict(n_gpus=0, n_gpus_sp=0, n_gpus_vp=0, n_gpus_mu=0, device_list=None)
+    base = dict(n_gpus=0, n_gpus_sp=0, n_gpus_vp=0, n_gpus_mu=0, n_gpus_s=0, device_list=None)
     return argparse.Namespace(**{**base, **kw})
 
 
@@ -46,19 +48,23 @@ def test_auto_mesh_rejects_counts_the_grid_cannot_take():
 
 def test_mesh_request_precedence():
     facts = dict(KINETIC, n_gpus_mu=4)
-    assert _mesh_request(_args(n_gpus_vp=2), facts) == (1, 2, 4)
-    assert _mesh_request(_args(n_gpus=8), facts) == (2, 1, 4)
-    assert _mesh_request(_args(), facts) == (1, 1, 4)
-    assert _mesh_request(_args(), dict(KINETIC, n_gpus=4)) == (2, 1, 2)
-    assert _mesh_request(_args(device_list="0,1,2,3"), KINETIC) == (2, 1, 2)
-    assert _mesh_request(_args(device_list="3"), KINETIC) == (1, 1, 1)
+    assert _mesh_request(_args(n_gpus_vp=2), facts) == (1, 2, 4, 1)
+    assert _mesh_request(_args(n_gpus=8), facts) == (2, 1, 4, 1)
+    assert _mesh_request(_args(), facts) == (1, 1, 4, 1)
+    assert _mesh_request(_args(), dict(KINETIC, n_gpus=4)) == (2, 1, 2, 1)
+    assert _mesh_request(_args(device_list="0,1,2,3"), KINETIC) == (2, 1, 2, 1)
+    assert _mesh_request(_args(device_list="3"), KINETIC) == (1, 1, 1, 1)
+    assert _mesh_request(_args(n_gpus_s=2), facts) == (1, 1, 4, 2)
 
 
 def test_check_mesh_explains_the_problem():
     with pytest.raises(SystemExit, match="does not divide nmu"):
-        _check_mesh((1, 1, 3), KINETIC, None)
+        _check_mesh((1, 1, 3, 1), KINETIC, None)
     with pytest.raises(SystemExit, match="only 2 are visible"):
-        _check_mesh((2, 1, 2), KINETIC, 2)
+        _check_mesh((2, 1, 2, 1), KINETIC, 2)
     with pytest.raises(SystemExit, match="vpar points"):
-        _check_mesh((1, 64, 1), KINETIC, None)
-    _check_mesh((2, 2, 4), KINETIC, 16)
+        _check_mesh((1, 64, 1, 1), KINETIC, None)
+    with pytest.raises(SystemExit, match="s points"):
+        _check_mesh((1, 1, 1, 16), KINETIC, None)
+    _check_mesh((2, 2, 4, 1), KINETIC, 16)
+    _check_mesh((1, 1, 2, 4), KINETIC, 8)

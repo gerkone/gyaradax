@@ -280,6 +280,45 @@ def _single_kernel_mrad(native: int, m_min: int, strides: Tuple[int, int], fp64:
     return native
 
 
+def _s_edges(x, axis):
+    n = x.shape[axis]
+    return jnp.concatenate(
+        [jax.lax.slice_in_dim(x, 0, 2, axis=axis), jax.lax.slice_in_dim(x, n - 2, n, axis=axis)],
+        axis=axis,
+    )
+
+
+def _s_halo(x, kinetic, has_apar, has_bpar, has_dpc, n_s):
+    """f, psi and the dissipation projection on the two s planes past each shard edge.
+
+    The s halo of linear_rhs_fused, periodic in s. Runs inside ``shard_map``; ``x`` maps
+    the kernel argument names to the local blocks.
+    """
+    g = x["df"] if kinetic else x["df"][None]
+    f = _s_edges(g, 3)
+    bes = _s_edges(x["bessel"], 2)
+    psi = bes * _s_edges(x["phi"], 0)
+    if has_bpar:
+        psi = psi + _s_edges(x["bpar_chi"], 2) * _s_edges(x["bpar"], 0)
+    if has_apar:
+        g2f = (
+            x["g2f_vfac"][:, :, None, None, None, None]
+            * bes[:, None]
+            * _s_edges(x["fmaxwl"], 3)[..., None, None]
+            * (1.0 / x["tmp0"])[:, None, None, None, None, None]
+        )
+        f = f + g2f * _s_edges(x["apar"], 0)
+    proj = jnp.zeros((1,), dtype=jnp.complex128)
+    if has_dpc:
+        m0, m1 = _s_edges(x["dproj_m0"], 1), _s_edges(x["dproj_m1"], 1)
+        e0, e1 = _s_edges(x["dproj_e0"], 3), _s_edges(x["dproj_e1"], 3)
+        proj = e0 * m0[:, None, None] + e1 * m1[:, None, None]
+        proj = sharding.halo_planes(proj, 3, "s", n_s, periodic=True)
+    f = sharding.halo_planes(f, 3, "s", n_s, periodic=True)
+    psi = sharding.halo_planes(psi, 2, "s", n_s, periodic=True)
+    return f, psi, proj
+
+
 @jax.tree_util.register_pytree_node_class
 class CUDAOps(SolverOps):
     """CUDA backend using custom FFI kernels for stencils and FFT bracket.
@@ -314,10 +353,19 @@ class CUDAOps(SolverOps):
         use_z2z, mixed_precision, mesh, fused_bracket = aux_data
         return cls(children[0], use_z2z, mixed_precision, mesh, fused_bracket)
 
-    def _pack_shift_maps(self):
-        """Pack precomputed shift maps into (9, ns, nkx, nky, 2) int32 array."""
+    def _pack_shift_maps(self, ns_local=None):
+        """Pack precomputed shift maps into (9, ns, nkx, nky, 2) int32 array.
+
+        With ``ns_local`` (s shards) the source plane indexes the shard's s block
+        extended by two halo planes per side.
+        """
         valid_jax = jnp.array(self.pre["valid_shift"])
-        s_map_jax = jnp.where(valid_jax, self.pre["s_shift"], -1).astype(jnp.int32)
+        s_src = self.pre["s_shift"]
+        if ns_local is not None:
+            ns = valid_jax.shape[1]
+            s_loc = jnp.arange(ns, dtype=jnp.int32)[None, :, None, None] % ns_local
+            s_src = s_loc + jnp.arange(-4, 5, dtype=jnp.int32)[:, None, None, None] + 2
+        s_map_jax = jnp.where(valid_jax, s_src, -1).astype(jnp.int32)
         kx_map_jax = jnp.array(self.pre["kx_shift"]).astype(jnp.int32)
         return jnp.stack([s_map_jax, kx_map_jax], axis=-1).copy()
 
@@ -382,7 +430,9 @@ class CUDAOps(SolverOps):
         hyper = jnp.broadcast_to(pre["hyper"], (1, 1, 1, nkx, nky)).reshape(nkx, nky)
         kx_vals = pre["kx_b"].reshape(-1)[:nkx]
         ky_vals = pre["ky_b"].reshape(-1)[:nky]
-        packed_maps = self._pack_shift_maps().reshape(9, ns, nkx, nky, 2)
+        n_s = self.mesh.shape["s"] if sharding.splits_s(self.mesh) else 1
+        ns_local = ns // n_s if n_s > 1 else None
+        packed_maps = self._pack_shift_maps(ns_local).reshape(9, ns, nkx, nky, 2)
 
         # signz0/tmp0 are per-species buffer args (F64) in the kernel, not scalar attrs
         def per_species(key):
@@ -437,7 +487,6 @@ class CUDAOps(SolverOps):
         d1 = stencils.VPAR_D1
         d4 = stencils.VPAR_D4
         attrs = dict(
-            ns=np.int32(ns),
             nkx=np.int32(nkx),
             nky=np.int32(nky),
             n_class=np.int32(n_class),
@@ -458,38 +507,42 @@ class CUDAOps(SolverOps):
             disp_vp=float(params.disp_vp),
             drive_scale=float(params.drive_scale),
         )
-        vel = ("sp", "vp", "mu") if kinetic else ("vp", "mu")
+        vel = sharding.df_axes(df.ndim, self.mesh)
         sp_v, sp_mu, sp_v_mu = ("sp", "vp"), ("sp", "mu"), ("sp", "vp", "mu")
+
+        def s(axes=()):
+            return sharding.with_s(self.mesh, axes)
+
         # kernel arguments in FFI order, with the mesh axes of their leading dims
         inputs = {
             "df": (df.astype(jnp.complex128), vel),
-            "phi": (phi.astype(jnp.complex128), ()),
-            "bessel": (bessel, sp_mu),
-            "s_upar_tab": (s_upar_tab, sp_v),
-            "s_t7_tab": (s_t7_tab, sp_v_mu),
-            "par_class": (par_class, ()),
-            "packed_maps": (packed_maps, ()),
-            "utrap": (utrap, sp_mu),
-            "abs_vp": (abs_vp, sp_mu),
-            "drift_x": (drift_x, sp_v_mu),
-            "drift_y": (drift_y, sp_v_mu),
-            "dmaxwel": (dmaxwel, sp_v_mu),
-            "fmaxwl": (fmaxwl, sp_v_mu),
+            "phi": (phi.astype(jnp.complex128), s()),
+            "bessel": (bessel, s(sp_mu)),
+            "s_upar_tab": (s_upar_tab, s(sp_v)),
+            "s_t7_tab": (s_t7_tab, s(sp_v_mu)),
+            "par_class": (par_class, s()),
+            "packed_maps": (packed_maps, s((None,))),
+            "utrap": (utrap, s(sp_mu)),
+            "abs_vp": (abs_vp, s(sp_mu)),
+            "drift_x": (drift_x, s(sp_v_mu)),
+            "drift_y": (drift_y, s(sp_v_mu)),
+            "dmaxwel": (dmaxwel, s(sp_v_mu)),
+            "fmaxwl": (fmaxwl, s(sp_v_mu)),
             "hyper": (hyper, ()),
             "kx_vals": (kx_vals, ()),
             "ky_vals": (ky_vals, ()),
             "signz0": (signz0, ("sp",)),
             "tmp0": (tmp0, ("sp",)),
-            "apar": (apar_buf, ()),
+            "apar": (apar_buf, s()),
             "chi_vfac": (chi_vfac, sp_v),
             "g2f_vfac": (g2f_vfac, sp_v),
-            "bpar": (bpar_buf, ()),
-            "bpar_chi": (bpar_chi, sp_mu),
-            "s_disp_tab": (s_disp_tab, sp_v),
-            "dproj_m0": (dproj_m0, ("sp",)),
-            "dproj_m1": (dproj_m1, ("sp",)),
-            "dproj_e0": (dproj_e0, sp_v_mu),
-            "dproj_e1": (dproj_e1, sp_v_mu),
+            "bpar": (bpar_buf, s()),
+            "bpar_chi": (bpar_chi, s(sp_mu)),
+            "s_disp_tab": (s_disp_tab, s(sp_v)),
+            "dproj_m0": (dproj_m0, s(("sp",))),
+            "dproj_m1": (dproj_m1, s(("sp",))),
+            "dproj_e0": (dproj_e0, s(sp_v_mu)),
+            "dproj_e1": (dproj_e1, s(sp_v_mu)),
         }
         names = tuple(inputs)
         args = tuple(x for x, _ in inputs.values())
@@ -500,6 +553,9 @@ class CUDAOps(SolverOps):
 
         def kernel(*xs):
             halo = (dummy_c, dummy_r, dummy_r)
+            s_halo = (dummy_c, dummy_c, dummy_c)
+            if n_s > 1:
+                s_halo = _s_halo(dict(zip(names, xs)), kinetic, has_apar, has_bpar, has_dpc, n_s)
             if n_vp > 1:
                 # vpar neighbours beyond the shard edges, for the in-kernel g -> f and vpar stencil
                 halo = (sharding.halo_planes(xs[0], v_axis, "vp", n_vp), dummy_r, dummy_r)
@@ -519,10 +575,13 @@ class CUDAOps(SolverOps):
             )(
                 *xs,
                 *halo,
+                *s_halo,
                 nsp=np.int32(nsp_l),
                 nv=np.int32(nv_l),
                 nmu=np.int32(nmu_l),
+                ns=np.int32(d.shape[-3]),
                 has_halo=np.int32(n_vp > 1),
+                has_shalo=np.int32(n_s > 1),
                 **attrs,
             )[0]
 
@@ -540,6 +599,8 @@ class CUDAOps(SolverOps):
             return "electromagnetic runs are not supported"
         if has_dpc:
             return "conservative parallel dissipation is not supported"
+        if sharding.splits_s(self.mesh):
+            return "s sharding is not supported"
         if df.shape[-3] > 576:
             return f"needs ns <= 576 (ns={df.shape[-3]})"
         if self._points_per_device(df) >= 2**31:
@@ -596,6 +657,8 @@ class CUDAOps(SolverOps):
             reason = "electromagnetic runs are not supported"
         elif has_dpc:
             reason = "conservative parallel dissipation is not supported"
+        elif sharding.splits_s(self.mesh):
+            reason = "s sharding is not supported"
         elif ns > 576:
             reason = f"needs ns <= 576 (ns={ns})"
         elif self._points_per_device(df) >= 2**31:
@@ -777,7 +840,7 @@ class CUDAOps(SolverOps):
         return term if kinetic else term[0]
 
     def _collisions(self, f, params, pre):
-        if params.fused_linear:
+        if params.fused_linear and not sharding.splits_s(self.mesh):
             if _has_collision_rhs:
                 return self._collision_cuda(f, params, pre)
             warn_once(
@@ -841,7 +904,7 @@ class CUDAOps(SolverOps):
         )
 
         def moments(g_l, w0, w1, g2f_l, apar_l):
-            n_rows, n_spatial = int(np.prod(g_l.shape[:3])), ns * nkx * nky
+            n_rows, n_spatial = int(np.prod(g_l.shape[:3])), g_l.shape[3] * nkx * nky
             n_chunks = max(1, min(n_rows, 2048 // -(-n_spatial // 128)))
             partial = ffi.ffi_call(
                 "field_moments_ffi",
@@ -861,15 +924,19 @@ class CUDAOps(SolverOps):
             )
             m = jnp.sum(partial, axis=0)
             if self.mesh is not None:
-                m = jax.lax.psum(m, axis_name=tuple(self.mesh.axis_names))
-            return m
+                # velocity moments: reduce over the shards of one s block
+                vel_axes = tuple(a for a in self.mesh.axis_names if a != "s")
+                m = jax.lax.psum(m, axis_name=vel_axes)
+            return m.reshape(n_w, g_l.shape[3], nkx, nky) if split_s else m
 
+        split_s = sharding.splits_s(self.mesh)
         if self.mesh is None:
             m = moments(*args)
         else:
-            vel = ("sp", "vp", "mu")
+            vel = sharding.df_axes(6, self.mesh)
+            out = PartitionSpec(None, "s") if split_s else PartitionSpec()
             m = sharding.velocity_map(
-                moments, self.mesh, args, (vel, vel, vel, vel, ()), PartitionSpec()
+                moments, self.mesh, args, (vel, vel, vel, vel, sharding.with_s(self.mesh)), out
             )
         m = m.reshape(n_w, ns, nkx, nky)
         return [m[k] for k in range(n_w)]
@@ -1068,7 +1135,7 @@ class CUDAOps(SolverOps):
         jind, nl_scale = pre["nl_jind"], pre["nl_fft_scale"]
         fp64, ixzero = not self.mixed_precision, int(pre["ixzero"])
         b_df, b_inner = nsp * nv * nmu * ns, n_pot_v * nmu * ns
-        vel = ("sp", "vp", "mu") if df.ndim == 6 else ("vp", "mu")
+        vel = sharding.df_axes(df.ndim, self.mesh)
         n_dev = 1 if self.mesh is None else math.prod(self.mesh.shape[a] for a in vel)
         m_row = _bracket_v6_row_size(fp64, mphi, nky, b_df // n_dev, nsp, b_inner)
         v6 = m_row is not None
@@ -1087,7 +1154,7 @@ class CUDAOps(SolverOps):
             )
         inverse_jind = jnp.full((mrad,), -1, dtype=jnp.int32)
         inverse_jind = inverse_jind.at[jind].set(jnp.arange(jind.shape[0], dtype=jnp.int32))
-        static = (kx_vec, ky_vec, jnp.asarray(jind, dtype=jnp.int32), inverse_jind, dum_s)
+        static = (kx_vec, ky_vec, jnp.asarray(jind, dtype=jnp.int32), inverse_jind)
 
         # output scale in the association XLA uses for fft_prefactor * scale * efun_sign
         scale = complex(fft_prefactor) * complex(mrad * mphi, 0.0) * complex(efun_sign, 0.0)
@@ -1108,8 +1175,9 @@ class CUDAOps(SolverOps):
                 fused=np.int32(self.fused_bracket),
             )
 
-        def bracket(d, a_pot, b_pot, vf):
+        def bracket(d, a_pot, b_pot, vf, dum):
             nsp_l, nv_l, nmu_l = d.shape[:3] if d.ndim == 6 else (1,) + d.shape[:2]
+            ns_l = d.shape[-3]
             n_pot_v_l = a_pot.shape[1]
             a_pot = a_pot.reshape(-1, nkx, nky)
             if em:
@@ -1117,38 +1185,39 @@ class CUDAOps(SolverOps):
                 a_pot = jnp.concatenate([a_pot, b_pot.reshape(-1, nkx, nky)], axis=0)
             out = ffi.ffi_call(
                 kernel_name,
-                jax.ShapeDtypeStruct((nsp_l * nv_l * nmu_l * ns, nkx, nky), jnp.complex128),
+                jax.ShapeDtypeStruct((nsp_l * nv_l * nmu_l * ns_l, nkx, nky), jnp.complex128),
                 vmap_method="sequential",
             )(
                 d.reshape(-1, nkx, nky).astype(jnp.complex128),
                 a_pot.astype(jnp.complex128),
                 *static,
+                dum,
                 vf.reshape(-1),
                 batch=np.int32(nsp_l * nv_l * nmu_l),
                 mrad=np.int32(mrad),
                 mphi=np.int32(mphi),
                 nkx=np.int32(nkx),
                 nky=np.int32(nky),
-                nspec=np.int32(ns),
+                nspec=np.int32(ns_l),
                 # the store callback zeroes (ixzero, iyzero); -1 disables the masking
                 ixzero=ixzero_static if exclude_zero_mode else np.int32(-1),
                 iyzero=iyzero_static,
                 nsp=np.int32(nsp_l),
                 nv=np.int32(nv_l),
-                b_inner=np.int32(n_pot_v_l * nmu_l * ns),
+                b_inner=np.int32(n_pot_v_l * nmu_l * ns_l),
                 em=np.int32(em),
                 **v6_attrs,
             )
             return out.reshape(d.shape)
 
-        args = (df, pot, pot_apar, vfac)
+        args = (df, pot, pot_apar, vfac, dum_s)
         if self.mesh is None:
             out = bracket(*args)
         else:
-            pot_ax = ("sp", "vp", "mu")
-            out = sharding.velocity_map(
-                bracket, self.mesh, args, (vel, pot_ax, pot_ax, ("sp", "vp")), PartitionSpec(*vel)
-            )
+            vel = sharding.df_axes(df.ndim, self.mesh)
+            pot_ax = sharding.df_axes(6, self.mesh)
+            axes = (vel, pot_ax, pot_ax, ("sp", "vp"), sharding.with_s(self.mesh))
+            out = sharding.velocity_map(bracket, self.mesh, args, axes, PartitionSpec(*vel))
         if fold:
             return out
         # bracket is linear in df: efun_sign folds into the output scale

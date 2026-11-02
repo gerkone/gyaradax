@@ -50,6 +50,10 @@ struct LinearRhsArgs {
     const double2* df_halo;       // (nsp, 4, nmu, ns, nkx, nky)
     const double*  fm_halo;       // (nsp, 4, nmu, ns)
     const double*  g2f_halo;      // (nsp, 4)
+    // s shard halo (S_HALO variants): planes s0 - 2, s0 - 1, s0 + ns, s0 + ns + 1, periodic in s
+    const double2* f_shalo;       // (nsp, nv, nmu, 4, nkx, nky): f
+    const double2* psi_shalo;     // (nsp, nmu, 4, nkx, nky): J0 phi + bpar_chi bpar
+    const double2* proj_shalo;    // (nsp, nv, nmu, 4, nkx, nky): dissipation projection
 };
 
 // g2f_correct: g2f = -2 signz vthrat vpgr J0 fmaxwl / tmp
@@ -64,7 +68,8 @@ __device__ __forceinline__ double2 g_to_f(double2 g, double g2f_v, double bes, d
 }
 
 // APAR: df is g, f = g + g2f*apar formed in-kernel; BPAR: psi = J0*phi + bpar_chi*bpar; NS == 0: runtime-sized
-template <int NS, int NKY, bool APAR, bool BPAR, bool DPC, bool HALO = false>
+// S_HALO: packed_maps hold the source plane in the s block extended by 2 halo planes per side
+template <int NS, int NKY, bool APAR, bool BPAR, bool DPC, bool HALO = false, bool S_HALO = false>
 __device__ __forceinline__ void linear_rhs_fused_body(const LinearRhsArgs& a) {
     // NS > 0: compile-time sizes; NS == 0: runtime sizes; NS < 0: runtime sizes with ky tiles
     constexpr bool kDyn   = (NS <= 0);
@@ -187,15 +192,22 @@ __device__ __forceinline__ void linear_rhs_fused_body(const LinearRhsArgs& a) {
     #pragma unroll
     for (int i = PAR_TAP_LO; i < PAR_TAP_HI; ++i) {
         const int2   map_val = __ldg(&a.packed_maps[(size_t)i * spatial_stride + spatial_idx]);
-        const int    src_s   = map_val.x;
-        if (src_s >= 0) {
+        const int    src_s   = S_HALO ? map_val.x - 2 : map_val.x;
+        if (map_val.x >= 0) {
             const int    src_kx = map_val.y;
 
             const double c_upar = __ldg(&c_upar_row[i]);
             const double c_t7   = __ldg(&c_t7_row[i]);
 
             double2 v_df, v_gyro, v_proj;
-            if (src_kx == kx) {
+            if (S_HALO && (src_s < 0 || src_s >= ns)) {
+                const size_t h_stride = (size_t)4 * nkx * nky;
+                const size_t h_idx = (size_t)(src_s < 0 ? src_s + 2 : src_s - ns + 2) * (nkx * nky)
+                                   + (size_t)src_kx * nky + ky;
+                v_df   = __ldg(&a.f_shalo[((size_t)sp * nv_nmu + v_idx) * h_stride + h_idx]);
+                v_gyro = __ldg(&a.psi_shalo[((size_t)sp * nmu + mu_idx) * h_stride + h_idx]);
+                if (DPC) v_proj = __ldg(&a.proj_shalo[((size_t)sp * nv_nmu + v_idx) * h_stride + h_idx]);
+            } else if (src_kx == kx) {
                 v_df   = smem_df[src_s * ky_tile + ky_local];
                 v_gyro = smem_gyro[src_s * ky_tile + ky_local];
                 if (DPC) v_proj = smem_proj[src_s * ky_tile + ky_local];
@@ -337,25 +349,27 @@ __device__ __forceinline__ void linear_rhs_fused_body(const LinearRhsArgs& a) {
     if (live) a.rhs_out[field_idx] = res;
 }
 
-template <int NS, int NKY, int MAX_THREADS, bool DPC, bool HALO = false>
+template <int NS, int NKY, int MAX_THREADS, bool DPC, bool HALO = false, bool S_HALO = false>
 __global__ __launch_bounds__(MAX_THREADS)
 void linear_rhs_fused_kernel(const LinearRhsArgs a) {
-    linear_rhs_fused_body<NS, NKY, false, false, DPC, HALO>(a);
+    linear_rhs_fused_body<NS, NKY, false, false, DPC, HALO, S_HALO>(a);
 }
 
 // EM variants: at most 64 registers per thread, 1024 resident threads per SM
-template <int NS, int NKY, int MAX_THREADS, bool APAR, bool BPAR, bool DPC, bool HALO = false>
+template <int NS, int NKY, int MAX_THREADS, bool APAR, bool BPAR, bool DPC, bool HALO = false,
+          bool S_HALO = false>
 __global__ __launch_bounds__(MAX_THREADS, 1024 / MAX_THREADS)
 void linear_rhs_fused_em_kernel(const LinearRhsArgs a) {
-    linear_rhs_fused_body<NS, NKY, APAR, BPAR, DPC, HALO>(a);
+    linear_rhs_fused_body<NS, NKY, APAR, BPAR, DPC, HALO, S_HALO>(a);
 }
 
-template <int NS, int NKY, int MAX_THREADS, bool APAR, bool BPAR, bool DPC, bool HALO = false>
+template <int NS, int NKY, int MAX_THREADS, bool APAR, bool BPAR, bool DPC, bool HALO = false,
+          bool S_HALO = false>
 static void launch_variant(const LinearRhsArgs& args, int num_blocks, int threads, size_t smem,
                            cudaStream_t stream) {
     auto kernel = [] {
-        if constexpr (APAR || BPAR) return linear_rhs_fused_em_kernel<NS, NKY, MAX_THREADS, APAR, BPAR, DPC, HALO>;
-        else return linear_rhs_fused_kernel<NS, NKY, MAX_THREADS, DPC, HALO>;
+        if constexpr (APAR || BPAR) return linear_rhs_fused_em_kernel<NS, NKY, MAX_THREADS, APAR, BPAR, DPC, HALO, S_HALO>;
+        else return linear_rhs_fused_kernel<NS, NKY, MAX_THREADS, DPC, HALO, S_HALO>;
     }();
     // static + dynamic smem can exceed the 48 KiB default
     cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem);
@@ -365,30 +379,34 @@ static void launch_variant(const LinearRhsArgs& args, int num_blocks, int thread
 
 // ── FFI Implementation ──────────────────────────────────────────────────────
 
-template <bool APAR, bool BPAR, bool DPC, bool HALO>
+template <bool APAR, bool BPAR, bool DPC, bool HALO, bool S_HALO>
 static void launch_sized(const LinearRhsArgs& args, int num_blocks, int threads, size_t smem,
                          cudaStream_t stream) {
 #define DISPATCH_CASE(NS_VAL, NKY_VAL)                                                   \
     case (((NS_VAL) << 16) | (NKY_VAL)):                                                 \
         launch_variant<NS_VAL, NKY_VAL, (NS_VAL) * (NKY_VAL), APAR, BPAR, DPC, HALO>(    \
             args, num_blocks, (NS_VAL) * (NKY_VAL), smem, stream);                       \
-        break;
+        return;
 
     if (args.ky_tile != args.nky) {
-        launch_variant<-1, 0, 1024, APAR, BPAR, DPC, HALO>(args, num_blocks, threads, smem, stream);
+        launch_variant<-1, 0, 1024, APAR, BPAR, DPC, HALO, S_HALO>(args, num_blocks, threads, smem, stream);
         return;
     }
-    switch ((args.ns << 16) | args.nky) {
-        DISPATCH_CASE(16, 32)
-        DISPATCH_CASE(32, 32)
-        DISPATCH_CASE(16, 64)
-        default:
-            // small blocks get the register budget of a 256-thread launch
-            if (threads <= 256)
-                launch_variant<0, 0, 256, APAR, BPAR, DPC, HALO>(args, num_blocks, threads, smem, stream);
-            else
-                launch_variant<0, 0, 1024, APAR, BPAR, DPC, HALO>(args, num_blocks, threads, smem, stream);
+    // s shards run the runtime-sized variants only
+    if constexpr (!S_HALO) {
+        switch ((args.ns << 16) | args.nky) {
+            DISPATCH_CASE(16, 32)
+            DISPATCH_CASE(32, 32)
+            DISPATCH_CASE(16, 64)
+            default:
+                break;
+        }
     }
+    // small blocks get the register budget of a 256-thread launch
+    if (threads <= 256)
+        launch_variant<0, 0, 256, APAR, BPAR, DPC, HALO, S_HALO>(args, num_blocks, threads, smem, stream);
+    else
+        launch_variant<0, 0, 1024, APAR, BPAR, DPC, HALO, S_HALO>(args, num_blocks, threads, smem, stream);
 #undef DISPATCH_CASE
 }
 
@@ -400,11 +418,16 @@ static cudaError_t launch_linear_rhs(const LinearRhsArgs& args, cudaStream_t str
     const int n_smem     = DPC ? 3 : 2;
     const size_t smem    = (size_t)n_smem * threads * sizeof(double2);
 
-    // a vpar shard takes the edge neighbours from the halo buffers
-    if (args.df_halo != nullptr)
-        launch_sized<APAR, BPAR, DPC, true>(args, num_blocks, threads, smem, stream);
+    // a vpar or s shard takes the edge neighbours from the halo buffers
+    const bool vp_halo = args.df_halo != nullptr, s_halo = args.f_shalo != nullptr;
+    if (vp_halo && s_halo)
+        launch_sized<APAR, BPAR, DPC, true, true>(args, num_blocks, threads, smem, stream);
+    else if (vp_halo)
+        launch_sized<APAR, BPAR, DPC, true, false>(args, num_blocks, threads, smem, stream);
+    else if (s_halo)
+        launch_sized<APAR, BPAR, DPC, false, true>(args, num_blocks, threads, smem, stream);
     else
-        launch_sized<APAR, BPAR, DPC, false>(args, num_blocks, threads, smem, stream);
+        launch_sized<APAR, BPAR, DPC, false, false>(args, num_blocks, threads, smem, stream);
     return cudaGetLastError();
 }
 
@@ -441,9 +464,12 @@ xla_ffi::Error LinearRhsFusedImpl(
     xla_ffi::Buffer<xla_ffi::DataType::C128> df_halo,
     xla_ffi::Buffer<xla_ffi::DataType::F64>  fm_halo,
     xla_ffi::Buffer<xla_ffi::DataType::F64>  g2f_halo,
+    xla_ffi::Buffer<xla_ffi::DataType::C128> f_shalo,
+    xla_ffi::Buffer<xla_ffi::DataType::C128> psi_shalo,
+    xla_ffi::Buffer<xla_ffi::DataType::C128> proj_shalo,
     xla_ffi::Result<xla_ffi::Buffer<xla_ffi::DataType::C128>> rhs_out,
     int32_t nsp, int32_t nv, int32_t nmu, int32_t ns, int32_t nkx, int32_t nky, int32_t n_class,
-    int32_t has_apar, int32_t has_bpar, int32_t has_dpc, int32_t has_halo,
+    int32_t has_apar, int32_t has_bpar, int32_t has_dpc, int32_t has_halo, int32_t has_shalo,
     double c_d1_0, double c_d1_1, double c_d1_2, double c_d1_3, double c_d1_4,
     double c_d4_0, double c_d4_1, double c_d4_2, double c_d4_3, double c_d4_4,
     double dvp, double disp_vp, double drive_scale
@@ -480,7 +506,10 @@ xla_ffi::Error LinearRhsFusedImpl(
             dvp, disp_vp, drive_scale,
             has_halo ? batch_at<const double2>(df_halo, n, i) : nullptr,
             has_halo ? batch_at<const double>(fm_halo, n, i) : nullptr,
-            has_halo ? batch_at<const double>(g2f_halo, n, i) : nullptr
+            has_halo ? batch_at<const double>(g2f_halo, n, i) : nullptr,
+            has_shalo ? batch_at<const double2>(f_shalo, n, i) : nullptr,
+            has_shalo ? batch_at<const double2>(psi_shalo, n, i) : nullptr,
+            has_shalo && has_dpc ? batch_at<const double2>(proj_shalo, n, i) : nullptr
         };
 
         cudaError_t err;
@@ -537,6 +566,9 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(
         .Arg<xla_ffi::Buffer<xla_ffi::DataType::C128>>() // df_halo
         .Arg<xla_ffi::Buffer<xla_ffi::DataType::F64>>()  // fm_halo
         .Arg<xla_ffi::Buffer<xla_ffi::DataType::F64>>()  // g2f_halo
+        .Arg<xla_ffi::Buffer<xla_ffi::DataType::C128>>() // f_shalo
+        .Arg<xla_ffi::Buffer<xla_ffi::DataType::C128>>() // psi_shalo
+        .Arg<xla_ffi::Buffer<xla_ffi::DataType::C128>>() // proj_shalo
         .Ret<xla_ffi::Buffer<xla_ffi::DataType::C128>>() // rhs_out
         .Attr<int32_t>("nsp")
         .Attr<int32_t>("nv")
@@ -549,6 +581,7 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(
         .Attr<int32_t>("has_bpar")
         .Attr<int32_t>("has_dpc")
         .Attr<int32_t>("has_halo")
+        .Attr<int32_t>("has_shalo")
         .Attr<double>("c_d1_0").Attr<double>("c_d1_1").Attr<double>("c_d1_2")
         .Attr<double>("c_d1_3").Attr<double>("c_d1_4")
         .Attr<double>("c_d4_0").Attr<double>("c_d4_1").Attr<double>("c_d4_2")
