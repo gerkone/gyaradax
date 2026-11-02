@@ -41,7 +41,7 @@ from typing import Any, Callable, Optional
 
 import numpy as np
 
-from gyaradax.io.schema import flatten_metadata, nest_metadata
+from gyaradax.io.schema import FLUX_LABELS, LIGHT_DROP_KEYS, flatten_metadata, nest_metadata
 
 # geometry entries of the kinetic dataset (neugk_jax.dataset.preprocess.kinetic_geometry)
 GEOMETRY_KEYS = ("kxrh", "krho", "intvp", "vpgr", "intmu", "mugr", "ints", "bn", "bt_frac", "rfun", "efun",
@@ -295,9 +295,7 @@ def load_metadata(traj: str) -> Optional[dict]:
 
 def write_metadata(traj: str, metadata: dict) -> None:
     _atomic_write(os.path.join(traj, "metadata.pkl"), pickle.dumps(nest_metadata(metadata)))
-    # metadata_light leaves out the per-element moments, as neugk does
-    drop = {f"df_{m}" for m in ("mean", "var", "std", "min", "max")} | {"phi_min", "phi_max", "phi_var"}
-    light = {k: v for k, v in metadata.items() if k not in drop}
+    light = {k: v for k, v in metadata.items() if k not in LIGHT_DROP_KEYS}
     _atomic_write(os.path.join(traj, "metadata_light.pkl"), pickle.dumps(nest_metadata(light)))
 
 
@@ -368,8 +366,6 @@ def _static_metadata(geometry: dict, params: Any, config_path: str) -> dict:
     return meta
 
 
-# flux channels of the (T, species, 3) flux series, as in the neugk-jax metadata schema
-FLUX_LABELS = ("pflux", "eflux", "vflux")
 # per-frame metadata; the quant_* entries track the bf16 loss (quantization_loss)
 SERIES_KEYS = ("timesteps", "solver_steps", "flux", "kyspec", "kxspec", "growth",
                "quant_phi_err", "quant_phi_df_err", "quant_flux_err")
@@ -471,12 +467,11 @@ class DatasetWriter:
             src = list(np.asarray(self.carried["phic_source_frames"]).astype(str))
             src += [str(self.static.get("phic_source", "solver_exact"))] * (n - len(src))
             meta["phic_source_frames"] = np.array(src)
-            kinds = sorted(set(src))
-            meta["phic_source"] = kinds[0] if len(kinds) == 1 else "mixed"
+            meta["phic_source"] = src[0] if len(set(src)) == 1 else "mixed"
         if "thinned_from" in self.carried:
-            base = [int(i) for i in np.asarray(self.carried["thinned_from"])]
-            start = base[-1] + 1 if base else 0
-            meta["thinned_from"] = np.asarray(base + list(range(start, start + n - len(base))), np.int64)
+            base = np.asarray(self.carried["thinned_from"], np.int64)
+            start = base[-1] + 1 if len(base) else 0
+            meta["thinned_from"] = np.concatenate([base, np.arange(start, start + n - len(base))])
         return meta
 
     def write_resume(self, df, state, dump_origin: Optional[float] = None) -> None:
@@ -505,7 +500,7 @@ class DatasetWriter:
             print(f"  dataset {os.path.basename(self.path)}: {quantization_summary(self.metadata())}")
 
 
-# per-frame keys outside the series that an extension carries on (and a resume from an older snapshot trims)
+# per-frame keys outside the series that an extension carries on
 CARRIED_PER_FRAME = ("phic_source_frames", "thinned_from")
 
 LINEAR_FILES = ("linear.bin", "linear_poten.bin")
