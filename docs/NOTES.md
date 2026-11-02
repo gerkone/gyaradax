@@ -1124,9 +1124,23 @@ potential planes are transformed and chi is formed in real space.
   pairs (inverse row FFT, bracket against the real-space potential row, 2-for-1 forward row
   FFT, nky modes kept); a cuFFT column pass on the nky kept columns and an unpack to
   [b_df, nkx, nky]. This removes the zero ky band from the column passes and the full
-  real-space round trips between them. Row kernels are instantiated for
-  mphi in {16, 32, 36, 40, 64, 96, 128, 144, 192}; other grids, odd plane counts or a build
-  without cuFFTDx run v5. `GYARADAX_BRACKET=v5` forces v5.
+  real-space round trips between them. Row kernels are built for the dealiased ky length mphi of
+  every nky up to the CMake option `BRACKET_V6_NKY_MAX` (default 192) and for the power of two
+  >= 3 `BRACKET_V6_NKY_MAX` - 2, except the lengths cuFFTDx runs only with a global workspace (70,
+  90, 98, 140, 150, 210, ...: 16 of the 53 lengths up to 576). A grid whose own mphi has no row
+  kernel runs at the smallest built length >= 3 nky - 2 (alias-free, so only round-off changes;
+  nky 23: 80 instead of 70), so every nky up to the option, and beyond up to the power of two,
+  runs v6. A build without cuFFTDx, a GPU architecture it was not built for, a larger nky or an
+  odd plane count per device run v5 with a one-time warning naming the reason;
+  `GYARADAX_BRACKET=v5` selects v5 quietly. `gyaradax info` lists the built architectures and
+  lengths.
+- v6 kx padding: the column passes run at the smallest alias-free length (>= max(2 Kp + Kn,
+  2 Kn + Kp) + 1 for the retained modes -Kn..Kp) that has prime factors <= 7 and a cuFFT plan
+  without workspace, i.e. one kernel; the native GKW length (e.g. 294 = 2 3 7^2 at nkx 191, three
+  cuFFT passes) is kept when no such length is smaller. Every alias-free length gives the same
+  retained product, so only FFT round-off changes. `GYARADAX_BRACKET_MRAD=native|auto|N` overrides.
+  The FP32 bracket applies its exact FP64 output scale in the unpack kernel (bitwise), or with
+  `fused_bracket` in the cuFFT store callback that replaces it.
 
 Performance, memory use, multi-GPU sharding and the CUDA vs JAX parity checks are collected
 in §13.
@@ -1524,14 +1538,29 @@ Per evaluation, H100, 2 x 32 x 8 x 16 x 85 x 32, mixed precision (master = befor
   bindings in `docs/cuda_experiments/legacy/`.
 - **Field moments.** Up to two velocity moments per pass over g, with g -> f in-kernel and
   chunked (deterministic) partial sums.
-- **vmap.** The linear kernels (`linear_rhs_fused`, `linear_rhs_es[_rk]`, `field_moments`,
-  `collision_rhs`) use `vmap_method="expand_dims"`: a vmapped call (e.g. a batch of flux tubes)
-  reaches the handler as one call and launches the unchanged kernel once per element at pointer
-  offsets, instead of XLA slicing every operand per element. Bitwise equal to separate calls; 8
-  elements at 85 x 32 on an A40 cost 8 single calls (117 ms/step adiabatic, 352 kinetic) against
-  152 / 467 ms with the sequential method. One element already fills the GPU, so merging elements
-  into one launch would not gain more. The bracket stays sequential: its cached cuFFT plans and
-  work buffers are sized for one element.
+- **Fused electrostatic step (`fused_linear`, default off).** One `linear_rhs_es` kernel per RK4
+  stage: a 5-plane vpar ring in shared memory, the 9-point collision stencil (without the
+  momentum / energy corrections) and the RK update in registers, so no k array; kinetic runs take
+  the field solve from `field_moments`. EM, conservative dissipation, ns nky > 576, nv % 8 != 0
+  or >= 2^31 points per device fall back to the default kernel with a one-time warning; sharded
+  runs use HALO instantiations (§13.4). ~1e-14 per RHS against the default path. B300 steps/s
+  against it: linear kinetic 2.2x, kinetic + collisions 2.7x, adiabatic 1.6x, NL kinetic mixed
+  precision 1.5x; H100 linear 1.8-2.3x (#17).
+- **Double-single linear RHS (`linear_arith: ds`, default `fp64`).** For weak-FP64 GPUs (B300:
+  FP32 ~70x the FP64 rate) the electrostatic linear RHS runs on hi + lo FP32 pairs (~48 bits) on
+  the FP32 pipe; df, phi and the RHS stay complex128 and `linear_precompute` builds the (hi, lo)
+  tables. With `fused_linear` it also takes the collisions and the RK updates; same fallbacks
+  (to FP64). ~1e-14 per RHS against FP64, converged gamma <= 3e-13. B300 production linear
+  kinetic: 5.0x the default path together with `fused_linear` (2.3x over `fused_linear` alone);
+  about neutral on H100 (#18). Parked Ozaki experiments: `docs/cuda_experiments/ozaki/`.
+- **vmap.** The linear kernels (`linear_rhs_fused`, `linear_rhs_es[_rk]`, `linear_rhs_ds[_rk]`,
+  `field_moments`, `collision_rhs`) use `vmap_method="expand_dims"`: a vmapped call (e.g. a batch of
+  flux tubes) reaches the handler as one call and launches the unchanged kernel once per element at
+  pointer offsets, instead of XLA slicing every operand per element. Bitwise equal to separate
+  calls; 8 elements at 85 x 32 on an A40 cost 8 single calls (117 ms/step adiabatic, 352 kinetic)
+  against 152 / 467 ms with the sequential method. One element already fills the GPU, so merging
+  elements into one launch would not gain more. The bracket stays sequential: its cached cuFFT plans
+  and work buffers are sized for one element.
 - **Bracket v5.** The EM potential is separable in vpar, so only the potentials A and B are
   transformed. On power-of-two dealiased planes with large batches cuFFT silently skips the FP32
   load callback (master returned an all-zero bracket on e.g. 9 x 5 mode boxes); a plan-time NaN
@@ -1540,6 +1569,8 @@ Per evaluation, H100, 2 x 32 x 8 x 16 x 85 x 32, mixed precision (master = befor
   columns only, cuFFTDx row kernels fusing the inverse row FFT, the bracket and the forward row FFT,
   and a final column pass on the nky kept columns. This removes the zero ky band from the column
   FFTs and the real-space round trips between passes.
+- **kx padding.** The column passes pick a single-kernel cuFFT length instead of GKW's (§10.14).
+  Production kinetic NL, mixed precision: B300 137 -> 62.5 ms, H100 141 -> 68 ms, A100 334 -> 122 ms.
 - **Tried, not kept.** A vpar-fastest block order (more stack spills, EM linear 1.43 -> 1.98 ms);
   staged v6 row kernels (slower); hand-written FFTs (cuFFT / cuFFTDx are used instead).
 
@@ -1615,8 +1646,18 @@ moments are all-reduced (a few MiB per step). Sharding vpar exchanges the two vp
 each shard edge per stage (`sharding.halo_planes`): df, plus F_M and the g2f factor for the
 in-kernel g -> f. The CUDA kernel reads them from separate halo buffers, the JAX stencil from a
 halo-extended block; planes past the grid ends are zero, so interior points are computed exactly
-as on one device. The sharded precompute keeps scalar entries (`dvp`, `sgr_dist`) concrete, which
-the CUDA kernels need. Multi-GPU runs need NCCL (`nvidia-nccl-cu13`, in the `cuda13` extra).
+as on one device. `fused_linear` / `linear_arith: ds` (`linear_rhs_es`, `linear_rhs_ds`) and
+`collision_rhs` do the same (`kernels/shard_halo.cuh`): the two vpar planes past each edge and,
+for the collision stencil, the mu plane past each edge over the vpar range plus one plane per
+side, so the corners come with the vpar halo. Their RHS and RK stages are bitwise equal to one
+device; only the momentum / energy collision corrections differ (all-reduced moments). Two A100
+(NVLink), `--fused-linear`, mixed precision, ms per step against the fallback before: kinetic
+2 x 32 x 12 x 18 x 192 x 32 sp/vp/mu 58/66/58 (82/90/82), with collisions 62/73/75
+(88/128/132); adiabatic 48 x 16 x 24 x 256 x 64 vp/mu 208/183 (278/264). The HALO
+instantiations run ~30 % (with collisions ~50 %) slower per point than the plain ones, which sit
+at the 56-register limit. The sharded precompute keeps scalar entries (`dvp`, `sgr_dist`)
+concrete, which the CUDA kernels need.
+Multi-GPU runs need NCCL (`nvidia-nccl-cu13`, in the `cuda13` extra).
 
 - **Which axis.** Without collisions, species and mu shards need nothing from their neighbours;
   vpar shards receive 4 nmu ns nkx nky complex values per device and stage (178 MB on the large
@@ -1658,8 +1699,10 @@ the CUDA kernels need. Multi-GPU runs need NCCL (`nvidia-nccl-cu13`, in the `cud
   exchange is periodic, so the end shards get the planes of the other end and `kx_shift` applies
   the kx shift of the connection. The field solve stays s-local; only the adiabatic zonal
   flux-surface average, the CFL maxima and the diagnostics reduce over s. Needs
-  `ns % n_gpus_s == 0` with >= 2 s points per shard; `--n-gpus` never picks it. On CPU it matches
-  one device at the round-off of the velocity axes; not yet run or benchmarked on GPUs.
+  `ns % n_gpus_s == 0` with >= 2 s points per shard; `--n-gpus` never picks it. `fused_linear`,
+  `ds` and the CUDA collision kernel have no s halo and fall back to the default kernels with a
+  one-time warning. On CPU it matches one device at the round-off of the velocity axes; not yet
+  run or benchmarked on GPUs.
 
 On the 2 x 32 x 8 x 16 x 55 x 8 waltz A_par + B_par case on two B300 the step went from 19.1 to
 11.6 ms (CUDA, mu = 2) and from 55.5 to 31.9 ms (JAX, mu = 2).
@@ -1709,8 +1752,8 @@ timings as the minimum over interleaved repeats when the GPU is shared.
 
 ### 13.6 recommendations
 
-- Production runs: CUDA backend (`--backend cuda`), mixed precision, H100-class GPUs for the
-  FP64-heavy linear kernel.
+- Production runs: CUDA backend (`--backend cuda`), mixed precision (faster than FP64 on every GPU
+  since the kx padding), `--fused-linear`, and `--linear-arith ds` plus `--fused-bracket` on B300.
 - Gradients and bitwise references: JAX backend.
 - Large grids: shard (`--n-gpus N`); close to the memory limit on one GPU, `--mem-fraction 0.95`.
 - `GYARADAX_BRACKET=v5` reproduces the v5 bracket bitwise (and the master CUDA ES results).
@@ -1718,6 +1761,25 @@ timings as the minimum over interleaved repeats when the GPU is shared.
 - `gyaradax run ... --telemetry` records per-block timings, dt and device memory in the run
   directory (`telemetry.jsonl`); `--profile` adds a profiler trace of one block and its GPU kernel
   breakdown (`profile_summary.json`). Both are off by default (docs/CLI.md).
+
+### 13.7 solver switches
+
+| switch | default | effect | scope | accuracy |
+|---|---|---|---|---|
+| `backend` (`--backend`) | `jax` | `cuda`: FFI kernels, Z2Z only; `auto`: CUDA when the library and a GPU are present | everything | linear <= 4e-16, FP64 bracket <= 2.2e-15 against JAX (§13.5) |
+| `mixed_precision` (`--mp` / `--dp`) | true in the CLI | FP32 FFTs in the bracket; linear terms and fields stay FP64 | nonlinear runs | ~1e-6 per bracket evaluation |
+| `use_z2z` | false | Z2Z instead of R2C FFTs in the JAX bracket | JAX backend | round-off |
+| `fused_linear` (`--fused-linear`) | false | fused electrostatic RK stage (§13.2) | ES; else default kernel | ~1e-14 per RHS |
+| `linear_arith` (`--linear-arith`) | `fp64` | `ds`: double-single linear RHS (§13.2) | as `fused_linear`, CUDA only | ~1e-14 per RHS |
+| `fused_bracket` (`--fused-bracket`) | false | mixed-precision v6 bracket packs and unpacks in cuFFT load / store callbacks, as FP64 always does: B300 bracket 1.25x, kinetic step 1.13x; A100 slower | CUDA v6 bracket, mixed precision | bitwise on B300; round-off elsewhere (A100 large adiabatic) |
+| `n_gpus_{sp,vp,mu}` (`--n-gpus`) | 1 | velocity-space sharding (§13.4) | all runs | round-off |
+| `GYARADAX_BRACKET=v5` | v6 | forces the v5 bracket (v6 falls back to v5 with a warning where it has no kernel) | CUDA bracket | bitwise v5 |
+| `BRACKET_V6_NKY_MAX` (CMake) | 192 | nky range of the v6 row kernels; build time and library size grow with it (README) | CUDA v6 bracket | round-off (padded mphi) |
+| `GYARADAX_BRACKET_MRAD=native\|auto\|N` | `auto` | kx length of the v6 column passes (§10.14) | CUDA v6 bracket | round-off |
+
+Grid limits: the v6 row FFT sizes are fixed at build time; `fused_linear` and `ds` (with their fused
+collisions) need ns <= 576 and < 2^31 points per device and otherwise fall back with a warning; all
+other kernels take their sizes at run time.
 
 ## 14. quasilinear transport (`quasilinear/`)
 

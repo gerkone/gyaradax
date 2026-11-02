@@ -315,6 +315,38 @@ def test_collisions_sharded_matches_single_device(backend, axis, conserve):
 
 
 @pytest.mark.skipif(len(jax.devices()) < 2, reason="requires ≥2 GPUs")
+@pytest.mark.parametrize("arith", ["fp64", "ds"])
+@pytest.mark.parametrize("axis", ["n_gpus_sp", "n_gpus_vp", "n_gpus_mu"])
+def test_fused_linear_sharded_matches_single_device(arith, axis):
+    """Fused RK stage with in-kernel collisions: bitwise on the device blocks, round-off over 3 steps."""
+    from gyaradax.backends import create_ops
+
+    if not HAS_CUDA:
+        pytest.skip("CUDA not available")
+    coll = dict(collisions=True, coll_freq=0.05, coll_freq_override=True, coll_mass_conserve=True)
+    df, geometry, params, state = noisy_case(
+        "kinetic.yaml", dict(nvpar=16, nmu=4, ns=16, nkx=21, nky=5),
+        dict(non_linear=False, adaptive_dt=False, fused_linear=True, linear_arith=arith, **coll),
+        seed=7, backend="cuda", mixed_precision=False,
+    )
+    sharded = replace(params, **{axis: 2})
+    mesh = sharding.build_mesh(sharded)
+    grid = sharding.grid_shape_from(sharded, geometry)
+    pre = linear_precompute(geometry, params)
+    phi = df[0, 0, 0] * 0.1
+
+    def stage(ops, d):
+        return ops.rk_stage(d, phi, params, ops.pre, 0.5 * d, d, None, 0.1, 0.05, True)
+
+    ref = jax.jit(lambda d: stage(create_ops(pre, backend="cuda"), d))(df)
+    ops = create_ops(sharding.shard_pre(pre, mesh, grid), backend="cuda", mesh=mesh)
+    assert ops.supports_rk_fused(df, sharded, ops.pre)
+    out = jax.jit(lambda d: stage(ops, d))(sharding.shard_df(df, mesh, grid))
+    for a, b in zip(out, ref):
+        np.testing.assert_array_equal(np.asarray(a), np.asarray(b))
+    _assert_sharded_matches_single(df, geometry, params, state, sharded)
+
+
 @pytest.mark.parametrize("backend", ["cuda", "jax"])
 @pytest.mark.parametrize("adiabatic", [True, False])
 def test_s_sharded_matches_single_device(backend, adiabatic):

@@ -182,6 +182,8 @@ is large or does not fit one GPU.
 | `--backend {auto,jax,cuda}` | kernel backend (default: config, else `jax`) |
 | `--mp` / `--dp` | mixed precision (FP32 nonlinear FFTs) or full FP64 |
 | `--fused-linear` | CUDA: fused electrostatic linear kernel with collisions and RK4 stages (`solver.fused_linear`) |
+| `--linear-arith {fp64,ds}` | CUDA: double-single linear RHS for weak-FP64 GPUs such as B300 (`solver.linear_arith`) |
+| `--fused-bracket` | CUDA: mixed-precision bracket packs/unpacks inside the cuFFT passes; faster on B300, slower on A100 (`solver.fused_bracket`) |
 | `--device N` | pin to one GPU (single-device runs only) |
 | `--device-list 0,1` | GPUs to use; several with no mesh given shard over them automatically |
 | `--n-gpus N` | shard over N GPUs, layout chosen from the grid |
@@ -236,8 +238,8 @@ process started (setup included), for the busiest GPU of a mesh.
   less on small or linear runs). JAX stays the reference for gradients and
   bitwise comparisons.
 - The CUDA nonlinear bracket uses cuFFTDx (v6) when the library was built with
-  `nvidia-mathdx`, and the cuFFT-only v5 pipeline for plane sizes v6 has no
-  kernel for; `GYARADAX_BRACKET=v5` forces v5 everywhere.
+  `nvidia-mathdx`, and the cuFFT-only v5 pipeline, with a one-time warning, for
+  grids v6 has no kernel for; `GYARADAX_BRACKET=v5` forces v5 everywhere.
 - Grids close to one GPU's memory can fail on allocator fragmentation even when
   they fit: try `--mem-fraction 0.95`, or shard.
 - `gyaradax info` shows the devices, whether the CUDA library and the v6

@@ -3,6 +3,7 @@
 #include <algorithm>
 
 #include "radius_batch.cuh"
+#include "shard_halo.cuh"
 
 namespace xla_ffi = xla::ffi;
 
@@ -14,9 +15,12 @@ __host__ __device__ constexpr int coll_dmu(int k) { return k < 3 ? 0 : k < 5 ? (
 
 constexpr int COLL_VCH = 4;
 
+template <bool HALO>
 __global__ __launch_bounds__(256) void collision_rhs_kernel(
     const double2* __restrict__ df,       // (nsp, nv, nmu, ns, nkx, nky)
     const double* __restrict__ stencil,   // (nsp, 9, nv, nmu, ns)
+    const double2* __restrict__ vp_halo,  // sharded blocks: shard_halo.cuh layouts, else null
+    const double2* __restrict__ mu_halo,
     double2* __restrict__ out,
     int nsp, int nv, int nmu, int ns, int nxy)
 {
@@ -43,6 +47,10 @@ __global__ __launch_bounds__(256) void collision_rhs_kernel(
         for (int j = 0; j < 3; ++j) {
             const int m = mu - 1 + j;
             w[i][j] = (v >= 0 && v < nv && m >= 0 && m < nmu) ? __ldg(&f_sp[(size_t)v * plane + (size_t)m * nspat]) : z;
+            ptrdiff_t shift;
+            if (HALO && !(v >= 0 && v < nv && m >= 0 && m < nmu)
+                && halo_shift(df, vp_halo, mu_halo, sp, v, m, nv, nmu, nspat, shift))
+                w[i][j] = __ldg(f_sp + (ptrdiff_t)v * (ptrdiff_t)plane + (ptrdiff_t)m * nspat + shift);
         }
     }
     #pragma unroll
@@ -66,17 +74,23 @@ xla_ffi::Error CollisionRhsImpl(
     cudaStream_t stream,
     xla_ffi::Buffer<xla_ffi::DataType::C128> df,
     xla_ffi::Buffer<xla_ffi::DataType::F64> stencil,
+    xla_ffi::Buffer<xla_ffi::DataType::C128> vp_halo,
+    xla_ffi::Buffer<xla_ffi::DataType::C128> mu_halo,
     xla_ffi::Result<xla_ffi::Buffer<xla_ffi::DataType::C128>> out,
-    int32_t nsp, int32_t nv, int32_t nmu, int32_t ns, int32_t nxy)
+    int32_t nsp, int32_t nv, int32_t nmu, int32_t ns, int32_t nxy, int32_t has_vp_halo, int32_t has_mu_halo)
 {
     const int threads = 256;
     const dim3 grid((unsigned)((ns * nxy + threads - 1) / threads),
                     (unsigned)(nsp * nmu * ((nv + COLL_VCH - 1) / COLL_VCH)));
     const int64_t n = batch_count(*out, (int64_t)nsp * nv * nmu * ns * nxy);
-    for (int64_t i = 0; i < n; ++i)
-        collision_rhs_kernel<<<grid, threads, 0, stream>>>(
-            batch_at<const double2>(df, n, i), batch_at<const double>(stencil, n, i),
-            batch_at<double2>(*out, n, i), nsp, nv, nmu, ns, nxy);
+    for (int64_t i = 0; i < n; ++i) {
+        const double2* vh = has_vp_halo ? batch_at<const double2>(vp_halo, n, i) : nullptr;
+        const double2* mh = has_mu_halo ? batch_at<const double2>(mu_halo, n, i) : nullptr;
+        (vh != nullptr || mh != nullptr ? collision_rhs_kernel<true> : collision_rhs_kernel<false>)
+            <<<grid, threads, 0, stream>>>(
+                batch_at<const double2>(df, n, i), batch_at<const double>(stencil, n, i), vh, mh,
+                batch_at<double2>(*out, n, i), nsp, nv, nmu, ns, nxy);
+    }
     const cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess)
         return xla_ffi::Error(XLA_FFI_Error_Code_INTERNAL, cudaGetErrorString(err));
@@ -89,10 +103,14 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(
         .Ctx<xla_ffi::PlatformStream<cudaStream_t>>()
         .Arg<xla_ffi::Buffer<xla_ffi::DataType::C128>>() // df
         .Arg<xla_ffi::Buffer<xla_ffi::DataType::F64>>()  // stencil
+        .Arg<xla_ffi::Buffer<xla_ffi::DataType::C128>>() // vp_halo
+        .Arg<xla_ffi::Buffer<xla_ffi::DataType::C128>>() // mu_halo
         .Ret<xla_ffi::Buffer<xla_ffi::DataType::C128>>() // out
         .Attr<int32_t>("nsp")
         .Attr<int32_t>("nv")
         .Attr<int32_t>("nmu")
         .Attr<int32_t>("ns")
         .Attr<int32_t>("nxy")
+        .Attr<int32_t>("has_vp_halo")
+        .Attr<int32_t>("has_mu_halo")
 );

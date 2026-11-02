@@ -167,6 +167,12 @@ SolverOps interface: `linear_rhs()`, `linear_rhs_from_g()`, `nonlinear_term_iii(
   incl. A_par/B_par, conservative parallel dissipation and collisions; 2.6-3.0x (ES) and 2.9-4.2x
   (EM) faster nonlinear steps than JAX on H100 production grids — operators in docs/NOTES.md
   §10.14, performance in §13).
+- **Performance switches** (docs/NOTES.md §13.7): `fused_linear` (one fused electrostatic kernel
+  per RK4 stage) and `linear_arith: ds` (double-single linear RHS for weak-FP64 GPUs such as B300)
+  are off by default; best flags are `--fused-linear` everywhere plus `--linear-arith ds` on B300.
+  Both fall back (one-time warning) for EM, conservative dissipation and sharded runs. The CUDA
+  bracket pads kx to a single-kernel cuFFT length (`GYARADAX_BRACKET_MRAD`), so mixed precision
+  is faster than FP64 on every GPU.
 
 ## Running tests
 

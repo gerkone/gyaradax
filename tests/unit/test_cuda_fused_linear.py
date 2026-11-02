@@ -32,10 +32,10 @@ CASES = {
 }
 
 
-def _run(name, fused):
+def _run(name, fused, grid=GRID):
     cfg_name, overrides = CASES[name]
     df, geometry, params, state = noisy_case(
-        cfg_name, GRID, {**overrides, "fused_linear": fused, "backend": "cuda"},
+        cfg_name, grid, {**overrides, "fused_linear": fused, "backend": "cuda"},
         seed=7, mixed_precision=False,
     )
     pre = linear_precompute(geometry, params)
@@ -49,6 +49,22 @@ def _run(name, fused):
 @pytest.mark.parametrize("name", list(CASES))
 def test_fused_linear_matches_default(name):
     (rhs_ref, out_ref), (rhs, out) = _run(name, False), _run(name, True)
+    assert not np.array_equal(rhs, rhs_ref), "fused path did not run"
+    assert np.max(np.abs(rhs - rhs_ref)) / np.max(np.abs(rhs_ref)) < 1e-14
+    assert np.max(np.abs(out - out_ref)) / np.max(np.abs(out_ref)) < 1e-13
+
+
+@pytest.mark.parametrize(
+    "grid",
+    [
+        {**GRID, "nky": 64},
+        {**GRID, "nky": 37},
+        {**GRID, "nvpar": 36},
+    ],
+    ids=["two_ky_tiles", "partial_ky_tile", "vpar_tail"],
+)
+def test_fused_linear_any_grid(grid):
+    (rhs_ref, out_ref), (rhs, out) = _run("kinetic_collisions", False, grid), _run("kinetic_collisions", True, grid)
     assert not np.array_equal(rhs, rhs_ref), "fused path did not run"
     assert np.max(np.abs(rhs - rhs_ref)) / np.max(np.abs(rhs_ref)) < 1e-14
     assert np.max(np.abs(out - out_ref)) / np.max(np.abs(out_ref)) < 1e-13
