@@ -8,6 +8,7 @@ is not compiled.
 import ctypes
 import functools
 import logging
+import math
 import os
 from pathlib import Path
 from typing import Dict, Optional, Tuple
@@ -20,7 +21,7 @@ from jax.sharding import PartitionSpec
 
 import gyaradax.operators.stencils as stencils
 import gyaradax.sharding as sharding
-from gyaradax.backends.ops import SolverOps
+from gyaradax.backends.ops import SolverOps, warn_once
 from gyaradax.core.state import GKPre
 from gyaradax.operators.collisions import (
     CONSERVATION_KEYS,
@@ -40,9 +41,7 @@ _ffi_registered = False
 _has_bracket_v6 = False
 _has_linear_es = False
 _has_collision_rhs = False
-_fused_fallback_logged = False
 _has_linear_ds = False
-_ds_fallback_logged = False
 
 
 def _cuda_zero_mode_index(pre: GKPre, key: str, size: int) -> np.int32:
@@ -197,6 +196,67 @@ def _v6_supported(fp64: bool, mphi: int, b_df: int, nky: int, nsp: int, b_inner:
     if probe is None:
         return False
     return bool(probe(int(fp64), mphi, b_df, nky, nsp, b_inner))
+
+
+def _device_sm() -> int:
+    major, minor = str(jax.devices("cuda")[0].compute_capability).split(".")
+    return 100 * int(major) + 10 * int(minor)
+
+
+@functools.lru_cache(maxsize=None)
+def v6_build(fp64: bool, sm: Optional[int] = None) -> Tuple[Tuple[int, ...], Tuple[int, ...]]:
+    """SM values (e.g. 900) of the v6 bracket build and its row FFT sizes on SM sm (this GPU)."""
+    archs_fn = _probe("gyaradax_bracket_v6_archs", ctypes.c_int, (ctypes.c_void_p, ctypes.c_int))
+    sizes_fn = _probe(
+        "gyaradax_bracket_v6_sizes",
+        ctypes.c_int,
+        (ctypes.c_int, ctypes.c_int, ctypes.c_void_p, ctypes.c_int),
+    )
+    if archs_fn is None or sizes_fn is None:
+        return (), ()
+    buf = (ctypes.c_int * 4096)()
+    archs = tuple(buf[: archs_fn(buf, len(buf))])
+    sizes = tuple(buf[: sizes_fn(_device_sm() if sm is None else sm, int(fp64), buf, len(buf))])
+    return archs, sizes
+
+
+@functools.lru_cache(maxsize=None)
+def _v6_row_size(fp64: bool, mphi: int, nky: int, b_df: int, nsp: int, b_inner: int):
+    """Row FFT length of the v6 bracket for these planes, or (None, why v5 runs instead).
+
+    The native length mphi is kept when built; otherwise the smallest built length >= 3 nky - 2,
+    which keeps the ky product alias-free like any length from there up.
+    """
+    if not _has_bracket_v6:
+        return None, "library built without cuFFTDx (pip install nvidia-mathdx, then rebuild)"
+    sm = _device_sm()
+    archs, sizes = v6_build(fp64, sm)
+    if not archs:
+        return None, "the CUDA library predates the v6 size list (rebuild it)"
+    if sm not in archs:
+        built = ", ".join(str(a // 10) for a in archs)
+        return None, f"not built for SM {sm // 10} (built: {built}; extend GPU_ARCHITECTURES)"
+    m = mphi if mphi in sizes else min((s for s in sizes if s >= 3 * nky - 2), default=None)
+    if m is None:
+        return None, (
+            f"no row FFT size >= {3 * nky - 2} for nky {nky} (largest built "
+            f"{max(sizes, default=0)}; rebuild with BRACKET_V6_NKY_MAX >= {nky})"
+        )
+    if not _v6_supported(fp64, m, b_df, nky, nsp, b_inner):
+        return None, f"{b_df} df planes per device, v6 needs an even number"
+    if m != mphi:
+        log.info("bracket: ky FFT size %d instead of %d (v6 row kernels)", m, mphi)
+    return m, None
+
+
+def _bracket_v6_row_size(fp64: bool, mphi: int, nky: int, b_df: int, nsp: int, b_inner: int):
+    """Row FFT length of the v6 bracket, or None for v5 (GYARADAX_BRACKET=v5, or with a warning)."""
+    if os.environ.get("GYARADAX_BRACKET", "auto") == "v5":
+        return None
+    m, reason = _v6_row_size(fp64, mphi, nky, b_df, nsp, b_inner)
+    if reason is not None:
+        warn_once(log, f"the bracket runs v5 instead of v6: {reason}")
+    return m
 
 
 @functools.lru_cache(maxsize=None)
@@ -464,13 +524,11 @@ class CUDAOps(SolverOps):
         return None
 
     def _use_ds(self, df, params, pre, has_em, has_dpc) -> bool:
-        global _ds_fallback_logged
         if params.linear_arith != "ds":
             return False
         reason = self._ds_unsupported(df, pre, has_em, has_dpc)
-        if reason is not None and not _ds_fallback_logged:
-            log.warning("linear_arith='ds' falls back to fp64: %s", reason)
-            _ds_fallback_logged = True
+        if reason is not None:
+            warn_once(log, f"linear_arith='ds' falls back to fp64: {reason}")
         return reason is None
 
     def _ds_call(self, df, phi, pre, with_collisions):
@@ -507,7 +565,6 @@ class CUDAOps(SolverOps):
 
     def _es_ok(self, df, pre, has_em, has_dpc) -> bool:
         """Whether the fused electrostatic kernel can run this call; warns once when it cannot."""
-        global _fused_fallback_logged
         ns = df.shape[-3]
         reason = None
         if not _has_linear_es:
@@ -520,9 +577,8 @@ class CUDAOps(SolverOps):
             reason = f"needs ns <= 576 (ns={ns})"
         elif self._points_per_device(df) >= 2**31:
             reason = "grid exceeds 32-bit indexing"
-        if reason is not None and not _fused_fallback_logged:
-            log.warning("fused_linear falls back to the default linear kernel: %s", reason)
-            _fused_fallback_logged = True
+        if reason is not None:
+            warn_once(log, f"fused_linear falls back to the default linear kernel: {reason}")
         return reason is None
 
     @staticmethod
@@ -698,8 +754,14 @@ class CUDAOps(SolverOps):
         return term if kinetic else term[0]
 
     def _collisions(self, f, params, pre):
-        if params.fused_linear and _has_collision_rhs:
-            return self._collision_cuda(f, params, pre)
+        if params.fused_linear:
+            if _has_collision_rhs:
+                return self._collision_cuda(f, params, pre)
+            warn_once(
+                log,
+                "fused_linear collisions run the JAX operator: the CUDA library has no "
+                "collision_rhs kernel (rebuild it)",
+            )
         return collision_term(f, params, pre, self.mesh)
 
     def supports_rk_fused(self, dg, params, pre) -> bool:
@@ -943,16 +1005,6 @@ class CUDAOps(SolverOps):
         dum_s = pre["nl_dum_s"]
 
         _register_ffi()
-        # v6 runs v5 itself for grids it does not instantiate
-        if _has_bracket_v6 and os.environ.get("GYARADAX_BRACKET", "auto") != "v5":
-            kernel_name = (
-                "cufft_bracket_v6_fp32_ffi" if self.mixed_precision else "cufft_bracket_v6_fp64_ffi"
-            )
-        elif self.mixed_precision:
-            kernel_name = "cufft_graph_bracket_true_fp32_ffi"
-        else:
-            kernel_name = "cufft_graph_bracket_fp64_ffi"
-
         ixzero_static = _cuda_zero_mode_index(pre, "ixzero", nkx)
         iyzero_static = _cuda_zero_mode_index(pre, "iyzero", nky)
 
@@ -980,6 +1032,8 @@ class CUDAOps(SolverOps):
                 )
                 em = 1
             else:
+                why = "bessel has a vpar axis" if pot.shape[1] != 1 else "pre has no apar_chi_vfac"
+                warn_once(log, f"EM bracket transforms chi per vpar plane (slow): {why}")
                 pot = pot + to6(pre["apar_chi_factor"]) * apar
         n_pot_v = pot.shape[1]
         pot = jnp.broadcast_to(pot, (nsp, n_pot_v, nmu, ns, nkx, nky))
@@ -991,16 +1045,23 @@ class CUDAOps(SolverOps):
         jind, nl_scale = pre["nl_jind"], pre["nl_fft_scale"]
         fp64, ixzero = not self.mixed_precision, int(pre["ixzero"])
         b_df, b_inner = nsp * nv * nmu * ns, n_pot_v * nmu * ns
-        v6_kernel = kernel_name.startswith("cufft_bracket_v6")
-        v6 = v6_kernel and _v6_supported(fp64, mphi, b_df, nky, nsp, b_inner)
+        vel = ("sp", "vp", "mu") if df.ndim == 6 else ("vp", "mu")
+        n_dev = 1 if self.mesh is None else math.prod(self.mesh.shape[a] for a in vel)
+        m_row = _bracket_v6_row_size(fp64, mphi, nky, b_df // n_dev, nsp, b_inner)
+        v6 = m_row is not None
         if v6:
+            kernel_name = "cufft_bracket_v6_fp64_ffi" if fp64 else "cufft_bracket_v6_fp32_ffi"
             b_pot = nsp * b_inner * (1 + em)
             strides = ((b_df + b_pot) * (2 * nky - 1), b_df * nky)
             m = _bracket_mrad(mrad, nkx, ixzero, strides, fp64)
-            if m != mrad:
-                mrad = m
+            if (m, m_row) != (mrad, mphi):
+                mrad, mphi = m, m_row
                 jind = build_jind(nkx, mrad, ixzero)
                 nl_scale = jnp.asarray(float(mrad * mphi), dtype=jnp.float64)
+        else:
+            kernel_name = (
+                "cufft_graph_bracket_fp64_ffi" if fp64 else "cufft_graph_bracket_true_fp32_ffi"
+            )
         inverse_jind = jnp.full((mrad,), -1, dtype=jnp.int32)
         inverse_jind = inverse_jind.at[jind].set(jnp.arange(jind.shape[0], dtype=jnp.int32))
         static = (kx_vec, ky_vec, jnp.asarray(jind, dtype=jnp.int32), inverse_jind, dum_s)
@@ -1015,11 +1076,9 @@ class CUDAOps(SolverOps):
             and float(scale.real).is_integer()
             and abs(scale.real) < 2**29
         )
-        v6_attrs = (
-            dict(fold=np.int32(fold), out_scale_re=scale.real, out_scale_im=scale.imag)
-            if v6_kernel
-            else {}
-        )
+        v6_attrs = {}
+        if v6:
+            v6_attrs = dict(fold=np.int32(fold), out_scale_re=scale.real, out_scale_im=scale.imag)
 
         def bracket(d, a_pot, b_pot, vf):
             nsp_l, nv_l, nmu_l = d.shape[:3] if d.ndim == 6 else (1,) + d.shape[:2]
@@ -1058,7 +1117,6 @@ class CUDAOps(SolverOps):
         if self.mesh is None:
             out = bracket(*args)
         else:
-            vel = ("sp", "vp", "mu") if df.ndim == 6 else ("vp", "mu")
             pot_ax = ("sp", "vp", "mu")
             out = sharding.velocity_map(
                 bracket, self.mesh, args, (vel, pot_ax, pot_ax, ("sp", "vp")), PartitionSpec(*vel)

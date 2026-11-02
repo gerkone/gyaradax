@@ -13,7 +13,7 @@ import logging
 import jax
 
 from gyaradax.backends._jax import JAXOps
-from gyaradax.backends.ops import SolverOps
+from gyaradax.backends.ops import SolverOps, warn_once
 
 log = logging.getLogger(__name__)
 
@@ -60,7 +60,7 @@ def create_ops(
                     raise RuntimeError(
                         "backend='cuda' but CUDA backend could not be imported"
                     ) from exc
-                log.info("Backend: JAX (GPU present, CUDA backend import failed)")
+                warn_once(log, f"backend 'auto' runs JAX on a GPU: CUDA import failed ({exc})")
             else:
                 if is_available():
                     mp_str = " (mixed)" if mixed_precision else " (fp64)"
@@ -68,7 +68,7 @@ def create_ops(
                     return CUDAOps(pre, use_z2z=use_z2z, mixed_precision=mixed_precision, mesh=mesh)
                 if backend == "cuda":
                     raise RuntimeError("backend='cuda' but extensions not compiled")
-                log.info("Backend: JAX (GPU present, extensions not compiled)")
+                warn_once(log, "backend 'auto' runs JAX on a GPU: the CUDA library is not built")
 
         if backend == "auto":
             log.info("Backend: JAX (GPU not found or CUDA not available)")

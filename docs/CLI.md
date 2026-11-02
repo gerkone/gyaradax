@@ -233,8 +233,8 @@ process started (setup included), for the busiest GPU of a mesh.
   less on small or linear runs). JAX stays the reference for gradients and
   bitwise comparisons.
 - The CUDA nonlinear bracket uses cuFFTDx (v6) when the library was built with
-  `nvidia-mathdx`, and the cuFFT-only v5 pipeline for plane sizes v6 has no
-  kernel for; `GYARADAX_BRACKET=v5` forces v5 everywhere.
+  `nvidia-mathdx`, and the cuFFT-only v5 pipeline, with a one-time warning, for
+  grids v6 has no kernel for; `GYARADAX_BRACKET=v5` forces v5 everywhere.
 - Grids close to one GPU's memory can fail on allocator fragmentation even when
   they fit: try `--mem-fraction 0.95`, or shard.
 - `gyaradax info` shows the devices, whether the CUDA library and the v6

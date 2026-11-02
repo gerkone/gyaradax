@@ -1124,9 +1124,16 @@ potential planes are transformed and chi is formed in real space.
   pairs (inverse row FFT, bracket against the real-space potential row, 2-for-1 forward row
   FFT, nky modes kept); a cuFFT column pass on the nky kept columns and an unpack to
   [b_df, nkx, nky]. This removes the zero ky band from the column passes and the full
-  real-space round trips between them. Row kernels are instantiated for
-  mphi in {16, 32, 36, 40, 64, 96, 128, 144, 192}; other grids, odd plane counts or a build
-  without cuFFTDx run v5. `GYARADAX_BRACKET=v5` forces v5.
+  real-space round trips between them. Row kernels are built for the dealiased ky length mphi of
+  every nky up to the CMake option `BRACKET_V6_NKY_MAX` (default 192) and for the power of two
+  >= 3 `BRACKET_V6_NKY_MAX` - 2, except the lengths cuFFTDx runs only with a global workspace (70,
+  90, 98, 140, 150, 210, ...: 16 of the 53 lengths up to 576). A grid whose own mphi has no row
+  kernel runs at the smallest built length >= 3 nky - 2 (alias-free, so only round-off changes;
+  nky 23: 80 instead of 70), so every nky up to the option, and beyond up to the power of two,
+  runs v6. A build without cuFFTDx, a GPU architecture it was not built for, a larger nky or an
+  odd plane count per device run v5 with a one-time warning naming the reason;
+  `GYARADAX_BRACKET=v5` selects v5 quietly. `gyaradax info` lists the built architectures and
+  lengths.
 - v6 kx padding: the column passes run at the smallest alias-free length (>= max(2 Kp + Kn,
   2 Kn + Kp) + 1 for the retained modes -Kn..Kp) that has prime factors <= 7 and a cuFFT plan
   without workspace, i.e. one kernel; the native GKW length (e.g. 294 = 2 3 7^2 at nkx 191, three
@@ -1753,8 +1760,13 @@ timings as the minimum over interleaved repeats when the GPU is shared.
 | `fused_linear` (`--fused-linear`) | false | fused electrostatic RK stage (§13.2) | ES; else default kernel | ~1e-14 per RHS |
 | `linear_arith` (`--linear-arith`) | `fp64` | `ds`: double-single linear RHS (§13.2) | as `fused_linear`, CUDA only | ~1e-14 per RHS |
 | `n_gpus_{sp,vp,mu}` (`--n-gpus`) | 1 | velocity-space sharding (§13.4) | all runs | round-off |
-| `GYARADAX_BRACKET=v5` | v6 | forces the v5 bracket | CUDA bracket | bitwise v5 |
+| `GYARADAX_BRACKET=v5` | v6 | forces the v5 bracket (v6 falls back to v5 with a warning where it has no kernel) | CUDA bracket | bitwise v5 |
+| `BRACKET_V6_NKY_MAX` (CMake) | 192 | nky range of the v6 row kernels; build time and library size grow with it (README) | CUDA v6 bracket | round-off (padded mphi) |
 | `GYARADAX_BRACKET_MRAD=native\|auto\|N` | `auto` | kx length of the v6 column passes (§10.14) | CUDA v6 bracket | round-off |
+
+Grid limits: the v6 row FFT sizes are fixed at build time; `fused_linear` and `ds` (with their fused
+collisions) need ns <= 576 and < 2^31 points per device and otherwise fall back with a warning; all
+other kernels take their sizes at run time.
 
 ## 14. quasilinear transport (`quasilinear/`)
 

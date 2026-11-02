@@ -601,15 +601,27 @@ def _write_run_record(setup: RunSetup) -> None:
         fh.write(json.dumps(record) + "\n")
 
 
-def _bracket_name(params: Any) -> str | None:
+def _bracket_name(params: Any, shape: Sequence[int]) -> str | None:
     if params.backend == "jax" or not _cuda_available():
         return None
     from gyaradax.backends import _cuda
+    from gyaradax.operators.precompute import extended_firstdim_fft_size
 
     _cuda._register_ffi()
-    if os.environ.get("GYARADAX_BRACKET", "auto") == "v5" or not _cuda._has_bracket_v6:
+    if os.environ.get("GYARADAX_BRACKET", "auto") == "v5":
         return "v5"
-    return "v6, v5 for plane sizes without a v6 kernel"
+    kinetic = len(shape) == 6
+    n_dev = max(1, params.n_gpus_vp * params.n_gpus_mu * (params.n_gpus_sp if kinetic else 1))
+    nky, ns, nmu = shape[-1], shape[-3], shape[-4]
+    _, reason = _cuda._v6_row_size(
+        not params.mixed_precision,
+        extended_firstdim_fft_size(nky)[0],
+        nky,
+        math.prod(shape[:-2]) // n_dev,
+        shape[0] if kinetic else 1,
+        nmu * ns,
+    )
+    return "v6" if reason is None else f"v5 ({reason})"
 
 
 def _describe(setup: RunSetup, config_path: str) -> None:
@@ -703,7 +715,7 @@ def _run_telemetry(setup: RunSetup) -> Any:
             "resumed_from": setup["resumed_from"],
             "grid": list(setup["df"].shape),
             "backend": params.backend,
-            "bracket": _bracket_name(params),
+            "bracket": _bracket_name(params, setup["df"].shape),
             "mixed_precision": bool(params.mixed_precision),
             "fused_linear": bool(params.fused_linear),
             "linear_arith": params.linear_arith,
@@ -993,12 +1005,15 @@ def _cmd_info(args: argparse.Namespace) -> int:
     if cuda_ok:
         _cuda._register_ffi()
         forced = os.environ.get("GYARADAX_BRACKET")
-        bracket = (
-            "v6 (cuFFTDx; plane sizes without a v6 kernel run v5)"
-            if _cuda._has_bracket_v6
-            else "v5 (library built without cuFFTDx)"
-        )
+        bracket = "v5 (library built without cuFFTDx)"
+        if _cuda._has_bracket_v6:
+            archs, sizes = _cuda.v6_build(False)
+            sms = ", ".join(str(a // 10) for a in archs)
+            bracket = f"v6 (cuFFTDx, SM {sms}; v5 with a warning elsewhere)"
         print(f"bracket     : {bracket}{f'; GYARADAX_BRACKET={forced}' if forced else ''}")
+        if _cuda._has_bracket_v6:
+            cover = f"nky <= {(max(sizes) + 2) // 3}" if sizes else "none on this GPU"
+            print(f"v6 sizes    : {', '.join(map(str, sizes))} ({cover})")
     nccl = importlib.util.find_spec("nvidia.nccl") is not None
     missing = "missing — multi-GPU needs nvidia-nccl-cu13 (cuda13 extra)"
     print(f"nccl        : {'found' if nccl else missing}")
