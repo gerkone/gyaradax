@@ -412,10 +412,21 @@ class DatasetWriter:
         self.potenc = bool(potenc)
         if self.potenc:
             self.static["phic_source"] = "solver_exact"
+        # an extended trajectory keeps every key of its metadata; the per-frame ones go on per new frame
+        self.carried: dict[str, Any] = {}
         if old is not None and len(old.get("timesteps", ())):
             keep = int(np.sum(np.asarray(old["solver_steps"]) <= start_step))
             for k in self.series:
                 self.series[k] = list(np.asarray(old[k])[:keep])
+            n_old = len(old["timesteps"])
+            for k, v in old.items():
+                if k in self.series or k in self.static:
+                    continue
+                if k in CARRIED_PER_FRAME and len(np.atleast_1d(v)) == n_old:
+                    v = np.asarray(v)[:keep]
+                self.carried[k] = v
+            if "phic_source" in old and "phic_source_frames" not in old:
+                self.carried["phic_source_frames"] = np.array([str(old["phic_source"])] * keep)
             for kind in ("timestep", "poten", "potenc"):
                 for path in glob.glob(os.path.join(self.path, "data", f"{kind}_*.bin")):
                     if int(re.search(rf"{kind}_(\d+)", path).group(1)) >= keep:
@@ -452,9 +463,20 @@ class DatasetWriter:
         write_metadata(self.path, self.metadata())
 
     def metadata(self) -> dict:
-        meta = dict(self.static)
+        meta = {**self.carried, **self.static}
         for k, v in self.series.items():
             meta[k] = np.asarray(v)
+        n = self.n_frames
+        if "phic_source_frames" in self.carried:
+            src = list(np.asarray(self.carried["phic_source_frames"]).astype(str))
+            src += [str(self.static.get("phic_source", "solver_exact"))] * (n - len(src))
+            meta["phic_source_frames"] = np.array(src)
+            kinds = sorted(set(src))
+            meta["phic_source"] = kinds[0] if len(kinds) == 1 else "mixed"
+        if "thinned_from" in self.carried:
+            base = [int(i) for i in np.asarray(self.carried["thinned_from"])]
+            start = base[-1] + 1 if base else 0
+            meta["thinned_from"] = np.asarray(base + list(range(start, start + n - len(base))), np.int64)
         return meta
 
     def write_resume(self, df, state, dump_origin: Optional[float] = None) -> None:
@@ -482,6 +504,9 @@ class DatasetWriter:
         if self.n_frames:
             print(f"  dataset {os.path.basename(self.path)}: {quantization_summary(self.metadata())}")
 
+
+# per-frame keys outside the series that an extension carries on (and a resume from an older snapshot trims)
+CARRIED_PER_FRAME = ("phic_source_frames", "thinned_from")
 
 LINEAR_FILES = ("linear.bin", "linear_poten.bin")
 

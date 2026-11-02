@@ -229,6 +229,25 @@ def test_f32_resume_dump_extends_the_trajectory_on_the_same_grid(tmp_path):
         main(["run", run, "--t-end", "0.1"])
 
 
+def test_extension_keeps_the_trajectory_metadata(tmp_path):
+    root = str(tmp_path / "data")
+    case = _tiny_kinetic(tmp_path, "case")
+    common = ["--from-scratch", "--backend", "jax", "--dump-dt", "0.013", "--dataset", root]
+    assert main(["run", case, *common, "--t-end", "0.026", "--output-dir", str(tmp_path / "run")]) == 0
+    traj = ds.trajectory_path(root, "case")
+    meta = ds.load_metadata(traj)
+    meta.update(phic_source_frames=np.array(["hybrid", "existing"]), phic_source="mixed",
+                thinned_from=np.array([5, 6]), linear_gamma=np.arange(3.0), hand_label="saturated")
+    ds.write_metadata(traj, meta)
+    assert main(["run", traj, "--t-end", "0.052", "--output-dir", str(tmp_path / "more")]) == 0
+    meta = ds.load_metadata(traj)
+    assert len(meta["timesteps"]) == 4 and meta["hand_label"] == "saturated"
+    np.testing.assert_array_equal(meta["linear_gamma"], np.arange(3.0))
+    assert meta["phic_source_frames"].tolist() == ["hybrid", "existing", "solver_exact", "solver_exact"]
+    assert meta["phic_source"] == "mixed" and meta["thinned_from"].tolist() == [5, 6, 7, 8]
+    assert meta["flux"].shape[0] == 4 and "species" in meta
+
+
 def test_linear_frames_are_spectral_with_a_species_axis(tmp_path):
     rng = np.random.default_rng(0)
     df = rng.standard_normal((4, 2, 3, 6, 5)) + 1j * rng.standard_normal((4, 2, 3, 6, 5))
