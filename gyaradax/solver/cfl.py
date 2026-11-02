@@ -29,10 +29,10 @@ def estimate_nl_timestep(
 ) -> jnp.ndarray:
     """CFL-adaptive timestep from nonlinear ExB velocity.
 
-    Computes max|grad(phi)| and (when apar is provided) max|grad(apar)|*vpmax
+    Computes ``max|grad(phi)|`` and (when apar is provided) ``max|grad(apar)| * vpmax``
     in real space, matching GKW non_linear_terms.F90:1530-1800. The y/x
-    correction factors absorb FFTW's unnormalized magnitude (N·|∂phi|_real)
-    so `irfft2(norm="backward")` outputs match GKW's `max|ar|·mrad·lxinv`.
+    correction factors absorb FFTW's unnormalized magnitude (``N |∂phi|_real``)
+    so ``irfft2(norm="backward")`` outputs match GKW's ``max|ar| mrad lxinv``.
     """
     mrad = cast(int, pre["nl_mrad"])
     mphi = cast(int, pre["nl_mphi"])
@@ -83,9 +83,11 @@ def estimate_linear_timestep(
 ) -> jnp.ndarray:
     """Von Neumann stability timestep estimate (matdat.F90:1440-1510).
 
-    Separates CFL by derivative order with RK4 stability factors:
-      tmax = max(tmax1/2.4, tmax4/2.4, 40)
-      dt   = fac_dtim_est / tmax
+    Separates the bound by derivative order, with the RK4 stability factor 2.4,
+    ``tmax = max(tmax1 / 2.4, tmax2, tmax4 / 2.4, 40)`` and
+    ``dt = fac_dtim_est / tmax``: tmax1 from streaming, trapping and (kinetic
+    electrons) the field frequency, tmax2 from the collision stencil, tmax4 from
+    the fourth-order dissipation.
 
     When *safety_factor* is given, falls back to safety_factor * dx / max|u|.
     """

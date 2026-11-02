@@ -14,11 +14,12 @@ species-pair prefactor `Γ^{a/b}`. Sum runs over all background species
 (kinetic + adiabatic).
 
 Prefactor paths:
-- `freq_override=True`: Γ = Z_a²·Z_b²·coll_freq·de_b·(L_ab/L_ref)/T_a²
-  where L_ref is the i-i Coulomb log for the first species pair, and
-  L_ab is the species-pair Coulomb log.
-- `freq_override=False`: Γ = 6.5141e-5·(R_ref·n_ref/T_ref²)·de_b·Z_a²·
-  Z_b²·L_ab/T_a² (full Coulomb log per species pair).
+
+- `freq_override=True`: Γ = Z_a²·Z_b²·coll_freq·de_b·(L_ab/L_ref)/T_a²,
+  where L_ref is the i-i Coulomb log of the first species pair and
+  L_ab the species-pair Coulomb log.
+- `freq_override=False`: Γ = 6.5141e-5·(R_ref·n_ref/T_ref²)·de_b·Z_a²·Z_b²·L_ab/T_a²
+  (full Coulomb log per species pair).
 
 Optional Xu-style momentum / energy conservation corrections
 (`cons_momentum` in collisionop.f90:2234) on top of the base operator.
@@ -582,7 +583,7 @@ def _precompute_conservation(geometry, params, vpgr, mugr, bn):
 def conservation_correction(coll_rhs, mom_factor, ene_factor, vpar_w, vsq_w, reduce=None):
     """Add the Xu scalar conservation correction on top of the base collision RHS.
 
-    coll_rhs: (nv, nmu, ns, nkx, nky). *_factor, *_weight: (nv, nmu, ns).
+    ``coll_rhs``: (nv, nmu, ns, nkx, nky); ``*_factor``, ``*_weight``: (nv, nmu, ns).
     ``reduce`` completes the velocity moments of a sharded block (a ``psum``).
     Returns an additive correction of the same shape as coll_rhs.
     """

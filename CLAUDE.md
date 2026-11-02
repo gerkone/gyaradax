@@ -39,7 +39,7 @@ gyaradax/
   geometry/           — geometry models (circular, s-alpha, Miller, loaded geom.dat), metric and drift tensors
   quasilinear/        — quasilinear transport: linear harvest, saturation rules, calibration
   sharding.py         — device mesh, sharded precompute / init, shard_map helpers for the kernels
-  cli.py              — `gyaradax` console script: run/bench/info (see docs/CLI.md)
+  cli.py              — `gyaradax` console script: run/bench/info (see docs/getting_started/running.md)
   _compat.py          — old module paths (gyaradax.params, .integrals, .utils, .simulate, ...) -> new modules
 
   backends/
@@ -63,7 +63,7 @@ tests/
   unit/          — pytest suite
 configs/         — YAML configs for simulations and validation sweeps
 gkw_ref/         — GKW Fortran source and manual (read-only reference)
-docs/NOTES.md    — detailed physics notes and validation results
+docs/            — Sphinx docs: getting_started/, performance/, numerics/, verification/, api/
 ```
 
 ## Call graph
@@ -165,9 +165,9 @@ SolverOps interface: `linear_rhs()`, `linear_rhs_from_g()`, `nonlinear_term_iii(
 - **Grid**: 5D `(vpar, mu, s, kx, ky)` for adiabatic; 6D `(species, ...)` for kinetic.
 - **Backends**: JAX (default, differentiable, R2C/Z2Z), CUDA (fused kernels, Z2Z only; ES and EM
   incl. A_par/B_par, conservative parallel dissipation and collisions; 2.6-3.0x (ES) and 2.9-4.2x
-  (EM) faster nonlinear steps than JAX on H100 production grids — operators in docs/NOTES.md
-  §10.14, performance in §13).
-- **Performance switches** (docs/NOTES.md §13.7): `fused_linear` (one fused electrostatic kernel
+  (EM) faster nonlinear steps than JAX on H100 production grids — operators in docs/numerics/index.md,
+  performance in docs/performance/index.md).
+- **Performance switches** (docs/performance/index.md): `fused_linear` (one fused electrostatic kernel
   per RK4 stage) and `linear_arith: ds` (double-single linear RHS for weak-FP64 GPUs such as B300)
   are off by default; best flags are `--fused-linear` everywhere plus `--linear-arith ds` on B300.
   Both fall back (one-time warning) for EM, conservative dissipation and sharded runs. The CUDA
@@ -195,7 +195,7 @@ python -m pytest tests/ -x -q -k "cuda"
 ## Running simulations
 
 Use the `gyaradax` console script (implemented in `gyaradax/cli.py`; see
-`docs/CLI.md`). Adiabatic vs kinetic, EM terms and sharding are all read from
+`docs/getting_started/running.md`). Adiabatic vs kinetic, EM terms and sharding are all read from
 the config — there is no `--kinetic` flag any more.
 
 ```bash
@@ -291,7 +291,7 @@ sharding:
 
 From the CLI, `--n-gpus N` (or a multi-GPU `--device-list`) picks the layout from
 the grid: species first, then mu, then vpar (`cli._auto_mesh`), and checks it
-before JAX starts. See docs/CLI.md.
+before JAX starts. See docs/getting_started/running.md.
 
 When `n_gpus_sp * n_gpus_vp * n_gpus_mu > 1`, the following automatically use
 sharding:
@@ -318,7 +318,7 @@ edge per RK stage (`sharding.halo_planes`); species and mu need no halo,
 except for collisions, whose 9-point stencil exchanges one plane per sharded
 velocity axis (`collisions.collision_term`).
 All three axes run at about the same speed. Multi-GPU needs NCCL
-(`nvidia-nccl-cu13`, in the `cuda13` extra). See docs/NOTES.md §13.4.
+(`nvidia-nccl-cu13`, in the `cuda13` extra). See docs/performance/index.md.
 
 ## Skills
 

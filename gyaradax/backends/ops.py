@@ -39,7 +39,11 @@ def em_chi_correction(ndim: int, pre, apar=None, bpar=None):
 
 
 class SolverOps(ABC):
-    """Container for solver operations. Backend selection happens at construction."""
+    """Field solve, linear RHS and nonlinear bracket of one backend.
+
+    Built once from the precomputed coefficients by :func:`gyaradax.backends.create_ops`
+    and registered as a pytree, so it can be closed over or passed into ``jit``.
+    """
 
     def __init__(
         self,
@@ -153,6 +157,7 @@ class SolverOps(ABC):
         apar: jnp.ndarray | None = None,
         bpar: jnp.ndarray | None = None,
     ) -> jnp.ndarray:
-        # linear terms act on the physical f; backends may fuse the g -> f conversion
+        """Linear RHS from the mixed variable g: :meth:`linear_rhs` applied to f = g_to_f(g)."""
+        # backends may fuse the g -> f conversion
         df = g_to_f(dg, apar, params, pre) if apar is not None else dg
         return self.linear_rhs(df, phi, geometry, params, pre, apar=apar, bpar=bpar)

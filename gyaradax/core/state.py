@@ -1,3 +1,5 @@
+"""Pytree containers: precomputed coefficients (:class:`GKPre`) and the run state (:class:`GKState`)."""
+
 from collections.abc import ItemsView, KeysView
 from typing import Any, Protocol
 from dataclasses import dataclass
@@ -7,12 +9,10 @@ import jax.numpy as jnp
 
 
 class Precompute(Protocol):
-    """Dict-like precompute access boundary.
+    """Read-only mapping interface shared by :class:`GKPre` and plain dicts.
 
-    Precompute values are intentionally heterogeneous: JAX arrays, nested
-    dictionaries, and static auxiliary metadata such as ``nl_m*``, ``ixzero``,
-    ``iyzero``, and ``nsp``. Accessors therefore return ``Any`` rather than a
-    homogeneous array type.
+    Values are heterogeneous: JAX arrays, nested dicts and static metadata
+    (``nl_m*``, ``ixzero``, ``iyzero``, ``nsp``).
     """
 
     def __contains__(self, key: object) -> bool: ...
@@ -28,8 +28,12 @@ class Precompute(Protocol):
 
 @jax.tree_util.register_pytree_node_class
 class GKPre:
-    """Precomputed terms container. separates dynamic arrays (leaves) from
-    static metadata (auxiliary) so FFT sizes stay concrete under JIT."""
+    """Precomputed coefficients, as returned by :func:`gyaradax.operators.precompute.linear_precompute`.
+
+    A dict-like pytree: arrays (also inside nested dicts) are leaves, while
+    FFT sizes (``nl_m*``), ``ixzero``, ``iyzero``, ``nsp`` and other non-array
+    values are static auxiliary data, so they stay Python ints under ``jit``.
+    """
 
     def __init__(self, items: dict[str, Any]) -> None:
         self._items: dict[str, Any] = items
@@ -87,7 +91,15 @@ class GKPre:
 @jax.tree_util.register_pytree_node_class
 @dataclass(frozen=True)
 class GKState:
-    """Diagnostic state for large-step growth tracking and normalization."""
+    """Time-stepping state carried between blocks.
+
+    Attributes:
+        time: Simulation time.
+        step: Step counter.
+        accumulated_norm_factor: Product of the per-ky renormalisation factors of linear runs.
+        window_start_amp: Per-ky mode amplitude at the start of the growth-rate window.
+        last_growth_rate: Per-ky growth rate of the last completed window.
+    """
 
     time: jnp.ndarray
     step: jnp.ndarray

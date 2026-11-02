@@ -54,6 +54,7 @@ def _now() -> str:
 
 
 def device_memory(devices) -> dict[str, list[float]]:
+    """Peak and current memory in GiB of each device, from ``memory_stats``."""
     peak, in_use = [], []
     for d in devices:
         try:

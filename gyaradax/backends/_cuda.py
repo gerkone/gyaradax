@@ -138,14 +138,6 @@ def _vel_axes(df) -> Tuple[str, ...]:
     return ("sp", "vp", "mu") if df.ndim == 6 else ("vp", "mu")
 
 
-def _assert_vpar_centre_zero() -> None:
-    c = float(np.asarray(stencils.VPAR_D1)[2])
-    if c != 0.0:
-        raise ValueError(
-            f"VPAR_D1 centre tap is {c!r}, not 0; linear_rhs_fused.cu drops it. "
-            "Restore the term in out_d1 if the vpar scheme changes.")
-
-
 def _assert_dead_taps_zero(pre: GKPre) -> None:
     """Raise if a parallel-stencil table is nonzero outside the taps the kernel sums."""
     dead = [i for i in range(9) if not PAR_TAP_LO <= i < PAR_TAP_HI]
@@ -197,13 +189,6 @@ def _probe(name: str, restype, argtypes):
 
 
 @functools.lru_cache(maxsize=None)
-def _v6_supported(fp64: bool, mphi: int, b_df: int, nky: int, nsp: int, b_inner: int) -> bool:
-    probe = _probe("gyaradax_bracket_v6_supported", ctypes.c_int, (ctypes.c_int,) * 6)
-    if probe is None:
-        return False
-    return bool(probe(int(fp64), mphi, b_df, nky, nsp, b_inner))
-
-
 def _device_sm() -> int:
     major, minor = str(jax.devices("cuda")[0].compute_capability).split(".")
     return 100 * int(major) + 10 * int(minor)
@@ -248,7 +233,8 @@ def _v6_row_size(fp64: bool, mphi: int, nky: int, b_df: int, nsp: int, b_inner: 
             f"no row FFT size >= {3 * nky - 2} for nky {nky} (largest built "
             f"{max(sizes, default=0)}; rebuild with BRACKET_V6_NKY_MAX >= {nky})"
         )
-    if not _v6_supported(fp64, m, b_df, nky, nsp, b_inner):
+    probe = _probe("gyaradax_bracket_v6_supported", ctypes.c_int, (ctypes.c_int,) * 6)
+    if probe is None or not probe(int(fp64), m, b_df, nky, nsp, b_inner):
         return None, f"{b_df} df planes per device, v6 needs an even number"
     if m != mphi:
         log.info("bracket: ky FFT size %d instead of %d (v6 row kernels)", m, mphi)
@@ -303,7 +289,8 @@ class CUDAOps(SolverOps):
         super().__init__(pre, use_z2z, mixed_precision, mesh)
         self.fused_bracket = fused_bracket
         _assert_dead_taps_zero(pre)
-        _assert_vpar_centre_zero()
+        if float(np.asarray(stencils.VPAR_D1)[2]) != 0.0:
+            raise ValueError("VPAR_D1 centre tap is not 0; linear_rhs_fused.cu drops it")
 
     def tree_flatten(self):
         children, aux = super().tree_flatten()

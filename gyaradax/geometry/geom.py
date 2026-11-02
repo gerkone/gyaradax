@@ -79,12 +79,13 @@ def compute_geometry(
     Miller shape parameters). Discrete topology (mode labels, connectivity)
     uses numpy.
 
-    geom_type:
-      'circ'    full Lapillonne circular model
-      's-alpha' simplified theta=2*pi*s, B=1/(1+eps*cos(theta))
-      'miller'  Miller parametrisation with elongation/triangularity/
-                squareness (see gyaradax.geometry.miller for the shape
-                parameters, passed through **miller_params).
+    ``geom_type``:
+
+    - ``circ``: full Lapillonne circular model
+    - ``s-alpha``: simplified ``theta = 2 pi s``, ``B = 1 / (1 + eps cos(theta))``
+    - ``miller``: Miller parametrisation with elongation, triangularity and
+      squareness (shape parameters in :mod:`gyaradax.geometry.miller`, passed
+      through ``**miller_params``)
     """
     spec = geometry_spec_from_compute_kwargs(
         q=q,

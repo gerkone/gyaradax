@@ -15,8 +15,8 @@ def ampere_gamma_num(
 ) -> jnp.ndarray:
     """Numerical velocity-grid moment for the Ampere diagonal (Candy moment).
 
-    GKW ampere_dia (linear_terms.f90:3756-3789):
-        gamma_num = sum_{mu,vpar} 2*B*intmu*intvp * J0^2 * vpgr^2 * fmaxwl
+    GKW ampere_dia (linear_terms.f90:3756-3789),
+    ``gamma_num = sum_{mu,vpar} 2*B*intmu*intvp * J0^2 * vpgr^2 * fmaxwl``,
     evaluated on the actual (vpar, mu) grid so the diagonal exactly cancels
     the discrete g2f correction (-2*Z*vthrat*vpgr*J0*F_M/T) in the
     mixed-variable Ampere solve.  The analytic Gamma_0 = I0(b)e^{-b} equals
@@ -93,7 +93,6 @@ def precompute_apar(geometry: Dict[str, jnp.ndarray], params: Any = None):
     geom_sp["vthrat"] = vthrat
     bessel, _gamma_analytic = _species_bessel_gamma(geom_sp)
 
-    mas_6d = mas.reshape(nsp, 1, 1, 1, 1, 1)
     signz_6d = signz.reshape(nsp, 1, 1, 1, 1, 1)
     de_6d = de.reshape(nsp, 1, 1, 1, 1, 1)
     vthrat_6d = vthrat.reshape(nsp, 1, 1, 1, 1, 1)
@@ -142,10 +141,9 @@ def calculate_apar(
     """
     Compute A_parallel from Ampere's law.
 
-    df: legacy parameter name for the evolved mixed variable ``g``/``dg`` with
-        shape (nsp, nvpar, nmu, ns, nkx, nky), not the physical distribution
-        δf after the g2f transform.
-    Returns: A_parallel with shape (ns, nkx, nky).
+    ``df`` is the evolved mixed variable ``g`` with shape
+    (nsp, nvpar, nmu, ns, nkx, nky), not the physical distribution after the
+    g2f transform. Returns A_parallel with shape (ns, nkx, nky).
 
     GKW's mixed-variable Ampere solve uses the evolved ``g`` as the source and
     keeps the g2f correction in the diagonal.  Passing physical ``f`` here

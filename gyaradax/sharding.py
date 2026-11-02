@@ -55,11 +55,6 @@ _AXIS_MU = "mu"
 _P = TypeVar("_P", bound=Precompute)
 
 
-def get_device_count() -> int:
-    """Return the number of available GPU devices."""
-    return len(jax.devices("gpu"))
-
-
 def build_mesh(params) -> Optional[Mesh]:
     """Build a 3-axis device mesh from ``params.n_gpus_{sp,vp,mu}``.
 

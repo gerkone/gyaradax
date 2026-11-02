@@ -1,25 +1,12 @@
-"""
-Gyrokinetic Vlasov-Poisson solver for the local flux-tube limit.
+"""Explicit RK4 time integration of the flux-tube gyrokinetic equation.
 
-Supports both adiabatic-electron (single species) and kinetic-electron
-(multi-species) configurations.
-
-Implemented Equations:
-The solver evolves the perturbed distribution function `f` in phase space.
-Adiabatic: (vpar, mu, s, kx, ky).  Kinetic: (nsp, vpar, mu, s, kx, ky).
-
-Active RHS Terms from the GKW formulation:
-1. Term I   — Parallel Advection: v_par nabla_par f
-2. Term II  — Drift Advection: v_d . nabla_perp f
-3. Term III — Nonlinear ExB Advection: v_E . nabla_perp f (pseudospectral)
-4. Term IV  — Trapping/Mirror: parallel velocity space advection
-5. Term V   — Equilibrium Drive: v_E . nabla F_M
-6. Term VII — Parallel Field Drive: v_par nabla_par phi coupling
-7. Term VIII— Drift Field Drive: v_d . nabla phi coupling
-
-Dissipation: parallel (4th order), velocity space, perpendicular hyper-diffusion.
-
-Time Integration: Explicit RK4 with optional per-ky normalization (linear mode).
+The state is the distribution function, ``(nvpar, nmu, ns, nkx, nky)`` for adiabatic
+electrons and ``(nsp, nvpar, nmu, ns, nkx, nky)`` for kinetic ones; with ``nlapar``
+it is the mixed variable g. Every RK4 stage solves the fields, evaluates the linear
+RHS (GKW Terms I, II, IV, V, VII, VIII, X, XI, dissipation and collisions) and, for
+nonlinear runs, the ExB bracket (Term III). :func:`gksolve` runs ``n_steps`` steps in
+one ``jax.lax.scan``, with a fixed or CFL-adaptive timestep; linear runs renormalise
+every ``naverage`` steps and track per-ky growth rates.
 """
 
 import jax
@@ -47,6 +34,7 @@ from gyaradax.solver.cfl import estimate_linear_timestep, estimate_nl_timestep
 
 
 def default_state(nky: int = 1) -> GKState:
+    """State at t = 0 for ``nky`` binormal modes."""
     return GKState(
         time=jnp.array(0.0, dtype=jnp.float64),
         step=jnp.array(0, dtype=jnp.int32),
@@ -77,6 +65,12 @@ def normalize_per_ky(
     params: GKParams,
     pre: Optional[Precompute] = None,
 ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """Scale every connected kx chain of every ky to unit amplitude (linear runs).
+
+    Returns:
+        ``(df_normalised, inv, amp)``: the scaled distribution, the per-ky
+        factor applied to the kx = 0 chain and the per-ky amplitude before scaling.
+    """
     phi = calculate_phi(geometry, df, params=params, pre=pre)
     # per-ky amplitude over the kx=0 chain (GKW diagnos_growth_freq convention);
     # returned for the growth-rate bookkeeping in advance_state, so gamma is unchanged
@@ -327,6 +321,11 @@ def advance_state(
     per_mode_norm_fac: jnp.ndarray,
     dt_used: Optional[jnp.ndarray] = None,
 ) -> GKState:
+    """Advance time and step, and update the per-ky growth rate of the current window.
+
+    The growth rate is ``log(amp / window_start_amp) / t_window``; at a window end
+    the start amplitude resets to the amplitude after normalisation.
+    """
     dt = dt_used if dt_used is not None else jnp.array(params.dt, dtype=jnp.float64)
     new_step = state.step + jnp.array(1, dtype=jnp.int32)
     new_time = state.time + dt
@@ -366,7 +365,26 @@ def gkstep_single(
     Tuple[jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]],
     GKState,
 ]:
-    """Single small-step RK4 time integration with backend dispatch."""
+    """One RK4 step.
+
+    The four stages are summed in the order of the closed form, behind
+    ``optimization_barrier`` so each stage's RHS is freed before the next; a CUDA
+    ``fused_linear`` step runs each stage as one kernel. Nonlinear runs also return
+    the CFL estimate ``2 / max|grad chi|`` over the four stages. Linear runs
+    renormalise at the end of every ``naverage`` window.
+
+    Args:
+        prev_df: Distribution (mixed variable g with ``nlapar``).
+        geometry: Geometry dict.
+        params: Run parameters.
+        state: State at the start of the step.
+        pre: Precomputed coefficients.
+        ops: Backend operations; built from ``params`` when None.
+        dt_override: Timestep to use instead of ``params.dt``.
+
+    Returns:
+        ``(next_df, (phi, (0, 0, dt_nl_estimate)), next_state)``.
+    """
     if ops is None:
         ops = create_ops(
             pre,
@@ -524,17 +542,26 @@ def gksolve(
     Tuple[jnp.ndarray, Tuple[jnp.ndarray, Any], GKState]
     | Tuple[jnp.ndarray, Tuple[jnp.ndarray, Any], GKState, Dict[str, Any]]
 ):
-    """Gyrokinetics solver forward.
+    """Advance ``n_steps`` RK4 steps in one jitted ``jax.lax.scan``.
 
-    Executes multiple time steps via jax.lax.scan.
-    When params.adaptive_dt is True, uses CFL-adaptive timestep with
-    one-step lag (current step uses CFL estimate from previous step's phi).
-    Returns (final_df, (final_phi, final_fluxes), final_state) by default.
-    When ``return_dt_info`` is True, returns an extra trailing dict with
-    per-step arrays ``dt_used``/``dt_nl``/``dt_lin`` (shape (n_steps,)) and
-    scalar ``dt_input``. The fixed-dt path steps with ``params.dt`` reduced to
-    the linear stability estimate when it exceeds it (as GKW does for every
-    explicit run); ``dt_lin`` holds that estimate and ``dt_nl`` is zero.
+    With ``adaptive_dt`` (nonlinear runs) each step uses the CFL estimate of the
+    previous one: the minimum of the nonlinear estimate times ``fac_dtim_nl``, the
+    linear estimate and ``params.dt``, growing by at most 5 % per step. Otherwise
+    the step is ``params.dt``, reduced to the linear stability estimate when it is
+    larger (as GKW does). Fields and fluxes are computed from the physical f.
+
+    Args:
+        df: Initial distribution, 5D or 6D.
+        geometry: Geometry dict.
+        params: Run parameters.
+        state: Initial state.
+        n_steps: Number of steps (static).
+        pre: Precomputed coefficients; built with ``linear_precompute`` when None.
+        return_dt_info: Also return the per-step ``dt_used``, ``dt_nl``, ``dt_lin``
+            arrays and the scalar ``dt_input``.
+
+    Returns:
+        ``(df, (phi, fluxes), state)``, plus the ``dt_info`` dict when requested.
     """
     if pre is None:
         pre = linear_precompute(geometry, params)

@@ -17,8 +17,8 @@ battle-tested), 'jax' a thick-restarted Krylov-Schur Arnoldi kept on device,
 differentiable apart from the small dense eigendecomposition.
 
 ``mode='exp'`` (recommended) uses ``n_steps_per_matvec`` RK4 steps, whose
-eigenvalues mu = exp(lambda*n_steps*dt) make the dominant physical mode the
-largest-|mu| one, so Arnoldi converges quickly; ``dt`` must be RK4-stable.
+eigenvalues ``mu = exp(lambda*n_steps*dt)`` make the dominant physical mode the
+largest-``|mu|`` one, so Arnoldi converges quickly; ``dt`` must be RK4-stable.
 What separates the modes is the time window n_steps*dt, not the step count,
 so scale `n_steps_per_matvec` with 1/dt rather than fixing it: kinetic
 electrons push dt to the electron Alfven CFL (~3e-4 against ~1e-2 adiabatic),
@@ -26,7 +26,7 @@ where a count tuned on an adiabatic run spans too little time and Arnoldi
 stops converging -- residual 2e-1 at t = 0.017, 7e-14 at t = 2.5.
 ``mode='rhs'`` applies L directly and converges slowly, since the physical
 modes are not the largest-magnitude eigenvalues of L. Recovering lambda from
-log(mu) is branch-ambiguous once |Im(lambda)|*n_steps*dt > pi, so by default
+log(mu) is branch-ambiguous once ``|Im(lambda)| n_steps dt > pi``, so by default
 ``refine=True`` re-evaluates each eigenvector through the 'rhs' matvec as a
 Rayleigh quotient, removing both that ambiguity and the RK4 error.
 
@@ -36,8 +36,8 @@ globally-dominant eigenvalues while the IVP reports per-ky rates. Passing
 coefficients are sliced, not masked, so the solve is nky times smaller -- and
 the dominant eigenvalue then matches ``last_growth_rate[iky]``.
 
-Example
--------
+Example::
+
     eigvals, eigvecs = eigensolve(
         geometry, params, k=4, mode="exp", n_steps_per_matvec=50, ky_select=1
     )
@@ -56,7 +56,6 @@ import scipy.sparse.linalg as spla
 
 from gyaradax.backends import create_ops
 from gyaradax.operators.precompute import linear_precompute
-from gyaradax.solver.driver import gk_init
 
 
 def _df_shape(geometry: Dict[str, jnp.ndarray], n_species: int, kinetic: bool) -> Tuple[int, ...]:
@@ -223,7 +222,7 @@ def eigensolve_linear(
             1 for adiabatic.
         k: number of eigenpairs to return.
         which: ARPACK selector. Defaults to 'LM' for mode='exp' (largest
-            |mu| == largest growth rate) and 'LR' for mode='rhs'.
+            ``|mu|`` == largest growth rate) and 'LR' for mode='rhs'.
         tol: ARPACK relative tolerance. Together with `ncv` and
             `n_steps_per_matvec` this is the accuracy/cost dial: at n~3e5 the
             same eigenvalue costs 165 s at tol=1e-10 with the default ncv and
@@ -239,14 +238,14 @@ def eigensolve_linear(
         ky_select: restrict the solve to one ky block (see module docstring).
         refine: mode='exp' only — re-evaluate each eigenvalue with a Rayleigh
             quotient through the 'rhs' matvec (fixes log-branch ambiguity).
-        return_residuals: also return ||L v - lambda v|| / (|lambda| ||v||)
+        return_residuals: also return ``||L v - lambda v|| / (|lambda| ||v||)``
             per eigenpair, measured against the direct 'rhs' operator.
 
     Returns:
-        eigenvalues: shape (k,), complex (lambda = gamma + i*omega); sorted by
-            descending Re(lambda).
-        eigenvectors: shape (k, *df_shape), complex; eigvecs[i] matches eigvals[i].
-        residuals: shape (k,), float, only when `return_residuals`.
+        ``(eigenvalues, eigenvectors)``, plus ``residuals`` when ``return_residuals``.
+        Eigenvalues have shape (k,), complex (lambda = gamma + i omega), sorted by
+        descending Re(lambda); eigenvectors have shape ``(k, *df_shape)`` and
+        ``eigvecs[i]`` belongs to ``eigvals[i]``; residuals have shape (k,).
     """
     if mode not in ("rhs", "exp"):
         raise ValueError(f"mode must be 'rhs' or 'exp', got {mode!r}")
@@ -365,29 +364,6 @@ def eigensolve(
     raise ValueError(f"solver must be 'jax' or 'arpack', got {solver!r}")
 
 
-def random_initial_df(
-    geometry: Dict[str, jnp.ndarray],
-    params: Any,
-    *,
-    n_species: int = 1,
-    seed: int = 0,
-    amp: float = 1e-3,
-) -> jnp.ndarray:
-    """Random complex df shaped like init_f's output, for IVP-baseline runs.
-
-    Uses gk_init solely for the shape; the returned array is a normalized
-    random complex perturbation of that shape so the IVP regression is
-    started from a generic state with non-zero projection on the dominant
-    eigenmode.
-    """
-    df, _, _ = gk_init(geometry, params, n_species=n_species)
-    rng = np.random.default_rng(seed)
-    shape = df.shape
-    x = rng.standard_normal(shape) + 1j * rng.standard_normal(shape)
-    x = x / np.linalg.norm(x)
-    return jnp.asarray(x * amp, dtype=jnp.complex128)
-
-
 def eigensolve_ky_spectrum(
     geometry: Dict[str, jnp.ndarray],
     params: Any,
@@ -499,7 +475,7 @@ def eigensolve_linear_jax(
     The Krylov window stays at `ncv`; each cycle keeps all `k` wanted Ritz
     directions and extends from column `k`, so accuracy no longer requires an
     unaffordable `ncv`. Convergence uses the Arnoldi residual bound
-    |h_{m+1,m} y_m| / |theta|, which costs no extra matvec.
+    ``|h_{m+1,m} y_m| / |theta|``, which costs no extra matvec.
 
     `tol` is the accuracy/cost dial: a restart cycle costs `ncv - k` matvecs.
     """

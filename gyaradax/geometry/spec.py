@@ -127,13 +127,9 @@ def geometry_spec_from_compute_kwargs(
 def geometry_spec_from_config(cfg: Any) -> GeometrySpec:
     """Build a ``GeometrySpec`` from the current YAML/OmegaConf config shape.
 
-    This mirrors the historical ``simulate._geometry_from_config`` wrapper:
-    missing ``geometry.geometry_model`` defaults through the direct geometry
-    API to ``circ``; only values present in the config are forwarded.
-
-    Anything the config omits therefore falls through to the ``GeometrySpec``
-    default. Notably ``grid.nperiod`` defaults to 1, a single poloidal turn,
-    which is what GKW's ``gridsize`` namelist does when nperiod is absent.
+    Only values present in the config are forwarded; anything it omits takes the
+    ``GeometrySpec`` default: ``circ`` geometry and ``nperiod = 1`` (one poloidal
+    turn, as GKW's ``gridsize`` namelist).
     """
     gc = _section_get(cfg, "geometry", {})
     gr = _section_get(cfg, "grid")

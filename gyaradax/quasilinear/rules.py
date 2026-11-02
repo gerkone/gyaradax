@@ -5,7 +5,7 @@ default). All rules share the ql_flux call signature, are pure jax.numpy (differ
 jit-able), have one fitted amplitude `cn`, and are registered in RULES at the bottom.
 
 ĝ = sigmoid(20γ)·relu(γ) is the smooth stability-gated growth rate and
-W(ky) = Σ_kx Γ / Σ_kx |φ|² the normalization-invariant QL weight, both
+``W(ky) = Σ_kx Γ / Σ_kx |φ|²`` the normalization-invariant QL weight, both
 identical to ql_flux.
 
   canonical      Q = C·Σ W·ĝ/⟨k⊥²⟩.  Plain mixing length, the reference.
@@ -13,7 +13,7 @@ identical to ql_flux.
   sat0           Q = C·Σ W·ky·(ĝ/⟨k⊥²⟩)².
                  Waltz mixing rule: saturated potential from the mixing
                  estimate φ_sat ~ γ/⟨k⊥²⟩ (zonal-flow/ExB shear balance
-                 V_zf ~ γ/ky ⇒ |φ|² ~ (γ/k⊥²)²), intensity is the SQUARE,
+                 V_zf ~ γ/ky ⇒ φ² ~ (γ/k⊥²)²), intensity is the SQUARE,
                  and the flux carries the explicit ky factor of the ExB
                  drift v_E = i·ky·φ.
 
@@ -45,7 +45,7 @@ def k_perp_squared(krho, kxrh, little_g):
 
 
 def k_perp_eff_squared(phi2, k_perp2, ds):
-    """Eigenmode-weighted <k_⊥²>(ky): ∫ds Σ_kx k_⊥²|φ|² / ∫ds Σ_kx |φ|².
+    """Eigenmode-weighted ``<k_⊥²>(ky) = ∫ds Σ_kx k_⊥² |φ|² / ∫ds Σ_kx |φ|²``.
 
     phi2: (ns, nkx, nky), k_perp2: (ns, nkx, nky), ds: scalar.
     Returns (nky,).
@@ -77,8 +77,8 @@ def ql_flux(
 
     Args:
         growth_rate : (nky,)            converged γ per ky.
-        phi2        : (ns, nkx, nky)    |φ|² of the eigenmode (for <k_⊥²>).
-        phi2_kxy    : (nkx, nky)        |φ|² integrated over s with `ints` weights.
+        phi2        : (ns, nkx, nky)    ``|φ|²`` of the eigenmode (for <k_⊥²>).
+        phi2_kxy    : (nkx, nky)        ``|φ|²`` integrated over s with `ints` weights.
         flux_kxy    : (nkx, nky)        per-mode linear flux (energy by default)
                                         from calculate_fluxes(..., reduce=False).
         krho        : (nky,)
@@ -220,7 +220,7 @@ def ql_flux_sat0(
 def geom_sat2_factors(geom):
     """SAT2's grad_r0 and Gq from a gyaradax geometry, not from constants.
 
-    grad_r0 = |grad r| at the outboard midplane = sqrt(g_eps_eps), which is
+    ``grad_r0 = |grad r|`` at the outboard midplane = sqrt(g_eps_eps), which is
     little_g[:, 2]; it comes out exactly 1 for circular, matching TGLF.
     Gq = B_geo0 / grad_r0 with B_geo0 the midplane field. gyaradax normalises
     B differently from TGLF (0.843 vs 0.826 at eps = 0.19), and Gq only
@@ -361,7 +361,7 @@ def ql_flux_sat2(
     I(ky) = (1/kymax) (12/dlnpdr) ((gamma_eff / (kx_width ky)) / (1 + ay kx_hat^2))^2, with kymax
     the quadratically refined peak of gamma/ky (floored at `kymin`, default 0.173 sqrt(2) grad_r0),
     gamma_eff the growth rate clamped above kymax and Lorentzian-averaged over high ky, and
-    kx_width from SAT2's model (`kx_width_model="tglf"`) or measured from |phi|^2. b2 folds into cn
+    kx_width from SAT2's model (`kx_width_model="tglf"`) or measured from ``|phi|^2``. b2 folds into cn
     and sat_geo is left out. `flux_exponent` p acts on each mode's intensity (1 is SAT2's own form;
     fitted values live in `calibrations`); `dlnpdr=None` drops 12/dlnpdr; `kthnorm` converts krho
     to k_theta rho.
@@ -435,11 +435,11 @@ def ql_flux_per_species(
 ):
     """Per-species / per-channel QL fluxes from ONE shared saturated intensity.
 
-    QL postulate: the saturated |φ|² amplitude is common to all species —
+    QL postulate: the saturated ``|φ|²`` amplitude is common to all species —
     species and channels differ only through their QL weights W_{s,c}(ky).
     Every rule in RULES is linear in `flux_kxy` (the flux enters only via
-    W = Σ_kx Γ / Σ_kx |φ|²), so evaluating the rule on each (species,
-    channel) flux slice with the SAME (γ, |φ|², geometry) realizes exactly
+    ``W = Σ_kx Γ / Σ_kx |φ|²``), so evaluating the rule on each (species,
+    channel) flux slice with the SAME (γ, ``|φ|²``, geometry) realizes exactly
     that decomposition, and the per-species outputs sum to the
     species-summed call by linearity.
 
@@ -449,8 +449,9 @@ def ql_flux_per_species(
             leading axes — e.g. the (nsp, 3, nkx, nky) ``fluxes_kxy_sp``
             harvested by linear_pipeline._harvest for kinetic runs
             (channels ordered [pflux, eflux, vflux], EM flutter included).
-        Other args/kwargs: identical to the underlying rule (γ, |φ|²
-        spectra, geometry, cn, gate, ...).
+        args: Arguments of the underlying rule (γ, ``|φ|²`` spectra,
+            geometry, cn, gate, ...).
+        kwargs: Keyword arguments of the underlying rule.
 
     Returns: jnp array of shape ``flux_kxy_sp.shape[:-2]`` — e.g. (nsp, 3)
     with [s, 1] the QL heat flux Q_s and [s, 0] the particle flux Γ_s.

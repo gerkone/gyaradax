@@ -10,6 +10,8 @@ from typing import Any, Dict, Tuple
 import jax.numpy as jnp
 import numpy as np
 
+_NUMBER = r"[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?"
+
 ParsedInput = Mapping[str, Mapping[str, Any]]
 
 _TRUE_STRINGS = (".true.", "true", "t")
@@ -152,11 +154,6 @@ def poten_files(directory):
     return poten_files, np.array(timestep_slices) - 1
 
 
-def is_number(string):
-    pattern = r"^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$"
-    return bool(re.fullmatch(pattern, string.strip()))
-
-
 def _strip_inline_comment(line: str) -> str:
     """Strip Fortran '!' comments while respecting quoted strings."""
     out = []
@@ -248,7 +245,7 @@ def load_geom_dat_file(file_path: str) -> Dict[str, Any]:
             continue
 
         parts = line.split()
-        if len(parts) == 1 and not is_number(parts[0]):
+        if len(parts) == 1 and not re.fullmatch(_NUMBER, parts[0]):
             try:
                 if len(values) == 0:
                     values.extend(map(float, parts))
@@ -315,11 +312,11 @@ def resolve_betaprime(inp: Dict[str, Any]) -> float:
     """Resolve GKW's veta_prime from a parsed input.dat dict.
 
     Mirrors the flux-tube fill in components.f90 (~1995-2016):
-      betaprime_type='ref'  -> betaprime_ref (input, default 0)
-      betaprime_type='sp'   -> veta * sum_species(-de*tmp*(rlt+rln))
-                               with veta = beta; the sum runs over ALL
-                               species blocks (incl. adiabatic ones).
-      betaprime_type='eq'/'file' -> not supported here.
+
+    - ``betaprime_type='ref'``: ``betaprime_ref`` (input, default 0)
+    - ``betaprime_type='sp'``: ``veta * sum_species(-de*tmp*(rlt+rln))`` with
+      ``veta = beta``, summed over all species blocks (adiabatic ones included)
+    - ``betaprime_type='eq'`` / ``'file'``: not supported
     """
     spc = inp.get("spcgeneral", {})
     bp_type = str(spc.get("betaprime_type", "ref")).strip().strip("'").strip('"').lower()

@@ -1,11 +1,12 @@
-"""Backend selection and solver ops creation.
+"""Backend selection: :func:`create_ops` returns the JAX or CUDA :class:`SolverOps`.
 
-usage:
+Example::
+
     from gyaradax.backends import create_ops
 
-    ops = create_ops(pre)                  # auto-detect
-    ops = create_ops(pre, "jax")           # force JAX
-    ops = create_ops(pre, "cuda")          # force CUDA (raises if unavailable)
+    ops = create_ops(pre)          # CUDA when the library and a GPU are present, else JAX
+    ops = create_ops(pre, "jax")   # pure JAX
+    ops = create_ops(pre, "cuda")  # CUDA, raises if unavailable
 """
 
 import logging
@@ -33,18 +34,20 @@ def create_ops(
     mesh=None,
     fused_bracket: bool = False,
 ) -> SolverOps:
-    """Create a SolverOps instance for the given backend.
+    """Create the solver operations for a backend.
 
     Args:
-        pre: Precomputed geometry and coefficients
-        backend: Backend selection ('auto', 'jax', or 'cuda')
-        use_z2z: Use Z2Z (complex-to-complex) FFTs instead of R2C (real-to-complex).
-                 Note: CUDA backend is Z2Z-only, this flag only affects JAX backend.
-        mixed_precision: Use mixed precision (FP32 FFTs) for nonlinear bracket.
-                        Set to False for full FP64 accuracy.
-        mesh: Device mesh of a sharded run (``sharding.build_mesh``); the
-              bracket and the CUDA kernels then run on the local blocks.
-        fused_bracket: CUDA mixed-precision bracket packs and unpacks inside the cuFFT passes.
+        pre: Precomputed coefficients from :func:`~gyaradax.operators.precompute.linear_precompute`.
+        backend: ``"auto"``, ``"jax"`` or ``"cuda"``. ``"auto"`` picks CUDA when a GPU
+            and the compiled library are present and warns when it falls back to JAX on a GPU.
+        use_z2z: Z2Z instead of R2C FFTs in the JAX bracket (the CUDA backend is Z2Z only).
+        mixed_precision: FP32 FFTs in the nonlinear bracket; ``False`` keeps FP64.
+        mesh: Device mesh of a sharded run (:func:`gyaradax.sharding.build_mesh`); the
+            bracket and the CUDA kernels then run on the local blocks.
+        fused_bracket: CUDA: pack and unpack the mixed-precision bracket inside the cuFFT passes.
+
+    Returns:
+        A :class:`SolverOps` instance.
     """
     if backend == "jax":
         z2z_str = " (z2z)" if use_z2z else ""

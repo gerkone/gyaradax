@@ -11,21 +11,6 @@ import jax.numpy as jnp
 
 from gyaradax.operators import stencils
 
-DS_KEYS = (
-    "ds_bessel",
-    "ds_s_upar_tab",
-    "ds_s_t7_tab",
-    "ds_wvp",
-    "ds_drift_x",
-    "ds_drift_y",
-    "ds_drive_a",
-    "ds_drive_b",
-    "ds_hyper",
-    "ds_kx_vals",
-    "ds_ky_vals",
-    "ds_coll_stencil",
-)
-
 
 def ds_pairs(x) -> jnp.ndarray:
     """Split float64 values into (..., 2) float32 (hi, lo) pairs."""

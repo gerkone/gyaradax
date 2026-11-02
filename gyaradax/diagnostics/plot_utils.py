@@ -1,3 +1,5 @@
+"""Plotting helpers for fluxes, spectra, growth rates and phase-space slices."""
+
 # mypy: ignore-errors
 
 from typing import List, Optional, Union, Tuple
@@ -59,6 +61,25 @@ def plot_flux_trace(
     n_species: int = 1,
     species_labels: Optional[List[str]] = None,
 ) -> plt.Figure:
+    """Plot flux time traces: one row per flux, one column per species.
+
+    Args:
+        time: Times, shape (T,).
+        fluxes: ``(n_species * len(labels), T)``, an ensemble
+            ``(n_runs, n_species * len(labels), T)`` drawn as mean and spread, or
+            a tuple of ``(T,)`` arrays.
+        labels: Flux names, one row each.
+        ref_time: Times of the reference traces.
+        ref_fluxes: Reference (e.g. GKW) traces, same layout as ``fluxes``.
+        title: Figure title.
+        show_average: Mark the average over the last ``avg_window`` points.
+        avg_window: Averaging window, in points.
+        n_species: Number of species columns.
+        species_labels: Column titles.
+
+    Returns:
+        The figure.
+    """
     if isinstance(fluxes, (tuple, list)):
         min_len = min(f.shape[-1] for f in fluxes)
         fluxes = np.stack([f[..., :min_len] for f in fluxes])
@@ -499,79 +520,6 @@ def plot_growth_snapshots(
     return fig
 
 
-def plot_ky_spectra_evolution(
-    ky: np.ndarray,
-    ky_spec_history: np.ndarray,
-    times: Optional[np.ndarray] = None,
-    ref_ky_spec: Optional[np.ndarray] = None,
-    n_snapshots: int = 5,
-    title: str = "",
-) -> plt.Figure:
-    """Plot ky spectra at selected timesteps showing time evolution.
-
-    Args:
-        ky: (nky,) wavenumber grid.
-        ky_spec_history: (n_windows, nky) spectral density over time.
-        times: (n_windows,) timestamps for labeling.
-        ref_ky_spec: (nky,) time-averaged GKW reference spectrum.
-        n_snapshots: number of timesteps to show.
-        title: figure title.
-    """
-    n_total = len(ky_spec_history)
-    if times is not None:
-        n_total = min(n_total, len(times))
-    indices = np.linspace(0, n_total - 1, min(n_snapshots, n_total), dtype=int)
-    colors = plt.cm.plasma(np.linspace(0.1, 0.9, len(indices)))
-
-    fig, ax = plt.subplots(figsize=(7.0, 2.8))
-
-    for i, idx in enumerate(indices):
-        t_label = f"t={times[idx]:.0f}" if times is not None else f"step {idx}"
-        ax.semilogy(
-            ky, ky_spec_history[idx], "o-", color=colors[i], ms=2, lw=0.8, alpha=0.7, label=t_label
-        )
-
-    if ref_ky_spec is not None:
-        ax.semilogy(ky, ref_ky_spec, "k--", lw=1.5, alpha=0.8, label="GKW (avg)")
-
-    ax.set_xlabel(r"$k_y \rho_{ref}$")
-    ax.set_ylabel(r"$|\phi|^2$")
-    ax.legend(frameon=False, ncol=2)
-    ax.grid(True, which="both")
-    if title:
-        ax.set_title(title)
-    fig.tight_layout()
-    return fig
-
-
-def plot_zonal_residual(
-    time: np.ndarray,
-    phi_history: np.ndarray,
-    target_residual: Optional[float] = None,
-) -> plt.Figure:
-    """Rosenbluth-Hinton zonal flow residual test."""
-    phi_norm = phi_history / phi_history[0]
-
-    fig, ax = plt.subplots()
-    ax.plot(time, phi_norm, color=JAX_COLORS["blue"], label="gyaradax")
-
-    if target_residual is not None:
-        ax.axhline(
-            target_residual,
-            color=JAX_COLORS["red"],
-            linestyle="--",
-            label=f"Analytical ({target_residual:.3f})",
-        )
-
-    ax.set_xlabel(r"Normalised Time $[c_s t/R]$")
-    ax.set_ylabel(r"$\phi(t)/\phi(0)$")
-    ax.set_title("Zonal Flow Damping (Rosenbluth-Hinton)")
-    ax.legend(frameon=False)
-    ax.grid(True)
-
-    return fig
-
-
 def force_aspect(ax: plt.Axes, aspect: float = 1.0):
     """Adjust axis aspect ratio based on image extent."""
     im = ax.get_images()
@@ -681,18 +629,3 @@ def plot_nd(
     plt.subplots_adjust(left=0.01, right=0.99, bottom=0.01, top=0.99, wspace=0, hspace=0)
     return fig
 
-
-def plot_gradient_comparison(
-    analytical_grad: np.ndarray,
-    fd_grad: Optional[np.ndarray] = None,
-    labels: Optional[List[str]] = None,
-    title: str = "Gradient Validation (Analytical vs FD)",
-) -> plt.Figure:
-    """Analytical vs finite-difference gradient comparison."""
-    grad_to_plot = np.real(analytical_grad)
-    fd_to_plot = np.real(fd_grad) if fd_grad is not None else None
-
-    fig = plot_nd(grad_to_plot, y=fd_to_plot, labels=labels)
-    if fig:
-        fig.suptitle(title, fontweight="bold", y=1.02)
-    return fig

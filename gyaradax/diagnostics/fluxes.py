@@ -28,7 +28,7 @@ def calculate_fluxes(
     When reduce=False, returns per-mode flux fields of shape (nkx, nky):
     velocity-space and parallel integration are still applied, but the
     final sum over (kx, ky) is left to the caller. Useful for quasilinear
-    weights Γ_lin(k_x, k_y) / |φ_lin(k_x, k_y)|² and for kx/ky spectra.
+    weights ``Γ_lin(kx, ky) / |φ_lin(kx, ky)|²`` and for kx/ky spectra.
     """
     bn, bt_frac, parseval = geom["bn"], geom["bt_frac"], geom["parseval"]
     rfun, efun, d2X, signB = geom["rfun"], geom["efun"], geom["d2X"], geom["signB"]
