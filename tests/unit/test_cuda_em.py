@@ -268,3 +268,17 @@ def test_bracket_v6_warns_when_running_v5(monkeypatch, caplog):
         _cuda._v6_row_size.cache_clear()
     assert np.array_equal(np.asarray(auto), np.asarray(v5))
     assert "runs v5 instead of v6" in caplog.text and "BRACKET_V6_NKY_MAX" in caplog.text
+
+
+@pytest.mark.skipif(not HAS_CUDA or not _has_bracket_v6(), reason="v6 bracket not built")
+def test_fused_bracket_matches_unfused(monkeypatch):
+    monkeypatch.setenv("GYARADAX_BRACKET", "auto")
+    df, geometry, params, _, pre = _setup("kinetic_apar_bpar", mixed_precision=True)
+    phi, apar, _ = _fields(df, geometry, params, pre)
+    out = []
+    for fused in (False, True):
+        ops = create_ops(pre, backend="cuda", mixed_precision=True, fused_bracket=fused)
+        leaves, tree = jax.tree_util.tree_flatten(ops)
+        assert jax.tree_util.tree_unflatten(tree, leaves).fused_bracket is fused
+        out.append(jax.jit(lambda d, p, a: ops.nonlinear_term_iii(d, p, geometry, apar=a))(df, phi, apar))
+    assert rel_l2(out[1], out[0]) < 1e-6

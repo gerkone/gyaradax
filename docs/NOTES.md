@@ -1139,7 +1139,8 @@ potential planes are transformed and chi is formed in real space.
   without workspace, i.e. one kernel; the native GKW length (e.g. 294 = 2 3 7^2 at nkx 191, three
   cuFFT passes) is kept when no such length is smaller. Every alias-free length gives the same
   retained product, so only FFT round-off changes. `GYARADAX_BRACKET_MRAD=native|auto|N` overrides.
-  The FP32 bracket applies its exact FP64 output scale in the unpack kernel (bitwise).
+  The FP32 bracket applies its exact FP64 output scale in the unpack kernel (bitwise), or with
+  `fused_bracket` in the cuFFT store callback that replaces it.
 
 Performance, memory use, multi-GPU sharding and the CUDA vs JAX parity checks are collected
 in §13.
@@ -1741,7 +1742,7 @@ timings as the minimum over interleaved repeats when the GPU is shared.
 ### 13.6 recommendations
 
 - Production runs: CUDA backend (`--backend cuda`), mixed precision (faster than FP64 on every GPU
-  since the kx padding), `--fused-linear`, and `--linear-arith ds` on weak-FP64 GPUs (B300).
+  since the kx padding), `--fused-linear`, and `--linear-arith ds` plus `--fused-bracket` on B300.
 - Gradients and bitwise references: JAX backend.
 - Large grids: shard (`--n-gpus N`); close to the memory limit on one GPU, `--mem-fraction 0.95`.
 - `GYARADAX_BRACKET=v5` reproduces the v5 bracket bitwise (and the master CUDA ES results).
@@ -1759,6 +1760,7 @@ timings as the minimum over interleaved repeats when the GPU is shared.
 | `use_z2z` | false | Z2Z instead of R2C FFTs in the JAX bracket | JAX backend | round-off |
 | `fused_linear` (`--fused-linear`) | false | fused electrostatic RK stage (§13.2) | ES; else default kernel | ~1e-14 per RHS |
 | `linear_arith` (`--linear-arith`) | `fp64` | `ds`: double-single linear RHS (§13.2) | as `fused_linear`, CUDA only | ~1e-14 per RHS |
+| `fused_bracket` (`--fused-bracket`) | false | mixed-precision v6 bracket packs and unpacks in cuFFT load / store callbacks, as FP64 always does: B300 bracket 1.25x, kinetic step 1.13x; A100 slower | CUDA v6 bracket, mixed precision | bitwise on B300; round-off elsewhere (A100 large adiabatic) |
 | `n_gpus_{sp,vp,mu}` (`--n-gpus`) | 1 | velocity-space sharding (§13.4) | all runs | round-off |
 | `GYARADAX_BRACKET=v5` | v6 | forces the v5 bracket (v6 falls back to v5 with a warning where it has no kernel) | CUDA bracket | bitwise v5 |
 | `BRACKET_V6_NKY_MAX` (CMake) | 192 | nky range of the v6 row kernels; build time and library size grow with it (README) | CUDA v6 bracket | round-off (padded mphi) |

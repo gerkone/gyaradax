@@ -179,6 +179,7 @@ is large or does not fit one GPU.
 | `--mp` / `--dp` | mixed precision (FP32 nonlinear FFTs) or full FP64 |
 | `--fused-linear` | CUDA: fused electrostatic linear kernel with collisions and RK4 stages (`solver.fused_linear`) |
 | `--linear-arith {fp64,ds}` | CUDA: double-single linear RHS for weak-FP64 GPUs such as B300 (`solver.linear_arith`) |
+| `--fused-bracket` | CUDA: mixed-precision bracket packs/unpacks inside the cuFFT passes; faster on B300, slower on A100 (`solver.fused_bracket`) |
 | `--device N` | pin to one GPU (single-device runs only) |
 | `--device-list 0,1` | GPUs to use; several with no mesh given shard over them automatically |
 | `--n-gpus N` | shard over N GPUs, layout chosen from the grid |
