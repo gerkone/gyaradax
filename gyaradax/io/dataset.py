@@ -8,7 +8,8 @@ A trajectory lives in ``<root>/<name>_ifft_realpotens/``::
                                      (frames of older legs may be ``.zstd16.bin``)
     data/potenc_NNNNN.bin            complex phi in real space, (re/im, x, s, y), every ky mode,
                                      raw float32 (dataset ``potenc: false`` skips it)
-    metadata.pkl                     everything below, including the statistics
+    metadata.pkl                     everything below, including the statistics, as the metadata tree
+                                     of :mod:`gyaradax.io.schema` (readers get the flat keys)
     metadata_light.pkl               the same without the per-element df / phi moments
     config.yaml                      the run's effective config
     .gyaradax_run                    the run directory that writes the trajectory
@@ -39,6 +40,8 @@ import warnings
 from typing import Any, Callable, Optional
 
 import numpy as np
+
+from gyaradax.io.schema import FLUX_LABELS, LIGHT_DROP_KEYS, flatten_metadata, nest_metadata
 
 # geometry entries of the kinetic dataset (neugk_jax.dataset.preprocess.kinetic_geometry)
 GEOMETRY_KEYS = ("kxrh", "krho", "intvp", "vpgr", "intmu", "mugr", "ints", "bn", "bt_frac", "rfun", "efun",
@@ -286,16 +289,14 @@ def load_metadata(traj: str) -> Optional[dict]:
         path = os.path.join(traj, name)
         if os.path.exists(path):
             with open(path, "rb") as fh:
-                return pickle.load(fh)
+                return flatten_metadata(pickle.load(fh))
     return None
 
 
 def write_metadata(traj: str, metadata: dict) -> None:
-    _atomic_write(os.path.join(traj, "metadata.pkl"), pickle.dumps(metadata))
-    # metadata_light leaves out the per-element moments, as neugk does
-    drop = {f"df_{m}" for m in ("mean", "var", "std", "min", "max")} | {"phi_min", "phi_max", "phi_var"}
-    light = {k: v for k, v in metadata.items() if k not in drop}
-    _atomic_write(os.path.join(traj, "metadata_light.pkl"), pickle.dumps(light))
+    _atomic_write(os.path.join(traj, "metadata.pkl"), pickle.dumps(nest_metadata(metadata)))
+    light = {k: v for k, v in metadata.items() if k not in LIGHT_DROP_KEYS}
+    _atomic_write(os.path.join(traj, "metadata_light.pkl"), pickle.dumps(nest_metadata(light)))
 
 
 def _coll_freq(params: Any, ion: int) -> float:
@@ -325,44 +326,43 @@ def _static_metadata(geometry: dict, params: Any, config_path: str) -> dict:
     n_species = len(signz) if kinetic else 1
     ion = int(np.argmax(signz > 0))
     elec = int(np.argmax(signz < 0)) if kinetic else -1
-    df_shape = (2, n_species, *resolution) if kinetic else (2, *resolution)
+    names = {ion: "ion", elec: "electron"}
+    # the kinetic species; adiabatic electrons carry no species entry
+    kept = slice(None) if kinetic else [ion]
     meta = {
         "simulation_code": "gyaradax",
         "source_config": os.path.abspath(config_path),
         "ds": float(geom["ints"][0]),
         "resolution": resolution,
-        "df_shape": df_shape,
+        "df_shape": (2, n_species, *resolution),
         "phi_shape": (resolution[3], resolution[2], resolution[4]),
-        "axis_order": (
-            "df: (re/im, species, vpar, mu, s, x, y); phi: (x, s, y); x, y real space"
-            if kinetic
-            else "df: (re/im, vpar, mu, s, x, y); phi: (x, s, y); x, y real space"
-        ),
-        "channel_layout": "reim_species" if kinetic else "reim",
+        "axis_order": "df: (re/im, species, vpar, mu, s, x, y); phi: (x, s, y); x, y real space",
+        "channel_layout": "reim_species",
         "quantization": "bf16",
         "real_space_convention": "ifftn(fftshift(spec, axes=kx), axes=(kx, ky), norm='forward')",
         "n_species": n_species,
+        "species": tuple(names.get(i, f"s{i}") for i in range(n_species)),
         "ion_species_index": ion,
         "electron_species_index": elec,
         "ion_temp_grad": np.array([rlt[ion]]),
         "density_grad": np.array([rln[ion]]),
-        "rlt": rlt,
-        "rln": rln,
-        "tmp": tmp,
+        "electron_temp_grad": np.array([rlt[elec]]) if kinetic else np.zeros(1),
+        "temp_ratio": np.array([tmp[elec] / tmp[ion]]) if kinetic else np.ones(1),
+        "rlt": rlt[kept],
+        "rln": rln[kept],
+        "tmp": tmp[kept],
         "ion_temp": np.array([tmp[ion]]),
         "s_hat": np.array([float(params.shat)]),
         "q": np.array([float(params.q)]),
         "eps": np.array([float(params.eps)]),
         "coll_freq": np.array([_coll_freq(params, ion)]),
         "geometry": geom,
-        "flux_labels": [f"{f}_s{s}" for s in range(n_species) for f in ("pflux", "eflux", "vflux")],
-        # df moments are pooled over (vpar, s, x, y): one value per (re/im, [species,] mu)
-        "df_stats_agg_axes": (2, 4, 5, 6) if kinetic else (1, 3, 4, 5),
+        "flux_labels": FLUX_LABELS,
+        # df moments are pooled over (vpar, s, x, y): one value per (re/im, species, mu)
+        "df_stats_agg_axes": (2, 4, 5, 6),
     }
     if kinetic:
-        meta["electron_temp_grad"] = np.array([rlt[elec]])
         meta["electron_temp"] = np.array([tmp[elec]])
-        meta["temp_ratio"] = np.array([tmp[elec] / tmp[ion]])
     return meta
 
 
@@ -401,15 +401,28 @@ class DatasetWriter:
         self.static = _static_metadata(geometry, params, os.path.join(self.path, "config.yaml"))
         self.series: dict[str, list] = {k: [] for k in SERIES_KEYS}
         old = load_metadata(self.path)
+        if old is not None and "species" not in old:
+            raise ValueError(f"{self.path}: metadata predates the schema, migrate it first (neugk-jax scripts/migrate_metadata.py)")
         if old is not None and phi_layout(old) != "real":
             raise ValueError(f"{self.path}: complex poten frames (phi_layout {phi_layout(old)}), convert them first")
         self.potenc = bool(potenc)
         if self.potenc:
             self.static["phic_source"] = "solver_exact"
+        # an extended trajectory keeps every key of its metadata; the per-frame ones go on per new frame
+        self.carried: dict[str, Any] = {}
         if old is not None and len(old.get("timesteps", ())):
             keep = int(np.sum(np.asarray(old["solver_steps"]) <= start_step))
             for k in self.series:
                 self.series[k] = list(np.asarray(old[k])[:keep])
+            n_old = len(old["timesteps"])
+            for k, v in old.items():
+                if k in self.series or k in self.static:
+                    continue
+                if k in CARRIED_PER_FRAME and len(np.atleast_1d(v)) == n_old:
+                    v = np.asarray(v)[:keep]
+                self.carried[k] = v
+            if "phic_source" in old and "phic_source_frames" not in old:
+                self.carried["phic_source_frames"] = np.array([str(old["phic_source"])] * keep)
             for kind in ("timestep", "poten", "potenc"):
                 for path in glob.glob(os.path.join(self.path, "data", f"{kind}_*.bin")):
                     if int(re.search(rf"{kind}_(\d+)", path).group(1)) >= keep:
@@ -432,22 +445,33 @@ class DatasetWriter:
         if self.potenc:
             _atomic_write(potenc_path(self.path, idx), phi_to_reim(phi).tobytes())
         loss = quantization_loss(df, frame, phi_real, phi_frame, integrals)
-        n_flux = np.asarray(fluxes).size
-        loss["quant_flux_err"] = np.broadcast_to(np.asarray(loss["quant_flux_err"], np.float64), (n_flux,)).copy()
+        flux = np.asarray(fluxes, np.float64).reshape(self.static["n_species"], len(FLUX_LABELS))
+        err = np.asarray(loss["quant_flux_err"], np.float64)
+        loss["quant_flux_err"] = np.broadcast_to(err.reshape(flux.shape) if err.size > 1 else err, flux.shape).copy()
         for k, v in loss.items():
             self.series[k].append(v)
         self.series["timesteps"].append(float(np.ravel(np.asarray(state.time))[0]))
         self.series["solver_steps"].append(int(np.ravel(np.asarray(state.step))[0]))
-        self.series["flux"].append(np.asarray(fluxes, np.float64).reshape(-1))
+        self.series["flux"].append(flux)
         self.series["kyspec"].append(np.asarray(ky_spec, np.float64))
         self.series["kxspec"].append(np.asarray(kx_spec, np.float64))
         self.series["growth"].append(np.asarray(state.last_growth_rate, np.float64))
         write_metadata(self.path, self.metadata())
 
     def metadata(self) -> dict:
-        meta = dict(self.static)
+        meta = {**self.carried, **self.static}
         for k, v in self.series.items():
             meta[k] = np.asarray(v)
+        n = self.n_frames
+        if "phic_source_frames" in self.carried:
+            src = list(np.asarray(self.carried["phic_source_frames"]).astype(str))
+            src += [str(self.static.get("phic_source", "solver_exact"))] * (n - len(src))
+            meta["phic_source_frames"] = np.array(src)
+            meta["phic_source"] = src[0] if len(set(src)) == 1 else "mixed"
+        if "thinned_from" in self.carried:
+            base = np.asarray(self.carried["thinned_from"], np.int64)
+            start = base[-1] + 1 if len(base) else 0
+            meta["thinned_from"] = np.concatenate([base, np.arange(start, start + n - len(base))])
         return meta
 
     def write_resume(self, df, state, dump_origin: Optional[float] = None) -> None:
@@ -475,6 +499,9 @@ class DatasetWriter:
         if self.n_frames:
             print(f"  dataset {os.path.basename(self.path)}: {quantization_summary(self.metadata())}")
 
+
+# per-frame keys outside the series that an extension carries on
+CARRIED_PER_FRAME = ("phic_source_frames", "thinned_from")
 
 LINEAR_FILES = ("linear.bin", "linear_poten.bin")
 
@@ -504,8 +531,8 @@ def quantization_summary(meta: dict) -> str:
         warnings.simplefilter("ignore", RuntimeWarning)
         med = {k: np.nanmedian(np.abs(np.asarray(meta[k], np.float64)), axis=0)
                for k in ("quant_phi_err", "quant_phi_df_err", "quant_flux_err")}
-    eflux = ", ".join(f"{label} {err:.1e}" for label, err in zip(meta["flux_labels"], np.ravel(med["quant_flux_err"]))
-                      if label.startswith("eflux"))
+    heat = np.reshape(med["quant_flux_err"], (len(meta["species"]), -1))[:, FLUX_LABELS.index("eflux")]
+    eflux = ", ".join(f"eflux {name} {err:.1e}" for name, err in zip(meta["species"], heat))
     return (f"bf16 loss (median relative error): phi frame {med['quant_phi_err']:.1e}, "
             f"phi from df {med['quant_phi_df_err']:.1e}, {eflux}")
 
