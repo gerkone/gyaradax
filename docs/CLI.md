@@ -64,6 +64,10 @@ Every run writes into its output directory (`--output-dir`, default
 | `run_info.jsonl` | one line per invocation: command, host, git revision, start and target step |
 | `telemetry.jsonl`, `profile/`, `profile_summary.json` | debug output, see below |
 
+SIGTERM stops a run after the block in progress and its snapshot, with exit code 75 (a second
+SIGTERM exits at once); resuming the directory continues it from there. The dataset statistics
+are then computed by the leg that completes the run.
+
 Pass the directory instead of a config to resume it in place:
 
 ```bash
@@ -95,6 +99,99 @@ written every `--snapshot-every K` blocks (config `run.snapshot_every`, default
 1) and always after the last block. A run that stops in between resumes from
 the last snapshot and rewrites the diagnostics after it.
 `--resume-from K03` keeps resuming from GKW K-files in the config's `data_dir`.
+
+### Equally spaced frames (time mode)
+
+`--dump-dt DT` (config `solver.dump_dt`) puts the frames (diagnostics, dataset frames) on an
+equally spaced time grid instead of every `--block-size` steps. Each block integrates to the next
+frame time and shortens its last step to land on it exactly, so the frame times are
+`t0 + k * DT` to round-off, whatever the adaptive time step does. `t0` is the time the run starts
+from; snapshots and the dataset resume dump carry it (`dump_origin`), so resumed legs continue
+the same grid. The run length is an end time:
+
+```bash
+gyaradax run my_case.yaml --dump-dt 1.4 --t-end 400     # frames at 1.4, 2.8, ..., ends at 400.4
+gyaradax run outputs_kinetic_my_case --n-blocks 10      # 10 more frames
+gyaradax run outputs_kinetic_my_case --t-end 600        # extend to t = 600
+```
+
+- The run ends on the first frame at or after `--t-end` (config `solver.t_end`), `--n-blocks N`
+  runs N more frames, and `--n-steps N` (or `solver.n_steps` when there is no end time) ends on
+  the first frame at or after N steps.
+- `--snapshot-every K` counts frames. `--block-size` is unused: a compiled call takes at most 8x
+  the steps of a frame at `solver.dt` and continues in another call when the time step is smaller.
+- SIGTERM stops a time-mode run on the frame in progress, like a block.
+- The stored kinetic trajectories were thinned to a minimum spacing of 1.4 (their native spacing
+  was 2.18-2.27); `--dump-dt 1.4` matches it.
+- Without `--dump-dt` nothing changes: the step-counted blocks are bitwise as before.
+
+## Preprocessed dataset output
+
+`--dataset DIR` also writes the run as a training-ready trajectory `DIR/<name>_ifft_realpotens/`,
+in the layout the neugk loaders read (`preprocessed_kvikio`), so no intermediate dumps or separate
+conversion are needed:
+
+```bash
+gyaradax run configs/kinetic_603.yaml --dataset /data/preprocessed/kinetic \
+    --dataset-name my_case
+```
+
+- The trajectory belongs to the run directory that created it (`.gyaradax_run`). An existing
+  trajectory of another run, or one not written by a run (including symlinks to the stored
+  dataset), is refused: a rerun needs a new `--dataset-name`.
+
+- One frame per checkpoint block: `data/timestep_NNNNN.zstd16.bin` holds df in real space,
+  (re/im, species, vpar, mu, s, x, y); adiabatic runs have no species axis.
+  `data/poten_NNNNN.zstd16.bin` holds phi in real space, (x, s, y).
+- `--dataset-bits zstd16` (default) is lossless zstd over bf16, the format of most of the kinetic
+  dataset, read by neugk with `dataset.prefer_dtype: zstd16`; `bf16` stores the raw values, read
+  with any `prefer_dtype`.
+- `metadata.pkl` and `metadata_light.pkl` carry the run's parameters, the geometry, and per frame
+  the time, solver step, fluxes per species, ky/kx spectra and growth rate. The trajectory also
+  gets a copy of the run's `config.yaml`. Keys and transforms are those of neugk's
+  `preprocess_gyaradax_kinetic`. As in the dump streams that dataset was built from, df is
+  rounded to bf16 in spectral space before the transform: on stored trajectories the frames
+  match bitwise up to FFT round-off (phi exactly; df in all but ~0.04% of values).
+- The bf16 loss is tracked per frame: `quant_phi_err` is the relative L2 error of the stored phi
+  frame, `quant_phi_df_err` that of phi solved from the stored df frame, and `quant_flux_err` the
+  relative error of each flux (`flux_labels`) recomputed from the stored df. The reference is the
+  same field solve and flux integral on the unrounded df, so the numbers hold the quantization
+  alone; channels zero to round-off are nan. The run prints their medians when it ends.
+- The df and phi normalisation statistics are computed from the stored frames when the run ends.
+  `--dataset-stats-from T` limits them to frames from time T on. Once the transient is known,
+  recompute them with:
+
+  ```bash
+  gyaradax dataset-stats /data/preprocessed/kinetic/my_case_ifft_realpotens --from-time 40
+  ```
+
+- The settings are stored in the run's `config.yaml` (`dataset:` section): resuming the run
+  directory keeps appending frames to the same trajectory. Frames past the snapshot a run
+  resumes from are dropped first.
+- Every leg replaces the trajectory's resume dump when it ends, finished or stopped by SIGTERM:
+  `resume/state.npz` holds df and the solver state of the last frame (and the frame grid origin
+  in time mode), and `resume/config.yaml` the leg's config. Each file is replaced atomically.
+  `--resume-dtype f32` (default) stores df as complex64, `f64` as complex128; on the kinetic
+  production grid (2 x 32 x 12 x 18 x 192 x 32) that is about 680 MB or 1.36 GB per trajectory.
+  The setting is kept in the `dataset:` section.
+- A trajectory can be extended from its resume dump without its run directory:
+
+  ```bash
+  gyaradax run DIR/my_case_ifft_realpotens --t-end 600 --output-dir outputs_my_case_more
+  gyaradax run my_case.yaml --resume-from DIR/my_case_ifft_realpotens --n-blocks 50
+  ```
+
+  The first form runs the dump's own config; the second a config of your choice. Frames are
+  appended to the same trajectory (on the same time grid in time mode), and the trajectory passes
+  to the new run directory, so its previous run can no longer write to it. `--dataset` writes the
+  continuation into a new trajectory instead. From an `f64` dump the continuation is bitwise the
+  run that never stopped; from `f32` it starts from df rounded to complex64.
+- Electromagnetic fields (A_par, B_par) are not written yet.
+- A linear config (`solver.non_linear: false`) writes no frames: when the run completes, its final
+  state, the eigenmode, goes into the trajectory as `data/linear.bin` (df, (re/im, species, vpar,
+  mu, s, kx, ky)) and `data/linear_poten.bin` (phi, (re/im, s, kx, ky)), float32, in spectral
+  space. Nothing else of the trajectory changes, so a linear run with the `--dataset-name` of a
+  nonlinear trajectory adds its eigenmode to it.
 
 ## Debugging: telemetry and profiling
 
@@ -185,10 +282,12 @@ is large or does not fit one GPU.
 | `--n-gpus-{sp,vp,mu} N` | set the mesh per axis (overrides the config) |
 | `--mem-fraction F` | fraction of GPU memory XLA may use (e.g. 0.95 for grids near the limit) |
 | `--n-steps N` | run N more steps (default: up to the config's `solver.n_steps`) |
-| `--n-blocks` / `--block-size` | run length in blocks, checkpoint cadence |
+| `--n-blocks` / `--block-size` | run length in blocks (frames in time mode), checkpoint cadence |
+| `--dump-dt DT` / `--t-end T` | time mode: frames every DT time units, run to the first frame at or after T |
 | `--snapshot-every K` | restart snapshot every K blocks (default 1) |
 | `--from-scratch` | cold start: ignore K-files and the run directory's snapshots |
-| `--resume-from K03` / `--resume-from DIR/step_000400.npz` | resume from a GKW K-dump or a gyaradax snapshot |
+| `--resume-from K03` / `--resume-from DIR/step_000400.npz` / `--resume-from TRAJECTORY` | resume from a GKW K-dump, a gyaradax snapshot, or a dataset trajectory's resume dump |
+| `--resume-dtype {f32,f64}` | df precision of the dataset trajectory's resume dump (default f32) |
 | `--save-dumps` / `--no-save-dumps` | keep every snapshot (default: only the latest); stored in the run directory |
 | `--overwrite` | replace another run's outputs (or snapshots past the resumed step) in the output directory |
 | `--telemetry` / `--profile` / `--debug` | debug output into the run directory (off by default) |
@@ -209,7 +308,8 @@ results of its single run; a member that diverges stops writing while the others
 With `--output-dir` the members go to `<dir>/<run.name>`. Members may differ in
 array-valued settings (e.g. gradients, `beta`); configs that cannot share one
 solve run one after another: different grids, geometries, start steps, step
-counts, block or snapshot cadence, sharded runs, or different static
+counts, block or snapshot cadence, dump spacing, end time or start time in time
+mode, sharded runs, or different static
 parameters, which include `dt`, the dissipation coefficients and the species
 masses, temperatures, densities and thermal velocities (see
 `GKParams._STATIC_FIELDS`).
@@ -240,6 +340,33 @@ process started (setup included), for the busiest GPU of a mesh.
 - `gyaradax info` shows the devices, whether the CUDA library and the v6
   bracket are available, and whether NCCL is installed.
 - Details and measurements: `docs/NOTES.md` §13.
+
+## Banding stop
+
+`--stop-on-banding` stops a run whose zonal potential piles up at the parallel Nyquist mode. Per
+frame, phi in real space (x, s, y) is split into its zonal part (the y mean) and the rest; the
+zonal share of the power at the s-Nyquist index (ns / 2) over the zonal power is checked against
+0.3. Above it for 3 frames in a row, the run ends on that frame with its snapshot, logs an error
+with the share and the time, and exits with code 6. The flag takes one config: it is refused for
+batched runs.
+
+## Data generation (`gyaradax datagen`)
+
+`gyaradax datagen` runs a list of configs on the GPUs of this machine, one `gyaradax run` per
+config and one config per GPU at a time, and collects their trajectories in a dataset:
+
+```bash
+gyaradax datagen configs/scan/*.yaml --out runs/scan --gpus 0,1,2,3 --dataset /data/kinetic \
+    --args "--backend cuda --stop-on-banding"
+```
+
+Each config runs in `OUT/<name>` (`<name>` is the file name without `.yaml`) and, with
+`--dataset`, writes the trajectory `<name>`; its output goes to `OUT/<name>.log`. Running the same
+command again skips the configs whose last run completed, diverged or banded (exit code 0, 2 or 6,
+kept in `OUT/<name>/datagen_exit`) and continues the others from their last snapshot
+(`gyaradax run OUT/<name>`). Linear configs run the same way and leave their eigenmode in the
+trajectory. Scheduling over several machines is left to the
+cluster's own tools: each `gyaradax run` is self-contained and resumable.
 
 ## Legacy entry point
 
