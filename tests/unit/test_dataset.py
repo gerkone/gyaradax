@@ -299,3 +299,13 @@ def test_writer_output_meets_the_contract(tmp_path, config, grid):
     assert main(["run", str(path), "--from-scratch", "--backend", "jax", "--n-steps", "20", "--block-size", "10",
                  "--output-dir", str(tmp_path / "run"), "--dataset", root, "--dataset-name", "case"]) == 0
     assert check_trajectory(ds.trajectory_path(root, "case")) == []
+
+
+def test_resume_frame():
+    from gyaradax.io.schema import resume_frame
+
+    ts = [0.0, 1.5, 3.0, 4.5]
+    assert resume_frame(ts, 4.5) == 3
+    assert resume_frame(ts, 4.6) == 3
+    assert resume_frame(ts, 3.0) == 2
+    assert resume_frame(ts, 2.9) == 1

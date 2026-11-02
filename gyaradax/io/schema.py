@@ -221,6 +221,11 @@ RESUME_FIELDS = {"df": "complex", "time": "float", "step": "int", "accumulated_n
                  "window_start_amp": "float", "last_growth_rate": "float", "frame": "int"}
 
 
+def resume_frame(timesteps, time: float) -> int:
+    ts = np.asarray(timesteps, dtype=np.float64)
+    return int(np.searchsorted(ts, time + 1e-6 * max(1.0, abs(time)), side="right")) - 1
+
+
 def _dims(meta: dict) -> dict:
     res = tuple(int(r) for r in np.atleast_1d(meta.get("resolution", ())))
     dims = {"T": len(np.atleast_1d(meta.get("timesteps", []))), "S": int(meta.get("n_species", 0)), "S2": 2}
@@ -365,8 +370,10 @@ def check_trajectory(path: str, require_checkpoint: bool = False) -> list[str]:
                     out.append(f"resume/state.npz: {key} missing")
                 elif kind == "complex" and z[key].dtype.kind != "c":
                     out.append(f"resume/state.npz: {key} dtype {z[key].dtype}")
-            if "frame" in z.files and int(z["frame"]) != t - 1:
-                out.append(f"resume/state.npz: frame {int(z['frame'])}, expected {t - 1}")
+            if "frame" in z.files and "time" in z.files and t:
+                want = resume_frame(meta["timesteps"], float(z["time"]))
+                if int(z["frame"]) != want:
+                    out.append(f"resume/state.npz: frame {int(z['frame'])}, expected {want} (time {float(z['time']):.4g})")
     if require_checkpoint and not glob.glob(os.path.join(path, "checkpoint", "step_*.npz")):
         out.append("checkpoint/step_*.npz: missing")
     return out
