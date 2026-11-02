@@ -141,7 +141,7 @@ def init_f(
         sine:    amp * de(is) * (sin(2*pi*s) + 1), density-weighted
         noise:   uniform random on [-1, 1] (real + imag)
         gnoise:  gaussian random (Box-Muller transform)
-        zonal:   Rosenbluth-Hinton test — only ky=0, kx=±1 with Maxwellian weight
+        zonal:   Rosenbluth-Hinton test: only ky=0, kx=±1 with Maxwellian weight
 
     Args:
         geometry: Geometry dictionary
@@ -279,7 +279,7 @@ def init_f(
 
     df = df.astype(jnp.complex128)
 
-    # zero out the zonal mode (ky=0) — not for zonal init which IS the zonal mode
+    # zero out the zonal mode (ky=0): not for zonal init which IS the zonal mode
     if nky > 1:
         iy0 = int(
             jnp.asarray(

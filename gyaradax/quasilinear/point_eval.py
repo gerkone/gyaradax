@@ -276,7 +276,7 @@ def nl_at_point(
 
     Pure-JAX (backend='jax' required for vmap/jit): burn-in to saturation,
     then a lax.scan over `tail_blocks` blocks collecting fluxes to average.
-    Orders of magnitude slower than ql_at_point — offline validation and
+    Orders of magnitude slower than ql_at_point: offline validation and
     ground-truth generation only, never inside a stiff transport loop.
 
     `df_init` warm-starts from an already-saturated turbulent state (GENE-TANGO

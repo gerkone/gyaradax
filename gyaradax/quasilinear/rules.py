@@ -20,7 +20,7 @@ identical to ql_flux.
   sat2           SAT2 on the full eigenmode; see ql_flux_sat2.
 
 Structural constants (SAT2's ay) are fixed by construction
-and documented at their definition — they are NOT calibrated; each rule
+and documented at their definition: they are NOT calibrated; each rule
 exposes only cn.
 """
 
@@ -435,7 +435,7 @@ def ql_flux_per_species(
 ):
     """Per-species / per-channel QL fluxes from ONE shared saturated intensity.
 
-    QL postulate: the saturated ``|φ|²`` amplitude is common to all species —
+    QL postulate: the saturated ``|φ|²`` amplitude is common to all species:
     species and channels differ only through their QL weights W_{s,c}(ky).
     Every rule in RULES is linear in `flux_kxy` (the flux enters only via
     ``W = Σ_kx Γ / Σ_kx |φ|²``), so evaluating the rule on each (species,
@@ -446,14 +446,14 @@ def ql_flux_per_species(
     Args:
         rule: a RULES entry or its name (e.g. "canonical").
         flux_kxy_sp: (..., nkx, nky) linear flux fields with arbitrary
-            leading axes — e.g. the (nsp, 3, nkx, nky) ``fluxes_kxy_sp``
+            leading axes: e.g. the (nsp, 3, nkx, nky) ``fluxes_kxy_sp``
             harvested by linear_pipeline._harvest for kinetic runs
             (channels ordered [pflux, eflux, vflux], EM flutter included).
         args: Arguments of the underlying rule (γ, ``|φ|²`` spectra,
             geometry, cn, gate, ...).
         kwargs: Keyword arguments of the underlying rule.
 
-    Returns: jnp array of shape ``flux_kxy_sp.shape[:-2]`` — e.g. (nsp, 3)
+    Returns: jnp array of shape ``flux_kxy_sp.shape[:-2]``: e.g. (nsp, 3)
     with [s, 1] the QL heat flux Q_s and [s, 0] the particle flux Γ_s.
     """
     if isinstance(rule, str):

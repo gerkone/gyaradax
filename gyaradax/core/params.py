@@ -599,7 +599,7 @@ def gkparams_from_config(config: Any, **overrides: Any) -> GKParams:
             if k in _SPECIES_PARAMS and hasattr(v, "__iter__") and not isinstance(v, str):
                 params_dict[k] = jnp.array([float(x) for x in v])
             elif hasattr(v, "__iter__") and not isinstance(v, str):
-                # scalar param stored as list in yaml (e.g. dgrid: [1.0, 1.0]) — take first
+                # scalar param stored as list in yaml (e.g. dgrid: [1.0, 1.0]): take first
                 params_dict[k] = float(list(v)[0])
             else:
                 params_dict[k] = float(v)

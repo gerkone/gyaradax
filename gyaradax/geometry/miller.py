@@ -108,7 +108,7 @@ def _miller_surface(theta, eps, kappa, delta, square, Zmil, dRmil, dZmil, skappa
     """R, Z and the analytic first/second derivatives at each theta.
 
     Returns a dict with rfun, z_fs, dRdpsi, dZdpsi, dRdth, dZdth, d2Rdth,
-    d2Zdth, d2Rdpsidth, d2Zdpsidth — all shape-of-theta.
+    d2Zdth, d2Rdpsidth, d2Zdpsidth: all shape-of-theta.
     """
     asd = jnp.arcsin(delta)
     x1 = theta + asd * jnp.sin(theta)

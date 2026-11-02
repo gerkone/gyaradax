@@ -521,10 +521,10 @@ def _precompute_conservation(geometry, params, vpgr, mugr, bn):
     """Precompute Xu-style momentum/energy conservation weights.
 
     Returns a dict with keys:
-      coll_mom_factor: (nv, nmu, ns) — coefficient of Δp in the correction
-      coll_ene_factor: (nv, nmu, ns) — coefficient of ΔE in the correction
-      coll_vpar_weight: (nv, nmu, ns) — weight to compute Δp = ∫v_par C(f) d³v
-      coll_vsq_weight: (nv, nmu, ns) — weight to compute ΔE = ∫v² C(f) d³v
+      coll_mom_factor: (nv, nmu, ns): coefficient of Δp in the correction
+      coll_ene_factor: (nv, nmu, ns): coefficient of ΔE in the correction
+      coll_vpar_weight: (nv, nmu, ns): weight to compute Δp = ∫v_par C(f) d³v
+      coll_vsq_weight: (nv, nmu, ns): weight to compute ΔE = ∫v² C(f) d³v
 
     Kinetic case adds a leading (nsp,) axis to every array.
     """

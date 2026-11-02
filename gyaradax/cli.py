@@ -37,7 +37,7 @@ _MULTI_GPU_XLA_FLAGS = (
 
 
 # ---------------------------------------------------------------------------
-# config inspection (must stay JAX-free — runs before backend init)
+# config inspection (must stay JAX-free, runs before backend init)
 # ---------------------------------------------------------------------------
 
 

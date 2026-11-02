@@ -27,7 +27,7 @@ def _dzetadeps(theta, q, shat, eps, signB, signJ):
 
     Branch-tracked atan with monotonicity correction
     (geom.f90:1492-1511). Carries ~0.1% model-level error into
-    zeta-direction tensors — inherent to the Lapillonne approximation.
+    zeta-direction tensors: inherent to the Lapillonne approximation.
     """
     raw = jnp.arctan(jnp.sqrt((1 - eps) / (1 + eps)) * jnp.tan(theta / 2))
     # cumulative pi jumps detect branch-cut crossings of atan

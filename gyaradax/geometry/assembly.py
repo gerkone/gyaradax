@@ -73,7 +73,7 @@ def assemble_geometry_dict(
         "vpgr": _f64(vpgr),
         "vpgr_rms": _f64(jnp.sqrt(jnp.mean(vpgr**2))),
         # static python float (uniform grid: mean(diff(vpgr)) == 2*vpar_max/nvpar).
-        # Kept un-staged so it stays concrete under jit tracing — it feeds
+        # Kept un-staged so it stays concrete under jit tracing: it feeds
         # GKPre's static aux (FFT/stencil scaling) in precompute.
         "dvp": float(2.0 * spec.vpar_max / spec.nvpar) if spec.nvpar > 1 else 1.0,
         "intmu": _f64(intmu),
@@ -112,7 +112,7 @@ def assemble_geometry_dict(
         "ixplus": _i32(ixplus),
         "ixminus": _i32(ixminus),
         # static python ints: topology metadata consumed as jit-static aux
-        # (GKPre); int() is safe — topology inputs are always concrete.
+        # (GKPre); int() is safe: topology inputs are always concrete.
         "ixzero": int(ixzero),
         "iyzero": int(iyzero),
         "pos_par_grid_class": jnp.array(pos_par_grid_class, dtype=jnp.int8),

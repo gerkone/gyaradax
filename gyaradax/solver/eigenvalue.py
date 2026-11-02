@@ -236,7 +236,7 @@ def eigensolve_linear(
         dt: time step for mode='exp' (defaults to params.dt; must be RK4-stable).
         n_steps_per_matvec: RK4 steps per matvec for mode='exp'.
         ky_select: restrict the solve to one ky block (see module docstring).
-        refine: mode='exp' only — re-evaluate each eigenvalue with a Rayleigh
+        refine: mode='exp' only: re-evaluate each eigenvalue with a Rayleigh
             quotient through the 'rhs' matvec (fixes log-branch ambiguity).
         return_residuals: also return ``||L v - lambda v|| / (|lambda| ||v||)``
             per eigenpair, measured against the direct 'rhs' operator.

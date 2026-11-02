@@ -76,8 +76,8 @@ def calculate_fluxes_kinetic(
 
     df: (nsp, nvpar, nmu, ns, nkx, nky).
 
-    reduce=True  (default): returns (nsp, 3) — scalar [pflux, eflux, vflux] per species.
-    reduce=False:           returns (nsp, 3, nkx, nky) — per-(kx, ky) flux fields.
+    reduce=True  (default): returns (nsp, 3): scalar [pflux, eflux, vflux] per species.
+    reduce=False:           returns (nsp, 3, nkx, nky): per-(kx, ky) flux fields.
     """
     nsp = df.shape[0]
 
@@ -106,7 +106,7 @@ def calculate_em_fluxes(
 
     reduce=True  (default): returns scalar (em_pflux, em_eflux, em_vflux) for 5D df,
                             or (nsp, 3) for 6D df.
-    reduce=False:           returns per-(kx, ky) flux fields — (nkx, nky) for 5D,
+    reduce=False:           returns per-(kx, ky) flux fields: (nkx, nky) for 5D,
                             (nsp, 3, nkx, nky) for 6D.
 
     A_par flutter: coupling factor -2*vthrat*vpgr*conj(J0*apar)
@@ -117,7 +117,7 @@ def calculate_em_fluxes(
     GKW's calc_fluxes_full_detail (diagnos_fluxes_vspace.F90:458-469).
 
     df: 5D or 6D distribution. apar, bpar: (ns, nkx, nky) or None.
-    Returns: (em_pflux, em_eflux, em_vflux) — scalars for 5D,
+    Returns: (em_pflux, em_eflux, em_vflux): scalars for 5D,
     (nsp, 3) for 6D.
     """
     z = jnp.array(0.0, dtype=jnp.float64)

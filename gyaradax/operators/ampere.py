@@ -63,9 +63,9 @@ def precompute_apar(geometry: Dict[str, jnp.ndarray], params: Any = None):
     ampere_dia for exact cancellation against the discrete g2f source.
 
     Returns (apar_weight, apar_diag, kperp_sq) where:
-        apar_weight: (nsp, nvpar, nmu, ns, nkx, nky) — Ampere numerator weight
-        apar_diag: (ns, nkx, nky) — Ampere denominator (precomputed)
-        kperp_sq: (1, 1, 1, ns, nkx, nky) — k_perp^2 for reuse
+        apar_weight: (nsp, nvpar, nmu, ns, nkx, nky): Ampere numerator weight
+        apar_diag: (ns, nkx, nky): Ampere denominator (precomputed)
+        kperp_sq: (1, 1, 1, ns, nkx, nky): k_perp^2 for reuse
     """
 
     # Use species arrays from params when available (multi-species from input.dat),

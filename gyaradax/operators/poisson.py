@@ -114,7 +114,7 @@ def _phi_adiabatic(geom: Dict[str, jnp.ndarray], df: jnp.ndarray) -> jnp.ndarray
     """Adiabatic electron phi from single-species quasineutrality.
 
     df: (nvpar, nmu, ns, nkx, nky).
-    Internal — use calculate_phi() as the public interface.
+    Internal: use calculate_phi() as the public interface.
     """
     de = geom["de"]
     signz, tmp, bn = geom["signz"], geom["tmp"], geom["bn"]
@@ -290,8 +290,8 @@ def precompute_phi_kinetic(geometry: Dict[str, jnp.ndarray]):
     """Precompute static arrays for the kinetic phi solve.
 
     Returns (phi_weight, phi_diag) where:
-        phi_weight: (nsp, nvpar, nmu, ns, nkx, nky) — Poisson integral weight
-        phi_diag: (ns, nkx, nky) — Poisson diagonal (zonal mode set to 1)
+        phi_weight: (nsp, nvpar, nmu, ns, nkx, nky): Poisson integral weight
+        phi_diag: (ns, nkx, nky): Poisson diagonal (zonal mode set to 1)
     """
     bessel, gamma = _species_bessel_gamma(geometry)
 
@@ -377,7 +377,7 @@ def _phi_kinetic(
     the same contraction.
 
     df: (nsp, nvpar, nmu, ns, nkx, nky).
-    Internal — use calculate_phi() as the public interface.
+    Internal: use calculate_phi() as the public interface.
     """
     if phi_weight is None or phi_diag is None:
         phi_weight, phi_diag = precompute_phi_kinetic(geometry)
@@ -399,7 +399,7 @@ def calculate_phi(
 
     Args:
         geometry: base geometry dict (or expanded geom_tensors for legacy calls).
-        df: distribution function — (nvpar, nmu, ns, nkx, nky) for adiabatic,
+        df: distribution function: (nvpar, nmu, ns, nkx, nky) for adiabatic,
             (nsp, nvpar, nmu, ns, nkx, nky) for kinetic.
         params: GKParams (used to determine adiabatic vs kinetic and species scalars).
         pre: precomputed arrays from linear_precompute (optional, for performance).

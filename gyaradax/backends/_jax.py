@@ -428,7 +428,7 @@ class JAXOps(SolverOps):
         Drive terms V, VIII use chi/phi; Term VII uses gyro_phi only.
 
         Term I (streaming) and parallel dissipation share a fused 9-point stencil
-        ('s_upar_tab') — exposed together in the dict as 'I_par_streaming_plus_diss'.
+        ('s_upar_tab'): exposed together in the dict as 'I_par_streaming_plus_diss'.
         """
         gyro_phi = pre["bessel"] * phi[None, None, :, :, :]
 
@@ -632,7 +632,7 @@ class JAXOps(SolverOps):
 def _pack_full_z2z(field, kx_vec, ky_vec, jind, rev_jind, mrad, mphi, mphiw3, nky, dtype):
     """Scatter from packed [nkx, nky] directly to full z2z workspace [mrad, mphi].
 
-    Gathers field values at each output position via rev_jind — no intermediate
+    Gathers field values at each output position via rev_jind: no intermediate
     [mrad, mphiw3] buffer, no scatter ops.
 
     Packing convention: ws = (i·ky − kx)·F, so Re(IFFT(ws)) = ∂y·F, Im(IFFT(ws)) = ∂x·F.
@@ -771,7 +771,7 @@ def _per_s_z2z(
     Packs two spectral derivatives into one complex field and uses
     ifft2 (C2C) instead of irfft2 (C2R), halving the inverse FFT count.
     _pack_full_z2z gathers directly from [nkx, nky] into [mrad, mphi]
-    via rev_jind — no intermediate half-spectrum buffer, no scatter ops.
+    via rev_jind: no intermediate half-spectrum buffer, no scatter ops.
     """
     fft_dtype = jnp.complex64 if mixed_precision else jnp.complex128
     real_dtype = jnp.float32 if mixed_precision else jnp.float64

@@ -139,7 +139,7 @@ def _precompute_shared(
     # grid-independent; the geometry's own kxmax/kymax are the truth (params
     # carries the config-derived value as fallback for legacy dicts). With
     # the 1.0 defaults of direct-GKParams users the dissipation is
-    # misnormalized by (kmax)^4 — catastrophic for wide-kx boxes.
+    # misnormalized by (kmax)^4: catastrophic for wide-kx boxes.
     kymax_n = jnp.asarray(geometry.get("kymax", params.kymax), dtype=jnp.float64)
     kxmax_n = jnp.asarray(geometry.get("kxmax", params.kxmax), dtype=jnp.float64)
     hyper = -(
@@ -681,7 +681,7 @@ def _linear_precompute_core(geometry: Dict[str, jnp.ndarray], params: GKParams) 
             sp["upar"], sp["abs_dum2_par"], sp["term7_fac"], params.disp_par, out["sgr_dist"]
         )
         if params.disp_par_conserve:
-            # conservative parallel dissipation — see kinetic branch above
+            # conservative parallel dissipation: see kinetic branch above
             sp["s_disp_par_tab"] = s_disp_tab
             intmu_p = jnp.asarray(geometry["intmu"], dtype=jnp.float64).reshape(
                 1, -1, 1, 1, 1)
@@ -696,7 +696,7 @@ def _linear_precompute_core(geometry: Dict[str, jnp.ndarray], params: GKParams) 
                           axis=(0, 1), keepdims=True)
             mode = int(params.disp_par_conserve)
             if mode == 3:
-                # CGYRO functional — see kinetic branch
+                # CGYRO functional: see kinetic branch
                 av = jnp.abs(vpgr_p)
                 gaa = jnp.sum(w_base * av**2 * sp["bessel"] * sp["fmaxwl"],
                               axis=(0, 1), keepdims=True)

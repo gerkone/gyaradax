@@ -1,7 +1,7 @@
 """Multi-GPU grid parallelism via JAX GSPMD.
 
 All sharding-specific logic lives here. Most of the codebase is unaware of
-the mesh — operations on `jax.Array`s with `NamedSharding` are partitioned
+the mesh: operations on `jax.Array`s with `NamedSharding` are partitioned
 automatically by XLA's GSPMD under `jit`. The exceptions are the opaque CUDA
 FFI kernels, the per-plane Poisson bracket and the stencils that couple velocity
 points (vpar derivatives, collisions): the backends get the mesh from
@@ -10,10 +10,10 @@ exchanging neighbour planes with ``halo_planes`` / ``halo``.
 
 Public API
 ----------
-- ``build_mesh(params)`` — mesh from GKParams, or None on single-device.
-- ``shard_df(df, mesh, grid_shape)`` — place the distribution function.
-- ``shard_pre(pre, mesh, grid_shape)`` — place the precompute pytree.
-- ``is_active(mesh)`` — helper for single-device early return.
+- ``build_mesh(params)``: mesh from GKParams, or None on single-device.
+- ``shard_df(df, mesh, grid_shape)``: place the distribution function.
+- ``shard_pre(pre, mesh, grid_shape)``: place the precompute pytree.
+- ``is_active(mesh)``: helper for single-device early return.
 
 Single-device path: all helpers are idempotent no-ops when
 ``n_gpus_sp * n_gpus_vp * n_gpus_mu == 1``.
@@ -174,7 +174,7 @@ def _spec_for_shape(shape, grid: GridShape) -> PartitionSpec:
     # velocity-broadcast pre arrays produced by _compute_species_coeffs often
     # have the full 5D shape; handled above. Handle collapsed velocity shapes
     # that retain nvpar/nmu as leading dims with broadcast singletons for s,
-    # kx, ky (shape (nvpar, nmu, 1, 1, 1), etc.) — these are reshapes of the
+    # kx, ky (shape (nvpar, nmu, 1, 1, 1), etc.): these are reshapes of the
     # per-species arrays, same vp/mu sharding.
     if len(s) == 5 and s[0] == grid.nvpar and s[1] == grid.nmu:
         return PartitionSpec(_AXIS_VP, _AXIS_MU, None, None, None)
@@ -206,7 +206,7 @@ def shard_df(df, mesh: Optional[Mesh], grid: Optional[GridShape]):
 def shard_pre(pre: _P, mesh: Optional[Mesh], grid: Optional[GridShape]) -> _P:
     """Place each ``pre`` leaf per shape (build-then-shard fallback path).
 
-    Prefer :func:`precompute_sharded` for large grids — it partitions the
+    Prefer :func:`precompute_sharded` for large grids: it partitions the
     construction itself and never materialises the full array anywhere.
     """
     if mesh is None:
@@ -227,7 +227,7 @@ def precompute_sharded(geometry, params, mesh: Optional[Mesh], grid: GridShape):
 
     Works because ``GKPre`` cleanly separates JAX-array leaves from Python
     aux (``nl_m*``, ``nsp``, ``ixzero``, ``iyzero``), so ``jax.eval_shape``
-    returns a pytree whose leaves are all ``ShapeDtypeStruct`` —
+    returns a pytree whose leaves are all ``ShapeDtypeStruct``:
     ``out_shardings`` only needs to map those leaves. XLA's GSPMD then
     partitions the entire construction; full-size intermediates never
     materialise on a single device.
@@ -265,7 +265,7 @@ def precompute_sharded(geometry, params, mesh: Optional[Mesh], grid: GridShape):
     params_rep = jax.tree_util.tree_map(_replicate, params)
 
     # Return pre._items (plain dict) so the jit output pytree is a clean
-    # dict/array structure — GKPre's custom flatten routes non-array leaves
+    # dict/array structure: GKPre's custom flatten routes non-array leaves
     # into aux, which trips up tree_map(_leaf_sharding, ...).
     # Use _linear_precompute_core to avoid auto-sharding recursion.
     # non-array items stay static: collected while tracing, re-attached after the jit
