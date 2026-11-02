@@ -253,3 +253,30 @@ def test_schema_tree_round_trips_and_matches_neugk():
     assert back.keys() == flat.keys() and back["geometry"].keys() == flat["geometry"].keys()
     neugk = pytest.importorskip("neugk_jax.dataset.schema")
     assert neugk.SCHEMA_VERSION == SCHEMA_VERSION and neugk.TREE_PATHS == TREE_PATHS
+
+
+def test_contract_matches_neugk():
+    from gyaradax.io import schema
+
+    neugk = pytest.importorskip("neugk_jax.dataset.schema")
+    for name in ("FLUX_LABELS", "LIGHT_DROP_KEYS", "METADATA_SPEC", "LINEAR_SPEC", "GEOMETRY_REQUIRED", "RESUME_FIELDS"):
+        assert getattr(neugk, name) == getattr(schema, name), name
+
+
+@pytest.mark.parametrize("config,grid", [
+    ("nl_em_waltz_b01.yaml", dict(nvpar=8, nmu=2, ns=8, nkx=11, nky=5)),
+    ("iteration_13.yaml", dict(nvpar=8, nmu=2, ns=8, nkx=11, nky=6)),
+])  # fmt: skip
+def test_writer_output_meets_the_contract(tmp_path, config, grid):
+    from gyaradax.io.schema import check_trajectory
+
+    cfg = OmegaConf.load(os.path.join(REPO_ROOT, "configs", config))
+    for key, value in grid.items():
+        cfg.grid[key] = value
+    cfg.run.pop("data_dir", None)
+    path = tmp_path / "case.yaml"
+    OmegaConf.save(cfg, path)
+    root = str(tmp_path / "data")
+    assert main(["run", str(path), "--from-scratch", "--backend", "jax", "--n-steps", "20", "--block-size", "10",
+                 "--output-dir", str(tmp_path / "run"), "--dataset", root, "--dataset-name", "case"]) == 0
+    assert check_trajectory(ds.trajectory_path(root, "case")) == []
