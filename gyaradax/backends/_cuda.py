@@ -114,6 +114,29 @@ def is_available():
 PAR_TAP_LO, PAR_TAP_HI = 2, 7
 _PAR_TABLES = ("s_upar_tab", "s_t7_tab", "s_disp_par_tab")
 
+# mesh axes of the leading dims of the linear_rhs_es / linear_rhs_ds table arguments (phi .. coll)
+_ES_TABLE_AXES = (
+    (),
+    ("sp", "mu"),
+    ("sp", "vp"),
+    ("sp", "vp", "mu"),
+    (),
+    (),
+    ("sp", "mu"),
+    ("sp", "vp", "mu"),
+    ("sp", "vp", "mu"),
+    ("sp", "vp", "mu"),
+    ("sp", "vp", "mu"),
+    (),
+    (),
+    (),
+    ("sp", None, "vp", "mu"),
+)
+
+
+def _vel_axes(df) -> Tuple[str, ...]:
+    return ("sp", "vp", "mu") if df.ndim == 6 else ("vp", "mu")
+
 
 def _assert_vpar_centre_zero() -> None:
     c = float(np.asarray(stencils.VPAR_D1)[2])
@@ -517,11 +540,9 @@ class CUDAOps(SolverOps):
             return "electromagnetic runs are not supported"
         if has_dpc:
             return "conservative parallel dissipation is not supported"
-        if self.mesh is not None:
-            return "sharded runs are not supported"
         if df.shape[-3] > 576:
             return f"needs ns <= 576 (ns={df.shape[-3]})"
-        if df.size >= 2**31:
+        if self._points_per_device(df) >= 2**31:
             return "grid exceeds 32-bit indexing"
         return None
 
@@ -534,10 +555,8 @@ class CUDAOps(SolverOps):
         return reason is None
 
     def _ds_call(self, df, phi, pre, with_collisions):
-        """Positional table arguments and size attributes of the double-single kernels."""
-        kinetic = df.ndim == 6
-        nsp = df.shape[0] if kinetic else 1
-        nv, nmu, ns, nkx, nky = df.shape[-5:]
+        """Positional table arguments (mesh axes in _ES_TABLE_AXES) and attributes of the ds kernels."""
+        ns, nkx, nky = df.shape[-3:]
         n_class = int(pre["ds_s_t7_tab"].shape[-3])
         par_class = jnp.broadcast_to(pre["par_stencil_class"], (ns, nkx, nky)).astype(jnp.int32)
         args = (
@@ -559,9 +578,6 @@ class CUDAOps(SolverOps):
             pre["ds_coll_stencil"] if with_collisions else jnp.zeros((1, 2), jnp.float32),
         )
         attrs = dict(
-            nsp=np.int32(nsp),
-            nv=np.int32(nv),
-            nmu=np.int32(nmu),
             ns=np.int32(ns),
             nkx=np.int32(nkx),
             nky=np.int32(nky),
@@ -580,11 +596,9 @@ class CUDAOps(SolverOps):
             reason = "electromagnetic runs are not supported"
         elif has_dpc:
             reason = "conservative parallel dissipation is not supported"
-        elif self.mesh is not None:
-            reason = "sharded runs are not supported"
         elif ns > 576:
             reason = f"needs ns <= 576 (ns={ns})"
-        elif df.size >= 2**31:
+        elif self._points_per_device(df) >= 2**31:
             reason = "grid exceeds 32-bit indexing"
         if reason is not None:
             warn_once(log, f"fused_linear falls back to the default linear kernel: {reason}")
@@ -597,7 +611,7 @@ class CUDAOps(SolverOps):
         )
 
     def _es_call(self, df, phi, pre, params, with_collisions):
-        """Positional arguments and attributes of the linear_rhs_es kernels."""
+        """Positional table arguments (mesh axes in _ES_TABLE_AXES) and attributes of the es kernels."""
         kinetic = df.ndim == 6
         nsp = df.shape[0] if kinetic else 1
         nv, nmu, ns, nkx, nky = df.shape[-5:]
@@ -650,9 +664,6 @@ class CUDAOps(SolverOps):
             coll,
         )
         attrs = dict(
-            nsp=np.int32(nsp),
-            nv=np.int32(nv),
-            nmu=np.int32(nmu),
             ns=np.int32(ns),
             nkx=np.int32(nkx),
             nky=np.int32(nky),
@@ -661,36 +672,96 @@ class CUDAOps(SolverOps):
         )
         return args, attrs
 
-    def _linear_rhs_es(self, df, phi, pre, params, with_collisions):
-        args, attrs = self._es_call(df, phi, pre, params, with_collisions)
-        return ffi.ffi_call(
-            "linear_rhs_es_ffi",
-            jax.ShapeDtypeStruct(df.shape, jnp.complex128),
-            vmap_method="expand_dims",
-        )(*args, **attrs)
+    def _points_per_device(self, df) -> int:
+        if self.mesh is None:
+            return df.size
+        return df.size // int(np.prod([self.mesh.shape[a] for a in _vel_axes(df)]))
+
+    def _shard_halos(self, f, with_mu):
+        """Inside ``velocity_map``: (vpar halo, mu halo) of a 6D block, None for an unsharded axis.
+
+        Layouts as in kernels/shard_halo.cuh: the two planes past each vpar edge, and the plane past
+        each mu edge over the vpar range extended by one plane per side (the stencil corners).
+        """
+        n_vp, n_mu = self.mesh.shape["vp"], self.mesh.shape["mu"]
+        vp_halo = sharding.halo_planes(f, 1, "vp", n_vp) if n_vp > 1 else None
+        if not with_mu or n_mu == 1:
+            return vp_halo, None
+
+        def mu_edges(x):
+            return jnp.concatenate([x[:, :, :1], x[:, :, -1:]], axis=2)
+
+        if vp_halo is None:
+            lo = hi = jnp.zeros_like(mu_edges(f[:, :1]))
+        else:
+            lo, hi = mu_edges(vp_halo[:, 1:2]), mu_edges(vp_halo[:, 2:3])
+        edges = jnp.concatenate([lo, mu_edges(f), hi], axis=1)
+        return vp_halo, sharding.halo_planes(edges, 2, "mu", n_mu, width=1)
+
+    def _velocity_call(self, name, args, axes, attrs, results, with_mu):
+        """Call the velocity-stencil kernel ``name`` on df = args[0], per (sp, vp, mu) block when sharded.
+
+        ``axes`` gives the mesh axes of each argument's leading dims. The kernel also takes the vpar
+        and (with ``with_mu``) mu halos of df and the local nsp, nv, nmu. ``results`` flags each
+        output as df-shaped (True) or a (1,) placeholder.
+        """
+        kinetic = args[0].ndim == 6
+        none = jnp.zeros((1,), jnp.complex128)
+        _register_ffi()
+
+        def kernel(*xs):
+            d = xs[0] if kinetic else xs[0][None]
+            vp_halo, mu_halo = (None, None) if self.mesh is None else self._shard_halos(d, with_mu)
+            outs = tuple(
+                jax.ShapeDtypeStruct(xs[0].shape if r else (1,), jnp.complex128) for r in results
+            )
+            return tuple(
+                ffi.ffi_call(name, outs, vmap_method="expand_dims")(
+                    *xs,
+                    none if vp_halo is None else vp_halo,
+                    none if mu_halo is None else mu_halo,
+                    nsp=np.int32(d.shape[0]),
+                    nv=np.int32(d.shape[1]),
+                    nmu=np.int32(d.shape[2]),
+                    has_vp_halo=np.int32(vp_halo is not None),
+                    has_mu_halo=np.int32(mu_halo is not None),
+                    **attrs,
+                )
+            )
+
+        if self.mesh is None:
+            return kernel(*args)
+        vel = PartitionSpec(*_vel_axes(args[0]))
+        specs = tuple(vel if r else PartitionSpec() for r in results)
+        return sharding.velocity_map(kernel, self.mesh, args, axes, specs)
+
+    def _linear_rhs_es(self, df, phi, pre, params, with_collisions, ds=False):
+        if ds:
+            args, attrs = self._ds_call(df, phi, pre, with_collisions)
+        else:
+            args, attrs = self._es_call(df, phi, pre, params, with_collisions)
+        name = "linear_rhs_ds_ffi" if ds else "linear_rhs_es_ffi"
+        axes = (_vel_axes(df),) + _ES_TABLE_AXES
+        return self._velocity_call(name, args, axes, attrs, (True,), with_collisions)[0]
 
     def _collision_cuda(self, df, params, pre):
         """Collision RHS from the collision_rhs kernel, conservation correction in JAX."""
         kinetic = df.ndim == 6
-        f = df if kinetic else df[None]
-        nsp, nv, nmu, ns, nkx, nky = f.shape
+        nsp = df.shape[0] if kinetic else 1
+        nv, nmu, ns, nkx, nky = df.shape[-5:]
 
         def apply(key):
             stencil = jnp.asarray(pre[key], dtype=jnp.float64)
             stencil = stencil if kinetic else stencil[None]
-            return ffi.ffi_call(
+            (out,) = self._velocity_call(
                 "collision_rhs_ffi",
-                jax.ShapeDtypeStruct(f.shape, jnp.complex128),
-                vmap_method="expand_dims",
-            )(
-                f.astype(jnp.complex128),
-                jnp.broadcast_to(stencil, (nsp, 9, nv, nmu, ns)),
-                nsp=np.int32(nsp),
-                nv=np.int32(nv),
-                nmu=np.int32(nmu),
-                ns=np.int32(ns),
-                nxy=np.int32(nkx * nky),
+                (df.astype(jnp.complex128), jnp.broadcast_to(stencil, (nsp, 9, nv, nmu, ns))),
+                (_vel_axes(df), ("sp", None, "vp", "mu")),
+                dict(ns=np.int32(ns), nxy=np.int32(nkx * nky)),
+                (True,),
+                True,
             )
+            return out if kinetic else out[None]
 
         term = apply("coll_stencil")
         if (params.coll_mom_conservation or params.coll_ene_conservation) and (
@@ -706,7 +777,7 @@ class CUDAOps(SolverOps):
         return term if kinetic else term[0]
 
     def _collisions(self, f, params, pre):
-        if params.fused_linear and self.mesh is None:
+        if params.fused_linear:
             if _has_collision_rhs:
                 return self._collision_cuda(f, params, pre)
             warn_once(
@@ -736,22 +807,20 @@ class CUDAOps(SolverOps):
         else:
             args, attrs = self._es_call(dg, phi, pre, params, fuse)
         coef = jnp.stack([jnp.asarray(c_acc, jnp.float64), jnp.asarray(c_stage, jnp.float64)])
-        acc_out, stage_out = ffi.ffi_call(
+        vel = _vel_axes(dg)
+        acc_out, stage_out = self._velocity_call(
             "linear_rhs_ds_rk_ffi" if ds else "linear_rhs_es_rk_ffi",
-            (
-                jax.ShapeDtypeStruct(dg.shape, jnp.complex128),
-                jax.ShapeDtypeStruct(dg.shape if want_stage else (1,), jnp.complex128),
+            args
+            + (
+                prev.astype(jnp.complex128),
+                acc.astype(jnp.complex128),
+                jnp.zeros((1,), jnp.complex128) if extra is None else extra.astype(jnp.complex128),
+                coef,
             ),
-            vmap_method="expand_dims",
-        )(
-            *args,
-            prev.astype(jnp.complex128),
-            acc.astype(jnp.complex128),
-            jnp.zeros((1,), jnp.complex128) if extra is None else extra.astype(jnp.complex128),
-            coef,
-            **attrs,
-            has_extra=np.int32(extra is not None),
-            has_stage=np.int32(want_stage),
+            (vel,) + _ES_TABLE_AXES + (vel, vel, () if extra is None else vel, ()),
+            dict(attrs, has_extra=np.int32(extra is not None), has_stage=np.int32(want_stage)),
+            (True, want_stage),
+            fuse,
         )
         return acc_out, (stage_out if want_stage else None)
 
@@ -862,12 +931,7 @@ class CUDAOps(SolverOps):
         coll_done = False
         if self._use_ds(df, params, pre, has_em, dproj is not None):
             coll_done = bool(params.fused_linear) and self._fuse_collisions(params, pre)
-            args, attrs = self._ds_call(df, phi, pre, coll_done)
-            rhs = ffi.ffi_call(
-                "linear_rhs_ds_ffi",
-                jax.ShapeDtypeStruct(df.shape, jnp.complex128),
-                vmap_method="expand_dims",
-            )(*args, **attrs)
+            rhs = self._linear_rhs_es(df, phi, pre, params, coll_done, ds=True)
         elif params.fused_linear and self._es_ok(df, pre, has_em, dproj is not None):
             coll_done = self._fuse_collisions(params, pre)
             rhs = self._linear_rhs_es(df, phi, pre, params, coll_done)
