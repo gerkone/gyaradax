@@ -46,7 +46,21 @@ class MillerGeometryModel:
         signJ: float,
         model_params: Mapping[str, Any],
     ) -> dict[str, Any]:
-        """Build the model-specific continuous Miller geometry dict."""
+        """Continuous Miller geometry (GKW ``geom_miller``).
+
+        Args:
+            sgrid: Parallel grid.
+            q: Safety factor.
+            shat: Magnetic shear.
+            eps: Inverse aspect ratio.
+            nperiod: Poloidal turns parameter.
+            signB: Sign of the magnetic field.
+            signJ: Sign of the Jacobian.
+            model_params: Model shape parameters.
+
+        Returns:
+            Dict of the continuous geometry fields.
+        """
         return _miller_geometry(
             sgrid=sgrid,
             q=q,

@@ -3,14 +3,15 @@
 - A. G. Peeters et al., *The nonlinear gyro-kinetic flux tube code GKW*,
   Comput. Phys. Commun. 180, 2650 (2009),
   [doi:10.1016/j.cpc.2009.07.001](https://doi.org/10.1016/j.cpc.2009.07.001).
-  Code and manual: [bitbucket.org/gkw/gkw](https://bitbucket.org/gkw/gkw).
+  Code and manual: [bitbucket.org/gkw/gkw](https://bitbucket.org/gkw/gkw/src/develop/).
 - G. Galletti, E. Volkmann, J. Brandstetter, *gyaradax: Local Gyrokinetics JAX Code* (2026),
   [arXiv:2604.06085](https://arxiv.org/abs/2604.06085).
 - M. N. Rosenbluth, F. L. Hinton, *Poloidal flow driven by ion-temperature-gradient
   turbulence in tokamaks*, Phys. Rev. Lett. 80, 724 (1998),
   [doi:10.1103/PhysRevLett.80.724](https://doi.org/10.1103/PhysRevLett.80.724).
 - Y. Xiao, P. J. Catto, *Plasma shaping effects on the collisionless residual zonal
-  flow level*, Phys. Plasmas 13, 082307 (2006).
+  flow level*, Phys. Plasmas 13, 082307 (2006),
+  [doi:10.1063/1.2266892](https://doi.org/10.1063/1.2266892).
 - A. M. Dimits et al., *Comparisons and physics basis of tokamak transport models
   and turbulence simulations*, Phys. Plasmas 7, 969 (2000),
   [doi:10.1063/1.873896](https://doi.org/10.1063/1.873896).

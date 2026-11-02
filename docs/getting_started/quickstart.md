@@ -2,21 +2,31 @@
 
 ## From the command line
 
-Every run is described by a YAML config; command-line flags only override it.
+Every run is described by a YAML config. Command-line flags only override it.
 `configs/iteration_13.yaml` is a nonlinear adiabatic ITG case on the standard
 grid ($n_{v_\parallel}, n_\mu, n_s, n_{k_x}, n_{k_y}$) = (32, 8, 16, 85, 32):
 
 ```bash
-gyaradax run configs/iteration_13.yaml --device 0
+gyaradax run configs/iteration_13.yaml --device 0 --backend cuda
 ```
 
-The run writes `outputs_adiabatic_iteration_13/`: the effective config, the
-geometry, the diagnostic histories (`fluxes.npz`, `kyspec.npz`, `kxspec.npz`,
-`growth.npz`, `dt_history.npz`) and a restart snapshot `step_NNNNNN.npz`. Pass
-the directory instead of the config to continue it:
+`--device 0` sets `CUDA_VISIBLE_DEVICES=0`. On a shared machine pick a free GPU,
+or leave the flag out and set `CUDA_VISIBLE_DEVICES` yourself.
+`XLA_PYTHON_CLIENT_PREALLOCATE=false` stops JAX from taking 75 % of the GPU
+memory at start. The backend defaults to `jax`. `--backend cuda` uses the CUDA
+kernels once they are built (2.6x faster on an A100 here), and `backend: auto` in the
+config picks them when they are available.
+
+The config runs 400 steps (t = 4), still in the linear phase. The run writes
+`outputs_adiabatic_iteration_13/`: the effective config (`config.yaml`), the
+geometry, the diagnostic histories (`fluxes.npz`, `fluxes_em.npz`, `kyspec.npz`,
+`kxspec.npz`, `growth.npz`, `dt_history.npz`), `run_info.jsonl` and a restart
+snapshot `step_NNNNNN.npz`. Only the latest snapshot is kept (about 180 MB on
+this grid). Pass the directory instead of the config to continue it. On a
+resume `--n-steps` adds steps:
 
 ```bash
-gyaradax run outputs_adiabatic_iteration_13 --n-steps 2000
+gyaradax run outputs_adiabatic_iteration_13 --n-steps 12000 --backend cuda   # to t = 124, saturated
 ```
 
 The heat flux of the run:
@@ -27,7 +37,9 @@ import matplotlib.pyplot as plt
 
 h = np.load("outputs_adiabatic_iteration_13/fluxes.npz")
 plt.plot(h["time"], h["fluxes"][:, 1])   # columns: particle, heat, momentum flux
-plt.xlabel("t [R/v_th]"); plt.ylabel("Q_i")
+plt.xlabel("t [R/v_th]")
+plt.ylabel("Q_i")
+plt.savefig("heat_flux.png")
 ```
 
 Kinetic electrons, electromagnetic fields and collisions are switched on in the
@@ -61,7 +73,7 @@ df, phi, fluxes, state = gyx.gksimulate(
 Parameters can also be built directly. The geometry comes from equilibrium
 parameters ({func}`~gyaradax.geometry.geom.compute_geometry`) and the run
 parameters are a {class}`~gyaradax.core.params.GKParams`, which needs the
-geometry's scalars (grid spacings, largest wavenumbers) copied in; the YAML
+geometry's scalars (grid spacings, largest wavenumbers) copied in. The YAML
 path does this for you:
 
 ```python
@@ -101,13 +113,22 @@ df, geometry, params, state, pre = gyx.gk_from_gkw_dir("/path/to/gkw_run")
 ## Differentiating through a run
 
 The JAX backend is differentiable end to end. A gradient of a loss on the
-potential with respect to the temperature gradient:
+potential with respect to the temperature gradient, reusing `df`, `geometry`,
+`params` and `state` of the linear example above:
 
 ```python
 import dataclasses
 import jax
 import jax.numpy as jnp
+from gyaradax import gk_run
 from gyaradax.operators.precompute import linear_precompute
+
+def potential(rlt):
+    p = dataclasses.replace(params, rlt=rlt)
+    _, phi, _, _ = gk_run(df, geometry, p, state, 400, pre=linear_precompute(geometry, p))
+    return phi
+
+phi_target = potential(7.5)
 
 def loss(rlt):
     p = dataclasses.replace(params, rlt=rlt)
@@ -118,5 +139,5 @@ def loss(rlt):
 dloss = jax.grad(loss)(6.9)
 ```
 
-{doc}`../verification/index` shows the inverse problem and the sensitivity study
-built this way. The CUDA kernels are not differentiable; use `backend="jax"`.
+{doc}`../validation/verification` shows the inverse problem and the sensitivity study
+built this way. The CUDA kernels are not differentiable, so use `backend="jax"`.

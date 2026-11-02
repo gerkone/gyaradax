@@ -22,7 +22,17 @@ def warn_once(logger, msg: str) -> None:
 
 
 def em_chi_correction(ndim: int, pre, apar=None, bpar=None):
-    """Velocity-dependent EM part of chi = J0*phi + chi_correction, or None."""
+    """Velocity-dependent electromagnetic part of ``chi = J0 phi + correction``.
+
+    Args:
+        ndim: Dimension of the distribution (5 or 6).
+        pre: Precomputed coefficients with ``apar_chi_factor`` / ``bpar_chi_factor``.
+        apar: A_par, (ns, nkx, nky), or None.
+        bpar: B_par, (ns, nkx, nky), or None.
+
+    Returns:
+        The correction broadcast to the distribution's shape, or None without EM fields.
+    """
     chi_corr = None
     if apar is not None and "apar_chi_factor" in pre:
         apar_b = apar[jnp.newaxis, jnp.newaxis, :, :, :]
@@ -98,15 +108,16 @@ class SolverOps(ABC):
             exclude_zero_mode: Zero out (kx=0, ky=0) mode
             bessel: Optional Bessel function array
             chi_correction: Optional velocity-dependent EM correction added to J0*phi
-            apar, bpar: Optional EM fields (ns, nkx, nky); the advecting potential becomes
-                chi = J0*phi + apar_chi_factor*apar + bpar_chi_factor*bpar
+            apar: A_par (ns, nkx, nky), or None. The advecting potential becomes
+                chi = J0*phi + apar_chi_factor*apar + bpar_chi_factor*bpar.
+            bpar: B_par (ns, nkx, nky), or None.
 
         Returns:
             Nonlinear RHS contribution (same shape as df)
 
         Raises:
-            NotImplementedError: If backend cannot handle this configuration (e.g., 6D with non-uniform params)
-            ValueError: If df has unsupported shape
+            ValueError: If df has an unsupported shape, or if ``chi_correction`` is
+                given together with ``apar`` / ``bpar``.
         """
         raise NotImplementedError
 
@@ -124,7 +135,7 @@ class SolverOps(ABC):
         """Compute linear RHS for 5D (single species) or 6D (multi-species) df.
 
         Implements Terms I, II, IV, V, VII, VIII, X, XI + dissipation.
-        When apar is provided (EM mode), includes electromagnetic coupling terms.
+        With apar or bpar it includes the electromagnetic coupling terms.
         Backend must handle both 5D and 6D cases, or raise NotImplementedError/ValueError.
 
         Args:
@@ -134,13 +145,13 @@ class SolverOps(ABC):
             params: GKParams with physical parameters
             pre: GKPre with precomputed coefficients
             apar: Parallel vector potential (ns, nkx, nky), None for electrostatic
+            bpar: Parallel magnetic perturbation (ns, nkx, nky), or None
 
         Returns:
             RHS contribution (same shape as df)
 
         Raises:
-            NotImplementedError: If backend cannot handle this configuration (e.g., non-uniform species params)
-            ValueError: If df has unsupported shape
+            ValueError: If df has an unsupported shape.
         """
         raise NotImplementedError
 
@@ -157,7 +168,22 @@ class SolverOps(ABC):
         apar: jnp.ndarray | None = None,
         bpar: jnp.ndarray | None = None,
     ) -> jnp.ndarray:
-        """Linear RHS from the mixed variable g: :meth:`linear_rhs` applied to f = g_to_f(g)."""
+        """Linear RHS from the mixed variable g: :meth:`linear_rhs` of ``f = g_to_f(g)``.
+
+        Backends may form f inside the kernel instead.
+
+        Args:
+            dg: Mixed variable g, 5D or 6D.
+            phi: Potential, (ns, nkx, nky).
+            geometry: Geometry dict.
+            params: Run parameters.
+            pre: Precomputed coefficients.
+            apar: A_par, (ns, nkx, nky), or None.
+            bpar: B_par, (ns, nkx, nky), or None.
+
+        Returns:
+            The linear RHS, same shape as ``dg``.
+        """
         # backends may fuse the g -> f conversion
         df = g_to_f(dg, apar, params, pre) if apar is not None else dg
         return self.linear_rhs(df, phi, geometry, params, pre, apar=apar, bpar=bpar)

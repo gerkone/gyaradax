@@ -46,12 +46,34 @@ def assemble_geometry_dict(
     kx_shift: Any,
     valid_shift: Any,
 ) -> dict[str, Any]:
-    """Assemble the solver-facing analytic geometry dictionary.
+    """Assemble the geometry dict the solver reads from computed arrays.
 
-    This is a behavior-preserving extraction of the final return block from
-    ``gyaradax.geometry.geom._compute_geometry_impl``.  Model-specific formulas
-    remain in the continuous geometry providers; this helper only packages
-    already-computed arrays and metadata into the historical dict contract.
+    Only packages arrays; the model formulas live in the continuous geometry models.
+
+    Args:
+        spec: Geometry specification.
+        cg: Continuous geometry of the model.
+        tensors: ``(efun, dfun, hfun, ifun, jfun, kfun)`` drift and metric tensors.
+        sgrid: Parallel grid.
+        kthnorm: Binormal wavenumber normalisation.
+        kxrh: Radial wavenumbers.
+        krho: Binormal wavenumbers.
+        vpgr: Parallel-velocity grid.
+        mugr: Magnetic-moment grid.
+        intvp: Parallel-velocity weights.
+        intmu: Magnetic-moment weights.
+        mode_label: Mode labels of the kx chains.
+        ixplus: Connected kx index towards +s (-1 at an open end).
+        ixminus: Connected kx index towards -s (-1 at an open end).
+        ixzero: Index of kx = 0.
+        iyzero: Index of ky = 0.
+        pos_par_grid_class: Parallel stencil class of each point.
+        s_shift: Parallel index of each stencil offset.
+        kx_shift: kx index of each stencil offset.
+        valid_shift: Whether each stencil offset is on the grid.
+
+    Returns:
+        Geometry dict.
     """
     efun_3x3, dfun, hfun, ifun, jfun, kfun = tensors
     ns = spec.ns

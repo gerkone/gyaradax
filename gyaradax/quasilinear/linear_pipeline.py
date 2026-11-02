@@ -130,10 +130,17 @@ def _harvest(geometry, df, phi, state, params=None, apar=None, bpar=None, pre=No
 
 
 def linear_from_fds(gkw_dir, dump="FDS"):
-    """Compute QL inputs directly from a GKW distribution dump (``FDS`` by default): no time stepping.
+    """QL inputs from a distribution dump of a GKW run, without time stepping.
 
-    Detects adiabatic / kinetic from input.dat and ES / EM from `params.nlapar`,
-    `params.nlbpar`. γ(ky) comes from `growth.dat`. ~1–2 s per ES adiabatic sim.
+    The electron model comes from ``input.dat``, the EM fields from ``nlapar`` /
+    ``nlbpar``, and the growth rates from ``growth.dat``.
+
+    Args:
+        gkw_dir: GKW run directory.
+        dump: Dump file to read, GKW's final state ``FDS`` by default.
+
+    Returns:
+        Dict of the QL inputs (growth rates, spectra, per-mode fluxes, geometry).
     """
     from gyaradax.operators.fields import _compute_fields
     from gyaradax.operators.precompute import linear_precompute

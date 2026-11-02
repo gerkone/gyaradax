@@ -1,7 +1,7 @@
 # Running simulations
 
 `gyaradax` is the single entry point. Everything that defines a run is in the
-YAML config ({doc}`configuration`); command-line flags only override it.
+YAML config ({doc}`configuration`). Command-line flags only override it.
 
 ```bash
 gyaradax run     CONFIG [CONFIG ...]   # run one or several configs
@@ -40,7 +40,7 @@ Every run writes into its output directory (`--output-dir`, default
 | `run_info.jsonl` | one line per invocation: command, host, git revision, start and target step |
 | `DIVERGED` | written when df turns non-finite; the run stops at that block |
 
-Diagnostics are appended every block; the snapshot, the large file, is written
+Diagnostics are appended every block. The snapshot, the large file, is written
 every `--snapshot-every K` blocks (default 1) and after the last block.
 `--save-dumps` keeps every snapshot instead of only the latest.
 
@@ -64,7 +64,7 @@ and ignores K-files and snapshots.
 ## Batched runs
 
 Configs that share the grid and the static parameters run batched under one
-`jax.vmap`; each writes its own run directory exactly as a single run would:
+`jax.vmap`. Each writes its own run directory exactly as a single run would:
 
 ```bash
 gyaradax run configs/case_a.yaml configs/case_b.yaml
@@ -138,7 +138,7 @@ memory. `--profile` adds the per-kernel breakdown.
 | `--fused-linear` | CUDA: fused electrostatic RK stage with collisions |
 | `--linear-arith {fp64,ds}` | CUDA: double-single linear RHS for GPUs with weak FP64 |
 | `--fused-bracket` | CUDA: mixed-precision bracket packing inside the cuFFT callbacks |
-| `--device N` | one GPU (single-device runs only) |
+| `--device N` | one GPU: sets `CUDA_VISIBLE_DEVICES=N` (single-device runs only) |
 | `--device-list 0,1` | GPUs to use; several shard automatically |
 | `--n-gpus N`, `--n-gpus-{sp,vp,mu} N` | mesh size and layout |
 | `--mem-fraction F` | fraction of GPU memory XLA may use (e.g. 0.95 near the limit) |
@@ -151,4 +151,4 @@ memory. `--profile` adds the per-kernel breakdown.
 | `--output-dir DIR` | output directory |
 | `--dry-run` | set up and print the summary only |
 
-`gyaradax run --help` lists every flag.
+{doc}`cli_reference` lists every command and flag.

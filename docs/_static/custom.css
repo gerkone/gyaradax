@@ -1,12 +1,4 @@
-.hero-logo {
-  display: block;
-  margin: 0 auto 1rem auto;
-  max-width: 320px;
-  width: 60%;
-}
-
 .hero-tagline {
-  text-align: center;
   font-size: 1.15rem;
   margin-bottom: 2rem;
 }
@@ -15,4 +7,12 @@ img.paper-fig {
   background: #ffffff;
   border-radius: 4px;
   padding: 4px;
+}
+
+.table-wrapper {
+  width: 100%;
+}
+
+table.docutils {
+  width: 100%;
 }

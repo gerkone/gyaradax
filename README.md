@@ -5,7 +5,7 @@
 </p>
 
 `gyaradax` is a JAX code for local flux-tube gyrokinetics, based on
-[GKW](https://bitbucket.org/gkw/gkw). It is differentiable and covers
+[GKW](https://bitbucket.org/gkw/gkw/src/develop/). It is differentiable and covers
 electrostatic and electromagnetic (A∥, B∥) turbulence with adiabatic or kinetic
 electrons and a linearised Fokker-Planck collision operator, linear and
 nonlinear, with an optional CUDA backend and multi-GPU sharding.

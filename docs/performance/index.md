@@ -1,11 +1,5 @@
 # Performance
 
-```{toctree}
-:hidden:
-
-development
-```
-
 ## Recommended settings
 
 | Use | Settings |
@@ -17,7 +11,7 @@ development
 
 Every switch keeps the physics: the kernels are checked against the JAX
 reference per evaluation, and against previous versions over long runs
-({doc}`development`). `gyaradax info` shows which kernels the installed library
+({doc}`../validation/development`). `gyaradax info` shows which kernels the installed library
 provides, and `gyaradax bench CONFIG` measures a config on your GPU.
 
 ## Throughput
@@ -34,8 +28,8 @@ The adiabatic grid is the one of the paper, where GKW ran 5.75 steps/s on a
 128-core AMD EPYC 9754 (64 MPI processes) and the JAX backend 30.9 steps/s on a
 B300 (paper Table 2). The kinetic grid is the one of `configs/kinetic.yaml`.
 
-CUDA against JAX, ms per step, H100 NVL, mixed precision (October 2026 code;
-JAX on its default R2C path):
+CUDA against JAX, ms per step, H100 NVL, mixed precision, October 2026 code.
+JAX runs its default R2C path.
 
 | case | grid | JAX | CUDA | speed-up |
 |---|---|---|---|---|
@@ -57,7 +51,7 @@ kinetic 85 x 32 grid on an H100 one stage takes about 1.3 ms for the linear RHS,
   small per-class tables and runs all species in one launch. It is FP64-bound,
   which is why GPUs with weak FP64 (B300) gain from `linear_arith: ds`, which
   evaluates it in double-single arithmetic (pairs of FP32 numbers, about 48 bits)
-  on the FP32 units; `fused_linear` also folds the collision stencil and the RK
+  on the FP32 units. `fused_linear` also folds the collision stencil and the RK
   update into the kernel.
 - **Bracket.** The ExB term needs two inverse 2D FFTs (the two derivatives of each
   field packed into one complex transform) and one forward FFT per stage, in FP32
@@ -68,18 +62,39 @@ kinetic 85 x 32 grid on an H100 one stage takes about 1.3 ms for the linear RHS,
   kernels that do the inverse row FFT, the product and the forward row FFT in one
   kernel.
 
+The x and y derivatives of one field go into the real and imaginary parts of one
+complex inverse FFT, with a Hermitian symmetrisation of the $k_y = 0$ column, so
+a stage needs two inverse transforms instead of four. The JAX backend does the
+same with `use_z2z`. The potential is separable in $v_\parallel$
+($\chi = A(\mu, s) + v_\parallel B(\mu, s)$), so only $2\,n_\mu n_s$ potential
+planes per species are transformed.
+
 ```{figure} ../_static/figs/paper/cufft_lto_fusion_paper.png
-:width: 70%
+:width: 65%
 :class: paper-fig
 
-The bracket without (left) and with (right) LTO callbacks; from the paper.
+The bracket as separate passes (left) and with the work fused into cuFFT
+callbacks and the derivatives packed into two inverse FFTs (right). Paper.
+```
+
+```{figure} ../_static/figs/diagrams/bracket_v6.png
+:width: 70%
+
+The v5 and v6 CUDA brackets. v6 runs the column FFTs on the retained $k_y$
+columns only and does the row FFTs and the product in one cuFFTDx kernel.
 ```
 
 ```{figure} ../_static/figs/paper/stencil_fusion_v2.png
 :width: 70%
 :class: paper-fig
 
-The linear RHS as one fused kernel; from the paper.
+The linear RHS as one fused kernel. Paper.
+```
+
+```{figure} ../_static/figs/diagrams/fused_linear.png
+:width: 70%
+
+One RK4 stage with the default kernels and with `fused_linear`.
 ```
 
 ## Grid sizes and FFT lengths
@@ -87,7 +102,7 @@ The linear RHS as one fused kernel; from the paper.
 The bracket runs on the dealiased real-space grid. Its lengths are GKW's:
 
 - along y, `mphi` starts at `3 nky - 2`, rounded up to an even length with prime
-  factors at most 7, or to a power of two if one lies within 16;
+  factors at most 7, or to a power of two if one lies within 16.
 - along x, `mrad` starts at `ceil(1.5 (nkx + 1)) + 1`, rounded up to a length with
   prime factors at most 7, or to a power of two within 8.
 
@@ -110,12 +125,13 @@ Hints:
 - Along x the v6 column passes pick the smallest alias-free length that cuFFT runs
   as a single kernel (the GKW length 294 at `nkx = 191` needs three passes).
   `GYARADAX_BRACKET_MRAD=native|auto|N` overrides the choice.
-- v6 needs an even number of distribution planes per device; otherwise, and for
+- v6 needs an even number of distribution planes per device. Otherwise, and for
   any grid the build does not cover, the bracket runs v5 and warns once with the
   reason. `GYARADAX_BRACKET=v5` selects v5 quietly.
 - `fused_linear` and `linear_arith: ds` need `ns <= 576` and fewer than 2^31
-  points per device, and are electrostatic only (no conservative dissipation);
-  otherwise they fall back to the default kernel with a one-time warning. With the
+  points per device, and do not cover conservative dissipation. Otherwise they
+  fall back to the default kernel with a one-time warning. Electromagnetic runs
+  always use the default kernel. With the
   momentum or energy conservation corrections on, the collisions run outside
   the fused kernel.
 
@@ -129,14 +145,14 @@ compiled step on a 2 x 64 x 16 x 32 x 85 x 64 grid with $A_\parallel$ (one df is
 
 The CLI runs with `XLA_PYTHON_CLIENT_PREALLOCATE=false`. On grids near the
 device limit the pool can fragment during setup, so that a large allocation fails
-although the compiled peak fits; `--mem-fraction 0.95` or
+although the compiled peak fits. `--mem-fraction 0.95` or
 `XLA_PYTHON_CLIENT_ALLOCATOR=platform` avoid it, and so does sharding.
 
 ## Multi-GPU
 
 The distribution function is sharded over species, $v_\parallel$ and $\mu$
 (`jax.sharding`). The kernels and the bracket run on each device's local block
-through `shard_map`; only the field moments are summed across devices, plus a
+through `shard_map`. Only the field moments are summed across devices, plus a
 two-plane $v_\parallel$ halo per stage when $v_\parallel$ is split (and one plane
 for the collision stencil). Species and $\mu$ need no halo. All three axes run
 at about the same speed.
@@ -145,6 +161,6 @@ On two B300 a 2 x 64 x 16 x 32 x 85 x 64 grid with $A_\parallel + B_\parallel$
 goes from 593 to 292 ms per step (CUDA, `mu = 2`). Small grids gain less: the
 per-step reductions and kernel launches weigh more. Sharded runs match a single
 device at round-off, not bitwise, because the field moments are summed per shard.
-Shard over GPUs that are connected by NVLink; on machines whose GPUs only
+Shard over GPUs that are connected by NVLink. On machines whose GPUs only
 connect through the host, check that NCCL collectives between the GPUs give
 correct sums before trusting a sharded run.

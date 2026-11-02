@@ -1,13 +1,9 @@
 # Verification
 
-A turbulent simulation is chaotic: two runs of the same code from the same
-initial state diverge once round-off differences grow, so trajectories cannot be
-compared point by point. gyaradax is checked in four ways: against analytical
-results, linear problems against GKW, nonlinear runs statistically against GKW,
-and every code change against the previous version. Figures marked "paper" are
-from [the paper](https://arxiv.org/abs/2604.06085) and were made with the code of
-April 2026 (electrostatic, collisionless); the electromagnetic and collisional
-checks below came later.
+The results behind {doc}`development`. Figures marked "paper" are from
+[the paper](https://arxiv.org/abs/2604.06085). They were made with the code of
+April 2026, which was electrostatic and collisionless. The electromagnetic and
+collisional checks came later.
 
 ## Analytical benchmarks
 
@@ -62,7 +58,7 @@ These two cases are unit tests (`tests/unit/test_gk_cases.py`) and are shown in
   and electrons, and the Coulomb logarithms and collision frequencies agree to
   1e-13 for five reference sets.
 - **Eigenvalue solver.** The dominant eigenvalue of the linear operator matches
-  the growth rate and frequency of the initial-value run; the solver also
+  the growth rate and frequency of the initial-value run. The solver also
   returns the subdominant modes.
 
 ```{figure} ../figs/eigensolver_spectrum.png
@@ -84,7 +80,7 @@ electrostatic adiabatic, kinetic-electron and electromagnetic cases.
 Nonlinear runs are compared through their statistics: time-averaged fluxes,
 $k_y$ and $k_x$ spectra of $|\phi|^2$, and growth rates. On 46 adiabatic ITG
 equilibria (grid 32 x 8 x 16 x 85 x 32, three runs per code from the same initial
-state), the grand-mean heat flux is 90.9 for gyaradax and 91.3 for GKW, and the
+state), the grand-mean heat flux is 90.9 for `gyaradax` and 91.3 for GKW, and the
 spectra agree as follows (paper):
 
 | | KS statistic | Pearson $r$ | log relative L2 |
@@ -97,7 +93,7 @@ spectra agree as follows (paper):
 :class: paper-fig
 
 Heat and momentum flux of one adiabatic case, three runs per code. The codes
-coincide in the linear phase and separate when turbulence sets in; the averages
+coincide in the linear phase and separate when turbulence sets in. The averages
 agree. Paper.
 ```
 
@@ -106,6 +102,20 @@ agree. Paper.
 :class: paper-fig
 
 Time-averaged $k_y$ and $k_x$ spectra of the same case. Paper.
+```
+
+```{figure} ../_static/figs/paper/fluxes_iteration_200.png
+:width: 100%
+:class: paper-fig
+
+A second adiabatic case: heat and momentum flux. Paper.
+```
+
+```{figure} ../_static/figs/paper/spectra_iteration_200.png
+:width: 100%
+:class: paper-fig
+
+Its time-averaged spectra. Paper.
 ```
 
 ```{figure} ../_static/figs/paper/kinetic_fluxes_v3_kiteration_991_half_rlt.png
@@ -182,10 +192,10 @@ Its sensitivity $\partial\gamma/\partial(R/L_T)$. Paper.
 
 ## Checking code changes
 
-Every optimisation went through the loop of {doc}`../performance/development`.
+Every optimisation went through the loop of {doc}`development`.
 
 **Per evaluation, CUDA against JAX** (relative L2 on the production grids, worst
-species; H100, the same on B300):
+species, H100, the same on B300):
 
 | case | linear RHS (FP64) | bracket FP64 | bracket mixed precision |
 |---|---|---|---|

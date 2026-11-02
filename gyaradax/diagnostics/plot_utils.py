@@ -283,9 +283,26 @@ def plot_spectra(
     title: str = "",
     shade_alpha: float = 0.25,
 ) -> plt.Figure:
-    """Plot radial and binormal spectra. Accepts either phi or pre-computed 1D spectra.
+    """Plot the kx and ky spectra, from ``phi`` or from precomputed 1D spectra.
 
-    Optional std arrays add shaded error bounds around the mean lines.
+    Args:
+        kx: Radial wavenumbers.
+        ky: Binormal wavenumbers.
+        phi: Potential, (ns, nkx, nky); used when the spectra are not given.
+        kx_spec: kx spectrum.
+        ky_spec: ky spectrum.
+        ref_phi: Reference potential (e.g. GKW).
+        ref_kx_spec: Reference kx spectrum.
+        ref_ky_spec: Reference ky spectrum.
+        kx_spec_std: Spread of ``kx_spec``, drawn as a band.
+        ky_spec_std: Spread of ``ky_spec``.
+        ref_kx_spec_std: Spread of ``ref_kx_spec``.
+        ref_ky_spec_std: Spread of ``ref_ky_spec``.
+        title: Figure title.
+        shade_alpha: Opacity of the bands.
+
+    Returns:
+        The figure.
     """
     if kx_spec is None or ky_spec is None:
         if phi is None:
@@ -389,17 +406,19 @@ def plot_growth_rates(
     title: str = "",
     max_modes: int = 8,
 ) -> plt.Figure:
-    """Plot per-ky growth rates over time with optional GKW reference.
+    """Plot per-ky growth rates over time, optionally against a GKW reference.
 
     Args:
-        time: (n_windows,) simulation time.
-        growth: (n_windows,) or (n_windows, nky) growth rates.
-        ky: (nky,) wavenumber values for legend labels.
-        ref_time: (n_ref, >=2) GKW time.dat with columns [time, growth, ...].
-        ref_growth: (n_ref,) or (n_ref, nky) GKW growth rates. if None and
-            ref_time has >=2 columns, column 1 is used as the mean growth.
-        title: figure title.
-        max_modes: maximum number of ky modes to plot individually.
+        time: Window times, (n_windows,).
+        growth: Growth rates, (n_windows,) or (n_windows, nky).
+        ky: Wavenumbers for the legend, (nky,).
+        ref_time: GKW ``time.dat`` columns ``[time, growth, ...]``.
+        ref_growth: GKW growth rates; column 1 of ``ref_time`` when None.
+        title: Figure title.
+        max_modes: Most ky modes drawn individually.
+
+    Returns:
+        The figure.
     """
     fig, ax = plt.subplots(figsize=(7.0, 2.8))
 
@@ -443,13 +462,18 @@ def plot_growth_snapshots(
     ref_time: Optional[np.ndarray] = None,
     title: str = "",
 ) -> plt.Figure:
-    """2x2 grid of per-ky growth rate profiles at 4 physically meaningful timesteps.
+    """Growth-rate spectra at window 5, at 10 % and 50 % of the run, and averaged over time.
 
-    Snapshots: (1) early linear phase, (2) onset of saturation,
-    (3) mid-saturation, (4) late/converged.
+    Args:
+        ky: Wavenumbers, (nky,).
+        sim_growth: Growth rates, (n_windows, nky).
+        sim_time: Window times.
+        ref_growth: Reference growth rates, or None.
+        ref_time: Reference times, or None.
+        title: Figure title.
 
-    Saturation onset is detected as the first time the mean growth rate
-    (over non-zonal ky modes) crosses below a small threshold.
+    Returns:
+        The figure.
     """
     n_total = len(sim_time)
 
@@ -521,7 +545,12 @@ def plot_growth_snapshots(
 
 
 def force_aspect(ax: plt.Axes, aspect: float = 1.0):
-    """Adjust axis aspect ratio based on image extent."""
+    """Set the axes aspect ratio from the extent of its first image.
+
+    Args:
+        ax: Matplotlib axes.
+        aspect: Target width-to-height ratio.
+    """
     im = ax.get_images()
     if not im:
         return
@@ -539,7 +568,22 @@ def plot_nd(
     mark_bad: bool = False,
     **kwargs,
 ):
-    """Grid of 2D slices for all dimension pairs. If y is provided, shows side-by-side."""
+    """Grid of 2D slices for every pair of dimensions; ``y`` is drawn next to ``x``.
+
+    Args:
+        x: N-dimensional array.
+        y: Second array of the same shape, or None.
+        labels: Dimension names.
+        cmap: Colormap.
+        aggregate: Reduction over the other dimensions: ``"mean"``, ``"std"`` or
+            ``"slice"`` (middle index).
+        aspect: Panel aspect ratio.
+        mark_bad: Blank cells whose values do not vary.
+        kwargs: Accepted and ignored.
+
+    Returns:
+        The figure.
+    """
     if labels is not None:
         ndim = len(labels)
         has_channel = x.ndim > ndim

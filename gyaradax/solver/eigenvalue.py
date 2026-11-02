@@ -13,8 +13,8 @@ d(g)/dt = L g: Re is the growth rate (matching the IVP's per-ky
 
 :func:`eigensolve` selects the driver with ``solver=``: 'arpack' is scipy's
 implicitly restarted Arnoldi on a jitted matvec (the reference -- slower but
-battle-tested), 'jax' a thick-restarted Krylov-Schur Arnoldi kept on device,
-differentiable apart from the small dense eigendecomposition.
+battle-tested), 'jax' a thick-restarted Krylov-Schur Arnoldi whose matvecs run on device. Its
+restarts and refinement run on the host, so it is not differentiable.
 
 ``mode='exp'`` (recommended) uses ``n_steps_per_matvec`` RK4 steps, whose
 eigenvalues ``mu = exp(lambda*n_steps*dt)`` make the dominant physical mode the
@@ -229,13 +229,15 @@ def eigensolve_linear(
             75 s at tol=1e-7 with ncv=60.
         mode: 'exp' (eigenvalues of the RK4 step operator, recommended) or
             'rhs' (direct eigenvalues of L).
-        backend: solver backend ('jax' recommended; 'cuda' is not differentiable).
+        backend: Backend of the matvec ('jax' recommended).
         seed: RNG seed for v0 if not provided.
         v0: optional initial Arnoldi vector (flat complex128).
-        maxiter, ncv: ARPACK knobs.
+        maxiter: ARPACK iteration limit.
+        ncv: ARPACK Krylov subspace size.
         dt: time step for mode='exp' (defaults to params.dt; must be RK4-stable).
         n_steps_per_matvec: RK4 steps per matvec for mode='exp'.
-        ky_select: restrict the solve to one ky block (see module docstring).
+        ky_select: restrict the solve to one ky block (see module docstring); ``pre``
+            is then rebuilt for that block.
         refine: mode='exp' only: re-evaluate each eigenvalue with a Rayleigh
             quotient through the 'rhs' matvec (fixes log-branch ambiguity).
         return_residuals: also return ``||L v - lambda v|| / (|lambda| ||v||)``
@@ -351,11 +353,17 @@ def eigensolve(
     solver: str = "jax",
     **kwargs,
 ):
-    """Top-k eigenpairs of the linear operator, via the JAX Arnoldi or ARPACK.
+    """Top-k eigenpairs of the linear operator, with the JAX Arnoldi or ARPACK.
 
-    `solver='jax'` uses the thick-restarted on-device Arnoldi,
-    `solver='arpack'` the scipy reference. Remaining keywords are forwarded to
-    the chosen driver; see those functions for the knobs each accepts.
+    Args:
+        geometry: Geometry dict.
+        params: Run parameters (``non_linear`` must be False).
+        solver: ``"jax"`` for :func:`eigensolve_linear_jax` (on device),
+            ``"arpack"`` for :func:`eigensolve_linear` (scipy reference).
+        kwargs: Passed to the chosen solver.
+
+    Returns:
+        What the chosen solver returns: eigenvalues, eigenvectors and optionally residuals.
     """
     if solver == "jax":
         return eigensolve_linear_jax(geometry, params, **kwargs)
@@ -374,15 +382,22 @@ def eigensolve_ky_spectrum(
     solver: str = "jax",
     **kwargs,
 ) -> Dict[int, Tuple[np.ndarray, np.ndarray]]:
-    """Top-k eigenpairs per ky block, TGLF style.
+    """Top-k eigenpairs of every ky block.
 
-    The linear operator is exactly block-diagonal over ky, so each block is an
-    independent problem of size n/nky; solving them separately is both cheaper
-    and the form a saturation rule wants (a few unstable roots per ky). Blocks
-    are solved in sequence here; they are independent and can be fanned out.
+    The linear operator is block diagonal over ky, so each block is an independent
+    problem of size n / nky. The blocks are solved one after another.
 
-    Returns {iky: (eigenvalues, residuals)}, each sorted by descending growth
-    rate.
+    Args:
+        geometry: Geometry dict.
+        params: Run parameters.
+        pre: Precomputed coefficients, or None.
+        kys: ky indices to solve; all of them when None.
+        k: Eigenpairs per block.
+        solver: ``"jax"`` or ``"arpack"``.
+        kwargs: Passed to the solver.
+
+    Returns:
+        ``{iky: (eigenvalues, residuals)}``, each sorted by descending growth rate.
     """
     if pre is None:
         pre = linear_precompute(geometry, params)
@@ -470,14 +485,38 @@ def eigensolve_linear_jax(
     return_eigvecs: bool = True,
     return_residuals: bool = False,
 ):
-    """Thick-restarted Arnoldi in JAX, matching :func:`eigensolve_linear`.
+    """Thick-restarted Arnoldi in JAX, with the interface of :func:`eigensolve_linear`.
 
-    The Krylov window stays at `ncv`; each cycle keeps all `k` wanted Ritz
-    directions and extends from column `k`, so accuracy no longer requires an
-    unaffordable `ncv`. Convergence uses the Arnoldi residual bound
-    ``|h_{m+1,m} y_m| / |theta|``, which costs no extra matvec.
+    The Krylov window stays at ``ncv``; each cycle keeps the ``k`` wanted Ritz
+    vectors and extends from column ``k``. Convergence uses the Arnoldi residual
+    bound ``|h_{m+1,m} y_m| / |theta|``, which needs no extra matvec. A restart
+    cycle costs ``ncv - k`` matvecs.
 
-    `tol` is the accuracy/cost dial: a restart cycle costs `ncv - k` matvecs.
+    Args:
+        geometry: Geometry dict.
+        params: Run parameters (``non_linear`` must be False).
+        pre: Precomputed coefficients, or None.
+        n_species: Ignored for adiabatic runs. For kinetic runs the larger of this
+            and ``len(params.mas)``.
+        k: Number of eigenpairs.
+        ncv: Krylov window size.
+        mode: ``"exp"`` (eigenvalues of the RK4 step operator) or ``"rhs"`` (of L).
+        backend: Backend of the matvec.
+        seed: Seed of the start vector.
+        v0: Start vector (flat complex128), or None.
+        dt: Timestep of ``mode="exp"``; ``params.dt`` when None.
+        n_steps_per_matvec: RK4 steps per matvec in ``mode="exp"``.
+        ky_select: Solve only this ky block; ``pre`` is then rebuilt for it.
+        refine: Re-evaluate each eigenvalue as a Rayleigh quotient of L (``mode="exp"``).
+        tol: Relative residual tolerance.
+        max_restarts: Largest number of restart cycles.
+        return_eigvecs: Return the eigenvectors.
+        return_residuals: Return ``||L v - lambda v|| / (|lambda| ||v||)`` per eigenpair.
+
+    Returns:
+        ``(eigenvalues, eigenvectors)``, plus ``residuals`` with ``return_residuals``.
+        Eigenvalues (k,) are sorted by descending growth rate; eigenvectors are None
+        without ``return_eigvecs``.
     """
     if mode not in ("rhs", "exp"):
         raise ValueError(f"mode must be 'rhs' or 'exp', got {mode!r}")

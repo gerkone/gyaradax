@@ -27,12 +27,22 @@ def estimate_nl_timestep(
     safety_factor: Any = 0.95,
     apar: Optional[jnp.ndarray] = None,
 ) -> jnp.ndarray:
-    """CFL-adaptive timestep from nonlinear ExB velocity.
+    """Nonlinear CFL timestep from the largest ExB velocity.
 
-    Computes ``max|grad(phi)|`` and (when apar is provided) ``max|grad(apar)| * vpmax``
-    in real space, matching GKW non_linear_terms.F90:1530-1800. The y/x
-    correction factors absorb FFTW's unnormalized magnitude (``N |∂phi|_real``)
-    so ``irfft2(norm="backward")`` outputs match GKW's ``max|ar| mrad lxinv``.
+    Computes ``max|grad(phi)|`` and, with ``apar``, ``2 vthrat_max vpmax max|grad A_par|`` in
+    real space, as GKW non_linear_terms.F90:1530-1800. The y/x factors absorb the
+    FFTW normalisation, so the result matches GKW's ``max|ar| mrad lxinv``.
+
+    Args:
+        phi: Potential, (ns, nkx, nky).
+        pre: Precomputed coefficients (FFT sizes and wavenumbers).
+        bessel: Unused, kept for the call signature.
+        dt_input: Upper bound on the timestep.
+        safety_factor: Factor on the CFL estimate.
+        apar: Parallel vector potential, or None.
+
+    Returns:
+        The timestep, at most ``dt_input``.
     """
     mrad = cast(int, pre["nl_mrad"])
     mphi = cast(int, pre["nl_mphi"])
@@ -81,15 +91,22 @@ def estimate_linear_timestep(
     fac_dtim_est: float = 0.95,
     safety_factor: Optional[float] = None,
 ) -> jnp.ndarray:
-    """Von Neumann stability timestep estimate (matdat.F90:1440-1510).
+    """Von Neumann stability timestep of the linear terms (GKW matdat.F90:1440-1510).
 
-    Separates the bound by derivative order, with the RK4 stability factor 2.4,
-    ``tmax = max(tmax1 / 2.4, tmax2, tmax4 / 2.4, 40)`` and
-    ``dt = fac_dtim_est / tmax``: tmax1 from streaming, trapping and (kinetic
-    electrons) the field frequency, tmax2 from the collision stencil, tmax4 from
-    the fourth-order dissipation.
+    The bound is split by derivative order with the RK4 stability factor 2.4,
+    ``tmax = max(tmax1 / 2.4, tmax2, tmax4 / 2.4, 40)`` and ``dt = fac_dtim_est / tmax``:
+    tmax1 from streaming, trapping and (kinetic electrons) the field frequency, tmax2
+    from the collision stencil, tmax4 from the fourth-order dissipation.
 
-    When *safety_factor* is given, falls back to safety_factor * dx / max|u|.
+    Args:
+        pre: Precomputed coefficients.
+        params: Run parameters; supply ``disp_par``, ``disp_vp`` and ``fac_dtim_est``.
+        fac_dtim_est: Safety factor when ``params`` is None.
+        safety_factor: If given, return the simple bound ``safety_factor * dx / max|u|``
+            of streaming and trapping instead.
+
+    Returns:
+        The timestep.
     """
     sgr_dist = jnp.asarray(pre["sgr_dist"], dtype=jnp.float64)
     dvp = jnp.asarray(pre["dvp"], dtype=jnp.float64)
@@ -163,7 +180,21 @@ def estimate_timestep(
     params: Optional["GKParams"] = None,
     apar: Optional[jnp.ndarray] = None,
 ) -> jnp.ndarray:
-    """Combined CFL: min(nonlinear ExB + EM apar, linear von Neumann)."""
+    """Combined CFL timestep: the smaller of the nonlinear and the linear estimate.
+
+    Args:
+        phi: Potential, (ns, nkx, nky).
+        pre: Precomputed coefficients.
+        bessel: Unused, kept for the call signature.
+        dt_input: Upper bound on the timestep.
+        safety_factor: Factor on the nonlinear estimate (``params.fac_dtim_nl`` wins).
+        params: Run parameters. Without them the linear part is the simple bound
+            ``dx / max|u| / 3`` of streaming and trapping.
+        apar: Parallel vector potential, or None.
+
+    Returns:
+        The timestep.
+    """
     if params is not None:
         safety_factor = float(getattr(params, "fac_dtim_nl", safety_factor))
     dt_nl = estimate_nl_timestep(phi, pre, bessel, dt_input, safety_factor, apar=apar)

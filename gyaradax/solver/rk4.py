@@ -34,7 +34,14 @@ from gyaradax.solver.cfl import estimate_linear_timestep, estimate_nl_timestep
 
 
 def default_state(nky: int = 1) -> GKState:
-    """State at t = 0 for ``nky`` binormal modes."""
+    """State at t = 0 for ``nky`` binormal modes.
+
+    Args:
+        nky: Number of binormal modes.
+
+    Returns:
+        GKState with unit amplitudes and zero growth rates.
+    """
     return GKState(
         time=jnp.array(0.0, dtype=jnp.float64),
         step=jnp.array(0, dtype=jnp.int32),
@@ -45,11 +52,18 @@ def default_state(nky: int = 1) -> GKState:
 
 
 def mode_amplitude(phi: jnp.ndarray, geometry: Dict[str, jnp.ndarray], eps: float) -> jnp.ndarray:
-    """
-    Per-ky mode amplitude over the connected kx chain containing kx=0.
+    """Per-ky amplitude of the potential over the connected kx chain through kx = 0.
 
-    Matches GKW convention (diagnos_growth_freq.f90): only kx modes sharing
-    the same mode_label as kx=0 contribute to the amplitude for each ky.
+    As GKW diagnos_growth_freq.f90, only kx modes with the same ``mode_label`` as
+    kx = 0 contribute.
+
+    Args:
+        phi: Potential, (ns, nkx, nky).
+        geometry: Geometry dict (``ints``, ``mode_label``, ``ixzero``).
+        eps: Floor of the squared amplitude.
+
+    Returns:
+        Amplitude per ky, (nky,).
     """
     ds = jnp.asarray(geometry["ints"], dtype=jnp.float64)[0]
     mode_label = jnp.asarray(geometry["mode_label"], dtype=jnp.int32)
@@ -67,9 +81,15 @@ def normalize_per_ky(
 ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Scale every connected kx chain of every ky to unit amplitude (linear runs).
 
+    Args:
+        df: Distribution function, 5D or 6D.
+        geometry: Geometry dict.
+        params: Run parameters (``norm_eps``).
+        pre: Precomputed coefficients, or None.
+
     Returns:
-        ``(df_normalised, inv, amp)``: the scaled distribution, the per-ky
-        factor applied to the kx = 0 chain and the per-ky amplitude before scaling.
+        ``(df_normalised, inv, amp)``: the scaled distribution, the per-ky factor
+        applied to the kx = 0 chain and the per-ky amplitude before scaling.
     """
     phi = calculate_phi(geometry, df, params=params, pre=pre)
     # per-ky amplitude over the kx=0 chain (GKW diagnos_growth_freq convention);
@@ -105,7 +125,24 @@ def nonlinear_term_iii(
     backend: str = "jax",
     use_z2z: bool = False,
 ) -> jnp.ndarray:
-    """Nonlinear ExB advection via pseudospectral method. df is 5D."""
+    """Nonlinear ExB term (Term III) of a 5D distribution, for diagnostics.
+
+    Args:
+        df: Distribution function, (nvpar, nmu, ns, nkx, nky).
+        phi: Potential, (ns, nkx, nky).
+        geometry: Geometry dict.
+        pre: Precomputed coefficients.
+        efun_sign: Sign of the ExB bracket.
+        fft_prefactor: Prefactor of the FFTs.
+        exclude_zero_mode: Zero the (kx, ky) = (0, 0) mode.
+        mixed_precision: FP32 FFTs.
+        ops: Backend operations; built from ``backend`` when None.
+        backend: ``"jax"`` or ``"cuda"``.
+        use_z2z: Z2Z FFTs in the JAX backend.
+
+    Returns:
+        Term III, same shape as ``df``.
+    """
     if ops is None:
         ops = create_ops(pre, backend=backend, use_z2z=use_z2z, mixed_precision=mixed_precision)
 
@@ -132,29 +169,29 @@ def init_f(
     params=None,
     out_sharding=None,
 ) -> jnp.ndarray:
-    """Initialize the distribution function.
+    """Initial distribution function, as GKW ``init_fdis``.
 
-    Supported finit modes (matching GKW):
-        cosine2 (default): amp * (cos(2*pi*s) + 1), flat in velocity space
-        cosine:  amp * cos(2*pi*s), flat in velocity space
-        cosine3: like cosine2 but weighted by exp(-E) in velocity space
-        sine:    amp * de(is) * (sin(2*pi*s) + 1), density-weighted
-        noise:   uniform random on [-1, 1] (real + imag)
-        gnoise:  gaussian random (Box-Muller transform)
-        zonal:   Rosenbluth-Hinton test: only ky=0, kx=±1 with Maxwellian weight
+    ``finit`` modes: ``cosine2`` (default, ``amp (cos 2 pi s + 1)``, flat in
+    velocity), ``cosine`` (``amp cos 2 pi s``), ``cosine3`` (as ``cosine2`` times
+    the Maxwellian), ``sine`` (``amp de (sin 2 pi s + 1)``), ``noise`` (uniform in
+    [-1, 1]), ``gnoise`` (Gaussian) and ``zonal`` (Rosenbluth-Hinton test:
+    ky = 0, kx = +-1, Maxwellian weight). The zonal mode is zeroed except for ``zonal``,
+    which also ignores the sharding and normalisation options.
 
     Args:
-        geometry: Geometry dictionary
-        finit: Initialization mode
-        amp_init_real: Initial amplitude (real part)
-        amp_init_imag: Initial amplitude (imaginary part)
-        normalize_per_toroidal_mode: Whether to normalize per toroidal mode
-        norm_eps: Normalization epsilon
-        n_species: Number of species
-        seed: Random seed for noise modes
-        params: Optional params object. If provided with n_gpus_* > 1, uses sharded init.
-        out_sharding: Optional JAX sharding to apply to output. If None and params
-            indicates multi-GPU, auto-detects and applies sharding.
+        geometry: Geometry dict.
+        finit: Initial condition.
+        amp_init_real: Real part of the amplitude.
+        amp_init_imag: Imaginary part of the amplitude.
+        normalize_per_toroidal_mode: Normalise every ky to unit amplitude.
+        norm_eps: Amplitude floor of that normalisation.
+        n_species: Number of species; 6D output when above 1.
+        seed: Seed of the noise modes.
+        params: Run parameters; a multi-GPU mesh in them shards the output.
+        out_sharding: Sharding of the output; overrides the one from ``params``.
+
+    Returns:
+        The distribution, 5D or 6D, complex128.
     """
     # auto-detect multi-GPU sharding when params indicates it (don't override explicit)
     if out_sharding is None and params is not None:
@@ -321,10 +358,21 @@ def advance_state(
     per_mode_norm_fac: jnp.ndarray,
     dt_used: Optional[jnp.ndarray] = None,
 ) -> GKState:
-    """Advance time and step, and update the per-ky growth rate of the current window.
+    """Advance time and step and update the per-ky growth rate of the current window.
 
     The growth rate is ``log(amp / window_start_amp) / t_window``; at a window end
     the start amplitude resets to the amplitude after normalisation.
+
+    Args:
+        state: State before the step.
+        params: Run parameters (``dt``, ``naverage``, ``norm_eps``).
+        is_window_end: Whether this step ends a ``naverage`` window.
+        per_mode_amp: Per-ky amplitude after the step.
+        per_mode_norm_fac: Per-ky normalisation factor applied at the window end.
+        dt_used: Timestep of the step; ``params.dt`` when None.
+
+    Returns:
+        The new GKState.
     """
     dt = dt_used if dt_used is not None else jnp.array(params.dt, dtype=jnp.float64)
     new_step = state.step + jnp.array(1, dtype=jnp.int32)
@@ -368,9 +416,10 @@ def gkstep_single(
     """One RK4 step.
 
     The four stages are summed in the order of the closed form, behind
-    ``optimization_barrier`` so each stage's RHS is freed before the next; a CUDA
+    ``optimization_barrier``, so each stage's RHS is freed before the next. A CUDA
     ``fused_linear`` step runs each stage as one kernel. Nonlinear runs also return
-    the CFL estimate ``2 / max|grad chi|`` over the four stages. Linear runs
+    the CFL estimate ``2 / m``, with ``m`` the largest over the four stages of
+    ``max|grad phi|`` and ``2 vthrat_max vpar_max max|grad A_par|``. Linear runs
     renormalise at the end of every ``naverage`` window.
 
     Args:

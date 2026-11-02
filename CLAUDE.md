@@ -130,7 +130,7 @@ SolverOps interface: `linear_rhs()`, `linear_rhs_from_g()`, `nonlinear_term_iii(
 | `_compute_fields` | `calculate_fields` (full EM) | `fields.F90` |
 | `precompute_collisions` / `collision_rhs` | `collision_differential_numu` | `collisionop.f90` |
 | `estimate_linear_timestep` | `get_estimated_timestep` | `matdat.F90` |
-| `init_f` | `init_dist` | `init.f90` |
+| `init_f` | `init_fdisi` | `init.f90` |
 | `compute_geometry` | `geom_circ` | `geom.f90` |
 | `gkstep_single` | `rk4` | `exp_integration.F90` |
 

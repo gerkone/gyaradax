@@ -98,7 +98,7 @@ class GKState:
         step: Step counter.
         accumulated_norm_factor: Product of the per-ky renormalisation factors of linear runs.
         window_start_amp: Per-ky mode amplitude at the start of the growth-rate window.
-        last_growth_rate: Per-ky growth rate of the last completed window.
+        last_growth_rate: Per-ky growth rate over the current window so far, updated every step.
     """
 
     time: jnp.ndarray

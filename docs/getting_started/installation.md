@@ -1,7 +1,8 @@
 # Installation
 
-gyaradax needs Python 3.12 or newer. The base package runs on CPU JAX; GPUs need
-the CUDA 13 extra.
+`gyaradax` needs Python 3.12 or newer. The base package runs on CPU JAX. GPUs need
+the CUDA 13 extra, which adds the CUDA build of JAX, cuFFTDx (`nvidia-mathdx`)
+and NCCL.
 
 ```bash
 git clone https://github.com/gerkone/gyaradax.git
@@ -31,8 +32,11 @@ cmake --build . -j"$(nproc)"
 cmake --install .
 ```
 
-`backend: auto` (or `--backend auto`) then picks CUDA whenever the library and a
-GPU are present, and says so in a warning when it falls back to JAX on a GPU.
+The default backend stays `jax`. Select the kernels with `--backend cuda`, or with
+`backend: auto` (in the config or on the command line), which picks CUDA
+whenever the library and a GPU are present and warns when it falls back to JAX
+on a GPU. The build prints compiler warnings from the jaxlib headers
+(`-Wreturn-type`); they are expected.
 
 Build options:
 
@@ -50,7 +54,7 @@ Build options:
   v6 bracket uses [cuFFTDx](https://docs.nvidia.com/cuda/cufftdx/), whose FFT
   lengths are fixed at compile time, so the build generates one kernel per
   dealiased row length. It needs `nvidia-mathdx`, which the `cuda13` extra
-  installs. Each length adds about 3 s of build time; the default build takes
+  installs. Each length adds about 3 s of build time, and the default build takes
   about 2 minutes.
 
 Grids the build does not cover (a larger `nky`, an architecture not built, a

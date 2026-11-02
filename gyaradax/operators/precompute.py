@@ -31,7 +31,15 @@ enable_x64()
 
 
 def prime_factors_smallereq_than(number: int, max_prime: int) -> bool:
-    """True when every prime factor of ``number`` is at most ``max_prime``."""
+    """Whether every prime factor of ``number`` is at most ``max_prime``.
+
+    Args:
+        number: Integer to factor.
+        max_prime: Largest allowed prime.
+
+    Returns:
+        True when ``number`` is ``max_prime``-smooth.
+    """
     i = 2
     n = int(number)
     while True:
@@ -46,8 +54,14 @@ def prime_factors_smallereq_than(number: int, max_prime: int) -> bool:
 def extended_firstdim_fft_size(nmod: int) -> Tuple[int, int]:
     """Dealiased real-space length ``mphi`` along y and its half-spectrum length, as GKW.
 
-    Starts at ``3 nmod - 2`` (3/2 rule for the half spectrum), rounds up to an
-    even 7-smooth length and takes a power of two instead when one lies within 16.
+    Starts at ``3 nmod - 2`` (3/2 rule for the half spectrum), rounds up to an even
+    7-smooth length and takes a power of two instead when one lies within 16.
+
+    Args:
+        nmod: Number of ky modes.
+
+    Returns:
+        ``(mphi, mphi // 2 + 1)``.
     """
     posspace_size = 3 * nmod - 2
     if posspace_size % 2 != 0:
@@ -65,8 +79,14 @@ def extended_firstdim_fft_size(nmod: int) -> Tuple[int, int]:
 def extended_seconddim_fft_size(nx: int) -> int:
     """Dealiased real-space length ``mrad`` along x, as GKW.
 
-    Starts at ``ceil(1.5 (nx + 1)) + 1``, rounds up to a 7-smooth length and takes
-    a power of two instead when one lies within 8.
+    Starts at ``ceil(1.5 (nx + 1)) + 1``, rounds up to a 7-smooth length and takes a
+    power of two instead when one lies within 8.
+
+    Args:
+        nx: Number of kx modes.
+
+    Returns:
+        ``mrad``.
     """
     dum = int(math.ceil(1.5 * float(nx + 1)) + 1)
     while not prime_factors_smallereq_than(dum, 7):
@@ -806,7 +826,17 @@ def linear_precompute(geometry: Dict[str, jnp.ndarray], params: GKParams) -> "GK
 def pack_half_spectrum(
     spec_kxky: jnp.ndarray, jind: jnp.ndarray, mrad: int, mphiw3: int
 ) -> jnp.ndarray:
-    """Scatter ``(..., nkx, nky)`` modes into the zero-padded ``(..., mrad, mphiw3)`` half spectrum."""
+    """Scatter modes into the zero-padded half spectrum of the dealiased grid.
+
+    Args:
+        spec_kxky: Modes, (..., nkx, nky).
+        jind: FFT-order index of each kx mode.
+        mrad: Dealiased x length.
+        mphiw3: Half-spectrum y length.
+
+    Returns:
+        Half spectrum, (..., mrad, mphiw3).
+    """
     out_shape = spec_kxky.shape[:-2] + (mrad, mphiw3)
     out = jnp.zeros(out_shape, dtype=jnp.complex128)
     nky = spec_kxky.shape[-1]

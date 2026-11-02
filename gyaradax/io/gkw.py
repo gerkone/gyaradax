@@ -29,12 +29,14 @@ def as_int(value: Any, default: int) -> int:
 
 
 def as_bool(value: Any, default: bool) -> bool:
-    """Coerce a parsed namelist scalar to bool using current GKW conventions.
+    """Coerce a parsed namelist value to bool, as GKW reads it.
 
-    Parsed booleans are already real ``bool`` values.  String handling is kept
-    for callers that pass raw or manually constructed parsed dictionaries.  An
-    unrecognized non-bool value falls back to the supplied default, matching the
-    local helper behavior previously used by ``load_runtime_params``.
+    Args:
+        value: Parsed value (bool, or a string such as ``.true.`` / ``T``).
+        default: Returned for None or an unrecognised value.
+
+    Returns:
+        The boolean.
     """
     if isinstance(value, bool):
         return value
@@ -48,12 +50,17 @@ def as_bool(value: Any, default: bool) -> bool:
 
 
 def species_section_keys(parsed: ParsedInput, limit: int | None = None) -> tuple[str, ...]:
-    """Return repeated ``&SPECIES`` section keys in parser insertion order.
+    """Keys of the repeated ``&SPECIES`` sections, in file order.
 
-    ``parse_input_dat`` names repeated sections ``species``, ``species0``,
-    ``species00``, ... by repeatedly appending ``0``.  This helper deliberately
-    preserves that existing key-order quirk by iterating the parsed mapping in
-    insertion order and filtering keys with the historical ``startswith`` rule.
+    :func:`parse_input_dat` names repeated sections ``species``, ``species0``,
+    ``species00``, ...
+
+    Args:
+        parsed: Output of :func:`parse_input_dat`.
+        limit: Keep at most this many.
+
+    Returns:
+        The section keys.
     """
     keys = tuple(k for k in parsed if k.startswith("species"))
     return keys if limit is None else keys[:limit]
@@ -65,7 +72,14 @@ def species_blocks(parsed: ParsedInput, limit: int | None = None) -> tuple[Mappi
 
 
 def read_gkw_dump_time(dat_path: str) -> float:
-    """Read simulation time from a GKW .dat file."""
+    """Simulation time stored in a GKW dump's ``.dat`` file.
+
+    Args:
+        dat_path: Path to the ``K*.dat`` file.
+
+    Returns:
+        The time.
+    """
     if not os.path.exists(dat_path):
         return 0.0
     with open(dat_path, "r", encoding="utf-8") as f:
@@ -77,7 +91,14 @@ def read_gkw_dump_time(dat_path: str) -> float:
 
 
 def read_gkw_dump_dtim(dat_path: str) -> float:
-    """Read timestep DTIM from a GKW .dat file."""
+    """Timestep ``DTIM`` stored in a GKW dump's ``.dat`` file.
+
+    Args:
+        dat_path: Path to the ``K*.dat`` file.
+
+    Returns:
+        The timestep.
+    """
     if not os.path.exists(dat_path):
         return 0.0
     with open(dat_path, "r", encoding="utf-8") as f:
@@ -139,7 +160,14 @@ def load_gkw_k_dump(file_path: str, resolution: Tuple[int, ...], n_species: int 
 
 
 def K_files(directory):
-    """List distribution function files in a directory."""
+    """Distribution dumps of a GKW run directory: ``K*`` files, then numbered files.
+
+    Args:
+        directory: GKW run directory.
+
+    Returns:
+        Sorted file names.
+    """
     files = os.listdir(directory)
     digit_files = sorted([file for file in files if file.isdigit()], key=lambda x: int(x))
     k_files = sorted([file for file in files if file.startswith("K") and not file.endswith(".dat")])
@@ -147,7 +175,14 @@ def K_files(directory):
 
 
 def poten_files(directory):
-    """List potential field files in a directory."""
+    """Potential dumps of a GKW run directory.
+
+    Args:
+        directory: GKW run directory.
+
+    Returns:
+        ``(names, indices)``: the sorted ``Poten*`` file names and their 0-based dump indices.
+    """
     files = os.listdir(directory)
     poten_files = sorted([file for file in files if file.startswith("Poten")])
     timestep_slices = [int(f.replace("Poten", "")) for f in poten_files]
@@ -231,7 +266,14 @@ def _parse_namelist_value(value: str):
 
 
 def load_geom_dat_file(file_path: str) -> Dict[str, Any]:
-    """Load geometric parameters from a .dat file."""
+    """Read a GKW ``geom.dat`` file.
+
+    Args:
+        file_path: Path to ``geom.dat``.
+
+    Returns:
+        Dict of the scalars and arrays it holds.
+    """
     data: dict[str, Any] = {}
     with open(file_path, "r") as f:
         lines = f.readlines()
@@ -271,7 +313,15 @@ def load_geom_dat_file(file_path: str) -> Dict[str, Any]:
 
 
 def parse_input_dat(file_path):
-    """Parse GKW input.dat configuration file."""
+    """Parse a GKW ``input.dat`` namelist file.
+
+    Args:
+        file_path: Path to ``input.dat``.
+
+    Returns:
+        Dict of sections (lower case) to dicts of parsed values; repeated sections
+        get keys with appended zeros (``species``, ``species0``, ...).
+    """
     parsed_data: Dict[str, Dict[str, Any]] = {}
     if not os.path.exists(file_path):
         return parsed_data
@@ -309,14 +359,17 @@ def parse_input_dat(file_path):
 
 
 def resolve_betaprime(inp: Dict[str, Any]) -> float:
-    """Resolve GKW's veta_prime from a parsed input.dat dict.
+    """GKW's ``veta_prime`` from a parsed ``input.dat``, as the flux-tube case of components.f90.
 
-    Mirrors the flux-tube fill in components.f90 (~1995-2016):
+    ``betaprime_type='ref'`` gives ``betaprime_ref`` (default 0); ``'sp'`` gives
+    ``beta * sum_species(-de * tmp * (rlt + rln))`` over all species blocks,
+    adiabatic ones included. ``'eq'`` and ``'file'`` are not supported.
 
-    - ``betaprime_type='ref'``: ``betaprime_ref`` (input, default 0)
-    - ``betaprime_type='sp'``: ``veta * sum_species(-de*tmp*(rlt+rln))`` with
-      ``veta = beta``, summed over all species blocks (adiabatic ones included)
-    - ``betaprime_type='eq'`` / ``'file'``: not supported
+    Args:
+        inp: Output of :func:`parse_input_dat`.
+
+    Returns:
+        The pressure-gradient factor.
     """
     spc = inp.get("spcgeneral", {})
     bp_type = str(spc.get("betaprime_type", "ref")).strip().strip("'").strip('"').lower()
@@ -340,10 +393,14 @@ def resolve_betaprime(inp: Dict[str, Any]) -> float:
 
 
 def load_runtime_params(input_dat_path: str) -> Dict[str, Any]:
-    """
-    Load runtime controls for solver parity from `input.dat`.
+    """Runtime controls of a GKW ``input.dat`` as typed scalars for :class:`~gyaradax.core.params.GKParams`.
 
-    Returned keys are typed scalars and can be fed into GKParams creation.
+    Args:
+        input_dat_path: Path to ``input.dat``.
+
+    Returns:
+        Dict of GKW names (``dtim``, ``naverage``, ``non_linear``, dissipation,
+        electromagnetic and collision settings, ...) to values.
     """
     inp = parse_input_dat(input_dat_path)
     control = inp.get("control", {})
@@ -443,10 +500,16 @@ def load_runtime_params(input_dat_path: str) -> Dict[str, Any]:
 
 
 def load_scalars(directory: str) -> Dict[str, Any]:
-    """Extract scalar config and physics parameters from GKW files.
+    """Scalar run, physics and geometry parameters of a GKW run directory.
 
-    Lightweight alternative to load_geometry: returns only the scalars
-    needed for GKParams and YAML configuration.
+    A lighter alternative to :func:`load_geometry` that returns only what
+    :class:`~gyaradax.core.params.GKParams` and the YAML config need.
+
+    Args:
+        directory: GKW run directory.
+
+    Returns:
+        Dict of scalars (species values as arrays for several species).
     """
     geom = load_geom_dat_file(os.path.join(directory, "geom.dat"))
     input_data = parse_input_dat(os.path.join(directory, "input.dat"))
@@ -550,7 +613,12 @@ def _to_native(v):
 
 
 def gkw_to_yaml(gkw_dir, output_yaml):
-    """Convert a GKW run directory into a complete Gyaradax YAML configuration."""
+    """Write a complete YAML run config for a GKW run directory.
+
+    Args:
+        gkw_dir: GKW run directory.
+        output_yaml: Path of the config to write.
+    """
     from omegaconf import OmegaConf
 
     if not os.path.isdir(gkw_dir):

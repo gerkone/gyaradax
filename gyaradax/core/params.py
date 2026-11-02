@@ -21,16 +21,20 @@ enable_x64()
 class GKParams:
     """Physical parameters and solver controls of a gyrokinetic run.
 
-    A frozen dataclass registered as a JAX pytree. Strings and the flags that
-    select code paths are static (pytree auxiliary data), so changing them
-    retraces; floats such as gradients stay leaves and can be differentiated.
+    A frozen dataclass registered as a JAX pytree. The fields in ``_STATIC_FIELDS``
+    are static (pytree auxiliary data), so changing them retraces. These are the
+    flags, strings, timestep, dissipation and scalar species values. The other
+    fields are leaves and can be differentiated, e.g. the gradients ``rlt`` and
+    ``rln`` and ``beta``. The geometry scalars (``shat``, ``q``, ``eps``, ...) are
+    informational: the solver reads them from the geometry dict, so differentiate
+    through :func:`~gyaradax.geometry.geom.compute_geometry` instead.
     Species fields (``rlt``, ``rln``, ``mas``, ``tmp``, ``de``, ``signz``,
     ``vthrat``) are scalars for one species or arrays of length ``nsp``.
     Field names follow the GKW namelists (``control``, ``gridsize``,
     ``species``, ``geom``, ``collisions``, ``rotation``).
 
     Attributes:
-        dt: Time step (``dtim``); the initial step when ``adaptive_dt`` is set.
+        dt: Time step (``dtim``); with ``adaptive_dt`` the starting value and the upper bound.
         naverage: Steps per normalisation / growth-rate window.
         disp_par: Parallel (s) hyper-dissipation coefficient.
         disp_vp: Parallel-velocity dissipation coefficient.
@@ -39,22 +43,22 @@ class GKParams:
         idisp: Dissipation scaling, as GKW ``idisp`` (1 / -1: abs(vpar), 2: rms velocity).
         disp_par_conserve: Conservative parallel dissipation. 0 off, 1 removes
             the Ampere current moment from the dissipated part, 2 also the
-            Poisson moment.
-        disp_par_conserve_kycut: Apply the conservative projection only for
-            ``krho`` at or below this value; ``<= 0`` applies it to every ky.
+            Poisson moment, 3 removes one ``|vpar|``-weighted moment (as CGYRO).
+        disp_par_conserve_kycut: Apply the conservative projection only to modes
+            with ``0 < krho * kthnorm <= kycut``; ``<= 0`` applies it to every ky.
         drive_scale: Scale of the gradient drives (Terms V and VIII); keep at 1.
         norm_eps: Floor of the per-ky mode amplitude in the normalisation.
         non_linear: Include the ExB nonlinearity (Term III).
         disable_per_ky_norm: Skip the per-ky amplitude renormalisation of linear runs.
-        finit: Initial condition (``cosine2``, ``cosine``, ``cosine3``, ``noise``,
-            ``gnoise``, ``zonal``), see :func:`gyaradax.solver.rk4.init_f`.
+        finit: Initial condition (``cosine2``, ``cosine``, ``cosine3``, ``sine``,
+            ``noise``, ``gnoise``, ``zonal``), see :func:`gyaradax.solver.rk4.init_f`.
         amp_init: Initial amplitude.
         adiabatic_electrons: Adiabatic (Boltzmann) electrons instead of a kinetic species.
-        adaptive_dt: Adapt dt every block from the CFL estimate.
-        cfl_safety: Safety factor of the nonlinear CFL estimate.
+        adaptive_dt: Adapt dt every step from the CFL estimate (nonlinear runs).
+        cfl_safety: Not read by the solver (``fac_dtim_nl`` is used); kept for old configs.
         fac_dtim_est: Safety factor of the linear CFL estimate (GKW ``fac_dtim_est``).
         fac_dtim_nl: Nonlinear CFL factor (GKW ``fac_dtim_nl``).
-        spectral_radius: Use the RK4 spectral-radius stability bound in the linear CFL.
+        spectral_radius: Not read by the solver; kept for old configs.
         mixed_precision: Run the nonlinear FFTs in FP32 (fields and linear terms stay FP64).
         backend: ``"jax"``, ``"cuda"`` or ``"auto"``.
         use_z2z: Z2Z instead of R2C FFTs in the JAX bracket (CUDA always uses Z2Z).
@@ -105,8 +109,8 @@ class GKParams:
         signB: Sign of the magnetic field.
         dvp: Parallel-velocity grid spacing.
         sgr_dist: Parallel (s) grid spacing.
-        kxmax: Largest radial wavenumber (internal units).
-        kymax: Largest binormal wavenumber (internal units).
+        kxmax: Largest radial wavenumber (internal units); fallback when the geometry has none.
+        kymax: Largest binormal wavenumber (internal units); fallback when the geometry has none.
         dgrid: Grid density normalisation of the Maxwellian.
         tgrid: Grid temperature normalisation.
         n_gpus_sp: Devices on the species axis.
@@ -291,7 +295,16 @@ class GKParams:
 
 
 def gkparams_from_runtime(runtime: Dict[str, Any], **overrides: Any) -> GKParams:
-    """Build GKParams from a GKW-compatible runtime-controls dictionary."""
+    """GKParams from a dict of GKW-style runtime controls (as from ``load_scalars``).
+
+    Args:
+        runtime: GKW names (``dtim``, ``naverage``, ``non_linear``, ``nl_dtim_est``, ...)
+            and species and geometry scalars.
+        overrides: Parameter overrides, applied last.
+
+    Returns:
+        GKParams.
+    """
     non_linear = bool(runtime.get("non_linear", False))
     nl_dtim_est = bool(runtime.get("nl_dtim_est", True))
     fac_dtim_est = float(runtime.get("fac_dtim_est", 0.95))
@@ -502,7 +515,7 @@ def gkparams_from_config(config: Any, **overrides: Any) -> GKParams:
     Reads the ``solver``, ``physics``, ``geometry``, ``grid``, ``sharding`` and
     ``collisions`` sections. Grid spacings (``sgr_dist``, ``dvp``) and the
     largest wavenumbers (``kxmax``, ``kymax``) are derived from ``grid`` when the
-    config does not set them, as :func:`gyaradax.geometry.compute_geometry` does.
+    config does not set them.
 
     Args:
         config: Config from :func:`load_config`.

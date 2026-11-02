@@ -165,12 +165,21 @@ def gk_run_batched(
     pre_batch: GKPre,
     return_dt_info: bool = False,
 ) -> Any:
-    """Batched gk_run: vmap over all per-config arguments.
+    """:func:`gk_run` over configs stacked along a leading batch axis, under ``jax.vmap``.
 
-    All arguments except n_steps carry a leading batch dimension.
-    Configs must share the same grid shape and static params
-    (adiabatic_electrons, non_linear, finit). ``return_dt_info`` appends the
-    batched per-step dt diagnostics, as in ``gk_run``.
+    The configs must share the grid shape and the static parameters.
+
+    Args:
+        df_batch: Stacked distributions.
+        geometry_batch: Stacked geometry dicts.
+        params_batch: Stacked GKParams.
+        state_batch: Stacked states.
+        n_steps: Number of steps.
+        pre_batch: Stacked precomputed coefficients.
+        return_dt_info: Also return the per-step timestep diagnostics.
+
+    Returns:
+        ``(df, phi, fluxes, state)``, batched, plus ``dt_info`` when requested.
     """
 
     def _single(df, geom, par, st, pre):
@@ -220,19 +229,31 @@ def gksimulate(
     telemetry: Any = None,
     profile: bool = False,
 ) -> Tuple[jnp.ndarray, jnp.ndarray, Any, GKState]:
-    """Run n_steps with optional IO checkpointing and logging.
+    """Run ``n_steps`` in blocks, writing diagnostics and snapshots to ``output_dir``.
 
-    ``stop_on_nan`` halts at the first block with a non-finite ``df``, writing a
-    ``DIVERGED`` marker into ``output_dir``; the corrupted block is not archived.
-    Snapshots (``step_*.npz``) are written every ``snapshot_every`` blocks and
-    after the last one: all of them with ``save_snapshots``, only the latest with
-    ``keep_latest_snapshot`` (the previous one, or ``previous_snapshot`` such as the
-    snapshot a run resumed from, is removed once a newer one exists).
-    ``telemetry`` (a ``telemetry.RunTelemetry``) records compile time and per-block
-    timings; ``profile`` traces the first compiled block into ``output_dir/profile``.
+    Args:
+        df: Initial distribution.
+        geometry: Geometry dict.
+        params: Run parameters.
+        state: Initial state.
+        n_steps: Number of steps.
+        pre: Precomputed coefficients; built when None.
+        output_dir: Run directory; no output when None.
+        checkpoint_interval: Steps per block (diagnostics are written every block).
+        save_snapshots: Keep a snapshot of every snapshot block.
+        save_final: Write a snapshot after the last block.
+        snapshot_f32: Store df and phi as complex64 in the snapshots.
+        stop_on_nan: Stop at the first block with a non-finite df and write a
+            ``DIVERGED`` marker; that block is not archived.
+        keep_latest_snapshot: Keep only the newest snapshot.
+        snapshot_every: Write a snapshot every this many blocks.
+        previous_snapshot: Snapshot to remove once a newer one exists (e.g. the one
+            the run resumed from).
+        telemetry: A :class:`~gyaradax.diagnostics.telemetry.RunTelemetry`, or None.
+        profile: Trace the first compiled block into ``output_dir/profile``.
 
     Returns:
-        (df, phi, fluxes, state)
+        ``(df, phi, fluxes, state)``.
     """
     if pre is None:
         pre = linear_precompute(geometry, params)
@@ -288,11 +309,34 @@ def gksimulate_batched(
     snapshot_every: int = 1,
     profile: bool = False,
 ) -> Tuple[jnp.ndarray, jnp.ndarray, Any, GKState]:
-    """``gksimulate`` for configs stacked along a leading batch axis (``gk_run_batched``).
+    """:func:`gksimulate` for configs stacked along a leading batch axis.
 
-    Every member writes its own output directory exactly as ``gksimulate`` would; a
-    member that diverges gets its ``DIVERGED`` marker and no further output while
-    the others continue.
+    Every member writes its own output directory as :func:`gksimulate` would. A
+    member that diverges gets its ``DIVERGED`` marker and no more output while the
+    others continue.
+
+    Args:
+        df_batch: Stacked distributions.
+        geometry_batch: Stacked geometry dicts.
+        params_batch: Stacked GKParams.
+        state_batch: Stacked states.
+        n_steps: Number of steps.
+        pre_batch: Stacked precomputed coefficients.
+        output_dirs: One run directory (or None) per member.
+        labels: Member names used in the log.
+        previous_snapshots: Per member, the snapshot to remove once a newer one exists.
+        telemetries: Per member, a RunTelemetry or None.
+        checkpoint_interval: Steps per block.
+        save_snapshots: Keep a snapshot of every snapshot block.
+        save_final: Write a snapshot after the last block.
+        snapshot_f32: Store df and phi as complex64 in the snapshots.
+        stop_on_nan: Stop a member at its first non-finite block.
+        keep_latest_snapshot: Keep only the newest snapshot.
+        snapshot_every: Write a snapshot every this many blocks.
+        profile: Trace the first compiled block into the first member's directory.
+
+    Returns:
+        ``(df, phi, fluxes, state)``, batched.
     """
     n = len(output_dirs)
 

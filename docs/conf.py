@@ -18,6 +18,8 @@ extensions = [
     "sphinx.ext.intersphinx",
     "sphinx_copybutton",
     "sphinx_design",
+    "sphinxarg.ext",
+    "sphinx_llms_txt",
 ]
 
 default_role = "literal"
@@ -28,6 +30,7 @@ myst_enable_extensions = ["dollarmath", "amsmath", "colon_fence", "deflist"]
 myst_heading_anchors = 3
 
 autodoc_member_order = "bysource"
+autodoc_preserve_defaults = True
 autodoc_typehints = "description"
 autodoc_default_options = {"members": True, "show-inheritance": False}
 autosummary_generate = False
@@ -40,6 +43,12 @@ intersphinx_mapping = {
     "jax": ("https://docs.jax.dev/en/latest", None),
     "numpy": ("https://numpy.org/doc/stable", None),
 }
+
+html_baseurl = os.environ.get("READTHEDOCS_CANONICAL_URL", "")
+llms_txt_summary = (
+    "Local flux-tube gyrokinetics in JAX, following GKW. The API pages are generated from "
+    "the docstrings in the gyaradax package at https://github.com/gerkone/gyaradax."
+)
 
 html_theme = "furo"
 html_title = "gyaradax"

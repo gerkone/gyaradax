@@ -1106,6 +1106,7 @@ def _add_common(p: argparse.ArgumentParser) -> None:
 
 
 def build_parser() -> argparse.ArgumentParser:
+    """Argument parser of the ``gyaradax`` command: ``run``, ``bench``, ``convert`` and ``info``."""
     parser = argparse.ArgumentParser(
         prog="gyaradax",
         description="Gyrokinetic Vlasov-Poisson solver in JAX.",
@@ -1186,7 +1187,7 @@ def build_parser() -> argparse.ArgumentParser:
     convert_p.set_defaults(func=_cmd_convert)
 
     info_p = sub.add_parser("info", help="show devices, backends and versions")
-    info_p.add_argument("--device-list", type=str, default=None)
+    info_p.add_argument("--device-list", type=str, default=None, help="GPUs to report, e.g. 0,1")
     info_p.set_defaults(func=_cmd_info)
 
     return parser

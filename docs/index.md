@@ -4,32 +4,23 @@ hide-toc: true
 
 # gyaradax
 
-```{image} figs/gyaradax_small.png
-:class: hero-logo
-:alt: gyaradax logo
-```
-
-
 ```{rst-class} hero-tagline
 ```
 
-Local flux-tube gyrokinetics in JAX, with CUDA kernels, multi-GPU sharding and
-automatic differentiation.
+Your local gyrokinetics JAX code.
 
-gyaradax solves the δf gyrokinetic equation in a flux tube: electrostatic or
-electromagnetic ($A_\parallel$, $B_\parallel$), adiabatic or kinetic electrons,
-linearised Fokker-Planck collisions, linear and nonlinear. It follows
-[GKW](https://bitbucket.org/gkw/gkw) ([Peeters et al. 2009](https://doi.org/10.1016/j.cpc.2009.07.001))
-closely, with the same normalisations, grids and input files, so a GKW run can
-be converted and continued in gyaradax.
+`gyaradax` (short `gyx`) solves the δf gyrokinetic equation in a flux tube, electrostatic or
+electromagnetic, with adiabatic or kinetic electrons and collisions. It follows
+[GKW](https://bitbucket.org/gkw/gkw/src/develop/) ([Peeters et al. 2009](https://doi.org/10.1016/j.cpc.2009.07.001))
+closely: same normalisations, grids and input files, so a GKW run can be
+converted and continued in `gyx`.
 
 It is meant for people who want a gyrokinetic code that fits in a Python
 workflow: generating turbulence datasets, coupling to transport solvers,
-fitting reduced models, or differentiating through a simulation. The core is
-plain JAX (`jit`, `vmap`, `grad`); an optional CUDA backend makes nonlinear runs
-several times faster.
+fitting reduced models, or differentiating through a simulation. An optional
+CUDA backend makes nonlinear runs several times faster.
 
-::::{grid} 1 2 2 3
+::::{grid} 1 2 2 2
 :gutter: 3
 
 :::{grid-item-card} Getting started
@@ -43,8 +34,7 @@ Install, run a first simulation from the CLI or Python, configure runs.
 :link: performance/index
 :link-type: doc
 
-Backends, precision and kernel switches, grid sizes, multi-GPU, and how the
-code was optimised.
+Backends, precision and kernel switches, FFT sizes, memory and multi-GPU.
 :::
 
 :::{grid-item-card} Numerics
@@ -52,15 +42,15 @@ code was optimised.
 :link-type: doc
 
 The equations as discretised: grids, stencils, time stepping, field solves,
-and where gyaradax differs from GKW.
+and where `gyx` differs from GKW.
 :::
 
-:::{grid-item-card} Verification
-:link: verification/index
+:::{grid-item-card} Development and validation
+:link: validation/development
 :link-type: doc
 
-Analytical benchmarks, statistical agreement with GKW, and differentiable
-experiments.
+How the code was built with agents, and how it is checked against GKW and
+analytical results.
 :::
 
 :::{grid-item-card} API reference
@@ -74,7 +64,7 @@ geometry, diagnostics.
 :::{grid-item-card} Paper
 :link: https://arxiv.org/abs/2604.06085
 
-*gyaradax: Local Gyrokinetics JAX Code*, Galletti, Volkmann and Brandstetter (2026).
+*`gyaradax`: Local Gyrokinetics JAX Code*, Galletti, Volkmann and Brandstetter (2026).
 :::
 ::::
 
@@ -118,7 +108,14 @@ df, phi, fluxes, state = gyx.gk_run(df, geometry, params, state, 400, pre=pre)
 getting_started/index
 performance/index
 numerics/index
-verification/index
+```
+
+```{toctree}
+:hidden:
+:caption: Development and validation
+
+validation/development
+validation/verification
 ```
 
 ```{toctree}

@@ -13,20 +13,20 @@ from gyaradax.operators.poisson import _species_bessel_gamma, i1e, j1_hat
 def ampere_gamma_num(
     geometry: Dict[str, jnp.ndarray], dgrid: Any = 1.0, bessel: Optional[jnp.ndarray] = None
 ) -> jnp.ndarray:
-    """Numerical velocity-grid moment for the Ampere diagonal (Candy moment).
+    """Velocity-grid moment ``Gamma_num`` of the Ampere diagonal (GKW ``ampere_dia``).
 
-    GKW ampere_dia (linear_terms.f90:3756-3789),
-    ``gamma_num = sum_{mu,vpar} 2*B*intmu*intvp * J0^2 * vpgr^2 * fmaxwl``,
-    evaluated on the actual (vpar, mu) grid so the diagonal exactly cancels
-    the discrete g2f correction (-2*Z*vthrat*vpgr*J0*F_M/T) in the
-    mixed-variable Ampere solve.  The analytic Gamma_0 = I0(b)e^{-b} equals
-    this only in the continuum limit; GKW notes the analytic form leads to
-    "large errors at high beta and low kthrho" at default vpmax.
+    ``Gamma_num = sum_{mu, vpar} 2 B intmu intvp J0^2 vpar^2 F_M`` on the actual grid,
+    so the diagonal cancels the discrete g-to-f correction of the mixed-variable
+    solve exactly. The analytic ``Gamma_0`` equals it only in the continuum limit.
 
-    geometry must carry per-species arrays (mas, signz, tmp, de, vthrat),
-    e.g. the geom_sp dict built inside :func:`precompute_apar`.
+    Args:
+        geometry: Geometry dict with per-species ``mas``, ``signz``, ``tmp``, ``de``,
+            ``vthrat`` (e.g. the one built in :func:`precompute_apar`).
+        dgrid: Grid density normalisation of the Maxwellian.
+        bessel: J0 per species, (nsp, nvpar, nmu, ns, nkx, nky); computed when None.
 
-    Returns gamma_num with shape (nsp, ns, nkx, nky).
+    Returns:
+        ``Gamma_num``, (nsp, ns, nkx, nky).
     """
     if bessel is None:
         bessel, _ = _species_bessel_gamma(geometry)
@@ -49,23 +49,20 @@ def ampere_gamma_num(
 
 
 def precompute_apar(geometry: Dict[str, jnp.ndarray], params: Any = None):
-    """
-    Precompute static arrays for the Ampere A_parallel solve (kinetic species).
+    """Static arrays of the Ampere solve for A_par (GKW ``ampere_int`` and ``ampere_dia``).
 
-    From GKW linear_terms.f90 ampere_int + ampere_dia.
+    Solves ``[k_perp^2 + beta sum_s Z^2 n / m Gamma_num] A_par = beta sum_s Z v_R n
+    2 pi B int vpar J0 g dvpar dmu``, with the numerical ``Gamma_num`` of
+    :func:`ampere_gamma_num`.
 
-    Ampere's law (normalized):
-        [k_perp^2 + beta * sum_sp(Z^2 n / m * gamma_num)] * A_par
-        = beta * sum_sp(Z * vthrat * n * 2pi*B * integral(vpar * J0 * g * dvpar dmu))
+    Args:
+        geometry: Geometry dict.
+        params: Run parameters (``beta``, species, ``dgrid``).
 
-    The diagonal uses the NUMERICAL grid moment gamma_num (see
-    :func:`ampere_gamma_num`), not the analytic Gamma_0, matching GKW
-    ampere_dia for exact cancellation against the discrete g2f source.
-
-    Returns (apar_weight, apar_diag, kperp_sq) where:
-        apar_weight: (nsp, nvpar, nmu, ns, nkx, nky): Ampere numerator weight
-        apar_diag: (ns, nkx, nky): Ampere denominator (precomputed)
-        kperp_sq: (1, 1, 1, ns, nkx, nky): k_perp^2 for reuse
+    Returns:
+        ``(apar_weight, apar_diag, kperp_sq)``: the numerator weight,
+        (nsp, nvpar, nmu, ns, nkx, nky), the denominator, (ns, nkx, nky), and
+        ``k_perp^2``, (1, 1, 1, ns, nkx, nky).
     """
 
     # Use species arrays from params when available (multi-species from input.dat),
@@ -138,16 +135,19 @@ def calculate_apar(
     params: Any = None,
     pre: Optional[Precompute] = None,
 ) -> jnp.ndarray:
-    """
-    Compute A_parallel from Ampere's law.
+    """A_par from Ampere's law.
 
-    ``df`` is the evolved mixed variable ``g`` with shape
-    (nsp, nvpar, nmu, ns, nkx, nky), not the physical distribution after the
-    g2f transform. Returns A_parallel with shape (ns, nkx, nky).
+    The source is the evolved mixed variable g, not the physical f: GKW keeps the
+    g-to-f correction in the diagonal, so passing f would count it twice.
 
-    GKW's mixed-variable Ampere solve uses the evolved ``g`` as the source and
-    keeps the g2f correction in the diagonal.  Passing physical ``f`` here
-    double-counts that correction and gives the wrong A_parallel.
+    Args:
+        geometry: Geometry dict.
+        df: Mixed variable g, (nsp, nvpar, nmu, ns, nkx, nky).
+        params: Run parameters; used when ``pre`` lacks the weights.
+        pre: Precomputed coefficients with ``apar_weight`` and ``apar_diag``.
+
+    Returns:
+        A_par, (ns, nkx, nky).
     """
     dg = df
     if pre is not None and "apar_weight" in pre:
@@ -164,16 +164,19 @@ def precompute_bpar(
     params: Any,
     species_precompute: Precompute | Mapping[str, Any],
 ) -> Dict[str, jnp.ndarray]:
-    """Precompute the kinetic multi-species B_parallel coupled solve arrays.
+    """Static arrays of the coupled phi and B_par solve (kinetic species).
 
-    This is a behavior-preserving extraction of the inline ``nlbpar`` block
-    from :func:`gyaradax.operators.precompute.linear_precompute`.  It intentionally uses the
-    already precomputed kinetic species arrays (not ``geom_tensors``) as the
-    source of truth so shapes, dtypes, and multi-species broadcasting match the
-    solver path exactly.
+    Uses the species arrays already built by
+    :func:`gyaradax.operators.precompute.linear_precompute`, so shapes and
+    broadcasting match the solver path.
 
-    Returns a dict with the exact solver precompute keys:
-      ``phi_weight``, ``phi_diag``, ``bpar_weight``, ``bpar_chi_factor``.
+    Args:
+        geometry: Geometry dict.
+        params: Run parameters (``beta``).
+        species_precompute: Precomputed species arrays.
+
+    Returns:
+        Dict with ``phi_weight``, ``phi_diag``, ``bpar_weight`` and ``bpar_chi_factor``.
     """
 
     nsp = jnp.asarray(params.signz, dtype=jnp.float64).reshape(-1).shape[0]

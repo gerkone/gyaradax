@@ -20,15 +20,17 @@ def calculate_fluxes(
     phi: jnp.ndarray,
     reduce: bool = True,
 ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
-    """Single-species fluxes. df: (nvpar, nmu, ns, nkx, nky).
+    """Particle, heat and momentum flux of one species.
 
-    When reduce=True (default), returns flux-surface-averaged scalar
-    (pflux, eflux, vflux) for backward compatibility.
+    Args:
+        geom: :func:`~gyaradax.operators.poisson.geom_tensors` dict of the species.
+        df: Distribution, (nvpar, nmu, ns, nkx, nky).
+        phi: Potential, (ns, nkx, nky).
+        reduce: Sum over (kx, ky). With False the per-mode flux fields are returned,
+            e.g. for quasilinear weights ``Γ(kx, ky) / |φ(kx, ky)|²``.
 
-    When reduce=False, returns per-mode flux fields of shape (nkx, nky):
-    velocity-space and parallel integration are still applied, but the
-    final sum over (kx, ky) is left to the caller. Useful for quasilinear
-    weights ``Γ_lin(kx, ky) / |φ_lin(kx, ky)|²`` and for kx/ky spectra.
+    Returns:
+        ``(pflux, eflux, vflux)``, scalars or (nkx, nky) fields.
     """
     bn, bt_frac, parseval = geom["bn"], geom["bt_frac"], geom["parseval"]
     rfun, efun, d2X, signB = geom["rfun"], geom["efun"], geom["d2X"], geom["signB"]
@@ -72,12 +74,16 @@ def calculate_fluxes_kinetic(
     phi: jnp.ndarray,
     reduce: bool = True,
 ) -> jnp.ndarray:
-    """Per-species fluxes for the kinetic case.
+    """Particle, heat and momentum flux of every species.
 
-    df: (nsp, nvpar, nmu, ns, nkx, nky).
+    Args:
+        geometry: Geometry dict with per-species arrays.
+        df: Distribution, (nsp, nvpar, nmu, ns, nkx, nky).
+        phi: Potential, (ns, nkx, nky).
+        reduce: Sum over (kx, ky).
 
-    reduce=True  (default): returns (nsp, 3): scalar [pflux, eflux, vflux] per species.
-    reduce=False:           returns (nsp, 3, nkx, nky): per-(kx, ky) flux fields.
+    Returns:
+        (nsp, 3), or (nsp, 3, nkx, nky) without ``reduce``; columns pflux, eflux, vflux.
     """
     nsp = df.shape[0]
 
@@ -102,23 +108,24 @@ def calculate_em_fluxes(
     pre: Optional[Precompute] = None,
     reduce: bool = True,
 ) -> Any:
-    """Electromagnetic flux contributions from A_parallel and B_parallel.
+    """Electromagnetic (flutter) fluxes of A_par and B_par.
 
-    reduce=True  (default): returns scalar (em_pflux, em_eflux, em_vflux) for 5D df,
-                            or (nsp, 3) for 6D df.
-    reduce=False:           returns per-(kx, ky) flux fields: (nkx, nky) for 5D,
-                            (nsp, 3, nkx, nky) for 6D.
+    The EM parts of GKW's generalised-potential flux ``f conj(chi)``
+    (``diagnos_fluxes_vspace.F90``): A_par couples through ``-2 vthrat vpar J0 A_par``,
+    B_par through ``2 mu T / Z J1hat B_par``.
 
-    A_par flutter: coupling factor -2*vthrat*vpgr*conj(J0*apar)
-    B_par flutter: coupling factor +2*mugr*tmp/signz*conj(J1hat*bpar)
+    Args:
+        geometry: Geometry dict.
+        df: Distribution f, 5D or 6D.
+        apar: A_par, (ns, nkx, nky), or None.
+        params: Run parameters.
+        bpar: B_par, (ns, nkx, nky), or None (kinetic runs only).
+        pre: Precomputed coefficients, or None.
+        reduce: Sum over (kx, ky).
 
-    Adds the EM parts of the generalised-potential flux formula
-    `f * conj(chi)` with `chi = phi - 2·vthrat·vpar·apar + ...` used by
-    GKW's calc_fluxes_full_detail (diagnos_fluxes_vspace.F90:458-469).
-
-    df: 5D or 6D distribution. apar, bpar: (ns, nkx, nky) or None.
-    Returns: (em_pflux, em_eflux, em_vflux): scalars for 5D,
-    (nsp, 3) for 6D.
+    Returns:
+        ``(em_pflux, em_eflux, em_vflux)`` for 5D, (nsp, 3) for 6D; per (kx, ky)
+        without ``reduce``.
     """
     z = jnp.array(0.0, dtype=jnp.float64)
     if apar is None and bpar is None:
@@ -274,12 +281,19 @@ def get_integrals(
     adiabatic_electrons: bool = True,
     geom: Optional[Dict[str, jnp.ndarray]] = None,
 ) -> Tuple[jnp.ndarray, Any]:
-    """
-    Compute phi and fluxes from distribution function.
+    """Potential and fluxes of a distribution.
+
+    Args:
+        df: Distribution f, 5D (adiabatic) or 6D (kinetic).
+        geometry: Geometry dict.
+        params: Run parameters.
+        pre: Precomputed coefficients, or None.
+        adiabatic_electrons: Electron model; with False and 6D ``df`` the kinetic path.
+        geom: :func:`~gyaradax.operators.poisson.geom_tensors` dict to use, or None.
 
     Returns:
-        (phi, fluxes) where fluxes is (pflux, eflux, vflux) for adiabatic
-        or (nsp, 3) array for kinetic electrons.
+        ``(phi, fluxes)``: fluxes are ``(pflux, eflux, vflux)`` for adiabatic
+        electrons and an (nsp, 3) array for kinetic ones.
     """
     if not adiabatic_electrons and df.ndim == 6:
         phi = calculate_phi(geometry, df, params=params, pre=pre)

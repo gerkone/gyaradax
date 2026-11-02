@@ -1,7 +1,7 @@
 """Circular (Lapillonne) and s-alpha geometry.
 
 Port of ``geom_circ`` (geom.f90:1444-1616) and ``geom_s_alpha``
-(geom.f90:1110-1200). Both produce the same dict shape as
+(geom.f90:1312-1428). Both produce the same dict shape as
 ``_miller_geometry`` so the downstream tensor builder is unchanged.
 """
 

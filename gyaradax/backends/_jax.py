@@ -88,11 +88,11 @@ class _StencilTable:
 
 @jax.tree_util.register_pytree_node_class
 class JAXOps(SolverOps):
-    """JAX implementation of solver operations.
+    """Pure JAX implementation of the solver operations; differentiable.
 
-    Supports both R2C (real-to-complex) and Z2Z (complex-to-complex) FFTs
-    via the use_z2z flag. Mixed precision (FP32 FFTs) is controlled by
-    the mixed_precision flag.
+    The bracket uses R2C FFTs, or Z2Z with ``use_z2z``, in FP32 with
+    ``mixed_precision``. Kinetic runs vmap the linear RHS and the bracket over
+    species; large grids loop over species and vpar chunks in the bracket.
     """
 
     def __init__(self, pre: GKPre, use_z2z: bool = False, mixed_precision: bool = True, mesh=None):
@@ -321,13 +321,6 @@ class JAXOps(SolverOps):
         apar: jnp.ndarray | None = None,
         bpar: jnp.ndarray | None = None,
     ) -> jnp.ndarray:
-        """Nonlinear ExB advection with shape dispatch.
-
-        Dispatches on df.ndim: 5D direct, 6D via vmap over species with per-species bessel.
-        Mixed precision is controlled by self.mixed_precision (set at construction time).
-        chi_correction: velocity-dependent EM correction added to gyro_phi to form chi;
-        built from apar/bpar when those are given instead.
-        """
         if apar is not None or bpar is not None:
             if chi_correction is not None:
                 raise ValueError("pass either chi_correction or apar/bpar, not both")
@@ -564,12 +557,6 @@ class JAXOps(SolverOps):
         apar: jnp.ndarray | None = None,
         bpar: jnp.ndarray | None = None,
     ) -> jnp.ndarray:
-        """Linear RHS with shape dispatch.
-
-        Implements Terms I, II, IV, V, VII, VIII, X, XI + dissipation.
-        Dispatches on df.ndim: 5D direct, 6D via vmap over species.
-        When apar/bpar are provided, includes EM coupling terms.
-        """
         # stencils coupling velocity points run on the shards with halos (sharded runs only)
         extra: dict[str, Any] = {}
         if self.mesh is not None and self.mesh.shape["vp"] > 1:

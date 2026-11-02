@@ -73,19 +73,36 @@ def compute_geometry(
     geom_type: str = "circ",
     **miller_params: Any,
 ) -> Dict[str, Any]:
-    """Compute the geometry dict from equilibrium parameters.
+    """Geometry dict from local equilibrium parameters and the grid.
 
-    Continuous geometry is JAX (differentiable w.r.t. q, shat, eps and the
-    Miller shape parameters). Discrete topology (mode labels, connectivity)
-    uses numpy.
+    The continuous fields are JAX, differentiable in ``q``, ``shat``, ``eps`` and the
+    Miller shape parameters; the mode connectivity is built with numpy.
 
-    ``geom_type``:
+    Args:
+        q: Safety factor.
+        shat: Magnetic shear.
+        eps: Inverse aspect ratio r/R.
+        ns: Parallel grid points.
+        nkx: Radial modes.
+        nky: Binormal modes.
+        nvpar: Parallel-velocity points.
+        nmu: Magnetic-moment points.
+        vpar_max: Velocity box, in thermal velocities.
+        nperiod: The field line covers ``2 nperiod - 1`` poloidal turns.
+        kxmax: Largest kx; used with ``nky = 1`` or zero shear or eps (otherwise the shear sets the spacing).
+        krhomax: Largest ``k_theta rho``.
+        ikxspace: Connected modes are (2 nperiod - 1) * ikxspace * iy kx cells apart at the iy-th ky.
+        signB: Sign of the magnetic field.
+        signJ: Sign of the Jacobian.
+        Rref: Reference major radius.
+        geom_type: ``"circ"`` (Lapillonne circular), ``"s-alpha"``
+            (``theta = 2 pi s``, ``B = 1 / (1 + eps cos theta)``) or ``"miller"``.
+        miller_params: Miller shape parameters (``kappa``, ``delta``, ``square``,
+            ``skappa``, ``sdelta``, ``ssquare``, ``Zmil``, ``dRmil``, ``dZmil``).
 
-    - ``circ``: full Lapillonne circular model
-    - ``s-alpha``: simplified ``theta = 2 pi s``, ``B = 1 / (1 + eps cos(theta))``
-    - ``miller``: Miller parametrisation with elongation, triangularity and
-      squareness (shape parameters in :mod:`gyaradax.geometry.miller`, passed
-      through ``**miller_params``)
+    Returns:
+        Geometry dict: grids, integration weights, metric, ``B(s)``, drift tensors
+        and mode connectivity.
     """
     spec = geometry_spec_from_compute_kwargs(
         q=q,
@@ -255,19 +272,25 @@ def _oriented_topology(topology, q, shat, eps, signB, signJ):
 
 
 def build_topology(nkx, nky, ikxspace, ns, max_shift=4, nperiod=1, flip=None):
-    """Build the discrete-topology pytree for a (nkx, nky, ikxspace, ns) grid.
+    """Discrete topology of a grid: mode labels, parallel connectivity, stencil classes.
 
-    Topology depends only on grid shape, nperiod and the direction of the field
-    line in kx (``flip``, see ``connection_flip``: the sign of signB signJ q shat;
-    ``None`` keeps both orientations and picks one from (q, shat, eps) at use, also when traced),
-    not on the values of (q, shat, eps, miller): the twist-shift stride is an
-    integer number of kx cells by construction, since the radial grid spacing is
-    defined as the one-turn shift divided by ikxspace. The centered kx grid puts
-    zero at index (nkx-1)//2 and the ky grid starts at zero, so ixzero/iyzero
-    follow from the shape alone.
+    It depends only on the grid shape, ``nperiod`` and the direction of the field
+    line in kx, not on the values of (q, shat, eps): the radial spacing is the
+    one-turn shift divided by ``ikxspace``, so the shift is a whole number of kx
+    cells. Safe to close over inside ``jax.jit``.
 
-    Returns a dict of jnp.int32/bool/int8 arrays plus concrete python ints.
-    Safe to close over inside ``@jax.jit``.
+    Args:
+        nkx: Radial modes.
+        nky: Binormal modes.
+        ikxspace: Connected modes are (2 nperiod - 1) * ikxspace * iy kx cells apart at the iy-th ky.
+        ns: Parallel grid points.
+        max_shift: Half width of the parallel stencil.
+        nperiod: Poloidal turns parameter.
+        flip: Direction of the field line in kx (see ``connection_flip``); None keeps
+            both and picks one from (q, shat, eps) at use.
+
+    Returns:
+        Dict of int32 / bool / int8 arrays and Python ints.
     """
     half = (nkx - 1) // 2
     # surrogate grids for connectivity: zero positions are all that matters
@@ -327,13 +350,34 @@ def compute_continuous_geometry(
     topology: Mapping[str, Any] | None = None,
     **miller_params: Any,
 ) -> Dict[str, Any]:
-    """Continuous geometry with an optional injected prebuilt topology.
+    """Continuous geometry with an optional prebuilt topology; ``jit`` safe with one.
 
-    Differentiable w.r.t. ``q, shat, eps`` and the Miller shape parameters,
-    and safe inside ``@jax.jit`` when ``topology`` (from ``build_topology``)
-    is supplied -- the discrete connectivity is the only numpy stage, and it
-    depends on grid shape alone. This is the torax-plugin entry point: the
-    plugin caches ``build_topology`` per grid and jits over (q, shat, eps).
+    Differentiable in ``q``, ``shat``, ``eps`` and the Miller parameters. With
+    ``topology`` from :func:`build_topology` there is no numpy stage left, so it can
+    be jitted over (q, shat, eps), as the TORAX plugin does.
+
+    Args:
+        q: Safety factor.
+        shat: Magnetic shear.
+        eps: Inverse aspect ratio r/R.
+        ns: Parallel grid points.
+        nkx: Radial modes.
+        nky: Binormal modes.
+        nvpar: Parallel-velocity points.
+        nmu: Magnetic-moment points.
+        vpar_max: Velocity box, in thermal velocities.
+        nperiod: The field line covers ``2 nperiod - 1`` poloidal turns.
+        kxmax: Largest kx; used with ``nky = 1`` or zero shear or eps (otherwise the shear sets the spacing).
+        krhomax: Largest ``k_theta rho``.
+        ikxspace: Connected modes are (2 nperiod - 1) * ikxspace * iy kx cells apart at the iy-th ky.
+        signB: Sign of the magnetic field.
+        Rref: Reference major radius.
+        geom_type: ``"circ"``, ``"s-alpha"`` or ``"miller"``.
+        topology: Prebuilt topology, or None to build it.
+        miller_params: Miller shape parameters.
+
+    Returns:
+        Geometry dict.
     """
     spec = geometry_spec_from_compute_kwargs(
         q=q,
@@ -358,7 +402,14 @@ def compute_continuous_geometry(
 
 
 def create_geometry(spec: GeometrySpec) -> Dict[str, Any]:
-    """Create analytic geometry arrays from a normalized spec via the registry."""
+    """Geometry dict from a :class:`~gyaradax.geometry.spec.GeometrySpec`, through the model registry.
+
+    Args:
+        spec: Geometry specification.
+
+    Returns:
+        Geometry dict.
+    """
     try:
         model = get_geometry_model(spec.model)
     except KeyError as exc:
@@ -367,10 +418,15 @@ def create_geometry(spec: GeometrySpec) -> Dict[str, Any]:
 
 
 def geometry_spec_from_input_dat(input_dat_path: str) -> GeometrySpec:
-    """Build a ``GeometrySpec`` from a GKW input.dat file.
+    """:class:`~gyaradax.geometry.spec.GeometrySpec` from a GKW ``input.dat``.
 
-    Preserves the historical ``compute_geometry_from_input`` defaults,
-    including absent ``geom_type`` -> ``s-alpha``.
+    A missing ``geom_type`` means s-α, as in GKW.
+
+    Args:
+        input_dat_path: Path to ``input.dat``.
+
+    Returns:
+        GeometrySpec.
     """
     from gyaradax.io.gkw import parse_input_dat
 
@@ -451,28 +507,42 @@ def geometry_spec_from_input_dat(input_dat_path: str) -> GeometrySpec:
 
 
 def compute_geometry_from_config(cfg: Any) -> Dict[str, Any]:
-    """Compute analytic geometry from a YAML/OmegaConf-style config.
+    """Analytic geometry from a YAML config; circular when ``geometry.geometry_model`` is missing.
 
-    Missing ``geometry.geometry_model`` preserves the historical config-wrapper
-    default of circular geometry.
+    Args:
+        cfg: Config (OmegaConf or dict).
+
+    Returns:
+        Geometry dict.
     """
     return create_geometry(geometry_spec_from_config(cfg))
 
 
 def compute_geometry_from_input(input_dat_path: str) -> Dict[str, Any]:
-    """Compute geometry from a GKW input.dat file.
+    """Analytic geometry from a GKW ``input.dat``.
 
-    Reads kxrh and vpgr.dat from the same directory if available; falls
-    back to approximate formulas otherwise.
+    Uses ``kxrh`` and ``vpgr.dat`` from the same directory when they exist.
+
+    Args:
+        input_dat_path: Path to ``input.dat``.
+
+    Returns:
+        Geometry dict.
     """
     return create_geometry(geometry_spec_from_input_dat(input_dat_path))
 
 
 def geometry_from_geom_dat_and_input(input_dat_path: str) -> Dict[str, Any]:
-    """Build geometry from a GKW geom.dat + grids from input.dat.
+    """Geometry from a GKW ``geom.dat`` with the grids of ``input.dat``.
 
-    Use this for geometry types not supported by the analytic models
-    (e.g. slab_periodic) when reference/geom.dat is available.
+    For geometries the analytic models do not cover (e.g. ``slab_periodic``) when
+    ``reference/geom.dat`` is available.
+
+    Args:
+        input_dat_path: Path to ``input.dat``.
+
+    Returns:
+        Geometry dict.
     """
     from gyaradax.io.gkw import parse_input_dat, load_geom_dat_file
 
