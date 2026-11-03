@@ -1,9 +1,9 @@
+import json
 import os
 import re
 import pytest
 import numpy as np
 from gyaradax import load_geometry
-from gyaradax.io import reference_data as refdata
 from gyaradax.core.jax_config import enable_x64
 
 enable_x64()
@@ -94,12 +94,17 @@ def read_dump_dtim(dat_path):
 
 # ── GKW reference runs ───────────────────────────────────────────────────────
 # Cases and dump pairs come from tests/data/gkw_reference.json, a copy of the
-# manifest of the Hugging Face dataset (gyaradax.io.reference_data). They are
-# read from $GYARADAX_TEST_DATA and downloaded only with --download-test-data,
-# GYARADAX_DOWNLOAD_TEST_DATA=1 or download_test_data = true in the pytest ini
-# options; otherwise the tests that need them skip.
+# manifest of the Hugging Face dataset. They are read from $GYARADAX_TEST_DATA
+# and downloaded only with --download-test-data, GYARADAX_DOWNLOAD_TEST_DATA=1
+# or download_test_data = true in the pytest ini options; otherwise the tests
+# that need them skip.
 
-REFERENCE = refdata.load_manifest(os.path.join(os.path.dirname(__file__), "data", "gkw_reference.json"))
+REPO_ID = "gerkone/gyaradax-tests"
+DATA_ROOT = os.path.abspath(
+    os.path.expanduser(os.environ.get("GYARADAX_TEST_DATA") or "~/.cache/gyaradax/test_data")
+)
+with open(os.path.join(os.path.dirname(__file__), "data", "gkw_reference.json")) as _f:
+    REFERENCE = json.load(_f)
 NONLINEAR_CASES = sorted(REFERENCE["cases"]["nonlinear"])
 LINEAR_CASES = sorted(REFERENCE["cases"]["linear"])
 KINETIC_CASES = sorted(REFERENCE["cases"]["kinetic"])
@@ -110,7 +115,7 @@ def pytest_addoption(parser):
     parser.addoption(
         "--download-test-data",
         action="store_true",
-        help=f"download missing GKW reference cases from {refdata.REPO_ID} into ${refdata.ENV_ROOT}",
+        help=f"download missing GKW reference cases from {REPO_ID} into $GYARADAX_TEST_DATA",
     )
     parser.addini(
         "download_test_data",
@@ -120,20 +125,42 @@ def pytest_addoption(parser):
     )
 
 
-def _reference_dir(request, kind):
-    config = request.config
-    download = (
+def _download_requested(config):
+    return (
         config.getoption("--download-test-data")
         or config.getini("download_test_data")
-        or refdata.download_requested()
+        or os.environ.get("GYARADAX_DOWNLOAD_TEST_DATA", "").lower() in ("1", "true", "yes")
     )
-    path = refdata.case_dir(REFERENCE, kind, request.param, download=download)
-    if path is None:
+
+
+def _complete(path, files):
+    return all(
+        os.path.isfile(os.path.join(path, f)) and os.path.getsize(os.path.join(path, f)) == meta["size"]
+        for f, meta in files.items()
+    )
+
+
+def reference_dir(request, kind, name):
+    """Directory of a reference case, downloaded first when asked; skips when missing."""
+    files = REFERENCE["cases"][kind][name]["files"]
+    path = os.path.join(DATA_ROOT, kind, name)
+    if not _complete(path, files) and _download_requested(request.config):
+        try:
+            from huggingface_hub import snapshot_download
+        except ImportError:
+            pytest.skip("downloading the GKW reference runs needs huggingface_hub: pip install -e '.[test]'")
+        snapshot_download(
+            repo_id=REPO_ID, repo_type="dataset", local_dir=DATA_ROOT, allow_patterns=[f"{kind}/{name}/*"]
+        )
+    if not _complete(path, files):
         pytest.skip(
-            f"GKW reference case {kind}/{request.param} not found under {refdata.data_root()}; "
-            "pass --download-test-data to fetch it"
+            f"GKW reference case {kind}/{name} not found under {DATA_ROOT}; pass --download-test-data to fetch it"
         )
     return path
+
+
+def _reference_dir(request, kind):
+    return reference_dir(request, kind, request.param)
 
 
 def reference_case(path):

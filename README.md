@@ -193,12 +193,7 @@ solver:
 python -m pytest tests/ -x -q
 ```
 
-Most tests compare against GKW reference runs. They are on Hugging Face
-([gerkone/gyaradax-tests](https://huggingface.co/datasets/gerkone/gyaradax-tests))
-and skip unless downloaded: `pip install -e ".[test]"`, then add
-`--download-test-data`. The files go to `$GYARADAX_TEST_DATA`
-(default `~/.cache/gyaradax/test_data`). [CONTRIBUTING.md](CONTRIBUTING.md) covers
-the tests, how to show that a change keeps long runs unchanged, and the open work.
+Most tests compare against GKW reference runs on Hugging Face ([gerkone/gyaradax-tests](https://huggingface.co/datasets/gerkone/gyaradax-tests)) and skip unless downloaded: `pip install -e ".[test]"`, then add `--download-test-data`. The files go to `$GYARADAX_TEST_DATA` (default `~/.cache/gyaradax/test_data`). [CONTRIBUTING.md](CONTRIBUTING.md) covers the tests, how to show that a change keeps long runs unchanged, and the open work.
 
 ## State of the project
 

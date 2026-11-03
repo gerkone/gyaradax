@@ -10,8 +10,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from conftest import REFERENCE, reference_dumps  # type: ignore[import-not-found]
-from gyaradax.io import reference_data as refdata
+from conftest import reference_dir, reference_dumps  # type: ignore[import-not-found]
 from gyaradax.quasilinear import calibration
 from gyaradax.quasilinear.rules import RULES, dlnpdr_tglf, ql_flux, ql_flux_per_species
 
@@ -349,10 +348,7 @@ class TestKineticIntegration:
     def kinetic_arr(self, request):
         from gyaradax.quasilinear.linear_pipeline import linear_from_fds
 
-        download = request.config.getoption("--download-test-data") or refdata.download_requested()
-        path = refdata.case_dir(REFERENCE, "kinetic", KINETIC_CASE, download=download)
-        if path is None:
-            pytest.skip(f"GKW reference case kinetic/{KINETIC_CASE} not found under {refdata.data_root()}")
+        path = reference_dir(request, "kinetic", KINETIC_CASE)
         return linear_from_fds(path, dump=reference_dumps(path)[-1])
 
     def test_harvest_shapes_and_consistency(self, kinetic_arr):

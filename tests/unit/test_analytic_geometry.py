@@ -8,8 +8,7 @@ import pytest
 import jax
 import jax.numpy as jnp
 
-from conftest import KINETIC_CASES, LINEAR_CASES, NONLINEAR_CASES, REFERENCE  # type: ignore[import-not-found]
-from gyaradax.io import reference_data as refdata
+from conftest import KINETIC_CASES, LINEAR_CASES, NONLINEAR_CASES, reference_dir  # type: ignore[import-not-found]
 from gyaradax.io.gkw import load_geometry, parse_input_dat
 from gyaradax.geometry import compute_geometry, compute_geometry_from_input
 
@@ -18,12 +17,7 @@ KINETIC = [("kinetic", n) for n in KINETIC_CASES]
 
 
 def _case(request):
-    kind, name = request.param
-    download = request.config.getoption("--download-test-data") or refdata.download_requested()
-    path = refdata.case_dir(REFERENCE, kind, name, download=download)
-    if path is None:
-        pytest.skip(f"GKW reference case {kind}/{name} not found under {refdata.data_root()}")
-    return path
+    return reference_dir(request, *request.param)
 
 
 @pytest.fixture(params=ADIABATIC, ids=lambda c: f"{c[0]}/{c[1]}")
