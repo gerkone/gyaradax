@@ -15,10 +15,10 @@ provides, and `gyaradax bench CONFIG` measures a config on your GPU.
 
 ## Throughput
 
-Both grids are the production grids of the configs in the repository, as $(n_{sp}, n_{v_\parallel}, n_\mu, n_s, n_{k_x}, n_{k_y})$:
+All timings on this page use two configs of the repository, with these grids $(n_{sp}, n_{v_\parallel}, n_\mu, n_s, n_{k_x}, n_{k_y})$:
 
-- adiabatic: 32, 8, 16, 85, 32 (`configs/iteration_13.yaml`),
-- kinetic: 2, 32, 12, 18, 192, 32 (`configs/kinetic.yaml`).
+- adiabatic: `configs/adiabatic/nonlinear/itg_high_shear.yaml`, grid 32, 8, 16, 85, 32;
+- kinetic: `configs/kinetic/nonlinear/benchmark.yaml`, grid 2, 32, 12, 18, 192, 32.
 
 The columns are the backends and kernel options of the `solver` section:
 
@@ -55,7 +55,7 @@ The same two cases in other codes, on the same GPUs:
 - **[CGYRO](https://github.com/gafusion/gacode)**: gacode commit 1df9cdc, built with NVHPC 26.3 (OpenACC and cuFFT), one MPI rank per GPU. FP64, default velocity space $(n_\xi, n_{energy})$ = (16, 8), so 128 points. RK4 with a fixed step: $0.01\,R/v_{th}$ adiabatic, about $0.001\,R/v_{th}$ kinetic (a step 2.5 times larger exceeds its error limit). `COLLISION_MODEL=5`, its cheapest collision step, at zero collision frequency. 84 radial modes on the adiabatic grid. The B300 has a small fraction of the H100's FP64 throughput, and CGYRO runs slower on it than on the H100.
 - **GKW\***: nonlinear GKW runs on the same grids, on CPU nodes: 64 Ice Lake cores (adiabatic) and 96 to 128 cores (kinetic). FP64, RK4, circular geometry.
 
-The GPU runs use s-alpha geometry with the $q$, $\hat s$, $\epsilon$ and gradients of the production configs. They are electrostatic and collisionless, on the same $(n_s, n_{k_x}, n_{k_y})$ and the same box. Nothing is printed or written during the timed steps. Each code keeps its own time stepper and dissipation, so the step sizes differ. The tables therefore report simulated time per wall-clock hour, in $[R/v_{th}]$/h, with the step rate in brackets for comparison with the throughput tables above.
+The GPU runs use s-alpha geometry with the $q$, $\hat s$, $\epsilon$ and gradients of these two configs. They are electrostatic and collisionless, on the same $(n_s, n_{k_x}, n_{k_y})$ and the same box. Nothing is printed or written during the timed steps. Each code keeps its own time stepper and dissipation, so the step sizes differ. The tables therefore report simulated time per wall-clock hour, in $[R/v_{th}]$/h, with the step rate in brackets for comparison with the throughput tables above.
 
 Simulated time is measured in $R/v_{th}$, the time a thermal ion with $v_{th} = \sqrt{2T/m}$ takes to cross one major radius $R$ (GKW units, other codes converted). A rate of 1000 $[R/v_{th}]$/h means one hour of wall time advances the simulation by $1000\,R/v_{th}$. Higher is better.
 
@@ -92,7 +92,7 @@ Each RK4 stage solves the fields (velocity moments of the distribution), applies
 
 ## Optimisations
 
-The speed of `gyaradax` comes from a stack of changes, each building on the previous one. The stages below were measured one at a time on one B300 with `gyaradax bench` (median of four timed blocks of 30 steps, after compilation), on the production grids above. Every stage keeps all the changes above it and adds one. The total is about 13x on the adiabatic grid and 17x on the kinetic grid.
+The speed of `gyaradax` comes from a stack of changes, each building on the previous one. The stages below were measured one at a time on one B300 with `gyaradax bench` (median of four timed blocks of 30 steps, after compilation), with the two configs above. Every stage keeps all the changes above it and adds one. The total is about 13x on the adiabatic grid and 17x on the kinetic grid.
 
 ```{figure} ../_static/figs/perf/stages.png
 :width: 100%

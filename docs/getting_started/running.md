@@ -55,9 +55,9 @@ A resumed run continues the solver state bitwise as if it had not stopped, appen
 Configs that share the grid and the static parameters run batched under one `jax.vmap`. Each writes its own run directory exactly as a single run would:
 
 ```bash
-gyaradax run configs/case_a.yaml configs/case_b.yaml
-gyaradax run configs/case_a.yaml configs/case_b.yaml --output-dir scan   # scan/<run.name>
-gyaradax run scan/case_a scan/case_b --n-steps 2000                      # resume both
+gyaradax run configs/adiabatic/nonlinear/itg_high_shear.yaml configs/adiabatic/nonlinear/itg_weak_drive.yaml
+gyaradax run configs/adiabatic/nonlinear/itg_high_shear.yaml configs/adiabatic/nonlinear/itg_weak_drive.yaml --output-dir scan   # scan/<run.name>
+gyaradax run scan/itg_high_shear scan/itg_weak_drive --n-steps 2000                                     # resume both
 ```
 
 Members may differ in array-valued settings (gradients, `beta`, ...). Configs that cannot share one solve (different grids, geometries, start steps, cadence, sharded runs, or different static parameters such as `dt`, the dissipation coefficients or the species masses) run one after another. A member that diverges stops writing while the others continue.
@@ -97,7 +97,7 @@ gyaradax run my_case.yaml --debug       # both
 ## Benchmarking
 
 ```bash
-gyaradax bench configs/adiabatic_a.yaml --device 0 --backend cuda --steps 100 --blocks 5
+gyaradax bench configs/adiabatic/nonlinear/itg_high_shear.yaml --device 0 --backend cuda --steps 100 --blocks 5
 ```
 
 `bench` always cold-starts, does no I/O and reports the steady-state median steps per second (the first block carries the compilation), plus the peak device memory. `--profile` adds the per-kernel breakdown.

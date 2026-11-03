@@ -35,16 +35,16 @@ GRIDS = {"small": SMALL_GRID, "pow2": POW2_GRID, "tiled": TILED_GRID, "nky23": N
 _OLD_COLL = dict(coll_freq=0.05, coll_freq_override=True, coll_mass_conserve=True)
 
 CASES = {
-    "kinetic_es": ("nl_em_waltz_b01.yaml", dict(nlapar=False, beta=0.0)),
-    "kinetic_apar": ("nl_em_waltz_b01.yaml", dict()),
-    "kinetic_apar_bpar": ("nl_em_waltz_b01.yaml", dict(nlbpar=True)),
-    "kinetic_bpar": ("nl_em_waltz_b01.yaml", dict(nlapar=False, nlbpar=True)),
-    "kinetic_apar_dpc": ("nl_em_waltz_b01.yaml", dict(disp_par_conserve=1)),
-    "kinetic_apar_dpc3": ("nl_em_waltz_b01.yaml", dict(disp_par_conserve=3)),
-    "adiabatic_apar": ("iteration_13.yaml", dict(non_linear=True, nlapar=True, beta=0.002)),
-    "adiabatic_collisions": ("iteration_13.yaml", dict(collisions=True, **_OLD_COLL)),
+    "kinetic_es": ("em/nl_em_waltz_b01.yaml", dict(nlapar=False, beta=0.0)),
+    "kinetic_apar": ("em/nl_em_waltz_b01.yaml", dict()),
+    "kinetic_apar_bpar": ("em/nl_em_waltz_b01.yaml", dict(nlbpar=True)),
+    "kinetic_bpar": ("em/nl_em_waltz_b01.yaml", dict(nlapar=False, nlbpar=True)),
+    "kinetic_apar_dpc": ("em/nl_em_waltz_b01.yaml", dict(disp_par_conserve=1)),
+    "kinetic_apar_dpc3": ("em/nl_em_waltz_b01.yaml", dict(disp_par_conserve=3)),
+    "adiabatic_apar": ("adiabatic/nonlinear/itg_high_shear.yaml", dict(non_linear=True, nlapar=True, beta=0.002)),
+    "adiabatic_collisions": ("adiabatic/nonlinear/itg_high_shear.yaml", dict(collisions=True, **_OLD_COLL)),
     "adiabatic_collisions_cons": (
-        "iteration_13.yaml",
+        "adiabatic/nonlinear/itg_high_shear.yaml",
         dict(
             collisions=True, **_OLD_COLL, coll_mom_conservation=True, coll_ene_conservation=True
         ),

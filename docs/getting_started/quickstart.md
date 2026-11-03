@@ -2,18 +2,18 @@
 
 ## From the command line
 
-Every run is described by a YAML config. Command-line flags only override it. `configs/iteration_13.yaml` is a nonlinear adiabatic ITG case on the standard grid ($n_{v_\parallel}, n_\mu, n_s, n_{k_x}, n_{k_y}$) = (32, 8, 16, 85, 32):
+Every run is described by a YAML config. Command-line flags only override it. `configs/adiabatic/nonlinear/itg_high_shear.yaml` is a nonlinear adiabatic ITG case on the standard grid ($n_{v_\parallel}, n_\mu, n_s, n_{k_x}, n_{k_y}$) = (32, 8, 16, 85, 32):
 
 ```bash
-gyaradax run configs/iteration_13.yaml --device 0 --backend cuda
+gyaradax run configs/adiabatic/nonlinear/itg_high_shear.yaml --device 0 --backend cuda --n-steps 400
 ```
 
 `--device 0` sets `CUDA_VISIBLE_DEVICES=0`. On a shared machine pick a free GPU, or leave the flag out and set `CUDA_VISIBLE_DEVICES` yourself. `XLA_PYTHON_CLIENT_PREALLOCATE=false` stops JAX from taking 75 % of the GPU memory at start. The backend defaults to `jax`. `--backend cuda` uses the CUDA kernels once they are built (2.6x faster on an A100 here), and `backend: auto` in the config picks them when they are available.
 
-The config runs 400 steps (t = 4), still in the linear phase. The run writes `outputs_adiabatic_iteration_13/`: the effective config (`config.yaml`), the geometry, the diagnostic histories (`fluxes.npz`, `fluxes_em.npz`, `kyspec.npz`, `kxspec.npz`, `growth.npz`, `dt_history.npz`), `run_info.jsonl` and a restart snapshot `step_NNNNNN.npz`. Only the latest snapshot is kept (about 180 MB on this grid). Pass the directory instead of the config to continue it. On a resume `--n-steps` adds steps:
+The config holds the whole GKW run it reproduces (32 000 steps, t = 320); `--n-steps 400` stops at t = 4, still in the linear phase. The run writes `outputs_adiabatic_itg_high_shear/`: the effective config (`config.yaml`), the geometry, the diagnostic histories (`fluxes.npz`, `fluxes_em.npz`, `kyspec.npz`, `kxspec.npz`, `growth.npz`, `dt_history.npz`), `run_info.jsonl` and a restart snapshot `step_NNNNNN.npz`. Only the latest snapshot is kept (about 180 MB on this grid). Pass the directory instead of the config to continue it. On a resume `--n-steps` adds steps:
 
 ```bash
-gyaradax run outputs_adiabatic_iteration_13 --n-steps 12000 --backend cuda   # to t = 124, saturated
+gyaradax run outputs_adiabatic_itg_high_shear --n-steps 12000 --backend cuda   # to t = 124, saturated
 ```
 
 The heat flux of the run:
@@ -22,14 +22,14 @@ The heat flux of the run:
 import numpy as np
 import matplotlib.pyplot as plt
 
-h = np.load("outputs_adiabatic_iteration_13/fluxes.npz")
+h = np.load("outputs_adiabatic_itg_high_shear/fluxes.npz")
 plt.plot(h["time"], h["fluxes"][:, 1])   # columns: particle, heat, momentum flux
 plt.xlabel("t [R/v_th]")
 plt.ylabel("Q_i")
 plt.savefig("heat_flux.png")
 ```
 
-Kinetic electrons, electromagnetic fields and collisions are switched on in the config, not with flags: `configs/kinetic.yaml`, `configs/nl_em_apar.yaml` and `configs/kinetic_collisions.yaml` are examples. {doc}`running` covers the remaining commands and options.
+Kinetic electrons, electromagnetic fields and collisions are switched on in the config, not with flags: `configs/kinetic/nonlinear/benchmark.yaml`, `configs/em/nl_em_apar.yaml` and `configs/kinetic/nonlinear/itg_mid_flux.yaml` are examples. {doc}`running` covers the remaining commands and options.
 
 ## From Python
 
@@ -38,7 +38,7 @@ The same run, step by step:
 ```python
 import gyaradax as gyx
 
-df, geometry, params, state, pre = gyx.gk_from_config("configs/iteration_13.yaml")
+df, geometry, params, state, pre = gyx.gk_from_config("configs/adiabatic/nonlinear/itg_high_shear.yaml")
 df, phi, fluxes, state = gyx.gk_run(df, geometry, params, state, 400, pre=pre)
 pflux, eflux, vflux = fluxes
 ```

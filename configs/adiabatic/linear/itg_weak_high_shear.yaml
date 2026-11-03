@@ -1,0 +1,51 @@
+# reference: linear/itg_weak_high_shear/linear.json; GKW run, weakest growth, high shear
+run:
+  name: itg_weak_high_shear_linear
+solver:
+  dt: 0.01
+  naverage: 40
+  n_steps: 32000
+  dump_interval: 3
+  disp_par: 1.0
+  disp_vp: 0.2
+  disp_x: 0.1
+  disp_y: 0.1
+  idisp: 2
+  non_linear: false
+  adaptive_dt: false
+  finit: cosine2
+physics:
+  rlt: 6.363221542893207
+  rln: 0.617557878969428
+  mas: 1.0
+  tmp: 1.0
+  de: 1.0
+  signz: 1.0
+  vthrat: 1.0
+  dgrid: 1.0
+  tgrid: 1.0
+geometry:
+  shat: 1.95431
+  q: 6.29957
+  eps: 0.19
+  kthnorm: 4.35563
+  Rref: 100.0
+  d2X: 1.0
+  signB: 1.0
+  signJ: 1.0
+  dvp: 0.1875
+  sgr_dist: 0.0625
+  kxmax: 5.64345
+  kymax: 0.3214230777178043
+  geometry_model: circ
+grid:
+  nvpar: 32
+  nmu: 8
+  ns: 16
+  nkx: 85
+  nky: 32
+  adiabatic_electrons: true
+  krhomax: 1.4
+  ikxspace: 5
+  nperiod: 1
+  vpar_max: 3.0

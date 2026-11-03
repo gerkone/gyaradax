@@ -61,7 +61,7 @@ scripts/
 tests/
   conftest.py    — fixtures, helpers, backend registry (JAX_BACKENDS, CUDA_BACKENDS, ALL_BACKENDS)
   unit/          — pytest suite
-configs/         — YAML configs for simulations and validation sweeps
+configs/         — YAML configs: adiabatic/ and kinetic/ (nonlinear, linear; the HF reference runs and the benchmark cases), em/
 gkw_ref/         — GKW Fortran source and manual (read-only reference)
 docs/            — Sphinx docs: getting_started/, performance/, numerics/, verification/, api/
 ```
@@ -199,11 +199,11 @@ Use the `gyaradax` console script (implemented in `gyaradax/cli.py`; see
 the config — there is no `--kinetic` flag any more.
 
 ```bash
-gyaradax run configs/iteration_13.yaml --device=N     # adiabatic
-gyaradax run configs/kinetic.yaml --device=N          # kinetic (auto-detected)
-gyaradax run configs/nl_em_apar.yaml --n-gpus 4      # EM, sharded over 4 GPUs (layout from the grid)
+gyaradax run configs/adiabatic/nonlinear/itg_high_shear.yaml --device=N     # adiabatic
+gyaradax run configs/kinetic/nonlinear/benchmark.yaml --device=N          # kinetic (auto-detected)
+gyaradax run configs/em/nl_em_apar.yaml --n-gpus 4      # EM, sharded over 4 GPUs (layout from the grid)
 gyaradax run outputs_kinetic_my_case                 # resume / extend a previous run directory
-gyaradax bench configs/adiabatic_a.yaml --backend=cuda
+gyaradax bench configs/adiabatic/nonlinear/itg_high_shear.yaml --backend=cuda
 gyaradax convert /path/to/gkw_run configs/my_case.yaml
 gyaradax info
 ```

@@ -15,15 +15,15 @@ pytestmark = pytest.mark.skipif(not HAS_CUDA, reason="CUDA not available")
 GRID = dict(nvpar=32, nmu=8, ns=16, nkx=85, nky=32)
 
 CASES = {
-    "adiabatic": ("iteration_13.yaml", dict(non_linear=False)),
-    "adiabatic_nl": ("iteration_13.yaml", dict(non_linear=True)),
-    "kinetic": ("kinetic.yaml", dict(non_linear=False, adaptive_dt=False)),
+    "adiabatic": ("adiabatic/nonlinear/itg_high_shear.yaml", dict(non_linear=False)),
+    "adiabatic_nl": ("adiabatic/nonlinear/itg_high_shear.yaml", dict(non_linear=True)),
+    "kinetic": ("kinetic/nonlinear/benchmark.yaml", dict(non_linear=False, adaptive_dt=False)),
     "kinetic_collisions": (
-        "kinetic.yaml",
+        "kinetic/nonlinear/benchmark.yaml",
         dict(non_linear=False, adaptive_dt=False, collisions=True, coll_freq=1e-3),
     ),
     "kinetic_collisions_cons": (
-        "kinetic.yaml",
+        "kinetic/nonlinear/benchmark.yaml",
         dict(
             non_linear=False, adaptive_dt=False, collisions=True, coll_freq=1e-3,
             coll_mom_conservation=True, coll_ene_conservation=True,
@@ -73,7 +73,7 @@ def test_fused_linear_any_grid(grid):
 @pytest.mark.parametrize("fused", [False, True])
 def test_vmap_matches_single_calls(fused):
     df, geometry, params, _ = noisy_case(
-        "kinetic.yaml", GRID, {**CASES["kinetic"][1], "fused_linear": fused, "backend": "cuda"},
+        "kinetic/nonlinear/benchmark.yaml", GRID, {**CASES["kinetic"][1], "fused_linear": fused, "backend": "cuda"},
         seed=7, mixed_precision=False,
     )
     pre = linear_precompute(geometry, params)

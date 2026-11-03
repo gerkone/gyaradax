@@ -5,7 +5,7 @@ A run config is a YAML file with the sections below, in this order. Names follow
 
 ```yaml
 run:
-  name: iteration_13
+  name: itg_high_shear
   data_dir: null           # GKW run directory: geometry from its geom.dat, resume from its K-files
 solver:
   dt: 0.01                 # time stepping
@@ -164,7 +164,7 @@ Configs written by `gyaradax convert` also store derived values (`kthnorm`, `dvp
 
 ### Choosing the grid
 
-- `nkx` and `ikxspace` fix the radial box. The kx spacing follows the magnetic shear, so that at the `iy`-th ky the modes `(2 nperiod - 1) ikxspace iy` cells apart connect through the ends of the field line. Kinetic runs need a larger `nkx` than adiabatic ones: `configs/kinetic.yaml` uses 192, `configs/iteration_13.yaml` 85.
+- `nkx` and `ikxspace` fix the radial box. The kx spacing follows the magnetic shear, so that at the `iy`-th ky the modes `(2 nperiod - 1) ikxspace iy` cells apart connect through the ends of the field line. Kinetic runs need a larger `nkx` than adiabatic ones: `configs/kinetic/nonlinear/benchmark.yaml` uses 192, `configs/adiabatic/nonlinear/itg_high_shear.yaml` 85.
 - `ns` points cover `2 nperiod - 1` poloidal turns. Linear benchmarks need enough of them to resolve Landau damping: the Cyclone Base Case uses `ns = 160` with `nperiod = 5`. At `ns = 16` its growth rates come out too high.
 - The FFT lengths of the nonlinear term follow from `nkx` and `nky`, see
   {doc}`../performance/index` for sizes that run fastest.

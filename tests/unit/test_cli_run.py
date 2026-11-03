@@ -22,7 +22,7 @@ STATE_KEYS = (
 
 @pytest.fixture
 def tiny_config(tmp_path):
-    cfg = OmegaConf.load(os.path.join(REPO_ROOT, "configs", "nl_em_waltz_b01.yaml"))
+    cfg = OmegaConf.load(os.path.join(REPO_ROOT, "configs", "em", "nl_em_waltz_b01.yaml"))
     for key, value in dict(nvpar=8, nmu=2, ns=8, nkx=11, nky=5).items():
         cfg.grid[key] = value
     cfg.run.pop("data_dir", None)

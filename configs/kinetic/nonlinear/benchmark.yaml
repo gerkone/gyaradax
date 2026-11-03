@@ -1,6 +1,6 @@
-# collisionless kinetic run from the isambard kinetic campaign (iteration_670): q_i ~ 5.3, steady from t ~ 120
+# kinetic case of the performance benchmarks (docs/performance): collisionless, q 3.16, shat 3.82, R/L_T 6.4 (ions) and 7.8 (electrons), T_e/T_i 1.72
 run:
-  name: kinetic_example
+  name: kinetic_benchmark
 solver:
   dt: 0.004
   naverage: 40

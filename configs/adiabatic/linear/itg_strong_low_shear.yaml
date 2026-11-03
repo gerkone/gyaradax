@@ -1,9 +1,10 @@
+# reference: linear/itg_strong_low_shear/linear.json; GKW run, strongest growth, low shear
 run:
-  name: linear_example
+  name: itg_strong_low_shear_linear
 solver:
   dt: 0.01
   naverage: 40
-  n_steps: 400
+  n_steps: 32000
   dump_interval: 3
   disp_par: 1.0
   disp_vp: 0.2
@@ -12,10 +13,10 @@ solver:
   idisp: 2
   non_linear: false
   adaptive_dt: false
-  finit: cosine2
+  finit: noise
 physics:
-  rlt: 10.173595669502436
-  rln: 2.6087803694867335
+  rlt: 10.914123474619728
+  rln: 0.9394721738501743
   mas: 1.0
   tmp: 1.0
   de: 1.0
@@ -24,18 +25,19 @@ physics:
   dgrid: 1.0
   tgrid: 1.0
 geometry:
-  geometry_model: circ
-  shat: 3.07514
-  q: 4.56844
+  shat: 0.574215
+  q: 8.05599
   eps: 0.19
-  kthnorm: 3.16004
+  kthnorm: 5.56903
   Rref: 100.0
   d2X: 1.0
   signB: 1.0
+  signJ: 1.0
   dvp: 0.1875
   sgr_dist: 0.0625
-  kxmax: 8.87631
-  kymax: 0.4430323666789028
+  kxmax: 1.65846
+  kymax: 0.25139027801969105
+  geometry_model: circ
 grid:
   nvpar: 32
   nmu: 8
@@ -43,7 +45,7 @@ grid:
   nkx: 85
   nky: 32
   adiabatic_electrons: true
-  vpar_max: 3.0
-  nperiod: 1
   krhomax: 1.4
   ikxspace: 5
+  nperiod: 1
+  vpar_max: 3.0

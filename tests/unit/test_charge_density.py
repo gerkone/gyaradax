@@ -19,7 +19,7 @@ def _close(actual, desired):
 
 @pytest.fixture(scope="module")
 def case():
-    df, geometry, params, _ = noisy_case("nl_em_waltz_b01.yaml", GRID, dict(nlapar=False), seed=3)
+    df, geometry, params, _ = noisy_case("em/nl_em_waltz_b01.yaml", GRID, dict(nlapar=False), seed=3)
     geom = dict(geometry)
     for key in ("mas", "signz", "tmp", "de", "vthrat"):
         geom[key] = jnp.asarray(getattr(params, key), dtype=jnp.float64).reshape(-1)

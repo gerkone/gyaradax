@@ -15,9 +15,9 @@ pytestmark = pytest.mark.skipif(not HAS_CUDA, reason="CUDA not available")
 GRID = dict(nvpar=32, nmu=8, ns=16, nkx=85, nky=32)
 
 CASES = {
-    "adiabatic": ("iteration_13.yaml", dict()),
-    "kinetic": ("kinetic.yaml", dict()),
-    "kinetic_collisions": ("kinetic.yaml", dict(collisions=True, coll_freq=1e-3)),
+    "adiabatic": ("adiabatic/nonlinear/itg_high_shear.yaml", dict()),
+    "kinetic": ("kinetic/nonlinear/benchmark.yaml", dict()),
+    "kinetic_collisions": ("kinetic/nonlinear/benchmark.yaml", dict(collisions=True, coll_freq=1e-3)),
 }
 
 
@@ -51,7 +51,7 @@ def test_ds_any_grid(grid):
 @pytest.mark.parametrize("fused", [False, True])
 def test_ds_vmap_matches_single_calls(fused):
     df, geometry, params, state = noisy_case(
-        "kinetic.yaml", GRID,
+        "kinetic/nonlinear/benchmark.yaml", GRID,
         {"linear_arith": "ds", "fused_linear": fused, "non_linear": False, "adaptive_dt": False,
          "backend": "cuda"},
         seed=5, mixed_precision=False,
@@ -70,6 +70,6 @@ def test_ds_vmap_matches_single_calls(fused):
 def test_ds_rejects_jax_backend():
     with pytest.raises(ValueError, match="linear_arith"):
         _, geometry, params, _ = noisy_case(
-            "iteration_13.yaml", GRID, {"linear_arith": "ds", "backend": "jax"}
+            "adiabatic/nonlinear/itg_high_shear.yaml", GRID, {"linear_arith": "ds", "backend": "jax"}
         )
         linear_precompute(geometry, params)

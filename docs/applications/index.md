@@ -6,6 +6,8 @@ Besides time stepping, `gyx` gives three tools built on the same linear operator
 - {doc}`quasilinear`: turbulent fluxes from one linear solve and a saturation rule.
 - {doc}`differentiable`: gradients of anything computed from a run, by JAX automatic differentiation, for sensitivities and inverse problems.
 
+{doc}`production` runs the reference configurations of the test dataset from scratch and compares them with long GKW runs.
+
 The examples on these pages share one small linear case: an ITG mode in circular geometry close to the Cyclone Base Case, on a $(n_{v_\parallel}, n_\mu, n_s, n_{k_x}, n_{k_y})$ = (24, 8, 16, 9, 8) grid. It runs in seconds on a GPU and in about a minute on a CPU.
 
 ```python
@@ -37,4 +39,5 @@ base = GKParams(
 eigenmodes
 quasilinear
 differentiable
+production
 ```

@@ -8,6 +8,8 @@ gyaradax output directories.
 
 import json
 import os
+import re
+import warnings
 
 import numpy as np
 from scipy import stats
@@ -103,7 +105,9 @@ def stationarity_test(x):
         adf_stat, adf_p = np.nan, np.nan
 
     try:
-        kpss_result = kpss_test(x, regression="c", nlags="auto")
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")  # p-value capped at the table edge
+            kpss_result = kpss_test(x, regression="c", nlags="auto")
         kpss_stat, kpss_p = float(kpss_result[0]), float(kpss_result[1])
     except Exception:
         kpss_stat, kpss_p = np.nan, np.nan
@@ -344,6 +348,20 @@ def reference_cases(root):
     return [(label, d) for label, d in cases if os.path.isdir(d)]
 
 
+def reference_configs(repo_root):
+    """Map each dataset JSON (``<label>/<kind>.json``) to its config in configs/, from the config headers."""
+    out = {}
+    for dirpath, _, files in os.walk(os.path.join(repo_root, "configs")):
+        for f in files:
+            if f.endswith(".yaml"):
+                path = os.path.join(dirpath, f)
+                with open(path) as fh:
+                    m = re.match(r"# reference: ([^;]+);", fh.readline())
+                for ref in (m.group(1).split(", ") if m else []):
+                    out[ref] = os.path.relpath(path, repo_root)
+    return out
+
+
 def load_reference(case_dir, kind="nonlinear"):
     path = os.path.join(case_dir, f"{kind}.json")
     return json.load(open(path)) if os.path.exists(path) else None
@@ -392,9 +410,10 @@ def compare_config(sim_dirs, ref, species=0):
 
     Returns
     -------
-    dict with all comparison results, or None when no run has diagnostics.
+    dict with all comparison results, or None when no run reaches the reference window.
     """
-    runs = [r for r in (load_run(d) for d in sim_dirs) if r is not None]
+    t_start = ref["average"]["window"][0]
+    runs = [r for r in (load_run(d) for d in sim_dirs) if r is not None and r["time"][-1] >= t_start]
     if not runs:
         return None
     rt = np.asarray(ref["time"])
@@ -439,7 +458,11 @@ def compare_config(sim_dirs, ref, species=0):
     sp = ref["species"][species]
     sim_windows = np.concatenate([r["fluxes"][_in(r["time"], run_window(r["time"], ref)), species] for r in runs])
     for i, (name, key) in enumerate(zip(FLUX_NAMES, FLUX_KEYS)):
-        results[key] = flux_comparison(sim_windows[:, i], np.asarray(ref["fluxes"][sp][name])[rmask])
+        ref_ts = np.asarray(ref["fluxes"][sp][name])[rmask]
+        # zero by construction, e.g. the particle flux with adiabatic electrons
+        if np.abs(ref_ts).max() <= 1e-12:
+            continue
+        results[key] = flux_comparison(sim_windows[:, i], ref_ts)
     return results
 
 
