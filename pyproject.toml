@@ -1,7 +1,7 @@
 [project]
 name = "gyaradax"
 authors = [{ name = "Gianluca Galletti" }, { name = "Eric Volkmann" }]
-version = "0.0.1"
+version = "0.2.0"
 description = "Gyrokinetic Vlasov-Poisson solver in JAX"
 requires-python = ">=3.12"
 dependencies = [
