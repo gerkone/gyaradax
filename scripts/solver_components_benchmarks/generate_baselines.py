@@ -23,7 +23,7 @@ from _runtime_config_loader import configure_runtime_env
 # parse --device before JAX import
 _p = argparse.ArgumentParser(add_help=False)
 _p.add_argument("--device", type=int, default=1)
-_p.add_argument("--config", type=str, default="configs/examples/iteration_13.yaml")
+_p.add_argument("--config", type=str, default="configs/adiabatic/nonlinear/itg_high_shear.yaml")
 _early, _ = _p.parse_known_args()
 configure_runtime_env(device=_early.device)
 
@@ -48,7 +48,7 @@ def save(name: str, **arrays: Any) -> None:
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--device", type=int, default=1)
-    parser.add_argument("--config", type=str, default="configs/examples/iteration_13.yaml")
+    parser.add_argument("--config", type=str, default="configs/adiabatic/nonlinear/itg_high_shear.yaml")
     args = parser.parse_args()
 
     print(f"Device: {jax.devices()[0]}")

@@ -46,12 +46,8 @@ REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
 
 def config_path(name):
-    """Path of a packaged config by file name, searched in configs/examples and configs/em."""
-    for sub in ("examples", "em"):
-        path = os.path.join(REPO_ROOT, "configs", sub, name)
-        if os.path.exists(path):
-            return path
-    raise FileNotFoundError(f"config {name} not found under configs/examples or configs/em")
+    """Path of a packaged config, given relative to configs/."""
+    return os.path.join(REPO_ROOT, "configs", name)
 
 
 def noisy_case(cfg_name, grid, overrides=None, seed=0, **param_kw):

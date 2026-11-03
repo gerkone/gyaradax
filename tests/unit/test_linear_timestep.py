@@ -21,7 +21,7 @@ REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 
 def _case(dt_factor):
     df, geometry, params, state = noisy_case(
-        "kinetic.yaml", GRID, dict(non_linear=False, adaptive_dt=False, backend="jax")
+        "kinetic/nonlinear/benchmark.yaml", GRID, dict(non_linear=False, adaptive_dt=False, backend="jax")
     )
     pre = linear_precompute(geometry, params)
     dt_lin = float(estimate_linear_timestep(pre, params=params))
@@ -67,7 +67,7 @@ def test_traced_precompute_caps_the_step_dt():
 
 
 def test_cli_reports_and_uses_the_reduced_dt(tmp_path, capsys):
-    cfg = OmegaConf.load(os.path.join(REPO_ROOT, "configs", "examples", "kinetic.yaml"))
+    cfg = OmegaConf.load(os.path.join(REPO_ROOT, "configs", "kinetic", "nonlinear", "benchmark.yaml"))
     for key, value in GRID.items():
         cfg.grid[key] = value
     cfg.solver.non_linear = False

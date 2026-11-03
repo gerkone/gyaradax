@@ -17,10 +17,10 @@ from gyaradax.solver.rk4 import gksolve
 GRID = dict(nvpar=8, nmu=2, ns=8, nkx=11, nky=5)
 
 CASES = {
-    "kinetic_es": ("nl_em_waltz_b01.yaml", dict(nlapar=False, beta=0.0)),
-    "kinetic_apar_bpar": ("nl_em_waltz_b01.yaml", dict(nlbpar=True)),
-    "kinetic_bpar": ("nl_em_waltz_b01.yaml", dict(nlapar=False, nlbpar=True)),
-    "adiabatic_apar": ("iteration_13.yaml", dict(non_linear=True, nlapar=True, beta=0.002)),
+    "kinetic_es": ("em/nl_em_waltz_b01.yaml", dict(nlapar=False, beta=0.0)),
+    "kinetic_apar_bpar": ("em/nl_em_waltz_b01.yaml", dict(nlbpar=True)),
+    "kinetic_bpar": ("em/nl_em_waltz_b01.yaml", dict(nlapar=False, nlbpar=True)),
+    "adiabatic_apar": ("adiabatic/nonlinear/itg_high_shear.yaml", dict(non_linear=True, nlapar=True, beta=0.002)),
 }
 
 

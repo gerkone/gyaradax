@@ -4,7 +4,7 @@
 The implementation now lives in :mod:`gyaradax.cli` so it ships with the
 package and is reachable from the ``gyaradax`` console script. Prefer::
 
-    gyaradax run configs/examples/adiabatic_a.yaml
+    gyaradax run configs/adiabatic/nonlinear/itg_high_shear.yaml
     gyaradax run configs/em/nl_em_apar.yaml --n-gpus 4
 
 This script keeps the old ``python scripts/run.py CONFIG ...`` invocation

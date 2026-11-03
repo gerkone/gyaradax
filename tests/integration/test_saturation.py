@@ -20,7 +20,7 @@ def test_simulation_saturation():
     Integration test: Runs a full nonlinear trajectory into the saturated phase,
     and compares the time-averaged fluxes over the final 80 against the GKW reference.
     """
-    config_path = "configs/examples/iteration_13.yaml"
+    config_path = "configs/adiabatic/nonlinear/itg_high_shear.yaml"
     cfg = load_config(config_path)
     data_dir = cfg.run.data_dir
 

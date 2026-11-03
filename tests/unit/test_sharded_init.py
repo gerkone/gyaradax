@@ -15,7 +15,7 @@ from typing import Any, cast
 
 
 CONFIG_ADIABATIC = os.path.join(
-    os.path.dirname(__file__), "..", "..", "configs", "examples", "iteration_13.yaml"
+    os.path.dirname(__file__), "..", "..", "configs", "adiabatic", "nonlinear", "itg_high_shear.yaml"
 )
 
 

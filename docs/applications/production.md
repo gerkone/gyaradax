@@ -1,9 +1,9 @@
 # Production cases
 
-Long nonlinear runs and converged linear runs of the reference dataset ([gerkone/gyaradax-tests](https://huggingface.co/datasets/gerkone/gyaradax-tests)): adiabatic-electron cases rerun from scratch against GKW, and kinetic-electron `gyaradax` runs as stored in the dataset. Every case has a config in [`configs/reference/`](https://github.com/gerkone/gyaradax/tree/master/configs/reference), under `adiabatic/` or `kinetic/` and `nonlinear/` or `linear/`, with the name used on this page:
+Long nonlinear runs and converged linear runs of the reference dataset ([gerkone/gyaradax-tests](https://huggingface.co/datasets/gerkone/gyaradax-tests)): adiabatic-electron cases rerun from scratch against GKW, and kinetic-electron `gyaradax` runs as stored in the dataset. Every case has a config in [`configs/`](https://github.com/gerkone/gyaradax/tree/master/configs), under `adiabatic/` or `kinetic/` and `nonlinear/` or `linear/`, with the name used on this page:
 
 ```bash
-gyaradax run configs/reference/adiabatic/nonlinear/itg_high_shear.yaml
+gyaradax run configs/adiabatic/nonlinear/itg_high_shear.yaml
 ```
 
 Averages are over the last 30% of each run, with autocorrelation-corrected errors. [`notebooks/validation.ipynb`](https://github.com/gerkone/gyaradax/blob/master/notebooks/validation.ipynb) makes the comparison, `docs/_static/figs/production/make_production.py` the figures.

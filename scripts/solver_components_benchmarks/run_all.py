@@ -24,7 +24,7 @@ enable_x64()
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-CONFIG = "configs/examples/iteration_13.yaml"
+CONFIG = "configs/adiabatic/nonlinear/itg_high_shear.yaml"
 
 COMPONENTS = [
     ("C1 _apply_parallel", "bench_apply_parallel"),

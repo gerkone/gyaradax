@@ -349,10 +349,9 @@ def reference_cases(root):
 
 
 def reference_configs(repo_root):
-    """Map each dataset JSON (``<label>/<kind>.json``) to its config in configs/reference, from the config headers."""
+    """Map each dataset JSON (``<label>/<kind>.json``) to its config in configs/, from the config headers."""
     out = {}
-    base = os.path.join(repo_root, "configs", "reference")
-    for dirpath, _, files in os.walk(base):
+    for dirpath, _, files in os.walk(os.path.join(repo_root, "configs")):
         for f in files:
             if f.endswith(".yaml"):
                 path = os.path.join(dirpath, f)

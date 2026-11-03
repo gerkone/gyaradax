@@ -30,7 +30,7 @@ from common import (
     analyze_cost,
     BASELINES_DIR,
 )
-def run(config="configs/examples/iteration_13.yaml", mixed_precision=False, test_z2z=False):
+def run(config="configs/adiabatic/nonlinear/itg_high_shear.yaml", mixed_precision=False, test_z2z=False):
     """Benchmark nonlinear_term_iii.
 
     Args:
@@ -134,7 +134,7 @@ def run(config="configs/examples/iteration_13.yaml", mixed_precision=False, test
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--device", type=int, default=1)
-    parser.add_argument("--config", type=str, default="configs/examples/iteration_13.yaml")
+    parser.add_argument("--config", type=str, default="configs/adiabatic/nonlinear/itg_high_shear.yaml")
     parser.add_argument("--mp", action="store_true", help="Enable mixed-precision mode")
     parser.add_argument(
         "--z2z",

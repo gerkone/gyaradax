@@ -25,7 +25,7 @@ from gyaradax import load_config
 
 
 CONFIG_ADIABATIC = os.path.join(
-    os.path.dirname(__file__), "..", "..", "configs", "examples", "iteration_13.yaml"
+    os.path.dirname(__file__), "..", "..", "configs", "adiabatic", "nonlinear", "itg_high_shear.yaml"
 )
 
 
@@ -207,7 +207,7 @@ def _em_case(backend, mesh_axes=None):
     grid = dict(nvpar=16, nmu=4, ns=16, nkx=21, nky=5)
     overrides = dict(nlbpar=True, adaptive_dt=False, **(mesh_axes or {}))
     return noisy_case(
-        "nl_em_waltz_b01.yaml", grid, overrides, seed=7, backend=backend, mixed_precision=False
+        "em/nl_em_waltz_b01.yaml", grid, overrides, seed=7, backend=backend, mixed_precision=False
     )
 
 
@@ -313,7 +313,7 @@ def test_fused_linear_sharded_matches_single_device(arith, axis):
         pytest.skip("CUDA not available")
     coll = dict(collisions=True, coll_freq=0.05, coll_freq_override=True, coll_mass_conserve=True)
     df, geometry, params, state = noisy_case(
-        "kinetic.yaml", dict(nvpar=16, nmu=4, ns=16, nkx=21, nky=5),
+        "kinetic/nonlinear/benchmark.yaml", dict(nvpar=16, nmu=4, ns=16, nkx=21, nky=5),
         dict(non_linear=False, adaptive_dt=False, fused_linear=True, linear_arith=arith, **coll),
         seed=7, backend="cuda", mixed_precision=False,
     )
