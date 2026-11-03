@@ -27,7 +27,15 @@ def names():
 
 @functools.lru_cache(maxsize=16)
 def load(spec, rule=None):
-    """Calibration from a bundled name, a JSON path, or `auto` (the rule's default); None if empty."""
+    """A calibration record: a bundled name, a JSON path, or ``"auto"`` for the rule's default.
+
+    Args:
+        spec: Name, path or ``"auto"``.
+        rule: Rule whose default ``"auto"`` picks.
+
+    Returns:
+        The record dict, or None when ``spec`` is empty.
+    """
     if not spec:
         return None
     if spec == "auto":
@@ -58,7 +66,16 @@ SETS = ("adiabatic", "kinetic")
 
 
 def summary_rows(kind, collisional=False, summary=SUMMARY):
-    """sat2 inputs and Qi of the saturated rows with settled QL weights in one summary table."""
+    """sat2 inputs and Qi of the saturated rows with settled QL weights in a summary table.
+
+    Args:
+        kind: ``"adiabatic"`` or ``"kinetic"``.
+        collisional: Keep collisional rows.
+        summary: Directory of the summary tables.
+
+    Returns:
+        List of row dicts.
+    """
     import pandas as pd
 
     rows = []
@@ -87,6 +104,16 @@ def summary_rows(kind, collisional=False, summary=SUMMARY):
 
 
 def sat2_predict(rows, cn, options):
+    """:func:`~gyaradax.quasilinear.rules.ql_flux_sat2` evaluated on summary rows.
+
+    Args:
+        rows: Rows from :func:`summary_rows`.
+        cn: Amplitude calibration.
+        options: Further keyword arguments of the rule.
+
+    Returns:
+        Predicted Qi per row.
+    """
     import jax.numpy as jnp
 
     from .rules import ql_flux_sat2
@@ -102,7 +129,17 @@ def sat2_predict(rows, cn, options):
 
 
 def stratified_test(y, frac=0.10, nbin=10, seed=0):
-    """Deterministic test mask: a fraction `frac` of each decile of log(y)."""
+    """Deterministic test mask: a fraction ``frac`` of each bin of ``log(y)``.
+
+    Args:
+        y: Fluxes.
+        frac: Fraction per bin.
+        nbin: Number of bins.
+        seed: Random seed.
+
+    Returns:
+        Boolean mask, True for test rows.
+    """
     y = np.asarray(y, float)
     ok = np.isfinite(y) & (y > 0)
     mask = np.zeros(y.size, bool)
@@ -120,6 +157,15 @@ def stratified_test(y, frac=0.10, nbin=10, seed=0):
 
 
 def flux_metrics(y, p):
+    """Error metrics of predicted against true fluxes, over the rows where both are positive.
+
+    Args:
+        y: True fluxes.
+        p: Predicted fluxes.
+
+    Returns:
+        Dict with ``n``, ``rmse``, ``mean_error``, ``rmse_log10`` and ``med_rel``.
+    """
     y, p = np.asarray(y, float), np.asarray(p, float)
     m = np.isfinite(y) & np.isfinite(p) & (y > 0) & (p > 0)
     y, p = y[m], p[m]
@@ -143,11 +189,22 @@ def _best(x_by_p, y, mask, exponents):
 
 
 def fit_sat2(summary=SUMMARY, options=None, collisional=False, exponents=None, folds=10):
-    """Calibration record of ql_flux_sat2 fitted jointly on the adiabatic and kinetic tables, Qi only.
+    """Calibration record of :func:`~gyaradax.quasilinear.rules.ql_flux_sat2`, fitted on Qi.
 
-    The fit uses 90% of each set (the test rows are 10% of each log-flux decile): p over
-    `exponents`, cn the log-mean ratio over the train rows, minimising log10 RMSE. The record
-    also carries the test metrics and a `folds`-fold cross-validation over all rows.
+    One ``(cn, p)`` is fitted on the adiabatic and kinetic tables together, on 90 %
+    of each (the test rows are 10 % of each log-flux decile). ``p`` is scanned over
+    ``exponents`` and ``cn`` is the log-mean ratio over the training rows, minimising
+    the log10 RMSE.
+
+    Args:
+        summary: Directory of the summary tables.
+        options: Fixed options of the rule.
+        collisional: Include collisional kinetic rows.
+        exponents: Values of ``p`` to scan.
+        folds: Folds of the cross-validation over all rows.
+
+    Returns:
+        The record: parameters, options, test metrics and cross-validation.
     """
     options = dict(options or {"gate_sharpness": 20.0, "kx_width_model": "tglf"})
     exponents = np.round(np.arange(0.30, 1.35, 0.01) if exponents is None else np.asarray(exponents), 4)

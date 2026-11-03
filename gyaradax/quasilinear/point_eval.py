@@ -29,9 +29,19 @@ DF_SEED_AMPLITUDE = 1e-3
 def initial_df(
     nvpar, nmu, ns, nkx, nky, amplitude=DF_SEED_AMPLITUDE, nsp=0
 ) -> jnp.ndarray:
-    """Initial df: cosine in s, every non-zonal ky seeded (bypasses init_f's .item()).
+    """Initial distribution: cosine in s, every non-zonal ky seeded, without ``init_f``'s host calls.
 
-    nsp > 0 prepends a species axis for the kinetic 6D grid.
+    Args:
+        nvpar: Parallel-velocity points.
+        nmu: Magnetic-moment points.
+        ns: Parallel grid points.
+        nkx: Radial modes.
+        nky: Binormal modes.
+        amplitude: Seed amplitude.
+        nsp: Species count; above 0 adds a leading species axis.
+
+    Returns:
+        The distribution, complex128.
     """
     s_grid = (jnp.arange(ns) + 0.5) / ns - 0.5
     seed_s = amplitude * (jnp.cos(2 * jnp.pi * s_grid) + 1.0)
@@ -62,12 +72,27 @@ def linear_early_stop(
     patience=2,
     return_blocks=False,
 ):
-    """Chunked linear gksolve, exiting once per-ky growth rates converge.
+    """Linear ``gksolve`` in blocks, stopped once every ky growth rate has converged.
 
-    jit/vmap-safe (lax.while_loop; under vmap it runs until all batch
-    elements converge). Patience guards against slowly decaying transients
-    that move little between adjacent blocks. `return_blocks` additionally
-    returns the traced number of blocks actually run.
+    Safe under ``jit`` and ``vmap`` (a ``lax.while_loop``; under ``vmap`` it runs until
+    every element has converged).
+
+    Args:
+        df: Initial distribution.
+        geom: Geometry dict.
+        params: Run parameters.
+        sim_state: Initial GKState.
+        pre: Precomputed coefficients.
+        block: Steps per block.
+        max_steps: Most steps.
+        min_steps: Fewest steps.
+        atol: Absolute tolerance on the change of the growth rates between blocks.
+        rtol: Tolerance relative to the largest growth rate.
+        patience: Consecutive converged blocks needed to stop.
+        return_blocks: Also return the number of blocks run.
+
+    Returns:
+        ``(df, phi, state)``, plus the block count with ``return_blocks``.
     """
     block = int(block)
     max_blocks = max(int(max_steps) // block, 1)
@@ -112,22 +137,31 @@ def ql_at_point(
     qi_tiny=1e-8,
     return_diagnostics=False,
 ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
-    """Linear solve + saturation rule at one point -> (qi, qe, pfe) in GKW GB units.
+    """Linear solve and saturation rule at one point, in GKW gyro-Bohm units.
 
-    `rule` names an entry of quasilinear.rules.RULES; each has its own cn.
-    `rule_options` is forwarded to it, so rule-specific knobs need no
-    plumbing through the callers.
+    Electromagnetic runs convert g to f for the diagnostics and add the A_par
+    flutter flux to the QL weight. Kinetic runs evaluate the rule per species and
+    channel against one shared saturated intensity
+    (:func:`~gyaradax.quasilinear.rules.ql_flux_per_species`). Adiabatic runs have no
+    electron channel, so ``qe = qi`` and ``pfe = 0``.
 
-    Electromagnetic (params.nlapar) runs convert the mixed g to physical f
-    for diagnostics and add the A_par flutter flux into the QL weight,
-    matching the calibration X stage.
+    Args:
+        params: Run parameters.
+        geom: Geometry dict.
+        grid_shape: ``(nvpar, nmu, ns, nkx, nky)``.
+        cn: Amplitude calibration of the rule.
+        rule: Name of an entry of ``quasilinear.rules.RULES``.
+        rule_options: Keyword arguments passed to the rule.
+        n_steps_linear: Most linear steps.
+        early_stop: Stop when the growth rates have converged (:func:`linear_early_stop`).
+        early_stop_opts: Options of :func:`linear_early_stop`.
+        qi_clip: Upper clip of the fluxes.
+        qi_tiny: Fluxes below this are set to zero.
+        return_diagnostics: Also return a dict of solver diagnostics (blocks and
+            steps run, growth rates).
 
-    Kinetic runs take qe and pfe from ql_flux_per_species, which evaluates
-    the rule per (species, channel) against one shared saturated intensity.
-    Adiabatic runs have no electron channel, so qe = qi and pfe = 0.
-
-    `return_diagnostics` appends a dict of traced per-call solver diagnostics
-    (blocks and steps actually run, converged growth rates).
+    Returns:
+        ``(qi, qe, pfe)``, plus the diagnostics dict when requested.
     """
     spec, n_blocks, n_steps, gamma, flux_kxy_sp = _linear_harvest(
         params, geom, grid_shape, n_steps_linear=n_steps_linear,
@@ -272,17 +306,26 @@ def nl_at_point(
     df_init=None,
     return_df=False,
 ):
-    """Full nonlinear ground truth at one point -> tail-averaged (qi, qe, pfe) in GKW GB units.
+    """Nonlinear ground truth at one point: tail-averaged ``(qi, qe, pfe)`` in GKW gyro-Bohm units.
 
-    Pure-JAX (backend='jax' required for vmap/jit): burn-in to saturation,
-    then a lax.scan over `tail_blocks` blocks collecting fluxes to average.
-    Orders of magnitude slower than ql_at_point — offline validation and
-    ground-truth generation only, never inside a stiff transport loop.
+    Adiabatic electrons only, so ``qe = qi`` and ``pfe = 0``. A burn-in to
+    saturation, then ``tail_blocks`` blocks whose fluxes are averaged. Use
+    ``backend='jax'`` in ``params`` to ``jit`` or ``vmap`` it. Much slower than
+    :func:`ql_at_point`, meant for validation and ground-truth data.
 
-    `df_init` warm-starts from an already-saturated turbulent state (GENE-TANGO
-    style), which skips the linear-growth transient: pair it with a smaller
-    `n_steps`. `return_df` additionally returns the final distribution so the
-    next outer iteration can resume from it.
+    Args:
+        params: Run parameters.
+        geom: Geometry dict.
+        grid_shape: ``(nvpar, nmu, ns, nkx, nky)``.
+        n_steps: Total steps.
+        tail_blocks: Blocks averaged at the end.
+        block: Steps per block.
+        qi_clip: Upper clip of the fluxes.
+        df_init: Saturated state to start from, which skips the linear phase.
+        return_df: Also return the final distribution.
+
+    Returns:
+        ``(qi, qe, pfe)``, plus the distribution with ``return_df``.
     """
     import dataclasses
 

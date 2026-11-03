@@ -25,15 +25,26 @@ def save_dumps(
     block_start_time: float = 0.0,
     snapshot_f32: bool = False,
 ):
-    """Handle simulation output. Saves heavy 5D distribution snapshots if requested
-    and appends diagnostic history to persistent files.
+    """Append one block's diagnostics to the run directory and optionally write a snapshot.
 
-    When ``params`` and ``pre`` are supplied and ``params.nlapar`` is set, also
-    writes ``fluxes_em.npz`` with the magnetic-flutter EM fluxes computed from
-    the final (f, A_par, B_par). When ``dt_info`` is supplied (dict with per-step
-    ``dt_used``/``dt_nl``/``dt_lin`` arrays and scalar ``dt_input``), also
-    appends a per-step ``dt_history.npz`` matching GKW's debug4 columns:
-    step, time, dt_used, dt_nl, dt_lin, dt_input.
+    Appends to ``fluxes.npz``, ``kyspec.npz``, ``kxspec.npz``, ``growth.npz`` and
+    ``fluxes_em.npz`` (zeros without ``nlapar``). With ``dt_info`` it also appends the
+    per-step ``dt_history.npz`` (step, time, dt_used, dt_nl, dt_lin, dt_input).
+
+    Args:
+        output_dir: Run directory.
+        df: Distribution.
+        phi: Potential.
+        fluxes: Fluxes of ``df``.
+        state: GKState.
+        geometry: Geometry dict.
+        save_dumps: Write the restart snapshot ``step_NNNNNN.npz``.
+        params: Run parameters; needed for the EM fluxes.
+        pre: Precomputed coefficients; needed for the EM fluxes.
+        dt_info: Per-step timestep diagnostics of the block, or None.
+        block_start_step: First step of the block.
+        block_start_time: Time at the start of the block.
+        snapshot_f32: Store df and phi as complex64 in the snapshot.
     """
     os.makedirs(output_dir, exist_ok=True)
 
@@ -161,14 +172,15 @@ def save_dumps(
 
 
 def save_run_metadata(output_dir: str, config: Any, geometry: Dict[str, Any]) -> None:
-    """Write config.yaml and geometry.pkl alongside a run's dumps.
+    """Write ``config.yaml`` and ``geometry.pkl`` into a run directory.
 
-    Downstream preprocessing/inference otherwise reconstructs a trajectory from
-    GKW's ``input.dat`` (physical parameters) and ``geom.dat`` (geometry), which
-    gyaradax runs do not produce. This records the equivalent information: the
-    run configuration as ``config.yaml`` and the full geometry dict as
-    ``geometry.pkl`` (jax arrays converted to numpy, mirroring how the dataset
-    metadata stores ``geometry``).
+    They hold what GKW keeps in ``input.dat`` and ``geom.dat``: the run config and
+    the full geometry dict, with JAX arrays converted to numpy.
+
+    Args:
+        output_dir: Run directory.
+        config: Effective run config.
+        geometry: Geometry dict.
     """
     import pickle
 
@@ -196,7 +208,12 @@ def load_checkpoint(path: str) -> Dict[str, Any]:
 
 
 def print_params(params, grid_shape=None):
-    """Pretty-print GKParams and optional grid shape."""
+    """Print the main GKParams fields, grouped, and optionally the grid shape.
+
+    Args:
+        params: Run parameters.
+        grid_shape: Shape of the distribution, or None.
+    """
     d = vars(params)
 
     solver_keys = [

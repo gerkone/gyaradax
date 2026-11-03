@@ -1,8 +1,7 @@
-"""Top-level convenience imports for gyaradax.
+"""gyaradax: local flux-tube gyrokinetics in JAX.
 
-The package import is intentionally lightweight: it enables the project-wide
-JAX x64 policy and exposes compatibility constants, while heavier solver,
-simulation, geometry, and diagnostics objects are imported lazily on first use.
+Importing the package enables JAX 64-bit mode; the names in ``__all__`` are
+imported lazily on first use.
 """
 
 from __future__ import annotations
@@ -11,14 +10,10 @@ from importlib import import_module
 from typing import Any
 
 from gyaradax import _compat
-from gyaradax.core.constants import EPS
 from gyaradax.core.jax_config import enable_x64
 
 enable_x64()
 _compat.install()
-
-# Compatibility alias used by older internal and external imports.
-_EPS = EPS
 
 __all__ = [
     "GKParams",

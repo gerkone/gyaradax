@@ -1,7 +1,7 @@
 """Multi-GPU grid parallelism via JAX GSPMD.
 
 All sharding-specific logic lives here. Most of the codebase is unaware of
-the mesh — operations on `jax.Array`s with `NamedSharding` are partitioned
+the mesh: operations on `jax.Array`s with `NamedSharding` are partitioned
 automatically by XLA's GSPMD under `jit`. The exceptions are the opaque CUDA
 FFI kernels, the per-plane Poisson bracket and the stencils that couple velocity
 points (vpar derivatives, collisions): the backends get the mesh from
@@ -10,10 +10,10 @@ exchanging neighbour planes with ``halo_planes`` / ``halo``.
 
 Public API
 ----------
-- ``build_mesh(params)`` — mesh from GKParams, or None on single-device.
-- ``shard_df(df, mesh, grid_shape)`` — place the distribution function.
-- ``shard_pre(pre, mesh, grid_shape)`` — place the precompute pytree.
-- ``is_active(mesh)`` — helper for single-device early return.
+- ``build_mesh(params)``: mesh from GKParams, or None on single-device.
+- ``shard_df(df, mesh, grid_shape)``: place the distribution function.
+- ``shard_pre(pre, mesh, grid_shape)``: place the precompute pytree.
+- ``is_active(mesh)``: helper for single-device early return.
 
 Single-device path: all helpers are idempotent no-ops when
 ``n_gpus_sp * n_gpus_vp * n_gpus_mu == 1``.
@@ -55,16 +55,15 @@ _AXIS_MU = "mu"
 _P = TypeVar("_P", bound=Precompute)
 
 
-def get_device_count() -> int:
-    """Return the number of available GPU devices."""
-    return len(jax.devices("gpu"))
-
-
 def build_mesh(params) -> Optional[Mesh]:
-    """Build a 3-axis device mesh from ``params.n_gpus_{sp,vp,mu}``.
+    """Device mesh with axes (sp, vp, mu) from ``params.n_gpus_{sp,vp,mu}``.
 
-    Returns None when all three are 1 (single-device path). Errors out
-    when the requested mesh size exceeds the visible JAX devices.
+    Args:
+        params: Run parameters.
+
+    Returns:
+        The mesh, or None when all three are 1. Raises when more devices are
+        requested than JAX sees.
     """
     p_sp = int(getattr(params, "n_gpus_sp", 1))
     p_vp = int(getattr(params, "n_gpus_vp", 1))
@@ -92,10 +91,19 @@ def is_active(mesh: Optional[Mesh]) -> bool:
 def velocity_map(fn, mesh: Mesh, args, axes, out_specs):
     """Run ``fn`` on the local blocks of ``args`` with ``shard_map``.
 
-    ``axes[i]`` names the mesh axis (``"sp"``, ``"vp"``, ``"mu"`` or None) of
-    each leading dimension of ``args[i]``; size-1 (broadcast) dimensions and
-    the remaining dimensions stay whole, ``()`` replicates the argument.
-    Replicated inputs are sliced locally (no communication).
+    Size-1 (broadcast) dimensions and the trailing dimensions stay whole;
+    replicated inputs are sliced locally, without communication.
+
+    Args:
+        fn: Function of the local blocks.
+        mesh: Device mesh.
+        args: Arguments of ``fn``.
+        axes: Per argument, the mesh axis (``"sp"``, ``"vp"``, ``"mu"`` or None) of each
+            leading dimension; ``()`` replicates the argument.
+        out_specs: ``PartitionSpec`` of the outputs.
+
+    Returns:
+        The output of ``fn``, assembled over the mesh.
     """
     in_specs = []
     for x, ax in zip(args, axes):
@@ -123,8 +131,16 @@ def splits_velocity(mesh: Mesh | None) -> bool:
 def halo_planes(x, axis: int, mesh_axis: str, n_shards: int, width: int = 2):
     """Inside ``shard_map``: the ``width`` planes before and after this shard along ``axis``.
 
-    ``axis`` is sharded over ``mesh_axis`` (``n_shards`` devices). Returns the planes
-    stacked along ``axis`` (before, then after); planes beyond the global grid are zero.
+    Args:
+        x: Local block.
+        axis: Array axis sharded over ``mesh_axis``.
+        mesh_axis: Mesh axis name.
+        n_shards: Devices along ``mesh_axis``.
+        width: Planes per side.
+
+    Returns:
+        The planes before, then after, stacked along ``axis``; planes past the
+        global grid are zero.
     """
     if x.shape[axis] < width:
         raise ValueError(f"a halo of {width} needs >= {width} local points along '{mesh_axis}'")
@@ -136,7 +152,18 @@ def halo_planes(x, axis: int, mesh_axis: str, n_shards: int, width: int = 2):
 
 
 def halo(x, axis: int, mesh_axis: str, n_shards: int, width: int = 2):
-    """Inside ``shard_map``: ``x`` extended by ``width`` planes of each neighbour along ``axis``."""
+    """Inside ``shard_map``: ``x`` extended by ``width`` planes of each neighbour along ``axis``.
+
+    Args:
+        x: Local block.
+        axis: Array axis sharded over ``mesh_axis``.
+        mesh_axis: Mesh axis name.
+        n_shards: Devices along ``mesh_axis``.
+        width: Planes per side.
+
+    Returns:
+        The extended block.
+    """
     h = halo_planes(x, axis, mesh_axis, n_shards, width)
     lo = jax.lax.slice_in_dim(h, 0, width, axis=axis)
     hi = jax.lax.slice_in_dim(h, width, 2 * width, axis=axis)
@@ -179,7 +206,7 @@ def _spec_for_shape(shape, grid: GridShape) -> PartitionSpec:
     # velocity-broadcast pre arrays produced by _compute_species_coeffs often
     # have the full 5D shape; handled above. Handle collapsed velocity shapes
     # that retain nvpar/nmu as leading dims with broadcast singletons for s,
-    # kx, ky (shape (nvpar, nmu, 1, 1, 1), etc.) — these are reshapes of the
+    # kx, ky (shape (nvpar, nmu, 1, 1, 1), etc.): these are reshapes of the
     # per-species arrays, same vp/mu sharding.
     if len(s) == 5 and s[0] == grid.nvpar and s[1] == grid.nmu:
         return PartitionSpec(_AXIS_VP, _AXIS_MU, None, None, None)
@@ -197,9 +224,15 @@ def _place(array, spec: PartitionSpec, mesh: Mesh):
 
 
 def shard_df(df, mesh: Optional[Mesh], grid: Optional[GridShape]):
-    """Place the distribution function onto the device mesh.
+    """Place a 5D or 6D distribution on the device mesh.
 
-    Dispatches on ``df.ndim``: 5D (adiabatic) or 6D (kinetic).
+    Args:
+        df: Distribution.
+        mesh: Device mesh, or None (returned unchanged).
+        grid: Grid shape.
+
+    Returns:
+        The sharded distribution.
     """
     if mesh is None:
         return df
@@ -209,10 +242,17 @@ def shard_df(df, mesh: Optional[Mesh], grid: Optional[GridShape]):
 
 
 def shard_pre(pre: _P, mesh: Optional[Mesh], grid: Optional[GridShape]) -> _P:
-    """Place each ``pre`` leaf per shape (build-then-shard fallback path).
+    """Place each leaf of ``pre`` on the mesh according to its shape.
 
-    Prefer :func:`precompute_sharded` for large grids — it partitions the
-    construction itself and never materialises the full array anywhere.
+    Builds on one device first; :func:`precompute_sharded` avoids that for large grids.
+
+    Args:
+        pre: Precomputed coefficients.
+        mesh: Device mesh, or None (returned unchanged).
+        grid: Grid shape.
+
+    Returns:
+        The sharded coefficients.
     """
     if mesh is None:
         return pre
@@ -228,17 +268,20 @@ def shard_pre(pre: _P, mesh: Optional[Mesh], grid: Optional[GridShape]) -> _P:
 
 
 def precompute_sharded(geometry, params, mesh: Optional[Mesh], grid: GridShape):
-    """Build the ``pre`` pytree directly sharded across the mesh.
+    """Build the precomputed coefficients already sharded across the mesh.
 
-    Works because ``GKPre`` cleanly separates JAX-array leaves from Python
-    aux (``nl_m*``, ``nsp``, ``ixzero``, ``iyzero``), so ``jax.eval_shape``
-    returns a pytree whose leaves are all ``ShapeDtypeStruct`` —
-    ``out_shardings`` only needs to map those leaves. XLA's GSPMD then
-    partitions the entire construction; full-size intermediates never
-    materialise on a single device.
+    ``GKPre`` keeps the static metadata out of its leaves, so ``jax.eval_shape``
+    gives the output structure and GSPMD partitions the whole construction; no
+    full-size array is formed on one device.
 
-    On single-device (mesh=None) this falls through to the normal
-    ``linear_precompute`` path.
+    Args:
+        geometry: Geometry dict.
+        params: Run parameters.
+        mesh: Device mesh; None runs :func:`~gyaradax.operators.precompute.linear_precompute`.
+        grid: Grid shape.
+
+    Returns:
+        The sharded GKPre.
     """
     from gyaradax.operators.precompute import linear_precompute
     import jax.numpy as jnp
@@ -270,7 +313,7 @@ def precompute_sharded(geometry, params, mesh: Optional[Mesh], grid: GridShape):
     params_rep = jax.tree_util.tree_map(_replicate, params)
 
     # Return pre._items (plain dict) so the jit output pytree is a clean
-    # dict/array structure — GKPre's custom flatten routes non-array leaves
+    # dict/array structure: GKPre's custom flatten routes non-array leaves
     # into aux, which trips up tree_map(_leaf_sharding, ...).
     # Use _linear_precompute_core to avoid auto-sharding recursion.
     # non-array items stay static: collected while tracing, re-attached after the jit
@@ -302,7 +345,15 @@ def precompute_sharded(geometry, params, mesh: Optional[Mesh], grid: GridShape):
 
 
 def grid_shape_from(params, geometry) -> GridShape:
-    """Infer grid dimensions for the classifier."""
+    """Grid dimensions of a run, used to classify arrays by shape.
+
+    Args:
+        params: Run parameters.
+        geometry: Geometry dict.
+
+    Returns:
+        GridShape.
+    """
     import jax.numpy as jnp
 
     nvpar = int(jnp.asarray(geometry["vpgr"]).shape[0])
@@ -329,12 +380,21 @@ def init_f_sharded(
     n_species: int = 1,
     seed: int = 42,
 ):
-    """Initialize distribution function directly sharded across the mesh.
+    """Deprecated: :func:`~gyaradax.solver.rk4.init_f` with ``params`` shards by itself.
 
-    DEPRECATED: This is now a thin wrapper around solver.init_f.
-    Use solver.init_f with params for automatic sharding detection.
+    Args:
+        geometry: Geometry dict.
+        params: Unused.
+        mesh: Device mesh (required).
+        grid: Unused.
+        finit: Initial condition.
+        amp_init_real: Real part of the amplitude.
+        amp_init_imag: Imaginary part of the amplitude.
+        n_species: Number of species.
+        seed: Seed of the noise initial conditions.
 
-    Returns sharded df with the same values as init_f would produce.
+    Returns:
+        The sharded initial distribution.
     """
     from jax.sharding import NamedSharding, PartitionSpec
     from gyaradax.solver.rk4 import init_f

@@ -13,13 +13,19 @@ enable_x64()
 
 
 def g_to_f(dg, apar, params, pre):
-    """Convert mixed variable g to physical distribution f.
+    """Physical distribution f from the mixed variable g (GKW ``g2f_correct``).
 
-    g = f + (2Z/T) * vthrat * vpar * J0 * A_par * F_M
-    => f = g - (2Z/T) * vthrat * vpar * J0 * A_par * F_M
-    => f = g + g2f_factor * A_par  (g2f_factor is negative of the coupling)
+    ``f = g - (2Z/T) v_R vpar J0 A_par F_M``, stored as ``g + g2f_factor A_par``.
+    Without ``nlapar`` the input is returned unchanged.
 
-    When nlapar=False, returns dg unchanged (identity).
+    Args:
+        dg: Mixed variable g, 5D or 6D.
+        apar: A_par, (ns, nkx, nky).
+        params: Run parameters.
+        pre: Precomputed coefficients with ``g2f_factor``.
+
+    Returns:
+        f, same shape as ``dg``.
     """
     if not params.nlapar:
         return dg
@@ -32,12 +38,16 @@ def g_to_f(dg, apar, params, pre):
 
 
 def f_to_g(df, apar, params, pre):
-    """Convert physical distribution f to mixed variable g.
+    """Mixed variable g from the physical distribution f, the inverse of :func:`g_to_f`.
 
-    g = f + (2Z/T) * vthrat * vpar * J0 * A_par * F_M
-    => g = f - g2f_factor * A_par  (g2f_factor = -(2Z/T)*vthrat*vpar*J0*F_M/T)
+    Args:
+        df: Distribution f, 5D or 6D.
+        apar: A_par, (ns, nkx, nky).
+        params: Run parameters.
+        pre: Precomputed coefficients with ``g2f_factor``.
 
-    When nlapar=False, returns df unchanged (identity).
+    Returns:
+        g, same shape as ``df``.
     """
     if not params.nlapar:
         return df

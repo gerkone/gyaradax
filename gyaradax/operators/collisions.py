@@ -14,11 +14,12 @@ species-pair prefactor `Γ^{a/b}`. Sum runs over all background species
 (kinetic + adiabatic).
 
 Prefactor paths:
-- `freq_override=True`: Γ = Z_a²·Z_b²·coll_freq·de_b·(L_ab/L_ref)/T_a²
-  where L_ref is the i-i Coulomb log for the first species pair, and
-  L_ab is the species-pair Coulomb log.
-- `freq_override=False`: Γ = 6.5141e-5·(R_ref·n_ref/T_ref²)·de_b·Z_a²·
-  Z_b²·L_ab/T_a² (full Coulomb log per species pair).
+
+- `freq_override=True`: Γ = Z_a²·Z_b²·coll_freq·de_b·(L_ab/L_ref)/T_a²,
+  where L_ref is the i-i Coulomb log of the first species pair and
+  L_ab the species-pair Coulomb log.
+- `freq_override=False`: Γ = 6.5141e-5·(R_ref·n_ref/T_ref²)·de_b·Z_a²·Z_b²·L_ab/T_a²
+  (full Coulomb log per species pair).
 
 Optional Xu-style momentum / energy conservation corrections
 (`cons_momentum` in collisionop.f90:2234) on top of the base operator.
@@ -400,10 +401,17 @@ def _reference_log(params, bg_mas, bg_signz, bg_tmp, bg_de, ne19):
 
 
 def collision_frequencies(params: GKParams):
-    """Coulomb logarithms and prefactors Gamma^(a/b), each (n_target, n_background).
+    """Coulomb logarithms and collision prefactors of every species pair.
 
-    The same numbers as GKW's CoulombLog and CollFreqs outputs (collision_init),
-    first index the scattered species, second the scattering one.
+    The same numbers as GKW's ``CoulombLog`` and ``CollFreqs`` outputs
+    (``collision_init``); the first index is the scattered species, the second the
+    scattering one.
+
+    Args:
+        params: Run parameters (species, collision backgrounds and references).
+
+    Returns:
+        ``(L, Gamma)``, each (n_target, n_background).
     """
     (
         tgt_mas,
@@ -445,13 +453,21 @@ def collision_frequencies(params: GKParams):
 
 
 def precompute_collisions(geometry: Dict, params: GKParams) -> Dict[str, jnp.ndarray]:
-    """Build the 9-point collision stencil.
+    """The 9-point collision stencil in (vpar, mu) and the conservation weights.
 
-    Output stencil shape: (9, nv, nmu, ns) for a single target species (adiabatic
-    MVP), (nsp, 9, nv, nmu, ns) otherwise. Each target stencil is a sum over all
-    background species (kinetic + adiabatic), each contributing the full
-    species-pair Fokker-Planck operator with Gamma^(a/b), vtb = v*vthrat_a/vthrat_b,
-    and mass ratio m_a/m_b (friction).
+    Each target species sums the operator of every background species (kinetic
+    and adiabatic), with the pair's ``Gamma^(a/b)``, ``vtb = v vthrat_a / vthrat_b``
+    and mass ratio for friction.
+
+    Args:
+        geometry: Geometry dict.
+        params: Run parameters.
+
+    Returns:
+        Dict with ``coll_stencil``, (9, nv, nmu, ns) for a single ion species and
+        (nsp, 9, nv, nmu, ns) otherwise. With momentum or energy conservation also the
+        conservation weights and, with more than one background, ``coll_self_stencil``.
+        Empty when collisions are off.
     """
     if not params.collisions:
         return {}
@@ -520,10 +536,10 @@ def _precompute_conservation(geometry, params, vpgr, mugr, bn):
     """Precompute Xu-style momentum/energy conservation weights.
 
     Returns a dict with keys:
-      coll_mom_factor: (nv, nmu, ns) — coefficient of Δp in the correction
-      coll_ene_factor: (nv, nmu, ns) — coefficient of ΔE in the correction
-      coll_vpar_weight: (nv, nmu, ns) — weight to compute Δp = ∫v_par C(f) d³v
-      coll_vsq_weight: (nv, nmu, ns) — weight to compute ΔE = ∫v² C(f) d³v
+      coll_mom_factor: (nv, nmu, ns): coefficient of Δp in the correction
+      coll_ene_factor: (nv, nmu, ns): coefficient of ΔE in the correction
+      coll_vpar_weight: (nv, nmu, ns): weight to compute Δp = ∫v_par C(f) d³v
+      coll_vsq_weight: (nv, nmu, ns): weight to compute ΔE = ∫v² C(f) d³v
 
     Kinetic case adds a leading (nsp,) axis to every array.
     """
@@ -580,11 +596,18 @@ def _precompute_conservation(geometry, params, vpgr, mugr, bn):
 
 
 def conservation_correction(coll_rhs, mom_factor, ene_factor, vpar_w, vsq_w, reduce=None):
-    """Add the Xu scalar conservation correction on top of the base collision RHS.
+    """Xu momentum and energy conservation correction of the collision RHS.
 
-    coll_rhs: (nv, nmu, ns, nkx, nky). *_factor, *_weight: (nv, nmu, ns).
-    ``reduce`` completes the velocity moments of a sharded block (a ``psum``).
-    Returns an additive correction of the same shape as coll_rhs.
+    Args:
+        coll_rhs: Collision RHS, (nv, nmu, ns, nkx, nky).
+        mom_factor: Coefficient of the momentum change, (nv, nmu, ns).
+        ene_factor: Coefficient of the energy change, (nv, nmu, ns).
+        vpar_w: Weight of the momentum moment, (nv, nmu, ns).
+        vsq_w: Weight of the energy moment, (nv, nmu, ns).
+        reduce: Completes the moments of a sharded block (a ``psum``), or None.
+
+    Returns:
+        The additive correction, same shape as ``coll_rhs``.
     """
     dp = jnp.sum(vpar_w[:, :, :, None, None] * coll_rhs, axis=(0, 1))
     de = jnp.sum(vsq_w[:, :, :, None, None] * coll_rhs, axis=(0, 1))
@@ -606,9 +629,16 @@ def collisions_on(params, pre) -> bool:
 
 
 def collision_term(df: jnp.ndarray, params, pre, mesh=None) -> jnp.ndarray:
-    """Collision RHS of a 5D or 6D (species-leading) df, conservation correction included.
+    """Collision RHS of a 5D or 6D distribution, conservation correction included.
 
-    With a mesh that splits vpar or mu it runs on each device's block.
+    Args:
+        df: Distribution, 5D or 6D (species first).
+        params: Run parameters.
+        pre: Precomputed coefficients with the collision stencil.
+        mesh: Device mesh; with vpar or mu split, the stencil runs on each block.
+
+    Returns:
+        The collision RHS, same shape as ``df``.
     """
     from gyaradax import sharding
 
@@ -656,12 +686,18 @@ def collision_term(df: jnp.ndarray, params, pre, mesh=None) -> jnp.ndarray:
 
 
 def collision_rhs(df: jnp.ndarray, stencil: jnp.ndarray, halo=None) -> jnp.ndarray:
-    """Apply the 9-point collision stencil to a 5D df.
+    """Apply the 9-point collision stencil to a 5D distribution.
 
-    df shape: (nv, nmu, ns, nkx, nky).
-    stencil shape: (9, nv, nmu, ns). Out-of-grid neighbors contribute zero.
-    ``halo`` (inside ``shard_map``) extends a local block by one neighbour plane per side
-    in vpar and mu, taking the place of the zero padding at the block edges.
+    Neighbours outside the grid contribute zero.
+
+    Args:
+        df: Distribution, (nv, nmu, ns, nkx, nky).
+        stencil: Collision stencil, (9, nv, nmu, ns).
+        halo: Inside ``shard_map``, extends the local block by one plane per side in
+            vpar and mu instead of the zero padding.
+
+    Returns:
+        The collision RHS, same shape as ``df``.
     """
     if halo is None and jnp.iscomplexobj(df):
         # real and imaginary parts apart run faster than one complex pass (same values)

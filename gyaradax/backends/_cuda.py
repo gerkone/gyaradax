@@ -138,14 +138,6 @@ def _vel_axes(df) -> Tuple[str, ...]:
     return ("sp", "vp", "mu") if df.ndim == 6 else ("vp", "mu")
 
 
-def _assert_vpar_centre_zero() -> None:
-    c = float(np.asarray(stencils.VPAR_D1)[2])
-    if c != 0.0:
-        raise ValueError(
-            f"VPAR_D1 centre tap is {c!r}, not 0; linear_rhs_fused.cu drops it. "
-            "Restore the term in out_d1 if the vpar scheme changes.")
-
-
 def _assert_dead_taps_zero(pre: GKPre) -> None:
     """Raise if a parallel-stencil table is nonzero outside the taps the kernel sums."""
     dead = [i for i in range(9) if not PAR_TAP_LO <= i < PAR_TAP_HI]
@@ -197,13 +189,6 @@ def _probe(name: str, restype, argtypes):
 
 
 @functools.lru_cache(maxsize=None)
-def _v6_supported(fp64: bool, mphi: int, b_df: int, nky: int, nsp: int, b_inner: int) -> bool:
-    probe = _probe("gyaradax_bracket_v6_supported", ctypes.c_int, (ctypes.c_int,) * 6)
-    if probe is None:
-        return False
-    return bool(probe(int(fp64), mphi, b_df, nky, nsp, b_inner))
-
-
 def _device_sm() -> int:
     major, minor = str(jax.devices("cuda")[0].compute_capability).split(".")
     return 100 * int(major) + 10 * int(minor)
@@ -248,7 +233,8 @@ def _v6_row_size(fp64: bool, mphi: int, nky: int, b_df: int, nsp: int, b_inner: 
             f"no row FFT size >= {3 * nky - 2} for nky {nky} (largest built "
             f"{max(sizes, default=0)}; rebuild with BRACKET_V6_NKY_MAX >= {nky})"
         )
-    if not _v6_supported(fp64, m, b_df, nky, nsp, b_inner):
+    probe = _probe("gyaradax_bracket_v6_supported", ctypes.c_int, (ctypes.c_int,) * 6)
+    if probe is None or not probe(int(fp64), m, b_df, nky, nsp, b_inner):
         return None, f"{b_df} df planes per device, v6 needs an even number"
     if m != mphi:
         log.info("bracket: ky FFT size %d instead of %d (v6 row kernels)", m, mphi)
@@ -282,10 +268,11 @@ def _single_kernel_mrad(native: int, m_min: int, strides: Tuple[int, int], fp64:
 
 @jax.tree_util.register_pytree_node_class
 class CUDAOps(SolverOps):
-    """CUDA backend using custom FFI kernels for stencils and FFT bracket.
+    """CUDA implementation of the solver operations, with fused FFI kernels.
 
-    Note: CUDA backend is Z2Z (complex-to-complex) only. The use_z2z flag
-    is ignored for CUDA operations and will emit a warning if set to True.
+    The linear RHS, the field moments and the bracket (cuFFT and cuFFTDx) run as
+    custom kernels. The bracket is Z2Z only; ``use_z2z=True`` is ignored with a
+    warning. Not differentiable.
     """
 
     def __init__(
@@ -303,7 +290,8 @@ class CUDAOps(SolverOps):
         super().__init__(pre, use_z2z, mixed_precision, mesh)
         self.fused_bracket = fused_bracket
         _assert_dead_taps_zero(pre)
-        _assert_vpar_centre_zero()
+        if float(np.asarray(stencils.VPAR_D1)[2]) != 0.0:
+            raise ValueError("VPAR_D1 centre tap is not 0; linear_rhs_fused.cu drops it")
 
     def tree_flatten(self):
         children, aux = super().tree_flatten()
@@ -788,6 +776,16 @@ class CUDAOps(SolverOps):
         return collision_term(f, params, pre, self.mesh)
 
     def supports_rk_fused(self, dg, params, pre) -> bool:
+        """Whether this call can run the fused RK stage (``fused_linear``, electrostatic only).
+
+        Args:
+            dg: Distribution.
+            params: Run parameters.
+            pre: Precomputed coefficients.
+
+        Returns:
+            True when :meth:`rk_stage` applies; warns once when ``fused_linear`` falls back.
+        """
         if not params.fused_linear or params.nlapar or params.nlbpar:
             return False
         has_dpc = "s_disp_par_tab" in pre
@@ -796,7 +794,23 @@ class CUDAOps(SolverOps):
         return self._es_ok(dg, pre, False, has_dpc)
 
     def rk_stage(self, dg, phi, params, pre, prev, acc, extra, c_acc, c_stage, want_stage):
-        """One fused RK4 stage: (acc + c_acc k, prev + c_stage k), k = linear RHS of dg + extra."""
+        """One fused RK4 stage: ``(acc + c_acc k, prev + c_stage k)`` with k the RHS of ``dg``.
+
+        Args:
+            dg: Stage input.
+            phi: Potential of ``dg``.
+            params: Run parameters.
+            pre: Precomputed coefficients.
+            prev: Distribution at the start of the step.
+            acc: Running RK4 sum.
+            extra: Nonlinear term added to k, or None.
+            c_acc: Weight of k in the running sum.
+            c_stage: Weight of k in the next stage input.
+            want_stage: Also return the next stage input.
+
+        Returns:
+            ``(acc, stage)``; ``stage`` is None without ``want_stage``.
+        """
         fuse = self._fuse_collisions(params, pre)
         if collisions_on(params, pre) and not fuse:
             coll = self._collisions(dg, params, pre)
@@ -875,10 +889,20 @@ class CUDAOps(SolverOps):
         return [m[k] for k in range(n_w)]
 
     def compute_fields(self, dg, geometry, params, pre):
-        """Field solve (phi, apar, bpar) from the mixed variable g.
+        """Fields ``(phi, apar, bpar)`` from the mixed variable g.
 
-        Kinetic electromagnetic runs, and kinetic electrostatic runs with fused_linear, take the
-        velocity moments with the field_moments kernel; all other configurations use the JAX solve.
+        Kinetic electromagnetic runs, and kinetic electrostatic runs with
+        ``fused_linear``, take the velocity moments with the ``field_moments`` kernel;
+        other runs use the JAX solve.
+
+        Args:
+            dg: Mixed variable g, 5D or 6D.
+            geometry: Geometry dict.
+            params: Run parameters.
+            pre: Precomputed coefficients.
+
+        Returns:
+            ``(phi, apar, bpar)``; the EM fields are None when they are off.
         """
         em = params.nlapar or params.nlbpar
         if (
@@ -1005,7 +1029,8 @@ class CUDAOps(SolverOps):
             exclude_zero_mode: Zero out (kx=0, ky=0) mode
             bessel: Optional Bessel function array
             chi_correction: Optional explicit EM correction (same shape as df)
-            apar, bpar: Optional EM fields (ns, nkx, nky)
+            apar: A_par (ns, nkx, nky), or None
+            bpar: B_par (ns, nkx, nky), or None
 
         Returns:
             Nonlinear RHS term III

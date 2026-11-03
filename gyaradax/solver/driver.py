@@ -1,10 +1,15 @@
-"""Simulation runtime."""
+"""Simulation drivers: set up a run from a config or a GKW directory and step it in blocks.
+
+:func:`gk_from_config` and :func:`gk_from_gkw_dir` build ``(df, geometry, params, state, pre)``;
+:func:`gk_run` steps without I/O and :func:`gksimulate` adds diagnostics, snapshots and logging.
+"""
 
 import contextlib
+import dataclasses
 import os
 import shutil
 import time
-from typing import Any, Dict, List, Literal, Optional, Sequence, Tuple, cast, overload
+from typing import Any, Dict, List, Optional, Sequence, Tuple, cast
 
 import jax
 import jax.numpy as jnp
@@ -32,17 +37,8 @@ from gyaradax.solver.rk4 import (
 )
 
 
-def _compute_phi_for_init(df, geometry, params):
-    """Compute phi for initial amplitude tracking."""
-    return calculate_phi(geometry, df, params=params)
-
-
-def _geometry_from_config(cfg):
-    """Compatibility wrapper for the public geometry config helper."""
-    return compute_geometry_from_config(cfg)
-
-
-def log_step(fluxes, state: GKState, wall_time: float, n_steps: int = 0, label=None):
+def _log_step(fluxes, state: GKState, wall_time: float, n_steps: int = 0, label=None):
+    """Print one progress line: step, time, energy fluxes, mean growth rate and steps/s."""
     flx = jnp.asarray(fluxes)
     growth = float(jnp.mean(state.last_growth_rate))
     if flx.ndim == 1:
@@ -87,12 +83,19 @@ def gk_init(
     params: GKParams,
     n_species: int = 1,
 ) -> Tuple[jnp.ndarray, Dict[str, jnp.ndarray], GKState]:
-    """Create initial (df, geometry, state) from geometry and params. No IO.
+    """Create the initial ``(df, geometry, state)``, without I/O.
 
-    For kinetic electrons the geometry dict is augmented with per-species arrays
-    from ``params`` when they are missing (e.g. when using ``compute_geometry``
-    which only creates single-species placeholders). The returned geometry
-    must be used for all subsequent calls.
+    For kinetic electrons the geometry gets the per-species arrays of ``params``
+    when it lacks them (``compute_geometry`` creates single-species entries), so
+    use the returned geometry from then on.
+
+    Args:
+        geometry: Geometry dict.
+        params: Run parameters; ``finit`` and ``amp_init`` set the initial condition.
+        n_species: Number of species (taken from ``params`` for kinetic runs).
+
+    Returns:
+        ``(df, geometry, state)``.
     """
     if not params.adiabatic_electrons:
         mas = jnp.asarray(params.mas, dtype=jnp.float64)
@@ -108,86 +111,10 @@ def gk_init(
         n_species=n_species,
         params=params,
     )
-    phi0 = _compute_phi_for_init(df, geometry, params)
+    phi0 = calculate_phi(geometry, df, params=params)
     amp0 = mode_amplitude(phi0, geometry, params.norm_eps)
-    nky = len(geometry["krho"])
-    state = default_state(nky=nky)
-    state = GKState(
-        time=state.time,
-        step=state.step,
-        accumulated_norm_factor=state.accumulated_norm_factor,
-        window_start_amp=amp0,
-        last_growth_rate=state.last_growth_rate,
-    )
+    state = dataclasses.replace(default_state(nky=len(geometry["krho"])), window_start_amp=amp0)
     return df, geometry, state
-
-
-@overload
-def gk_run(
-    df: jnp.ndarray,
-    geometry: Dict[str, jnp.ndarray],
-    params: GKParams,
-    state: GKState,
-    n_steps: int,
-    pre: Optional[GKPre] = None,
-    return_dt_info: Literal[False] = False,
-) -> Tuple[jnp.ndarray, jnp.ndarray, Any, GKState]: ...
-
-
-@overload
-def gk_run(
-    df: jnp.ndarray,
-    geometry: Dict[str, jnp.ndarray],
-    params: GKParams,
-    state: GKState,
-    n_steps: int,
-    pre: Optional[GKPre],
-    return_dt_info: Literal[True],
-) -> Tuple[jnp.ndarray, jnp.ndarray, Any, GKState, Dict[str, Any]]: ...
-
-
-@overload
-def gk_run(
-    df: jnp.ndarray,
-    geometry: Dict[str, jnp.ndarray],
-    params: GKParams,
-    state: GKState,
-    n_steps: int,
-    pre: Optional[GKPre] = None,
-    *,
-    return_dt_info: Literal[True],
-) -> Tuple[jnp.ndarray, jnp.ndarray, Any, GKState, Dict[str, Any]]: ...
-
-
-@overload
-def gk_run(
-    df: jnp.ndarray,
-    geometry: Dict[str, jnp.ndarray],
-    params: GKParams,
-    state: GKState,
-    n_steps: int,
-    pre: Optional[GKPre],
-    return_dt_info: bool,
-) -> (
-    Tuple[jnp.ndarray, jnp.ndarray, Any, GKState]
-    | Tuple[jnp.ndarray, jnp.ndarray, Any, GKState, Dict[str, Any]]
-): ...
-
-
-@overload
-def gk_run(
-    df: jnp.ndarray,
-    geometry: Dict[str, jnp.ndarray],
-    params: GKParams,
-    state: GKState,
-    n_steps: int,
-    pre: Optional[GKPre] = None,
-    *,
-    return_dt_info: bool,
-) -> (
-    Tuple[jnp.ndarray, jnp.ndarray, Any, GKState]
-    | Tuple[jnp.ndarray, jnp.ndarray, Any, GKState, Dict[str, Any]]
-): ...
 
 
 def gk_run(
@@ -202,11 +129,19 @@ def gk_run(
     Tuple[jnp.ndarray, jnp.ndarray, Any, GKState]
     | Tuple[jnp.ndarray, jnp.ndarray, Any, GKState, Dict[str, Any]]
 ):
-    """Run n_steps. Pure, no IO.
+    """Advance ``n_steps`` RK4 steps with :func:`~gyaradax.solver.rk4.gksolve`, without I/O.
 
-    Returns ``(df, phi, fluxes, state)`` by default. When
-    ``return_dt_info=True``, returns ``(df, phi, fluxes, state, dt_info)``
-    with per-step adaptive-CFL diagnostics from the underlying scan.
+    Args:
+        df: Distribution function, 5D (adiabatic) or 6D (kinetic).
+        geometry: Geometry dict.
+        params: Run parameters.
+        state: State at the start.
+        n_steps: Number of steps.
+        pre: Precomputed coefficients; built with ``linear_precompute`` when None.
+        return_dt_info: Also return the per-step timestep diagnostics.
+
+    Returns:
+        ``(df, phi, fluxes, state)``, plus ``dt_info`` when ``return_dt_info`` is set.
     """
     if pre is None:
         pre = linear_precompute(geometry, params)
@@ -230,12 +165,21 @@ def gk_run_batched(
     pre_batch: GKPre,
     return_dt_info: bool = False,
 ) -> Any:
-    """Batched gk_run: vmap over all per-config arguments.
+    """:func:`gk_run` over configs stacked along a leading batch axis, under ``jax.vmap``.
 
-    All arguments except n_steps carry a leading batch dimension.
-    Configs must share the same grid shape and static params
-    (adiabatic_electrons, non_linear, finit). ``return_dt_info`` appends the
-    batched per-step dt diagnostics, as in ``gk_run``.
+    The configs must share the grid shape and the static parameters.
+
+    Args:
+        df_batch: Stacked distributions.
+        geometry_batch: Stacked geometry dicts.
+        params_batch: Stacked GKParams.
+        state_batch: Stacked states.
+        n_steps: Number of steps.
+        pre_batch: Stacked precomputed coefficients.
+        return_dt_info: Also return the per-step timestep diagnostics.
+
+    Returns:
+        ``(df, phi, fluxes, state)``, batched, plus ``dt_info`` when requested.
     """
 
     def _single(df, geom, par, st, pre):
@@ -248,14 +192,6 @@ def gk_run_batched(
         return final_df, phi, fluxes, final_state
 
     return jax.vmap(_single)(df_batch, geometry_batch, params_batch, state_batch, pre_batch)
-
-
-def _has_diagnostics_at(output_dir: str, step: int) -> bool:
-    path = os.path.join(output_dir, "fluxes.npz")
-    if not os.path.exists(path):
-        return False
-    with np.load(path) as data:
-        return "step" in data.files and bool(np.any(data["step"] == step))
 
 
 def _diagnostics(df, geometry, params, pre):
@@ -293,19 +229,31 @@ def gksimulate(
     telemetry: Any = None,
     profile: bool = False,
 ) -> Tuple[jnp.ndarray, jnp.ndarray, Any, GKState]:
-    """Run n_steps with optional IO checkpointing and logging.
+    """Run ``n_steps`` in blocks, writing diagnostics and snapshots to ``output_dir``.
 
-    ``stop_on_nan`` halts at the first block with a non-finite ``df``, writing a
-    ``DIVERGED`` marker into ``output_dir``; the corrupted block is not archived.
-    Snapshots (``step_*.npz``) are written every ``snapshot_every`` blocks and
-    after the last one: all of them with ``save_snapshots``, only the latest with
-    ``keep_latest_snapshot`` (the previous one, or ``previous_snapshot`` such as the
-    snapshot a run resumed from, is removed once a newer one exists).
-    ``telemetry`` (a ``telemetry.RunTelemetry``) records compile time and per-block
-    timings; ``profile`` traces the first compiled block into ``output_dir/profile``.
+    Args:
+        df: Initial distribution.
+        geometry: Geometry dict.
+        params: Run parameters.
+        state: Initial state.
+        n_steps: Number of steps.
+        pre: Precomputed coefficients; built when None.
+        output_dir: Run directory; no output when None.
+        checkpoint_interval: Steps per block (diagnostics are written every block).
+        save_snapshots: Keep a snapshot of every snapshot block.
+        save_final: Write a snapshot after the last block.
+        snapshot_f32: Store df and phi as complex64 in the snapshots.
+        stop_on_nan: Stop at the first block with a non-finite df and write a
+            ``DIVERGED`` marker; that block is not archived.
+        keep_latest_snapshot: Keep only the newest snapshot.
+        snapshot_every: Write a snapshot every this many blocks.
+        previous_snapshot: Snapshot to remove once a newer one exists (e.g. the one
+            the run resumed from).
+        telemetry: A :class:`~gyaradax.diagnostics.telemetry.RunTelemetry`, or None.
+        profile: Trace the first compiled block into ``output_dir/profile``.
 
     Returns:
-        (df, phi, fluxes, state)
+        ``(df, phi, fluxes, state)``.
     """
     if pre is None:
         pre = linear_precompute(geometry, params)
@@ -361,11 +309,34 @@ def gksimulate_batched(
     snapshot_every: int = 1,
     profile: bool = False,
 ) -> Tuple[jnp.ndarray, jnp.ndarray, Any, GKState]:
-    """``gksimulate`` for configs stacked along a leading batch axis (``gk_run_batched``).
+    """:func:`gksimulate` for configs stacked along a leading batch axis.
 
-    Every member writes its own output directory exactly as ``gksimulate`` would; a
-    member that diverges gets its ``DIVERGED`` marker and no further output while
-    the others continue.
+    Every member writes its own output directory as :func:`gksimulate` would. A
+    member that diverges gets its ``DIVERGED`` marker and no more output while the
+    others continue.
+
+    Args:
+        df_batch: Stacked distributions.
+        geometry_batch: Stacked geometry dicts.
+        params_batch: Stacked GKParams.
+        state_batch: Stacked states.
+        n_steps: Number of steps.
+        pre_batch: Stacked precomputed coefficients.
+        output_dirs: One run directory (or None) per member.
+        labels: Member names used in the log.
+        previous_snapshots: Per member, the snapshot to remove once a newer one exists.
+        telemetries: Per member, a RunTelemetry or None.
+        checkpoint_interval: Steps per block.
+        save_snapshots: Keep a snapshot of every snapshot block.
+        save_final: Write a snapshot after the last block.
+        snapshot_f32: Store df and phi as complex64 in the snapshots.
+        stop_on_nan: Stop a member at its first non-finite block.
+        keep_latest_snapshot: Keep only the newest snapshot.
+        snapshot_every: Write a snapshot every this many blocks.
+        profile: Trace the first compiled block into the first member's directory.
+
+    Returns:
+        ``(df, phi, fluxes, state)``, batched.
     """
     n = len(output_dirs)
 
@@ -437,7 +408,12 @@ def _simulate(
     for i, run in enumerate(runs):
         out = run["output_dir"]
         st = view(state, i)
-        if out is not None and not _has_diagnostics_at(out, int(st.step)):
+        history = os.path.join(out, "fluxes.npz") if out is not None else None
+        written = False
+        if history is not None and os.path.exists(history):
+            with np.load(history) as data:
+                written = "step" in data.files and bool(np.any(data["step"] == int(st.step)))
+        if out is not None and not written:
             os.makedirs(out, exist_ok=True)
             d = view(df, i)
             phi_init, fluxes_init = _diagnostics(d, run["geometry"], run["params"], run["pre"])
@@ -504,7 +480,11 @@ def _simulate(
         wall_time = time.time() - t0
         blocks_done += 1
         if profiled:
-            _share_profile_summary(runs)
+            src = os.path.join(cast(str, runs[0]["output_dir"]), "profile_summary.json")
+            for run in runs[1:]:
+                if run["output_dir"] is not None and os.path.exists(src):
+                    os.makedirs(run["output_dir"], exist_ok=True)
+                    shutil.copy(src, os.path.join(run["output_dir"], "profile_summary.json"))
 
         for i, run in enumerate(runs):
             if not alive[i]:
@@ -557,7 +537,7 @@ def _simulate(
                             os.remove(previous[i])
                     previous[i] = latest
 
-            log_step(
+            _log_step(
                 view(current_fluxes, i), st, wall_time, n_steps=block_steps, label=run["label"]
             )
             if run["telemetry"] is not None:
@@ -593,26 +573,23 @@ def _simulate(
     return current_df, current_phi, current_fluxes, current_state
 
 
-def _share_profile_summary(runs: List[Dict[str, Any]]) -> None:
-    src = os.path.join(cast(str, runs[0]["output_dir"]), "profile_summary.json")
-    for run in runs[1:]:
-        if run["output_dir"] is not None and os.path.exists(src):
-            os.makedirs(run["output_dir"], exist_ok=True)
-            shutil.copy(src, os.path.join(run["output_dir"], "profile_summary.json"))
-
-
 def gk_from_gkw_dir(
     gkw_dir: str,
     k_index: int = -1,
     **overrides,
 ) -> Tuple[jnp.ndarray, Dict[str, jnp.ndarray], GKParams, GKState, GKPre]:
-    """Load a GKW run directory -> (df, geometry, params, state, pre).
+    """Set up a run from a GKW run directory, resuming from one of its K-file dumps.
 
-    Builds params from input.dat, loads geometry from geom.dat,
-    and resumes from a K-file. No YAML config needed.
+    Parameters come from ``input.dat``, the geometry from ``geom.dat``. Without
+    K-files the run cold-starts from ``finit``.
 
     Args:
-        k_index: which K-file to load (default -1, i.e. the last one).
+        gkw_dir: GKW run directory.
+        k_index: Index of the K-file to load (default: the last one).
+        overrides: GKParams overrides.
+
+    Returns:
+        ``(df, geometry, params, state, pre)``.
     """
     from gyaradax.core.params import gkparams_from_input_and_geometry
     from gyaradax.io.gkw import K_files, load_gkw_k_dump, read_gkw_dump_time
@@ -637,7 +614,7 @@ def gk_from_gkw_dir(
         df, geometry, _ = gk_init(geometry, params, n_species=n_species)
         t_start = 0.0
 
-    phi0 = _compute_phi_for_init(df, geometry, params)
+    phi0 = calculate_phi(geometry, df, params=params)
     amp0 = mode_amplitude(phi0, geometry, params.norm_eps)
     nky = len(geometry["krho"])
     state = GKState(
@@ -655,11 +632,18 @@ def gk_from_config(
     config_path: str,
     **overrides,
 ) -> Tuple[jnp.ndarray, Dict[str, jnp.ndarray], GKParams, GKState, GKPre]:
-    """Load YAML config -> (df, geometry, params, state, pre).
+    """Set up a cold-started run from a YAML config.
 
-    Fresh-start initialization only. Resume from checkpoint/K-file is the
-    caller's responsibility using load_checkpoint() or load_gkw_k_dump().
-    Uses analytic geometry when data_dir is absent from the config.
+    The geometry is computed from the config, or loaded from ``run.data_dir``
+    when that points to a GKW run. Resuming from a snapshot or a K-file is done
+    by the CLI (``gyaradax run RUN_DIR``) or by the caller.
+
+    Args:
+        config_path: Path to the YAML config.
+        overrides: GKParams overrides.
+
+    Returns:
+        ``(df, geometry, params, state, pre)``.
     """
     cfg = load_config(config_path)
     params = gkparams_from_config(cfg, **overrides)

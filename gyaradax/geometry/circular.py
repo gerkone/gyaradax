@@ -72,6 +72,10 @@ class SAlphaGeometryModel(_DelegatingCircularGeometryModel):
 def register_circular_geometry_models(
     compute_impl: Callable[[GeometrySpec], dict[str, Any]],
 ) -> None:
-    """Register circular and s-alpha geometry models with the registry."""
+    """Register the circular and s-α models with the geometry registry.
+
+    Args:
+        compute_impl: Function that builds the geometry dict of a spec.
+    """
     register_geometry_model(CircularGeometryModel(compute_impl))
     register_geometry_model(SAlphaGeometryModel(compute_impl))

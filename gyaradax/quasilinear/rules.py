@@ -5,7 +5,7 @@ default). All rules share the ql_flux call signature, are pure jax.numpy (differ
 jit-able), have one fitted amplitude `cn`, and are registered in RULES at the bottom.
 
 ĝ = sigmoid(20γ)·relu(γ) is the smooth stability-gated growth rate and
-W(ky) = Σ_kx Γ / Σ_kx |φ|² the normalization-invariant QL weight, both
+``W(ky) = Σ_kx Γ / Σ_kx |φ|²`` the normalization-invariant QL weight, both
 identical to ql_flux.
 
   canonical      Q = C·Σ W·ĝ/⟨k⊥²⟩.  Plain mixing length, the reference.
@@ -13,14 +13,14 @@ identical to ql_flux.
   sat0           Q = C·Σ W·ky·(ĝ/⟨k⊥²⟩)².
                  Waltz mixing rule: saturated potential from the mixing
                  estimate φ_sat ~ γ/⟨k⊥²⟩ (zonal-flow/ExB shear balance
-                 V_zf ~ γ/ky ⇒ |φ|² ~ (γ/k⊥²)²), intensity is the SQUARE,
+                 V_zf ~ γ/ky ⇒ φ² ~ (γ/k⊥²)²), intensity is the SQUARE,
                  and the flux carries the explicit ky factor of the ExB
                  drift v_E = i·ky·φ.
 
   sat2           SAT2 on the full eigenmode; see ql_flux_sat2.
 
 Structural constants (SAT2's ay) are fixed by construction
-and documented at their definition — they are NOT calibrated; each rule
+and documented at their definition: they are NOT calibrated; each rule
 exposes only cn.
 """
 
@@ -31,10 +31,15 @@ import jax.numpy as jnp
 
 
 def k_perp_squared(krho, kxrh, little_g):
-    """k_⊥²(s, kx, ky) from geometry metric tensors.
+    """``k_perp^2(s, kx, ky)`` from the metric.
 
-    krho: (nky,), kxrh: (nkx,), little_g: (3, ns) = [g_zz, g_ez, g_ee].
-    Returns (ns, nkx, nky).
+    Args:
+        krho: Binormal wavenumbers, (nky,).
+        kxrh: Radial wavenumbers, (nkx,).
+        little_g: Metric ``[g_zz, g_ez, g_ee]``, (3, ns).
+
+    Returns:
+        (ns, nkx, nky).
     """
     g_zz = little_g[0][:, None, None]
     g_ez = little_g[1][:, None, None]
@@ -45,10 +50,15 @@ def k_perp_squared(krho, kxrh, little_g):
 
 
 def k_perp_eff_squared(phi2, k_perp2, ds):
-    """Eigenmode-weighted <k_⊥²>(ky): ∫ds Σ_kx k_⊥²|φ|² / ∫ds Σ_kx |φ|².
+    """Eigenmode-weighted ``<k_perp^2>(ky) = int ds sum_kx k_perp^2 |phi|^2 / int ds sum_kx |phi|^2``.
 
-    phi2: (ns, nkx, nky), k_perp2: (ns, nkx, nky), ds: scalar.
-    Returns (nky,).
+    Args:
+        phi2: ``|phi|^2``, (ns, nkx, nky).
+        k_perp2: ``k_perp^2``, (ns, nkx, nky).
+        ds: Parallel grid spacing.
+
+    Returns:
+        (nky,).
     """
     norm = jnp.sum(phi2, axis=(0, 1)) * ds
     weighted = jnp.sum(k_perp2 * phi2, axis=(0, 1)) * ds
@@ -76,20 +86,24 @@ def ql_flux(
     """Compute Q_QL from a gyaradax linear-run end-state.
 
     Args:
-        growth_rate : (nky,)            converged γ per ky.
-        phi2        : (ns, nkx, nky)    |φ|² of the eigenmode (for <k_⊥²>).
-        phi2_kxy    : (nkx, nky)        |φ|² integrated over s with `ints` weights.
-        flux_kxy    : (nkx, nky)        per-mode linear flux (energy by default)
-                                        from calculate_fluxes(..., reduce=False).
-        krho        : (nky,)
-        kxrh        : (nkx,)
-        little_g    : (3, ns)           [g_zz, g_ez, g_ee].
-        ds          : scalar            mean(ints).
-        cn          : scalar amplitude calibration.
-        gate_*      : smooth sigmoid on γ > gate_threshold.
-        mask_zonal  : suppress ky=0 contribution.
+        growth_rate: Converged growth rate per ky, (nky,).
+        phi2: ``|phi|^2`` of the eigenmode, (ns, nkx, nky).
+        phi2_kxy: ``|phi|^2`` integrated over s with the ``ints`` weights, (nkx, nky).
+        flux_kxy: Per-mode linear flux, (nkx, nky), from ``calculate_fluxes(..., reduce=False)``.
+        krho: Binormal wavenumbers, (nky,).
+        kxrh: Radial wavenumbers, (nkx,).
+        little_g: Metric ``[g_zz, g_ez, g_ee]``, (3, ns).
+        ds: Parallel grid spacing.
+        cn: Amplitude calibration.
+        gate_threshold: Growth rate where the smooth stability gate switches on.
+        gate_sharpness: Sharpness of the gate's sigmoid.
+        eps: Floor of the denominators.
+        mask_zonal: Drop the ky = 0 contribution.
+        kx_ratio_sum: Sum the per-kx ratios ``Γ / |φ|²`` instead of ``Σ Γ / Σ |φ|²``.
+        kperp2_eff: ``<k_perp^2>`` per ky; the all-chain average when None.
 
-    Returns: scalar Q_QL.
+    Returns:
+        The flux.
     """
     if kperp2_eff is None:
         # averages all theta0 chains equally; pass kperp2_eff for the kx = 0 chain alone
@@ -140,17 +154,22 @@ _DLNPDR_FLOOR, _DLNPDR_CUTOFF = 4.0, 18.0
 
 
 def dlnpdr_tglf(rlt, rln, te_ti=1.0, adiabatic=False):
-    """TGLF's normalized pressure-gradient scale length for SAT2's cnorm.
+    """TGLF's normalised pressure-gradient length of SAT2's ``cnorm``, clamped to [4, 18].
 
-    tglf_multiscale_spectrum.f90:85-97 forms
-    rmaj*SUM_s as*taus*(rlns+rlts)/ptot, clamped into [4, 18]. TGLF's rlns
-    and rlts are a/L_x with rmaj = R/a, so the product is R/L; gyaradax's
-    rlt and rln are already R/L and the rmaj factor is 1 here.
+    TGLF (tglf_multiscale_spectrum.f90) forms ``rmaj sum_s a_s tau_s (rln_s + rlt_s) / p_tot``
+    with ``a/L`` gradients. gyaradax gradients are already ``R/L``, so ``rmaj`` is 1.
+    For a pure deuterium plasma both species have ``a_s = 1`` and ``tau_s`` is
+    normalised to the electron temperature. Adiabatic runs still count the
+    electrons, as TGLF does, with ``rlt_e = 0`` and ``Te = Ti``.
 
-    Pure D, quasineutral: as = 1 for both species and taus is normalized to
-    the electron temperature. Adiabatic runs follow TGLF, whose species loop
-    runs from 1 and so still counts the electrons, with rlt_e = 0 and
-    Te = Ti -- giving rln + rlt/2, not rln + rlt.
+    Args:
+        rlt: Temperature gradients R/L_T (ion first).
+        rln: Density gradients R/L_n.
+        te_ti: Electron-to-ion temperature ratio.
+        adiabatic: Adiabatic electrons.
+
+    Returns:
+        The pressure-gradient length.
     """
     rlt_i, rlt_e = (rlt, 0.0) if adiabatic else (rlt[0], rlt[1])
     rln_i = rln if adiabatic else rln[0]
@@ -207,7 +226,27 @@ def ql_flux_sat0(
     mask_zonal=True,
     kperp2_eff=None,
 ):
-    """SAT0-style Waltz mixing rule: Q = C·Σ W·ky·(ĝ/⟨k⊥²⟩)²."""
+    """SAT0-style Waltz mixing rule, ``Q = cn sum_ky W ky (gamma_hat / <k_perp^2>)^2``.
+
+    Args:
+        growth_rate: Converged growth rate per ky, (nky,).
+        phi2: ``|phi|^2`` of the eigenmode, (ns, nkx, nky).
+        phi2_kxy: ``|phi|^2`` integrated over s with the ``ints`` weights, (nkx, nky).
+        flux_kxy: Per-mode linear flux, (nkx, nky), from ``calculate_fluxes(..., reduce=False)``.
+        krho: Binormal wavenumbers, (nky,).
+        kxrh: Radial wavenumbers, (nkx,).
+        little_g: Metric ``[g_zz, g_ez, g_ee]``, (3, ns).
+        ds: Parallel grid spacing.
+        cn: Amplitude calibration.
+        gate_threshold: Growth rate where the smooth stability gate switches on.
+        gate_sharpness: Sharpness of the gate's sigmoid.
+        eps: Floor of the denominators.
+        mask_zonal: Drop the ky = 0 contribution.
+        kperp2_eff: ``<k_perp^2>`` per ky to use instead of the all-chain average.
+
+    Returns:
+        The flux.
+    """
     ghat = _gated_gamma(growth_rate, gate_threshold, gate_sharpness)
     safe_kperp2 = _safe_kperp2_eff(phi2, krho, kxrh, little_g, ds, eps,
                                    kperp2_eff=kperp2_eff)
@@ -218,13 +257,18 @@ def ql_flux_sat0(
 
 
 def geom_sat2_factors(geom):
-    """SAT2's grad_r0 and Gq from a gyaradax geometry, not from constants.
+    """SAT2's ``grad_r0`` and ``Gq`` from a gyaradax geometry.
 
-    grad_r0 = |grad r| at the outboard midplane = sqrt(g_eps_eps), which is
-    little_g[:, 2]; it comes out exactly 1 for circular, matching TGLF.
-    Gq = B_geo0 / grad_r0 with B_geo0 the midplane field. gyaradax normalises
-    B differently from TGLF (0.843 vs 0.826 at eps = 0.19), and Gq only
-    enters kx_width above kycut, where the intensity is already small.
+    ``grad_r0 = |grad r|`` at the outboard midplane, ``sqrt(g_eps_eps)``, which is 1
+    for circular geometry, as in TGLF. ``Gq = B_geo0 / grad_r0`` with ``B_geo0`` the
+    midplane field. gyaradax normalises B differently from TGLF, but ``Gq`` only
+    enters the kx width above ``kycut``, where the intensity is small.
+
+    Args:
+        geom: Geometry dict.
+
+    Returns:
+        ``(grad_r0, gq)``.
     """
     lg = jnp.asarray(geom["little_g"])
     lg = lg if lg.shape[-1] == 3 else lg.T
@@ -305,7 +349,7 @@ def _gamma_kymix(ky, gamma, kymax, vzf, jmax, etg_stiff, eps):
     clamped = gammamax + etg_stiff * jnp.maximum(gamma - _SAT2_CZ2 * vzf * ky, 0.0)
     g = jnp.where(ky < kymax, gamma, clamped)
 
-    ky0 = ky[:, None]
+    ky0 = jnp.maximum(ky, eps)[:, None]
     ky1, ky2 = ky[None, :-1], ky[None, 1:]
     g1, g2 = g[None, :-1], g[None, 1:]
 
@@ -356,15 +400,40 @@ def ql_flux_sat2(
     eps=1e-30,
     mask_zonal=True,
 ):
-    """SAT2 flux Q = cn * sum_ky W(ky) I(ky)^p on the full linear eigenmode.
+    """SAT2 flux ``Q = cn sum_ky W(ky) I(ky)^p`` on the full linear eigenmode.
 
-    I(ky) = (1/kymax) (12/dlnpdr) ((gamma_eff / (kx_width ky)) / (1 + ay kx_hat^2))^2, with kymax
-    the quadratically refined peak of gamma/ky (floored at `kymin`, default 0.173 sqrt(2) grad_r0),
-    gamma_eff the growth rate clamped above kymax and Lorentzian-averaged over high ky, and
-    kx_width from SAT2's model (`kx_width_model="tglf"`) or measured from |phi|^2. b2 folds into cn
-    and sat_geo is left out. `flux_exponent` p acts on each mode's intensity (1 is SAT2's own form;
-    fitted values live in `calibrations`); `dlnpdr=None` drops 12/dlnpdr; `kthnorm` converts krho
-    to k_theta rho.
+    ``I(ky) = (1 / kymax) (12 / dlnpdr) (gamma_eff / (kx_width ky) / (1 + ay kx_hat^2))^2``.
+    ``kymax`` is the quadratically refined peak of ``gamma / ky``, ``gamma_eff`` the
+    growth rate clamped above ``kymax`` and Lorentzian-averaged over high ky, and
+    ``kx_width`` comes from SAT2's model or from ``|phi|^2``. ``b2`` folds into
+    ``cn``, and SAT2's ``sat_geo`` factor is left out.
+
+    Args:
+        growth_rate: Converged growth rate per ky, (nky,).
+        phi2: ``|phi|^2`` of the eigenmode, (ns, nkx, nky).
+        phi2_kxy: ``|phi|^2`` integrated over s with the ``ints`` weights, (nkx, nky).
+        flux_kxy: Per-mode linear flux, (nkx, nky), from ``calculate_fluxes(..., reduce=False)``.
+        krho: Binormal wavenumbers, (nky,).
+        kxrh: Radial wavenumbers, (nkx,).
+        little_g: Metric ``[g_zz, g_ez, g_ee]``, (3, ns).
+        ds: Parallel grid spacing.
+        cn: Amplitude calibration.
+        dlnpdr: Pressure-gradient length (:func:`dlnpdr_tglf`); None drops ``12 / dlnpdr``.
+        kx0_e: ExB spectral shift, 0 without rotation.
+        etg_stiff: Weight of the growth above the zonal-mixing clamp.
+        kymin: Floor of ``kymax``; ``0.173 sqrt(2) grad_r0`` when None.
+        kthnorm: Converts ``krho`` to ``k_theta rho``.
+        grad_r0: SAT2's ``grad_r0`` (:func:`geom_sat2_factors`).
+        gq: SAT2's ``Gq`` (:func:`geom_sat2_factors`).
+        kx_width_model: ``"tglf"`` for SAT2's model, otherwise measured from ``|phi|^2``.
+        flux_exponent: Exponent ``p`` on each mode's intensity; 1 is SAT2's own form.
+        gate_threshold: Growth rate where the smooth stability gate switches on.
+        gate_sharpness: Sharpness of the gate's sigmoid.
+        eps: Floor of the denominators.
+        mask_zonal: Drop the ky = 0 contribution.
+
+    Returns:
+        The flux.
     """
     ghat = _gated_gamma(growth_rate, gate_threshold, gate_sharpness)
     w = _w_ky(flux_kxy, phi2_kxy, eps)
@@ -435,25 +504,31 @@ def ql_flux_per_species(
 ):
     """Per-species / per-channel QL fluxes from ONE shared saturated intensity.
 
-    QL postulate: the saturated |φ|² amplitude is common to all species —
+    QL postulate: the saturated ``|φ|²`` amplitude is common to all species:
     species and channels differ only through their QL weights W_{s,c}(ky).
     Every rule in RULES is linear in `flux_kxy` (the flux enters only via
-    W = Σ_kx Γ / Σ_kx |φ|²), so evaluating the rule on each (species,
-    channel) flux slice with the SAME (γ, |φ|², geometry) realizes exactly
+    ``W = Σ_kx Γ / Σ_kx |φ|²``), so evaluating the rule on each (species,
+    channel) flux slice with the SAME (γ, ``|φ|²``, geometry) realizes exactly
     that decomposition, and the per-species outputs sum to the
     species-summed call by linearity.
 
     Args:
-        rule: a RULES entry or its name (e.g. "canonical").
-        flux_kxy_sp: (..., nkx, nky) linear flux fields with arbitrary
-            leading axes — e.g. the (nsp, 3, nkx, nky) ``fluxes_kxy_sp``
-            harvested by linear_pipeline._harvest for kinetic runs
-            (channels ordered [pflux, eflux, vflux], EM flutter included).
-        Other args/kwargs: identical to the underlying rule (γ, |φ|²
-        spectra, geometry, cn, gate, ...).
+        rule: A RULES entry or its name (e.g. "canonical").
+        growth_rate: Converged growth rate per ky, (nky,).
+        phi2: ``|phi|^2`` of the eigenmode, (ns, nkx, nky).
+        phi2_kxy: ``|phi|^2`` integrated over s with the ``ints`` weights, (nkx, nky).
+        flux_kxy_sp: Linear flux fields, (..., nkx, nky), with any leading axes,
+            e.g. the (nsp, 3, nkx, nky) ``fluxes_kxy_sp`` of kinetic runs (channels
+            pflux, eflux, vflux, EM flutter included).
+        krho: Binormal wavenumbers, (nky,).
+        kxrh: Radial wavenumbers, (nkx,).
+        little_g: Metric ``[g_zz, g_ez, g_ee]``, (3, ns).
+        ds: Parallel grid spacing.
+        kwargs: Keyword arguments of the rule (cn, gate, ...).
 
-    Returns: jnp array of shape ``flux_kxy_sp.shape[:-2]`` — e.g. (nsp, 3)
-    with [s, 1] the QL heat flux Q_s and [s, 0] the particle flux Γ_s.
+    Returns:
+        Array of shape ``flux_kxy_sp.shape[:-2]``, e.g. (nsp, 3) with ``[s, 1]`` the
+        heat flux and ``[s, 0]`` the particle flux of species s.
     """
     if isinstance(rule, str):
         rule = RULES[rule]

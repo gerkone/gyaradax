@@ -8,6 +8,7 @@ JAX import or package import that may import JAX.
 from __future__ import annotations
 
 import os
+import warnings
 
 _MULTI_GPU_XLA_FLAGS = (
     "--xla_gpu_enable_latency_hiding_scheduler=true",
@@ -28,9 +29,13 @@ def configure_runtime_env(
 ) -> None:
     """Configure process environment that must be set before importing JAX.
 
+    Selecting devices sets ``CUDA_DEVICE_ORDER=PCI_BUS_ID`` unless it is already
+    set, and warns when it replaces a different ``CUDA_VISIBLE_DEVICES``.
+
     Args:
-        device: Single CUDA device index.  ``-1`` or ``None`` leaves existing
-            ``CUDA_VISIBLE_DEVICES`` unchanged unless ``device_list`` is set.
+        device: Single CUDA device index, numbered as ``nvidia-smi`` does.
+            ``-1`` or ``None`` leaves ``CUDA_VISIBLE_DEVICES`` unchanged unless
+            ``device_list`` is set.
         device_list: Comma-separated CUDA device list.  When provided, this
             takes precedence over ``device``.
         preallocate: Default for ``XLA_PYTHON_CLIENT_PREALLOCATE``.  ``None``
@@ -40,10 +45,13 @@ def configure_runtime_env(
         n_gpus_vp: Number of devices requested on the vparallel axis.
         n_gpus_mu: Number of devices requested on the mu axis.
     """
-    if device_list:
-        os.environ["CUDA_VISIBLE_DEVICES"] = device_list
-    elif device is not None and device != -1:
-        os.environ["CUDA_VISIBLE_DEVICES"] = str(device)
+    visible = device_list or (str(device) if device is not None and device != -1 else None)
+    if visible:
+        previous = os.environ.get("CUDA_VISIBLE_DEVICES")
+        if previous is not None and previous != visible:
+            warnings.warn(f"CUDA_VISIBLE_DEVICES={previous} is replaced by {visible}", stacklevel=2)
+        os.environ["CUDA_VISIBLE_DEVICES"] = visible
+        os.environ.setdefault("CUDA_DEVICE_ORDER", "PCI_BUS_ID")
 
     if preallocate is not None:
         if isinstance(preallocate, bool):

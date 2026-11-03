@@ -1,7 +1,8 @@
 """gyaradax command-line interface: ``run``, ``bench``, ``info``.
 
 Run mode (adiabatic/kinetic), electromagnetic terms and velocity-space
-sharding all come from the YAML config; flags only override it. See docs/CLI.md.
+sharding all come from the YAML config; flags only override it (docs: "Running
+simulations").
 
 JAX and gyaradax are imported inside the command handlers, not at module scope,
 because ``CUDA_VISIBLE_DEVICES``/``XLA_FLAGS`` must be set before the backend
@@ -36,7 +37,7 @@ _MULTI_GPU_XLA_FLAGS = (
 
 
 # ---------------------------------------------------------------------------
-# config inspection (must stay JAX-free — runs before backend init)
+# config inspection (must stay JAX-free, runs before backend init)
 # ---------------------------------------------------------------------------
 
 
@@ -233,11 +234,6 @@ def _snapshots(run_dir: str) -> dict[int, str]:
     return steps
 
 
-def _latest_snapshot(run_dir: str) -> str | None:
-    steps = _snapshots(run_dir)
-    return steps[max(steps)] if steps else None
-
-
 def _in_dir(path: str, directory: str) -> bool:
     return os.path.abspath(os.path.dirname(path)) == os.path.abspath(directory)
 
@@ -280,10 +276,6 @@ def _confirm(question: str) -> bool:
         return False
 
 
-def _has_geom_dat(data_dir: str | None) -> bool:
-    return bool(data_dir) and os.path.exists(os.path.join(str(data_dir), "geom.dat"))
-
-
 def _find_k_file(data_dir: str | None, resume_from: str | None = None) -> str | None:
     """Return a K-dump to resume from, or None to cold-start."""
     from gyaradax.io.gkw import K_files
@@ -316,12 +308,9 @@ def _setup_run(config_path: str, args: argparse.Namespace, run_dir: str | None =
     from gyaradax import load_config, sharding as _sharding
     from gyaradax.geometry import compute_geometry_from_config
     from gyaradax.core.params import gkparams_from_config
+    from gyaradax.operators.poisson import calculate_phi
     from gyaradax.operators.precompute import linear_precompute
-    from gyaradax.solver.driver import (
-        _compute_phi_for_init,
-        _ensure_species_arrays,
-        gk_init,
-    )
+    from gyaradax.solver.driver import _ensure_species_arrays, gk_init
     from gyaradax.solver.rk4 import mode_amplitude
     from gyaradax.core.state import GKState
     from gyaradax.io.gkw import (
@@ -365,7 +354,7 @@ def _setup_run(config_path: str, args: argparse.Namespace, run_dir: str | None =
     overrides["n_gpus_sp"], overrides["n_gpus_vp"], overrides["n_gpus_mu"] = sp, vp, mu
     params = gkparams_from_config(cfg, **overrides)
 
-    if _has_geom_dat(data_dir):
+    if data_dir and os.path.exists(os.path.join(str(data_dir), "geom.dat")):
         geometry = cast(dict[str, Any], load_geometry(data_dir))
     else:
         geometry = cast(dict[str, Any], compute_geometry_from_config(cfg))
@@ -380,7 +369,8 @@ def _setup_run(config_path: str, args: argparse.Namespace, run_dir: str | None =
         if args.resume_from and args.resume_from.endswith(".npz"):
             snapshot = args.resume_from
         elif run_dir is not None and not args.resume_from:
-            snapshot = _latest_snapshot(run_dir)
+            steps = _snapshots(run_dir)
+            snapshot = steps[max(steps)] if steps else None
             rolling = snapshot is not None
     k_path = None
     if not args.from_scratch and snapshot is None:
@@ -417,7 +407,7 @@ def _setup_run(config_path: str, args: argparse.Namespace, run_dir: str | None =
             params = replace(params, dt=actual_dt)
 
         geometry = _ensure_species_arrays(geometry, params)
-        phi0 = _compute_phi_for_init(df, geometry, params)
+        phi0 = calculate_phi(geometry, df, params=params)
         amp0 = mode_amplitude(phi0, geometry, params.norm_eps)
         state = GKState(
             time=jnp.array(t_start, dtype=jnp.float64),
@@ -1116,6 +1106,7 @@ def _add_common(p: argparse.ArgumentParser) -> None:
 
 
 def build_parser() -> argparse.ArgumentParser:
+    """Argument parser of the ``gyaradax`` command: ``run``, ``bench``, ``convert`` and ``info``."""
     parser = argparse.ArgumentParser(
         prog="gyaradax",
         description="Gyrokinetic Vlasov-Poisson solver in JAX.",
@@ -1196,7 +1187,7 @@ def build_parser() -> argparse.ArgumentParser:
     convert_p.set_defaults(func=_cmd_convert)
 
     info_p = sub.add_parser("info", help="show devices, backends and versions")
-    info_p.add_argument("--device-list", type=str, default=None)
+    info_p.add_argument("--device-list", type=str, default=None, help="GPUs to report, e.g. 0,1")
     info_p.set_defaults(func=_cmd_info)
 
     return parser
