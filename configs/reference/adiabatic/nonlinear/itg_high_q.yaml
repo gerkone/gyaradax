@@ -1,6 +1,6 @@
-# gerkone/gyaradax-tests long_horizon/adiabatic_itg_high_shear, nonlinear: GKW 0.4-b1-1269 run, ITG, adiabatic electrons, high magnetic shear
+# reference: long_horizon/adiabatic_itg_high_q/nonlinear.json; GKW 0.4-b1-1269 run, ITG, adiabatic electrons, high q, flat density
 run:
-  name: adiabatic_itg_high_shear
+  name: itg_high_q
   block_size: 120
 solver:
   dt: 0.01
@@ -15,8 +15,8 @@ solver:
   adaptive_dt: false
   finit: cosine2
 physics:
-  rlt: 10.173595669502436
-  rln: 2.6087803694867335
+  rlt: 10.425231173754597
+  rln: 0.7429177033744687
   mas: 1.0
   tmp: 1.0
   de: 1.0
@@ -25,18 +25,18 @@ physics:
   dgrid: 1.0
   tgrid: 1.0
 geometry:
-  shat: 3.07514
-  q: 4.56844
+  shat: 1.25885
+  q: 8.94572
   eps: 0.19
-  kthnorm: 3.16004
+  kthnorm: 6.18376
   Rref: 100.0
   d2X: 1.0
   signB: 1.0
   signJ: 1.0
   dvp: 0.1875
   sgr_dist: 0.0625
-  kxmax: 8.87631
-  kymax: 0.4430323666789028
+  kxmax: 3.63603
+  kymax: 0.226399472165802
   geometry_model: circ
 grid:
   nvpar: 32

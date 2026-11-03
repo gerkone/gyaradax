@@ -1,6 +1,6 @@
-# gerkone/gyaradax-tests long_horizon/kinetic_itg_mid_flux, linear: gyaradax development version run, ITG, mid flux, collisions
+# reference: long_horizon/kinetic_tem_low_flux/nonlinear.json; gyaradax run, TEM, low flux, collisions
 run:
-  name: kinetic_itg_mid_flux
+  name: tem_low_flux
   block_size: 120
 solver:
   dt: 0.004
@@ -10,26 +10,26 @@ solver:
   disp_x: 0.1
   disp_y: 0.1
   idisp: 2
-  non_linear: false
+  non_linear: true
   adaptive_dt: true
   finit: noise
-  n_steps: 71280
   backend: cuda
-  fused_linear: true
-  linear_arith: fp64
+  mixed_precision: true
+  use_z2z: false
+  n_steps: 170702
 physics:
   rlt:
-  - 8.8205
-  - 2.2497
+  - 1.848
+  - 9.1765
   rln:
-  - 0.40091
-  - 0.40091
+  - 4.8239
+  - 4.8239
   mas:
   - 1.0
   - 0.000272
   tmp:
   - 1.0
-  - 1.585
+  - 1.3512
   de:
   - 1.0
   - 1.0
@@ -40,9 +40,9 @@ physics:
   tgrid: 1.0
 geometry:
   geometry_model: circ
-  shat: 3.7411
-  q: 2.2715
-  eps: 0.15002
+  shat: 2.6709
+  q: 2.9191
+  eps: 0.13155
   Rref: 100.0
   d2X: 1.0
   signB: 1.0
@@ -58,7 +58,7 @@ grid:
   vpar_max: 3.0
   nperiod: 1
   krhomax: 1.5
-  ikxspace: 23
+  ikxspace: 17
 collisions:
   enabled: true
   pitch_angle: true
@@ -67,4 +67,4 @@ collisions:
   freq_override: false
   rref: 6.229
   nref: 10.0
-  tref: 9.8023
+  tref: 6.8064

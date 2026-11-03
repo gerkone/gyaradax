@@ -1,6 +1,6 @@
-# gerkone/gyaradax-tests long_horizon/kinetic_itg_collisionless, linear: gyaradax development version run, ITG with a steep electron gradient, collisionless
+# reference: long_horizon/kinetic_itg_collisionless/linear.json; gyaradax run, ITG with a steep electron gradient, collisionless
 run:
-  name: kinetic_itg_collisionless
+  name: itg_collisionless_linear
   block_size: 120
 solver:
   dt: 0.004

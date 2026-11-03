@@ -1,6 +1,6 @@
-# gerkone/gyaradax-tests kinetic/kinetic_low_te_gradient: GKW run, electron R/L_T halved
+# reference: kinetic/kinetic_mid_te_gradient/nonlinear.json; GKW run, electron R/L_T equal to the ion one
 run:
-  name: kinetic_low_te_gradient
+  name: mid_te_gradient
 solver:
   dt: 0.004
   naverage: 100
@@ -17,7 +17,7 @@ solver:
 physics:
   rlt:
   - 5.394021989480302
-  - 3.45
+  - 6.9
   rln:
   - 3.0309573188766237
   - 3.0309573188766237

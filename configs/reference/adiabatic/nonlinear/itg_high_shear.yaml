@@ -1,6 +1,6 @@
-# gerkone/gyaradax-tests nonlinear/itg_weak_drive: GKW run, weakest temperature gradient
+# reference: nonlinear/itg_high_shear/nonlinear.json, long_horizon/adiabatic_itg_high_shear/nonlinear.json; GKW run, high magnetic shear, lower q
 run:
-  name: itg_weak_drive
+  name: itg_high_shear
 solver:
   dt: 0.01
   naverage: 40
@@ -13,10 +13,10 @@ solver:
   idisp: 2
   non_linear: true
   adaptive_dt: false
-  finit: sine
+  finit: cosine2
 physics:
-  rlt: 7.366463312621599
-  rln: 1.5940168155580587
+  rlt: 10.173595669502436
+  rln: 2.6087803694867335
   mas: 1.0
   tmp: 1.0
   de: 1.0
@@ -25,18 +25,18 @@ physics:
   dgrid: 1.0
   tgrid: 1.0
 geometry:
-  shat: 1.67212
-  q: 8.98969
+  shat: 3.07514
+  q: 4.56844
   eps: 0.19
-  kthnorm: 6.21414
+  kthnorm: 3.16004
   Rref: 100.0
   d2X: 1.0
   signB: 1.0
   signJ: 1.0
   dvp: 0.1875
   sgr_dist: 0.0625
-  kxmax: 4.82973
-  kymax: 0.22529263904578908
+  kxmax: 8.87631
+  kymax: 0.4430323666789028
   geometry_model: circ
 grid:
   nvpar: 32

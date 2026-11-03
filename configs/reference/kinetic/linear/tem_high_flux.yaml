@@ -1,6 +1,6 @@
-# gerkone/gyaradax-tests long_horizon/kinetic_tem_high_flux, linear: gyaradax development version run, TEM, high flux, low shear, collisions
+# reference: long_horizon/kinetic_tem_high_flux/linear.json; gyaradax run, TEM, high flux, low shear, collisions
 run:
-  name: kinetic_tem_high_flux
+  name: tem_high_flux_linear
   block_size: 120
 solver:
   dt: 0.004

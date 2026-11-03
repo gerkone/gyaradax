@@ -1,6 +1,6 @@
-# gerkone/gyaradax-tests linear/itg_strong_low_shear: GKW run, strongest growth, low shear
+# reference: linear/itg_strong_low_shear/linear.json; GKW run, strongest growth, low shear
 run:
-  name: itg_strong_low_shear
+  name: itg_strong_low_shear_linear
 solver:
   dt: 0.01
   naverage: 40

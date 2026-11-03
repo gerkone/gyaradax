@@ -1,4 +1,4 @@
-# gerkone/gyaradax-tests nonlinear/itg_low_shear_strong_drive: GKW run, low shear, strong temperature gradient
+# reference: nonlinear/itg_low_shear_strong_drive/nonlinear.json; GKW run, low shear, strong temperature gradient
 run:
   name: itg_low_shear_strong_drive
 solver:

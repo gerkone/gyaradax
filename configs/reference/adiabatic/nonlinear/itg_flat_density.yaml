@@ -1,4 +1,4 @@
-# gerkone/gyaradax-tests nonlinear/itg_flat_density: GKW run, flat density profile
+# reference: nonlinear/itg_flat_density/nonlinear.json; GKW run, flat density profile
 run:
   name: itg_flat_density
 solver:

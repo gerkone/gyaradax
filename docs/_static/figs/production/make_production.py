@@ -47,7 +47,7 @@ def main(root, runs):
         ref = reference(root, label, "nonlinear")
         run = load_run(os.path.join(runs, run_dir))
         t0, t1 = ref["average"]["window"]
-        name = label.split("/")[1]
+        name = label.split("/")[1].removeprefix("adiabatic_")
         ax = ax_f[i]
         ax.axvspan(t0, t1, color="0.92", zorder=-1)
         ax.plot(ref["time"], ref["fluxes"]["ion"]["heat"], color="k", lw=0.8, label="GKW")
@@ -93,7 +93,7 @@ def main(root, runs):
         ax.axhline(0, color="0.6", lw=0.5)
         ax.plot(res["ky"], res["ref_gamma"], "k.-", ms=4, lw=0.8, label="GKW")
         ax.plot(res["ky"], res["sim_gamma"], "o", color=GYX, ms=3, mfc="none", label="gyaradax")
-        ax.set(xlabel=r"$k_y\rho_i$", title=label.split("/")[1])
+        ax.set(xlabel=r"$k_y\rho_i$", title=label.split("/")[1].removeprefix("adiabatic_"))
         if i == 0:
             ax.set_ylabel(r"$\gamma$ [$v_{th}/R$]")
             ax.legend(frameon=False, fontsize=9)
@@ -116,7 +116,7 @@ def kinetic(root):
         a.axvspan(t0, t1, color="0.92", zorder=-1)
         for sp, c in SPECIES.items():
             a.plot(t, nl["fluxes"][sp]["heat"], color=c, lw=0.8, label=f"$Q_{sp[0]}$")
-        a.set(xlabel=r"$t$ [$R/v_{th}$]", title=name)
+        a.set(xlabel=r"$t$ [$R/v_{th}$]", title=name.removeprefix("kinetic_"))
         a = ax[1, i]
         m = (t >= t0) & (t <= t1)
         ky = np.asarray(nl["ky"])
@@ -127,7 +127,7 @@ def kinetic(root):
             a.axhline(0, color="0.6", lw=0.5)
             a.plot(ln["ky"], ln[key], ".-", color=GYX, ms=3, lw=0.8)
             if row == 0:
-                a.set_title(name)
+                a.set_title(name.removeprefix("kinetic_"))
             else:
                 a.set_xlabel(r"$k_y\rho_i$")
             if i == 0:

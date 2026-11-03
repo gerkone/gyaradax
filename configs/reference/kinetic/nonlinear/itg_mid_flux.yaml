@@ -1,6 +1,6 @@
-# gerkone/gyaradax-tests long_horizon/kinetic_itg_mid_flux, nonlinear: gyaradax development version run, ITG, mid flux, collisions
+# reference: long_horizon/kinetic_itg_mid_flux/nonlinear.json; gyaradax run, ITG, mid flux, collisions
 run:
-  name: kinetic_itg_mid_flux
+  name: itg_mid_flux
   block_size: 120
 solver:
   dt: 0.004

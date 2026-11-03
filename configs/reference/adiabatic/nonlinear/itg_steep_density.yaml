@@ -1,22 +1,22 @@
-# gerkone/gyaradax-tests long_horizon/adiabatic_itg_high_q, linear: GKW 0.4-b1-1269 run, ITG, adiabatic electrons, high q, flat density
+# reference: nonlinear/itg_steep_density/nonlinear.json; GKW run, steep density gradient, high q
 run:
-  name: adiabatic_itg_high_q
-  block_size: 120
+  name: itg_steep_density
 solver:
   dt: 0.01
   naverage: 40
   n_steps: 32000
+  dump_interval: 3
   disp_par: 1.0
   disp_vp: 0.2
   disp_x: 0.1
   disp_y: 0.1
   idisp: 2
-  non_linear: false
+  non_linear: true
   adaptive_dt: false
-  finit: cosine2
+  finit: sine
 physics:
-  rlt: 10.425231173754597
-  rln: 0.7429177033744687
+  rlt: 11.890701836262648
+  rln: 6.157114531268134
   mas: 1.0
   tmp: 1.0
   de: 1.0
@@ -25,18 +25,18 @@ physics:
   dgrid: 1.0
   tgrid: 1.0
 geometry:
-  shat: 1.25885
-  q: 8.94572
+  shat: 2.14389
+  q: 7.73187
   eps: 0.19
-  kthnorm: 6.18376
+  kthnorm: 5.34511
   Rref: 100.0
   d2X: 1.0
   signB: 1.0
   signJ: 1.0
   dvp: 0.1875
   sgr_dist: 0.0625
-  kxmax: 3.63603
-  kymax: 0.226399472165802
+  kxmax: 6.1919
+  kymax: 0.26192164426924797
   geometry_model: circ
 grid:
   nvpar: 32

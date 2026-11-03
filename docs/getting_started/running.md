@@ -55,9 +55,9 @@ A resumed run continues the solver state bitwise as if it had not stopped, appen
 Configs that share the grid and the static parameters run batched under one `jax.vmap`. Each writes its own run directory exactly as a single run would:
 
 ```bash
-gyaradax run configs/case_a.yaml configs/case_b.yaml
-gyaradax run configs/case_a.yaml configs/case_b.yaml --output-dir scan   # scan/<run.name>
-gyaradax run scan/case_a scan/case_b --n-steps 2000                      # resume both
+gyaradax run configs/examples/adiabatic_a.yaml configs/examples/adiabatic_b.yaml
+gyaradax run configs/examples/adiabatic_a.yaml configs/examples/adiabatic_b.yaml --output-dir scan   # scan/<run.name>
+gyaradax run scan/adiabatic_example_a scan/adiabatic_example_b --n-steps 2000                        # resume both
 ```
 
 Members may differ in array-valued settings (gradients, `beta`, ...). Configs that cannot share one solve (different grids, geometries, start steps, cadence, sharded runs, or different static parameters such as `dt`, the dissipation coefficients or the species masses) run one after another. A member that diverges stops writing while the others continue.

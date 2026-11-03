@@ -2,8 +2,7 @@
 
 ## Example runs
 
-The configs in [`configs/`](https://github.com/gerkone/gyaradax/tree/master/configs) are ready to run. Run times below are from `gyaradax bench` on one GPU (see
-{doc}`../performance/index`).
+The configs in [`configs/`](https://github.com/gerkone/gyaradax/tree/master/configs) are ready to run: `examples/` holds the short runs below, `em/` the electromagnetic ones, and `reference/` the long runs of the reference dataset, described in {doc}`../applications/production`. Run times below are from `gyaradax bench` on one GPU (see {doc}`../performance/index`).
 
 **Adiabatic ITG turbulence.** `configs/examples/iteration_13.yaml` is ion-temperature-gradient turbulence with adiabatic electrons in circular geometry: $q = 4.57$, $\hat s = 3.08$, $\varepsilon = 0.19$, $R/L_T = 10.2$, $R/L_n = 2.6$. The grid is $(n_{v_\parallel}, n_\mu, n_s, n_{k_x}, n_{k_y}) = (32, 8, 16, 85, 32)$ with a fixed `dt = 0.01`. It saturates after about t = 60, so run it for at least 12 000 steps:
 

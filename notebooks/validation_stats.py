@@ -8,6 +8,7 @@ gyaradax output directories.
 
 import json
 import os
+import re
 import warnings
 
 import numpy as np
@@ -345,6 +346,21 @@ def reference_cases(root):
     if os.path.exists(index):
         cases += [(f"long_horizon/{n}", os.path.join(root, "long_horizon", n)) for n in json.load(open(index))["cases"]]
     return [(label, d) for label, d in cases if os.path.isdir(d)]
+
+
+def reference_configs(repo_root):
+    """Map each dataset JSON (``<label>/<kind>.json``) to its config in configs/reference, from the config headers."""
+    out = {}
+    base = os.path.join(repo_root, "configs", "reference")
+    for dirpath, _, files in os.walk(base):
+        for f in files:
+            if f.endswith(".yaml"):
+                path = os.path.join(dirpath, f)
+                with open(path) as fh:
+                    m = re.match(r"# reference: ([^;]+);", fh.readline())
+                for ref in (m.group(1).split(", ") if m else []):
+                    out[ref] = os.path.relpath(path, repo_root)
+    return out
 
 
 def load_reference(case_dir, kind="nonlinear"):

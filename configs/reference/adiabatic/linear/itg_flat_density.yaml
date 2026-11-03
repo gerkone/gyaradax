@@ -1,6 +1,6 @@
-# gerkone/gyaradax-tests linear/itg_flat_density: GKW run, flat density profile
+# reference: linear/itg_flat_density/linear.json; GKW run, flat density profile
 run:
-  name: itg_flat_density
+  name: itg_flat_density_linear
 solver:
   dt: 0.01
   naverage: 40

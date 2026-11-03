@@ -1,6 +1,6 @@
-# gerkone/gyaradax-tests long_horizon/kinetic_tem_low_flux, linear: gyaradax development version run, TEM, low flux, collisions
+# reference: long_horizon/kinetic_itg_collisionless/nonlinear.json; gyaradax run, ITG with a steep electron gradient, collisionless
 run:
-  name: kinetic_tem_low_flux
+  name: itg_collisionless
   block_size: 120
 solver:
   dt: 0.004
@@ -10,26 +10,28 @@ solver:
   disp_x: 0.1
   disp_y: 0.1
   idisp: 2
-  non_linear: false
+  non_linear: true
   adaptive_dt: true
   finit: noise
-  n_steps: 69240
   backend: cuda
+  mixed_precision: true
+  use_z2z: false
   fused_linear: true
   linear_arith: ds
+  n_steps: 464892
 physics:
   rlt:
-  - 1.848
-  - 9.1765
+  - 9.5048
+  - 9.2217
   rln:
-  - 4.8239
-  - 4.8239
+  - 2.6105
+  - 2.6105
   mas:
   - 1.0
   - 0.000272
   tmp:
   - 1.0
-  - 1.3512
+  - 0.53578
   de:
   - 1.0
   - 1.0
@@ -40,9 +42,9 @@ physics:
   tgrid: 1.0
 geometry:
   geometry_model: circ
-  shat: 2.6709
-  q: 2.9191
-  eps: 0.13155
+  shat: 1.6949
+  q: 1.8585
+  eps: 0.13088
   Rref: 100.0
   d2X: 1.0
   signB: 1.0
@@ -58,13 +60,4 @@ grid:
   vpar_max: 3.0
   nperiod: 1
   krhomax: 1.5
-  ikxspace: 17
-collisions:
-  enabled: true
-  pitch_angle: true
-  en_scatter: true
-  friction: true
-  freq_override: false
-  rref: 6.229
-  nref: 10.0
-  tref: 6.8064
+  ikxspace: 10
