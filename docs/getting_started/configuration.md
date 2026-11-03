@@ -1,10 +1,7 @@
 # Configuration
 
-A run config is a YAML file with the sections below, in this order. Names follow
-GKW's `input.dat` where there is an equivalent; `gyaradax convert` writes a
-complete config from a GKW run directory. Every key maps to a field of
-{class}`~gyaradax.core.params.GKParams` or of the geometry, whose docstrings give
-the full list and defaults.
+A run config is a YAML file with the sections below, in this order. Names follow GKW's `input.dat` where there is an equivalent; `gyaradax convert` writes a complete config from a GKW run directory. Every key maps to a field of
+{class}`~gyaradax.core.params.GKParams` or of the geometry, whose docstrings give the full list and defaults.
 
 ```yaml
 run:
@@ -70,8 +67,7 @@ grid:
 | `snapshot_every` | 1 | write the restart snapshot every this many blocks |
 | `save_dumps` | false | keep every snapshot instead of only the latest |
 
-The command-line flags of the same names (`--block-size`, `--snapshot-every`,
-`--save-dumps`) override them.
+The command-line flags of the same names (`--block-size`, `--snapshot-every`, `--save-dumps`) override them.
 
 ## `solver`
 
@@ -153,8 +149,7 @@ Rigid toroidal rotation (`vcor`, `uprim`) is read from GKW input files only.
 | `signB`, `Rref` | sign of the field, reference major radius |
 | `kappa`, `delta`, `square`, `skappa`, `sdelta`, `ssquare`, `Zmil`, `dRmil`, `dZmil` | Miller shape |
 
-Configs written by `gyaradax convert` also store derived values (`kthnorm`,
-`dvp`, `sgr_dist`, `kxmax`, `kymax`). They are recomputed when absent.
+Configs written by `gyaradax convert` also store derived values (`kthnorm`, `dvp`, `sgr_dist`, `kxmax`, `kymax`). They are recomputed when absent.
 
 ## `grid`
 
@@ -169,20 +164,14 @@ Configs written by `gyaradax convert` also store derived values (`kthnorm`,
 
 ### Choosing the grid
 
-- `nkx` and `ikxspace` fix the radial box. The kx spacing follows the magnetic
-  shear, so that at the `iy`-th ky the modes `(2 nperiod - 1) ikxspace iy` cells
-  apart connect through the ends of the field line. Kinetic runs need a larger
-  `nkx` than adiabatic ones: `configs/kinetic.yaml` uses 192, `configs/iteration_13.yaml` 85.
-- `ns` points cover `2 nperiod - 1` poloidal turns. Linear benchmarks need
-  enough of them to resolve Landau damping: the Cyclone Base Case uses
-  `ns = 160` with `nperiod = 5`. At `ns = 16` its growth rates come out too high.
+- `nkx` and `ikxspace` fix the radial box. The kx spacing follows the magnetic shear, so that at the `iy`-th ky the modes `(2 nperiod - 1) ikxspace iy` cells apart connect through the ends of the field line. Kinetic runs need a larger `nkx` than adiabatic ones: `configs/kinetic.yaml` uses 192, `configs/iteration_13.yaml` 85.
+- `ns` points cover `2 nperiod - 1` poloidal turns. Linear benchmarks need enough of them to resolve Landau damping: the Cyclone Base Case uses `ns = 160` with `nperiod = 5`. At `ns = 16` its growth rates come out too high.
 - The FFT lengths of the nonlinear term follow from `nkx` and `nky`, see
   {doc}`../performance/index` for sizes that run fastest.
 
 ## `collisions`
 
-The section switches collisions on (`enabled: true` by default once present).
-The defaults are GKW's.
+The section switches collisions on (`enabled: true` by default once present). The defaults are GKW's.
 
 | Key | Default | Meaning |
 |---|---|---|

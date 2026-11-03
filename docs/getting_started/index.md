@@ -1,7 +1,6 @@
 # Getting started
 
-`gyaradax` runs from a YAML config, either with the `gyaradax` command or from
-Python. Install it with the CUDA 13 extra on a GPU machine:
+`gyaradax` runs from a YAML config, either with the `gyaradax` command or from Python. Install it with the CUDA 13 extra on a GPU machine:
 
 ```bash
 pip install -e ".[cuda13]"
@@ -23,9 +22,7 @@ df, geometry, params, state, pre = gyx.gk_from_config("configs/iteration_13.yaml
 df, phi, fluxes, state = gyx.gk_run(df, geometry, params, state, 400, pre=pre)
 ```
 
-The pages below cover the installation (including the CUDA kernels), the
-quickstart, running and resuming simulations with the command reference, the
-config sections and the example runs and notebooks.
+The pages below cover the installation (including the CUDA kernels), the quickstart, running and resuming simulations with the command reference, the config sections and the example runs and notebooks.
 
 ```{toctree}
 :maxdepth: 1

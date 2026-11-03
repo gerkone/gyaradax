@@ -4,16 +4,9 @@
   <img src="docs/figs/gyaradax_small.png" width="400" alt="gyaradax logo">
 </p>
 
-`gyaradax` is a JAX code for local flux-tube gyrokinetics, based on
-[GKW](https://bitbucket.org/gkw/gkw/src/develop/). It is differentiable and covers
-electrostatic and electromagnetic (A∥, B∥) turbulence with adiabatic or kinetic
-electrons and a linearised Fokker-Planck collision operator, linear and
-nonlinear, with an optional CUDA backend and multi-GPU sharding.
+`gyaradax` is a JAX code for local flux-tube gyrokinetics, based on [GKW](https://bitbucket.org/gkw/gkw/src/develop/). It is differentiable and covers electrostatic and electromagnetic (A∥, B∥) turbulence with adiabatic or kinetic electrons and a linearised Fokker-Planck collision operator, linear and nonlinear, with an optional CUDA backend and multi-GPU sharding.
 
-**Documentation:** installation, usage, performance guide, numerics and
-verification are in [`docs/`](docs/index.md) (build with
-`pip install -e ".[docs]" && sphinx-build docs docs/_build`). The
-[paper](https://arxiv.org/abs/2604.06085) describes the code and its validation.
+**Documentation:** installation, usage, performance guide, numerics and verification are in [`docs/`](docs/index.md) (build with `pip install -e ".[docs]" && sphinx-build docs docs/_build`). The [paper](https://arxiv.org/abs/2604.06085) describes the code and its validation.
 
 <p align="center">
   <img src="docs/figs/torus.gif" width="700" alt="Nonlinear ITG turbulence on a torus">
@@ -35,8 +28,7 @@ df, geometry, params, state, pre = gyx.gk_from_config("configs/iteration_13.yaml
 df, phi, fluxes, state = gyx.gk_run(df, geometry, params, state, 400, pre=pre)
 ```
 
-The optional CUDA kernels are built from `gyaradax/backends/cuda_kernels/` with
-CMake; see the installation page of the docs.
+The optional CUDA kernels are built from `gyaradax/backends/cuda_kernels/` with CMake; see the installation page of the docs.
 
 ## Tests
 
@@ -48,9 +40,7 @@ Most tests compare against GKW reference runs on Hugging Face ([gerkone/gyaradax
 
 ## Development
 
-`gyaradax` was written with coding agents under human supervision;
-[PROMPT.md](docs/PROMPT.md) is the prompt of the first working version, and the
-docs describe the validation loop used for every change since.
+`gyaradax` was written with coding agents under human supervision; [PROMPT.md](docs/PROMPT.md) is the prompt of the first working version, and the docs describe the validation loop used for every change since.
 
 ## Citing
 

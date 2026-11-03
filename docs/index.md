@@ -9,16 +9,9 @@ hide-toc: true
 
 Your local gyrokinetics JAX code.
 
-`gyaradax` (short `gyx`) solves the δf gyrokinetic equation in a flux tube, electrostatic or
-electromagnetic, with adiabatic or kinetic electrons and collisions. It follows
-[GKW](https://bitbucket.org/gkw/gkw/src/develop/) ([Peeters et al. 2009](https://doi.org/10.1016/j.cpc.2009.07.001))
-closely: same normalisations, grids and input files, so a GKW run can be
-converted and continued in `gyx`.
+`gyaradax` (short `gyx`) solves the δf gyrokinetic equation in a flux tube, electrostatic or electromagnetic, with adiabatic or kinetic electrons and collisions. It follows [GKW](https://bitbucket.org/gkw/gkw/src/develop/) ([Peeters et al. 2009](https://doi.org/10.1016/j.cpc.2009.07.001)) closely: same normalisations, grids and input files, so a GKW run can be converted and continued in `gyx`.
 
-It is meant for people who want a gyrokinetic code that fits in a Python
-workflow: generating turbulence datasets, coupling to transport solvers,
-fitting reduced models, or differentiating through a simulation. An optional
-CUDA backend makes nonlinear runs several times faster.
+It is meant for people who want a gyrokinetic code that fits in a Python workflow: generating turbulence datasets, coupling to transport solvers, fitting reduced models, or differentiating through a simulation. An optional CUDA backend makes nonlinear runs several times faster.
 
 ::::{grid} 1 2 2 2
 :gutter: 3
@@ -91,8 +84,7 @@ df, phi, fluxes, state = gyx.gk_run(df, geometry, params, state, 400, pre=pre)
 
 ## Citing
 
-We wrote a [short paper](https://arxiv.org/abs/2604.06085) about `gyaradax` and its
-development. If you use it, cite it as:
+We wrote a [short paper](https://arxiv.org/abs/2604.06085) about `gyaradax` and its development. If you use it, cite it as:
 
 ```bibtex
 @misc{galletti2026gyaradax,
@@ -122,6 +114,7 @@ numerics/index
 
 validation/development
 validation/verification
+contributing
 ```
 
 ```{toctree}

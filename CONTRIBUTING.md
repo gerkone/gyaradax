@@ -26,6 +26,10 @@ Turbulence is chaotic: two codes that differ by rounding separate after a few te
 
 The dataset holds references for the second kind as JSON diagnostics: every test case covers its whole GKW run, and `long_horizon/` adds long adiabatic (GKW) and kinetic (`gyaradax`) runs with their configs. [`notebooks/validation.ipynb`](https://github.com/gerkone/gyaradax/blob/master/notebooks/validation.ipynb) compares a set of runs with them. A rerun should reproduce the averages within their errors, not the trajectory.
 
+## Documentation
+
+The documentation is a Sphinx site in `docs/`, written in Markdown (MyST). Build it with `pip install -e ".[docs]"` and `sphinx-build docs docs/_build`. Each section is a folder with an `index.md` whose `toctree` lists its pages. `docs/api/` is generated from the docstrings (Google style). Figures sit in `docs/_static/figs/<section>/` next to the script that makes them; commit both.
+
 ## Open work
 
 - **Documentation:** worked examples and notebooks that run from the dataset.
