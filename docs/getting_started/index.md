@@ -24,8 +24,8 @@ df, phi, fluxes, state = gyx.gk_run(df, geometry, params, state, 400, pre=pre)
 ```
 
 The pages below cover the installation (including the CUDA kernels), the
-quickstart, running and resuming simulations, the full command reference, the
-config sections and the example notebooks.
+quickstart, running and resuming simulations with the command reference, the
+config sections and the example runs and notebooks.
 
 ```{toctree}
 :maxdepth: 1
@@ -33,7 +33,6 @@ config sections and the example notebooks.
 installation
 quickstart
 running
-cli_reference
 configuration
 examples
 ```

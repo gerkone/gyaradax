@@ -30,6 +30,13 @@ CUDA backend makes nonlinear runs several times faster.
 Install, run a first simulation from the CLI or Python, configure runs.
 :::
 
+:::{grid-item-card} Applications
+:link: applications/index
+:link-type: doc
+
+Linear eigenmodes, quasilinear fluxes and gradients through a run.
+:::
+
 :::{grid-item-card} Performance
 :link: performance/index
 :link-type: doc
@@ -61,11 +68,6 @@ Generated from the docstrings: drivers, solver, operators, backends,
 geometry, diagnostics.
 :::
 
-:::{grid-item-card} Paper
-:link: https://arxiv.org/abs/2604.06085
-
-*`gyaradax`: Local Gyrokinetics JAX Code*, Galletti, Volkmann and Brandstetter (2026).
-:::
 ::::
 
 ## At a glance
@@ -89,6 +91,9 @@ df, phi, fluxes, state = gyx.gk_run(df, geometry, params, state, 400, pre=pre)
 
 ## Citing
 
+We wrote a [short paper](https://arxiv.org/abs/2604.06085) about `gyaradax` and its
+development. If you use it, cite it as:
+
 ```bibtex
 @misc{galletti2026gyaradax,
   title         = {gyaradax: Local Gyrokinetics JAX Code},
@@ -106,6 +111,7 @@ df, phi, fluxes, state = gyx.gk_run(df, geometry, params, state, 400, pre=pre)
 :caption: User guide
 
 getting_started/index
+applications/index
 performance/index
 numerics/index
 ```
@@ -124,4 +130,5 @@ validation/verification
 
 api/index
 references
+GitHub <https://github.com/gerkone/gyaradax>
 ```

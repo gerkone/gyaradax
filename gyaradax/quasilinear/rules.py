@@ -349,7 +349,7 @@ def _gamma_kymix(ky, gamma, kymax, vzf, jmax, etg_stiff, eps):
     clamped = gammamax + etg_stiff * jnp.maximum(gamma - _SAT2_CZ2 * vzf * ky, 0.0)
     g = jnp.where(ky < kymax, gamma, clamped)
 
-    ky0 = ky[:, None]
+    ky0 = jnp.maximum(ky, eps)[:, None]
     ky1, ky2 = ky[None, :-1], ky[None, 1:]
     g1, g2 = g[None, :-1], g[None, 1:]
 

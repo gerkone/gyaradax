@@ -52,10 +52,10 @@ $T_\mathrm{ref} = 12$ keV. The same command as above runs it.
 
 **Electromagnetic turbulence.** `configs/nl_em_apar.yaml` is a small Cyclone-like
 case ($q = 1.4$, $\hat s = 0.78$, $R/L_T = 6.9$) with kinetic electrons and
-$A_\parallel$ at $\beta = 0.001$, on a 9 x 5 mode box for quick tests.
+$A_\parallel$ at $\beta = 0.001$, on a 9 by 5 mode box for quick tests.
 `configs/nl_em_waltz_b005.yaml` and `nl_em_waltz_b01.yaml` are Waltz-style
 cases ($q = 2$, $\hat s = 1$, $R/L_T = 9$) at $\beta = 0.005$ and $0.01$ on a
-55 x 8 box. Their `run.data_dir` points to GKW reference runs. Without them
+55 by 8 box. Their `run.data_dir` points to GKW reference runs. Without them
 the geometry is computed from the config.
 
 ```bash

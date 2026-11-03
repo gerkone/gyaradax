@@ -11,6 +11,7 @@ every ``naverage`` steps and track per-ky growth rates.
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 from gyaradax.core.jax_config import enable_x64
 
@@ -282,13 +283,11 @@ def init_f(
     elif finit == "zonal":
         # Rosenbluth-Hinton: spectral kx = ±1 around kx=0 with ±i*amp*fmaxwl/2,
         # ions only (signz > 0). GKW init.f90:1471-1514.
-        kxrh = jnp.asarray(geometry["kxrh"], dtype=jnp.float64)
-        ixzero = int(jnp.argmin(jnp.abs(kxrh)).item())
-        iy0 = int(
-            jnp.asarray(
-                geometry.get("iyzero", jnp.argmin(jnp.abs(jnp.asarray(geometry["krho"]))))
-            ).item()
-        )
+        ixzero = int(np.argmin(np.abs(np.asarray(geometry["kxrh"]))))
+        if "iyzero" in geometry:
+            iy0 = int(np.asarray(geometry["iyzero"]))
+        else:
+            iy0 = int(np.argmin(np.abs(np.asarray(geometry["krho"]))))
 
         df = jnp.zeros(full_shape, dtype=jnp.complex128)
 
@@ -318,11 +317,10 @@ def init_f(
 
     # zero out the zonal mode (ky=0): not for zonal init which IS the zonal mode
     if nky > 1:
-        iy0 = int(
-            jnp.asarray(
-                geometry.get("iyzero", jnp.argmin(jnp.abs(jnp.asarray(geometry["krho"]))))
-            ).item()
-        )
+        if "iyzero" in geometry:
+            iy0 = int(np.asarray(geometry["iyzero"]))
+        else:
+            iy0 = int(np.argmin(np.abs(np.asarray(geometry["krho"]))))
         df = df.at[..., iy0].set(0.0)
 
     if normalize_per_toroidal_mode:

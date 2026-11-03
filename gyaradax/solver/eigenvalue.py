@@ -39,7 +39,7 @@ the dominant eigenvalue then matches ``last_growth_rate[iky]``.
 Example::
 
     eigvals, eigvecs = eigensolve(
-        geometry, params, k=4, mode="exp", n_steps_per_matvec=50, ky_select=1
+        geometry, params, k=4, mode="exp", n_steps_per_matvec=250, ky_select=1
     )
     gamma, omega = eigvals[0].real, eigvals[0].imag
 """

@@ -1,8 +1,8 @@
 # Configuration
 
-A run config is a YAML file with the sections below. Names follow GKW's
-`input.dat` where there is an equivalent; `gyaradax convert` writes a complete
-config from a GKW run directory. Every key maps to a field of
+A run config is a YAML file with the sections below, in this order. Names follow
+GKW's `input.dat` where there is an equivalent; `gyaradax convert` writes a
+complete config from a GKW run directory. Every key maps to a field of
 {class}`~gyaradax.core.params.GKParams` or of the geometry, whose docstrings give
 the full list and defaults.
 
@@ -11,18 +11,22 @@ run:
   name: iteration_13
   data_dir: null           # GKW run directory: geometry from its geom.dat, resume from its K-files
 solver:
-  dt: 0.01
+  dt: 0.01                 # time stepping
   n_steps: 400
   naverage: 40             # steps per normalisation / growth-rate window
   dump_interval: 3         # checkpoint every dump_interval x naverage steps
   non_linear: true
   adaptive_dt: false       # CFL-adaptive dt (nonlinear runs)
-  finit: cosine2
-  disp_par: 1.0
+  finit: cosine2           # initial condition
+  amp_init: 1.0e-4
+  disp_par: 1.0            # dissipation
   disp_vp: 0.2
   disp_x: 0.1
   disp_y: 0.1
-  backend: auto
+  nlapar: false            # electromagnetic fields
+  nlbpar: false
+  backend: auto            # backend and kernels
+  mixed_precision: true
 physics:
   rlt: 10.17               # one value per species for kinetic runs
   rln: 2.61
@@ -46,11 +50,17 @@ grid:
   nperiod: 1
   krhomax: 1.4
   ikxspace: 5
+# optional sections
+# collisions:
+#   freq_override: true
+#   freq: 0.01
+# sharding:
+#   n_gpus: 4
+# debug:
+#   telemetry: true
 ```
 
-## Sections
-
-### `run`
+## `run`
 
 | Key | Default | Meaning |
 |---|---|---|
@@ -63,9 +73,9 @@ grid:
 The command-line flags of the same names (`--block-size`, `--snapshot-every`,
 `--save-dumps`) override them.
 
-### `solver`
+## `solver`
 
-Time stepping and initial condition:
+### Time stepping
 
 | Key | Default | Meaning |
 |---|---|---|
@@ -77,10 +87,15 @@ Time stepping and initial condition:
 | `adaptive_dt` | false | adapt dt to the CFL limit every step (nonlinear runs) |
 | `fac_dtim_est` | 0.95 | safety factor of the linear CFL estimate |
 | `fac_dtim_nl` | 0.95 | safety factor of the nonlinear CFL estimate |
-| `finit` | `cosine2` | initial condition: `cosine2`, `cosine`, `cosine3`, `sine`, `noise`, `gnoise`, `zonal` |
+
+### Initial condition
+
+| Key | Default | Meaning |
+|---|---|---|
+| `finit` | `cosine2` | `cosine2`, `cosine`, `cosine3`, `sine`, `noise`, `gnoise` or `zonal` |
 | `amp_init` | 1e-4 | initial amplitude |
 
-Dissipation:
+### Dissipation
 
 | Key | Default | Meaning |
 |---|---|---|
@@ -91,7 +106,7 @@ Dissipation:
 | `disp_par_conserve` | 0 | conservative parallel dissipation (1, 2 or 3, see {class}`~gyaradax.core.params.GKParams`) |
 | `disp_par_conserve_kycut` | 0 | apply it only up to this $k_\theta\rho$ |
 
-Electromagnetic fields:
+### Electromagnetic fields
 
 | Key | Default | Meaning |
 |---|---|---|
@@ -100,7 +115,9 @@ Electromagnetic fields:
 
 The plasma $\beta$ is set in `physics`.
 
-Performance (see {doc}`../performance/index` for when to use them):
+### Backend and kernels
+
+See {doc}`../performance/index` for when to use them.
 
 | Key | Default | Meaning |
 |---|---|---|
@@ -111,7 +128,7 @@ Performance (see {doc}`../performance/index` for when to use them):
 | `linear_arith` | `fp64` | CUDA: `ds` for double-single linear arithmetic on weak-FP64 GPUs |
 | `fused_bracket` | false | CUDA: bracket packing inside the cuFFT callbacks |
 
-### `physics`
+## `physics`
 
 | Key | Meaning |
 |---|---|
@@ -125,7 +142,9 @@ Performance (see {doc}`../performance/index` for when to use them):
 
 Species values are scalars for one species and lists (ions first) for several.
 
-### `geometry`
+Rigid toroidal rotation (`vcor`, `uprim`) is read from GKW input files only.
+
+## `geometry`
 
 | Key | Meaning |
 |---|---|
@@ -137,18 +156,30 @@ Species values are scalars for one species and lists (ions first) for several.
 Configs written by `gyaradax convert` also store derived values (`kthnorm`,
 `dvp`, `sgr_dist`, `kxmax`, `kymax`). They are recomputed when absent.
 
-### `grid`
+## `grid`
 
 | Key | Meaning |
 |---|---|
 | `nvpar`, `nmu`, `ns`, `nkx`, `nky` | resolution |
+| `adiabatic_electrons` | adiabatic (true) or kinetic electrons |
 | `vpar_max` | velocity box, in thermal velocities |
 | `nperiod` | the field line covers `2 nperiod - 1` poloidal turns |
 | `krhomax` | largest $k_\theta\rho$ |
 | `ikxspace` | sets the kx spacing from the shear |
-| `adiabatic_electrons` | adiabatic (true) or kinetic electrons |
 
-### `collisions`
+### Choosing the grid
+
+- `nkx` and `ikxspace` fix the radial box. The kx spacing follows the magnetic
+  shear, so that at the `iy`-th ky the modes `(2 nperiod - 1) ikxspace iy` cells
+  apart connect through the ends of the field line. Kinetic runs need a larger
+  `nkx` than adiabatic ones: `configs/kinetic.yaml` uses 192, `configs/iteration_13.yaml` 85.
+- `ns` points cover `2 nperiod - 1` poloidal turns. Linear benchmarks need
+  enough of them to resolve Landau damping: the Cyclone Base Case uses
+  `ns = 160` with `nperiod = 5`. At `ns = 16` its growth rates come out too high.
+- The FFT lengths of the nonlinear term follow from `nkx` and `nky`, see
+  {doc}`../performance/index` for sizes that run fastest.
+
+## `collisions`
 
 The section switches collisions on (`enabled: true` by default once present).
 The defaults are GKW's.
@@ -162,30 +193,16 @@ The defaults are GKW's.
 | `mass_conserve` | false | zero flux through the velocity boundaries |
 | `mom_conservation`, `ene_conservation` | false | momentum and energy conservation (Xu) |
 
-### `sharding`
+## `sharding`
 
 | Key | Meaning |
 |---|---|
 | `n_gpus` | number of GPUs, layout chosen from the grid |
 | `n_gpus_sp`, `n_gpus_vp`, `n_gpus_mu` | explicit layout over species, $v_\parallel$ and $\mu$ |
 
-### `debug`
+## `debug`
 
 | Key | Meaning |
 |---|---|
 | `telemetry` | write `telemetry.jsonl` |
 | `profile` | trace one block with the JAX profiler |
-
-Rigid toroidal rotation (`vcor`, `uprim`) is read from GKW input files only.
-
-## Choosing the grid
-
-- `nkx` and `ikxspace` fix the radial box. The kx spacing follows the magnetic
-  shear, so that at the `iy`-th ky the modes `(2 nperiod - 1) ikxspace iy` cells
-  apart connect through the ends of the field line. Kinetic runs need a larger
-  `nkx` than adiabatic ones: `configs/kinetic.yaml` uses 192, `configs/iteration_13.yaml` 85.
-- `ns` points cover `2 nperiod - 1` poloidal turns. Linear benchmarks need
-  enough of them to resolve Landau damping: the Cyclone Base Case uses
-  `ns = 160` with `nperiod = 5`. At `ns = 16` its growth rates come out too high.
-- The FFT lengths of the nonlinear term follow from `nkx` and `nky`, see
-  {doc}`../performance/index` for sizes that run fastest.

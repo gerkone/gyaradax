@@ -22,7 +22,7 @@ follows the prediction across $\varepsilon$.
 :class: paper-fig
 
 Zonal potential over time at $\varepsilon = 0.05$ (a) and residual against
-$\varepsilon$ (b). Paper.
+$\varepsilon$ (b).
 ```
 
 **Cyclone Base Case.** The standard linear ITG benchmark
@@ -38,7 +38,7 @@ $k_\theta\rho = 0.5$, $R/L_T = 6.9$).
 :class: paper-fig
 
 Growth rate against $k_\theta\rho$ at $R/L_T = 6.9$ (a) and against $R/L_T$ at
-$k_\theta\rho = 0.5$ (b). Paper.
+$k_\theta\rho = 0.5$ (b).
 ```
 
 These two cases are unit tests (`tests/unit/test_gk_cases.py`) and are shown in
@@ -65,7 +65,7 @@ These two cases are unit tests (`tests/unit/test_gk_cases.py`) and are shown in
 :width: 95%
 
 Growth rate and frequency from the linear initial-value run and from the
-eigensolver, adiabatic electrons, 16 x 85 x 32.
+eigensolver, adiabatic electrons, $(n_s, n_{k_x}, n_{k_y}) = (16, 85, 32)$.
 ```
 
 ```{figure} ../figs/eigensolver_structure.png
@@ -79,7 +79,7 @@ electrostatic adiabatic, kinetic-electron and electromagnetic cases.
 
 Nonlinear runs are compared through their statistics: time-averaged fluxes,
 $k_y$ and $k_x$ spectra of $|\phi|^2$, and growth rates. On 46 adiabatic ITG
-equilibria (grid 32 x 8 x 16 x 85 x 32, three runs per code from the same initial
+equilibria (grid 32, 8, 16, 85, 32, three runs per code from the same initial
 state), the grand-mean heat flux is 90.9 for `gyaradax` and 91.3 for GKW, and the
 spectra agree as follows (paper):
 
@@ -94,42 +94,42 @@ spectra agree as follows (paper):
 
 Heat and momentum flux of one adiabatic case, three runs per code. The codes
 coincide in the linear phase and separate when turbulence sets in. The averages
-agree. Paper.
+agree.
 ```
 
 ```{figure} ../_static/figs/paper/spectra_iteration_13.png
 :width: 100%
 :class: paper-fig
 
-Time-averaged $k_y$ and $k_x$ spectra of the same case. Paper.
+Time-averaged $k_y$ and $k_x$ spectra of the same case.
 ```
 
 ```{figure} ../_static/figs/paper/fluxes_iteration_200.png
 :width: 100%
 :class: paper-fig
 
-A second adiabatic case: heat and momentum flux. Paper.
+A second adiabatic case: heat and momentum flux.
 ```
 
 ```{figure} ../_static/figs/paper/spectra_iteration_200.png
 :width: 100%
 :class: paper-fig
 
-Its time-averaged spectra. Paper.
+Its time-averaged spectra.
 ```
 
 ```{figure} ../_static/figs/paper/kinetic_fluxes_v3_kiteration_991_half_rlt.png
 :width: 100%
 :class: paper-fig
 
-Kinetic electrons: ion and electron fluxes. Paper.
+Kinetic electrons: ion and electron fluxes.
 ```
 
 ```{figure} ../_static/figs/paper/kinetic_spectra_v3_kiteration_991_half_rlt.png
 :width: 100%
 :class: paper-fig
 
-Kinetic electrons: time-averaged $k_y$ and $k_x$ spectra. Paper.
+Kinetic electrons: time-averaged $k_y$ and $k_x$ spectra.
 ```
 
 :::{dropdown} All 46 adiabatic cases
@@ -150,45 +150,15 @@ $k_y$-spectrum Pearson correlation 1.00.
 
 ## Differentiable experiments
 
-**Inverse problem.** The temperature gradient is recovered from a target
-potential: a 400-step linear run at $R/L_T = 6.9$ ($q = 1.4$, $\hat s = 0.78$,
-$\varepsilon = 0.19$, grid 24 x 8 x 16 x 9 x 8) gives $\phi^*$, and Adam on the
-mean squared potential mismatch, with gradients by reverse-mode AD through all
-400 steps, goes from $R/L_T = 10$ to 6.908. The loss is smooth with a single
-minimum. `notebooks/inverse_problem.ipynb`.
+- **Inverse problem.** The temperature gradient is recovered from a target
+  potential: a 400-step linear run at $R/L_T = 6.9$ ($q = 1.4$, $\hat s = 0.78$,
+  $\varepsilon = 0.19$, grid 24, 8, 16, 9, 8) gives $\phi^*$, and Adam on the
+  mean squared potential mismatch, with gradients by reverse-mode AD through all
+  400 steps, goes from $R/L_T = 10$ to 6.908 (`notebooks/inverse_problem.ipynb`).
+- **Sensitivity.** `jax.jacrev` gives $\partial\gamma(k_y)/\partial(R/L_T)$ for
+  the whole spectrum, over 15 values of $R/L_T \in [3, 10]$ on the same grid.
 
-```{figure} ../_static/figs/paper/inverse_spectrum.png
-:width: 60%
-:class: paper-fig
-
-Initial, target and recovered $k_y$ spectra (top) and $R/L_T$ over the
-iterations (bottom). Paper.
-```
-
-```{figure} ../_static/figs/paper/inv_landscape.png
-:width: 50%
-:class: paper-fig
-
-Loss and its AD gradient over $R/L_T$, with the optimiser's path. Paper.
-```
-
-**Sensitivity.** `jax.jacrev` gives $\partial\gamma(k_y)/\partial(R/L_T)$ for the
-whole spectrum in $n_{k_y}$ backward passes, here over 15 values of
-$R/L_T \in [3, 10]$ on the same grid. `notebooks/sensitivity_analysis.ipynb`.
-
-```{figure} ../_static/figs/paper/sensitivity_gamma.png
-:width: 70%
-:class: paper-fig
-
-Growth rate $\gamma(k_y, R/L_T)$. Paper.
-```
-
-```{figure} ../_static/figs/paper/sensitivity_dgamma.png
-:width: 70%
-:class: paper-fig
-
-Its sensitivity $\partial\gamma/\partial(R/L_T)$. Paper.
-```
+Code and figures are in {doc}`../applications/differentiable`.
 
 ## Checking code changes
 

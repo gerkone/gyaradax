@@ -129,26 +129,15 @@ gyaradax bench configs/adiabatic_a.yaml --device 0 --backend cuda --steps 100 --
 steps per second (the first block carries the compilation), plus the peak device
 memory. `--profile` adds the per-kernel breakdown.
 
-## Options
+## Command reference
 
-| Flag | Meaning |
-|---|---|
-| `--backend {auto,jax,cuda}` | kernel backend |
-| `--mp` / `--dp` | mixed precision (FP32 nonlinear FFTs, the default) or full FP64 |
-| `--fused-linear` | CUDA: fused electrostatic RK stage with collisions |
-| `--linear-arith {fp64,ds}` | CUDA: double-single linear RHS for GPUs with weak FP64 |
-| `--fused-bracket` | CUDA: mixed-precision bracket packing inside the cuFFT callbacks |
-| `--device N` | one GPU: sets `CUDA_VISIBLE_DEVICES=N` (single-device runs only) |
-| `--device-list 0,1` | GPUs to use; several shard automatically |
-| `--n-gpus N`, `--n-gpus-{sp,vp,mu} N` | mesh size and layout |
-| `--mem-fraction F` | fraction of GPU memory XLA may use (e.g. 0.95 near the limit) |
-| `--n-steps N` | run N more steps |
-| `--n-blocks`, `--block-size` | run length in blocks, checkpoint cadence |
-| `--snapshot-every K` | restart snapshot every K blocks |
-| `--save-dumps` / `--no-save-dumps` | keep every snapshot / only the latest |
-| `--from-scratch`, `--resume-from`, `--overwrite` | start, resume and replace (above) |
-| `--telemetry`, `--profile`, `--debug` | debug output |
-| `--output-dir DIR` | output directory |
-| `--dry-run` | set up and print the summary only |
+Every command and flag, generated from the argument parser
+({func}`gyaradax.cli.build_parser`). The CUDA kernel flags (`--fused-linear`,
+`--linear-arith`, `--fused-bracket`) are explained in {doc}`../performance/index`.
 
-{doc}`cli_reference` lists every command and flag.
+```{eval-rst}
+.. argparse::
+   :module: gyaradax.cli
+   :func: build_parser
+   :prog: gyaradax
+```

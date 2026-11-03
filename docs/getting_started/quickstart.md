@@ -93,9 +93,8 @@ df, phi, fluxes, state = gk_run(df, geometry, params, state, 2000)
 gamma = state.last_growth_rate          # per-ky growth rate
 ```
 
-Pass `backend="cuda"` to `GKParams` for the CUDA kernels. Linear runs also have
-an eigenvalue solver, {func}`~gyaradax.solver.eigenvalue.eigensolve`, which finds
-subdominant and damped modes as well.
+Pass `backend="cuda"` to `GKParams` for the CUDA kernels. Eigenmodes,
+quasilinear fluxes and gradients through a run are in {doc}`../applications/index`.
 
 ## From a GKW run
 
@@ -109,35 +108,3 @@ gyaradax convert /path/to/gkw_run configs/my_case.yaml
 ```python
 df, geometry, params, state, pre = gyx.gk_from_gkw_dir("/path/to/gkw_run")
 ```
-
-## Differentiating through a run
-
-The JAX backend is differentiable end to end. A gradient of a loss on the
-potential with respect to the temperature gradient, reusing `df`, `geometry`,
-`params` and `state` of the linear example above:
-
-```python
-import dataclasses
-import jax
-import jax.numpy as jnp
-from gyaradax import gk_run
-from gyaradax.operators.precompute import linear_precompute
-
-def potential(rlt):
-    p = dataclasses.replace(params, rlt=rlt)
-    _, phi, _, _ = gk_run(df, geometry, p, state, 400, pre=linear_precompute(geometry, p))
-    return phi
-
-phi_target = potential(7.5)
-
-def loss(rlt):
-    p = dataclasses.replace(params, rlt=rlt)
-    pre = linear_precompute(geometry, p)
-    _, phi, _, _ = gk_run(df, geometry, p, state, 400, pre=pre)
-    return jnp.mean(jnp.abs(phi - phi_target) ** 2)
-
-dloss = jax.grad(loss)(6.9)
-```
-
-{doc}`../validation/verification` shows the inverse problem and the sensitivity study
-built this way. The CUDA kernels are not differentiable, so use `backend="jax"`.

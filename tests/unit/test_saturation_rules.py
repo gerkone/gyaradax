@@ -6,6 +6,7 @@ The optional kinetic integration test reads the last dump of a GKW kinetic-elect
 """
 
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -185,6 +186,14 @@ class TestRuleZoo:
             cur = float(call_rule(RULES[name], spec2, name=name))
             assert cur >= prev - 1e-12
             prev = cur
+
+    def test_growth_rate_gradient_finite(self, name):
+        spec = synthetic_spectrum(zonal_content=0.5)
+        grad = jax.grad(
+            lambda g: call_rule(RULES[name], dict(spec, growth_rate=g), name=name)
+        )(spec["growth_rate"])
+        assert np.all(np.isfinite(np.asarray(grad)))
+        assert np.any(np.asarray(grad) != 0.0)
 
 
 class TestRuleSpecifics:
