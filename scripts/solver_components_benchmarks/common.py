@@ -69,7 +69,7 @@ BASELINES_DIR = Path(__file__).parent / "baselines"
 # ── Setup ────────────────────────────────────────────────────────────────────
 
 
-def load_setup(config_path: str = "configs/iteration_13.yaml", mixed_precision: bool = False):
+def load_setup(config_path: str = "configs/examples/iteration_13.yaml", mixed_precision: bool = False):
     """Load real solver state from config + K-file checkpoint.
 
     Returns

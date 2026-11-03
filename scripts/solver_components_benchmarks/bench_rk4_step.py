@@ -135,7 +135,7 @@ def _bench_phase(
 # Entry point
 # ---------------------------------------------------------------------------
 def run(
-    config: str = "configs/iteration_13.yaml",
+    config: str = "configs/examples/iteration_13.yaml",
     mixed_precision: bool = False,
     backend_forced: str | None = None,
     nonlinear_z2z: bool = False,
@@ -197,7 +197,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--device", type=int, default=1, help="CUDA device index (already applied at import)"
     )
-    parser.add_argument("--config", type=str, default="configs/iteration_13.yaml")
+    parser.add_argument("--config", type=str, default="configs/examples/iteration_13.yaml")
     parser.add_argument("--mp", action="store_true", help="Enable mixed-precision mode")
     parser.add_argument(
         "--backend",

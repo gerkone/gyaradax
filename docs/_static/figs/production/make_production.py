@@ -2,6 +2,7 @@
 
 REFERENCE_ROOT holds the gerkone/gyaradax-tests diagnostics (``--include "*.json"`` is enough),
 RUNS_DIR the ``gyaradax run`` output directories laid out as in ``notebooks/validation.ipynb``.
+The kinetic figures use the dataset alone.
 """
 
 import json
@@ -30,7 +31,9 @@ LINEAR = [
     ("long_horizon/adiabatic_itg_high_q", "long_horizon/adiabatic_itg_high_q/linear"),
     ("linear/itg_strong_low_shear", "linear/itg_strong_low_shear"),
 ]
+KINETIC = ["kinetic_tem_low_flux", "kinetic_itg_mid_flux", "kinetic_itg_collisionless", "kinetic_tem_high_flux"]
 GYX = JAX_COLORS["cyan"]
+SPECIES = {"ion": JAX_COLORS["cyan"], "electron": JAX_COLORS["purple"]}
 
 
 def reference(root, label, kind):
@@ -97,6 +100,45 @@ def main(root, runs):
         print(f"linear `{label}`: max relative difference {res['max_rel_diff']:.1e} at t = {res['t_end']:.0f}")
     fig_l.tight_layout()
     fig_l.savefig(os.path.join(OUT, "linear.png"), dpi=130, bbox_inches="tight")
+
+    kinetic(root)
+
+
+def kinetic(root):
+    fig, ax = plt.subplots(2, 4, figsize=(15, 6))
+    fig_l, ax_l = plt.subplots(2, 4, figsize=(15, 5.5), sharex=True)
+    for i, name in enumerate(KINETIC):
+        nl = reference(root, f"long_horizon/{name}", "nonlinear")
+        ln = reference(root, f"long_horizon/{name}", "linear")
+        t = np.asarray(nl["time"])
+        t0, t1 = nl["average"]["window"]
+        a = ax[0, i]
+        a.axvspan(t0, t1, color="0.92", zorder=-1)
+        for sp, c in SPECIES.items():
+            a.plot(t, nl["fluxes"][sp]["heat"], color=c, lw=0.8, label=f"$Q_{sp[0]}$")
+        a.set(xlabel=r"$t$ [$R/v_{th}$]", title=name)
+        a = ax[1, i]
+        m = (t >= t0) & (t <= t1)
+        ky = np.asarray(nl["ky"])
+        a.semilogy(ky[1:], np.asarray(nl["ky_spectrum"])[m].mean(0)[1:], ".-", color=GYX, ms=3, lw=0.8)
+        a.set_xlabel(r"$k_y\rho_i$")
+        for row, key, yl in ((0, "gamma", r"$\gamma$ [$v_{th}/R$]"), (1, "omega", r"$\omega$ [$v_{th}/R$]")):
+            a = ax_l[row, i]
+            a.axhline(0, color="0.6", lw=0.5)
+            a.plot(ln["ky"], ln[key], ".-", color=GYX, ms=3, lw=0.8)
+            if row == 0:
+                a.set_title(name)
+            else:
+                a.set_xlabel(r"$k_y\rho_i$")
+            if i == 0:
+                a.set_ylabel(yl)
+    ax[0, 0].set_ylabel("heat flux")
+    ax[0, 0].legend(frameon=False, fontsize=9)
+    ax[1, 0].set_ylabel(r"$\langle|\phi|^2\rangle$, $k_y > 0$")
+    fig.tight_layout()
+    fig.savefig(os.path.join(OUT, "kinetic.png"), dpi=130, bbox_inches="tight")
+    fig_l.tight_layout()
+    fig_l.savefig(os.path.join(OUT, "kinetic_linear.png"), dpi=130, bbox_inches="tight")
 
 
 if __name__ == "__main__":

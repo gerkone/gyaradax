@@ -1,0 +1,65 @@
+# gerkone/gyaradax-tests kinetic/kinetic_low_te_gradient: GKW run, electron R/L_T halved
+run:
+  name: kinetic_low_te_gradient
+solver:
+  dt: 0.004
+  naverage: 100
+  n_steps: 80000
+  dump_interval: 3
+  disp_par: 1.0
+  disp_vp: 0.2
+  disp_x: 0.1
+  disp_y: 0.1
+  idisp: 2
+  non_linear: true
+  adaptive_dt: true
+  finit: cosine2
+physics:
+  rlt:
+  - 5.394021989480302
+  - 3.45
+  rln:
+  - 3.0309573188766237
+  - 3.0309573188766237
+  mas:
+  - 1.0
+  - 0.000272
+  tmp:
+  - 1.0
+  - 1.0
+  de:
+  - 1.0
+  - 1.0
+  signz:
+  - 1.0
+  - -1.0
+  vthrat:
+  - 1.0
+  - 60.63390625908325
+  dgrid: 1.0
+  tgrid: 1.0
+geometry:
+  shat: 2.74913
+  q: 3.48731
+  eps: 0.19
+  kthnorm: 2.41376
+  Rref: 100.0
+  d2X: 1.0
+  signB: 1.0
+  signJ: 1.0
+  dvp: 0.1875
+  sgr_dist: 0.0625
+  kxmax: 7.93021
+  kymax: 0.5800079543948031
+  geometry_model: circ
+grid:
+  nvpar: 32
+  nmu: 8
+  ns: 16
+  nkx: 85
+  nky: 32
+  adiabatic_electrons: false
+  krhomax: 1.4
+  ikxspace: 5
+  nperiod: 1
+  vpar_max: 3.0

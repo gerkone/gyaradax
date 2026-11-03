@@ -67,7 +67,7 @@ def test_traced_precompute_caps_the_step_dt():
 
 
 def test_cli_reports_and_uses_the_reduced_dt(tmp_path, capsys):
-    cfg = OmegaConf.load(os.path.join(REPO_ROOT, "configs", "kinetic.yaml"))
+    cfg = OmegaConf.load(os.path.join(REPO_ROOT, "configs", "examples", "kinetic.yaml"))
     for key, value in GRID.items():
         cfg.grid[key] = value
     cfg.solver.non_linear = False

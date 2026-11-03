@@ -17,8 +17,8 @@ provides, and `gyaradax bench CONFIG` measures a config on your GPU.
 
 Both grids are the production grids of the configs in the repository, as $(n_{sp}, n_{v_\parallel}, n_\mu, n_s, n_{k_x}, n_{k_y})$:
 
-- adiabatic: 32, 8, 16, 85, 32 (`configs/iteration_13.yaml`),
-- kinetic: 2, 32, 12, 18, 192, 32 (`configs/kinetic.yaml`).
+- adiabatic: 32, 8, 16, 85, 32 (`configs/examples/iteration_13.yaml`),
+- kinetic: 2, 32, 12, 18, 192, 32 (`configs/examples/kinetic.yaml`).
 
 The columns are the backends and kernel options of the `solver` section:
 

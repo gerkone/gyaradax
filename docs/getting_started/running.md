@@ -97,7 +97,7 @@ gyaradax run my_case.yaml --debug       # both
 ## Benchmarking
 
 ```bash
-gyaradax bench configs/adiabatic_a.yaml --device 0 --backend cuda --steps 100 --blocks 5
+gyaradax bench configs/examples/adiabatic_a.yaml --device 0 --backend cuda --steps 100 --blocks 5
 ```
 
 `bench` always cold-starts, does no I/O and reports the steady-state median steps per second (the first block carries the compilation), plus the peak device memory. `--profile` adds the per-kernel breakdown.

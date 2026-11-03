@@ -2,10 +2,10 @@
 
 ## From the command line
 
-Every run is described by a YAML config. Command-line flags only override it. `configs/iteration_13.yaml` is a nonlinear adiabatic ITG case on the standard grid ($n_{v_\parallel}, n_\mu, n_s, n_{k_x}, n_{k_y}$) = (32, 8, 16, 85, 32):
+Every run is described by a YAML config. Command-line flags only override it. `configs/examples/iteration_13.yaml` is a nonlinear adiabatic ITG case on the standard grid ($n_{v_\parallel}, n_\mu, n_s, n_{k_x}, n_{k_y}$) = (32, 8, 16, 85, 32):
 
 ```bash
-gyaradax run configs/iteration_13.yaml --device 0 --backend cuda
+gyaradax run configs/examples/iteration_13.yaml --device 0 --backend cuda
 ```
 
 `--device 0` sets `CUDA_VISIBLE_DEVICES=0`. On a shared machine pick a free GPU, or leave the flag out and set `CUDA_VISIBLE_DEVICES` yourself. `XLA_PYTHON_CLIENT_PREALLOCATE=false` stops JAX from taking 75 % of the GPU memory at start. The backend defaults to `jax`. `--backend cuda` uses the CUDA kernels once they are built (2.6x faster on an A100 here), and `backend: auto` in the config picks them when they are available.
@@ -29,7 +29,7 @@ plt.ylabel("Q_i")
 plt.savefig("heat_flux.png")
 ```
 
-Kinetic electrons, electromagnetic fields and collisions are switched on in the config, not with flags: `configs/kinetic.yaml`, `configs/nl_em_apar.yaml` and `configs/kinetic_collisions.yaml` are examples. {doc}`running` covers the remaining commands and options.
+Kinetic electrons, electromagnetic fields and collisions are switched on in the config, not with flags: `configs/examples/kinetic.yaml`, `configs/em/nl_em_apar.yaml` and `configs/examples/kinetic_collisions.yaml` are examples. {doc}`running` covers the remaining commands and options.
 
 ## From Python
 
@@ -38,7 +38,7 @@ The same run, step by step:
 ```python
 import gyaradax as gyx
 
-df, geometry, params, state, pre = gyx.gk_from_config("configs/iteration_13.yaml")
+df, geometry, params, state, pre = gyx.gk_from_config("configs/examples/iteration_13.yaml")
 df, phi, fluxes, state = gyx.gk_run(df, geometry, params, state, 400, pre=pre)
 pflux, eflux, vflux = fluxes
 ```

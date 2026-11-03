@@ -25,7 +25,7 @@ from gyaradax import load_config
 
 
 CONFIG_ADIABATIC = os.path.join(
-    os.path.dirname(__file__), "..", "..", "configs", "iteration_13.yaml"
+    os.path.dirname(__file__), "..", "..", "configs", "examples", "iteration_13.yaml"
 )
 
 
@@ -163,7 +163,7 @@ def test_equivalence_4gpu_vpmu():
     assert rel_l2(phi_sh, phi_ref) < 1e-8
 
 
-CONFIG_KINETIC = os.path.join(os.path.dirname(__file__), "..", "..", "configs", "nl_em_apar.yaml")
+CONFIG_KINETIC = os.path.join(os.path.dirname(__file__), "..", "..", "configs", "em", "nl_em_apar.yaml")
 
 
 def _build_kinetic(params_overrides=None):

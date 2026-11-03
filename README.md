@@ -16,7 +16,7 @@
 
 ```bash
 pip install -e ".[cuda13]"                            # JAX with CUDA 13 (pip install -e . for CPU)
-gyaradax run configs/iteration_13.yaml --device 0     # nonlinear adiabatic ITG
+gyaradax run configs/examples/iteration_13.yaml --device 0     # nonlinear adiabatic ITG
 gyaradax run outputs_adiabatic_iteration_13           # resume it
 gyaradax info                                         # devices and backends
 ```
@@ -24,7 +24,7 @@ gyaradax info                                         # devices and backends
 ```python
 import gyaradax as gyx
 
-df, geometry, params, state, pre = gyx.gk_from_config("configs/iteration_13.yaml")
+df, geometry, params, state, pre = gyx.gk_from_config("configs/examples/iteration_13.yaml")
 df, phi, fluxes, state = gyx.gk_run(df, geometry, params, state, 400, pre=pre)
 ```
 

@@ -6,8 +6,8 @@ Measures gyaradax throughput, memory, and (estimated) FLOP utilization,
 and parses GKW perform.dat / perfloop.dat / slurm files for comparison.
 
 Usage:
-    python scripts/paper_benchmark.py --config configs/iteration_13a.yaml --device 0
-    python scripts/paper_benchmark.py --config configs/iteration_13a.yaml --device 0 --kinetic-config configs/v3_kiteration_991_half_rlt.yaml
+    python scripts/paper_benchmark.py --config configs/examples/iteration_13.yaml --device 0
+    python scripts/paper_benchmark.py --config configs/examples/iteration_13.yaml --device 0 --kinetic-config configs/reference/kinetic/kinetic_low_te_gradient.yaml
 """
 
 import os

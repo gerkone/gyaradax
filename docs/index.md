@@ -67,13 +67,13 @@ geometry, diagnostics.
 
 ```bash
 pip install -e ".[cuda13]"                          # JAX with CUDA 13
-gyaradax run configs/iteration_13.yaml --device 0   # adiabatic ITG turbulence
+gyaradax run configs/examples/iteration_13.yaml --device 0   # adiabatic ITG turbulence
 ```
 
 ```python
 import gyaradax as gyx
 
-df, geometry, params, state, pre = gyx.gk_from_config("configs/iteration_13.yaml")
+df, geometry, params, state, pre = gyx.gk_from_config("configs/examples/iteration_13.yaml")
 df, phi, fluxes, state = gyx.gk_run(df, geometry, params, state, 400, pre=pre)
 ```
 

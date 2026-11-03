@@ -1,40 +1,44 @@
 # Production cases
 
-The reference dataset ([gerkone/gyaradax-tests](https://huggingface.co/datasets/gerkone/gyaradax-tests)) holds whole GKW runs as JSON diagnostics, with `gyaradax` configs for the same parameters. This page runs those configs from scratch to the length of the GKW runs and compares the statistics. Turbulent runs of two codes separate after a few tens of $R/v_{th}$, so the comparison is between time averages over GKW's window, the last 30% of the run ($t$ = 224 to 320), not between trajectories.
-
-## Setup
-
-Four adiabatic-electron ITG cases on the (32, 8, 16, 85, 32) grid of the dataset, fixed step 0.01, 32 000 steps to $t$ = 320. One A100 per run, JAX backend, mixed precision. A nonlinear run takes 35 to 42 minutes, a linear one 7 minutes.
-
-| case | dataset folder | runs | $q$ | $\hat s$ | $R/L_{T_i}$ | $R/L_n$ |
-|---|---|---|---|---|---|---|
-| `adiabatic_itg_high_shear` | `long_horizon/` | nonlinear, linear | 4.57 | 3.08 | 10.17 | 2.61 |
-| `adiabatic_itg_high_q` | `long_horizon/` | nonlinear, linear | 8.95 | 1.26 | 10.43 | 0.74 |
-| `itg_weak_drive` | `nonlinear/` | nonlinear | 8.99 | 1.67 | 7.37 | 1.59 |
-| `itg_strong_low_shear` | `linear/` | linear | 8.06 | 0.57 | 10.91 | 0.94 |
-
-The kinetic-electron cases of `long_horizon/` take 0.17 to 0.9 million steps each and are not on this page yet.
-
-To reproduce, download the diagnostics and configs, run them, and compare with [`notebooks/validation.ipynb`](https://github.com/gerkone/gyaradax/blob/master/notebooks/validation.ipynb), which prints the command of every missing run:
+Long nonlinear runs and converged linear runs of the reference dataset ([gerkone/gyaradax-tests](https://huggingface.co/datasets/gerkone/gyaradax-tests)): adiabatic-electron cases rerun from scratch against GKW, and kinetic-electron `gyaradax` runs as stored in the dataset. Every case has a config in [`configs/reference/`](https://github.com/gerkone/gyaradax/tree/master/configs/reference):
 
 ```bash
-ROOT=~/.cache/gyaradax/test_data RUNS=runs
-hf download gerkone/gyaradax-tests --repo-type dataset --local-dir $ROOT --include "*.json" "*.yaml" "*input*.dat"
-gyaradax run $ROOT/long_horizon/adiabatic_itg_high_shear/config_nonlinear.yaml --output-dir $RUNS/long_horizon/adiabatic_itg_high_shear/nonlinear
-(cd $ROOT/nonlinear/itg_weak_drive && gyaradax run config.yaml --from-scratch --n-steps 32000 --output-dir $OLDPWD/$RUNS/nonlinear/itg_weak_drive)
+gyaradax run configs/reference/long_horizon/adiabatic_itg_high_shear_nonlinear.yaml
 ```
 
-The figures on this page come from `docs/_static/figs/production/make_production.py`.
+Averages are over the last 30% of each run, with autocorrelation-corrected errors. [`notebooks/validation.ipynb`](https://github.com/gerkone/gyaradax/blob/master/notebooks/validation.ipynb) makes the comparison, `docs/_static/figs/production/make_production.py` the figures.
 
-## Nonlinear runs
+## Parameters
 
-```{figure} ../_static/figs/production/fluxes.png
-:width: 100%
+| parameter | what it sets |
+|---|---|
+| $q$ | safety factor: the connection length $qR$ along the field line |
+| $\hat s$ | magnetic shear: how fast the field-line pitch changes with radius; sets the $k_x$ coupling along the field line |
+| $R/L_{T_i}$, $R/L_{T_e}$ | temperature gradients: drive ion-temperature-gradient (ITG) and electron modes (TEM) |
+| $R/L_n$ | density gradient: raises the ITG threshold with adiabatic electrons, drives trapped-electron modes with kinetic ones |
+| $T_e/T_i$ | temperature ratio |
+| $\varepsilon$ | inverse aspect ratio, the trapped fraction: 0.19 for the adiabatic cases, 0.13 to 0.15 for the kinetic ones |
+| collisions | linearised Fokker-Planck operator, frequency from the reference values `rref`, `nref`, `tref` |
 
-Ion heat flux of GKW and `gyaradax`. The shaded band is the averaging window.
-```
+## Adiabatic electrons, against GKW
 
-Averages over the window, with autocorrelation-corrected standard errors. $z$ is the difference over the combined error, so values below 2 are consistent. KS and $r$ compare the time-averaged spectra (Kolmogorov-Smirnov statistic and Pearson correlation).
+| setting | value | why |
+|---|---|---|
+| grid $(n_{v_\parallel}, n_\mu, n_s, n_{k_x}, n_{k_y})$ | (32, 8, 16, 85, 32), $k_y\rho_i \leq 1.4$, `ikxspace` 5 | the grid and box of the GKW runs |
+| time step | 0.01, fixed | GKW's step |
+| dissipation | `disp_par` 1, `disp_vp` 0.2, `disp_x` = `disp_y` = 0.1 | GKW's inputs |
+| initial condition | GKW's (`cosine2` or `sine`) | both codes start from the same state |
+| length | 32 000 steps, $t$ = 320 | the length of the GKW runs |
+| backend | JAX, mixed precision, one A100 | 35 to 42 min per nonlinear run, 7 min per linear run |
+
+The linear runs use the same inputs with the nonlinear term off.
+
+| case | $q$ | $\hat s$ | $R/L_{T_i}$ | $R/L_n$ | runs | what the parameters do |
+|---|---|---|---|---|---|---|
+| `adiabatic_itg_high_shear` | 4.57 | 3.08 | 10.17 | 2.61 | nonlinear, linear | strong ITG drive against a steep density gradient and high shear: the lowest flux of the set, in bursts |
+| `adiabatic_itg_high_q` | 8.95 | 1.26 | 10.43 | 0.74 | nonlinear, linear | long connection length and flat density leave the ITG drive unopposed: the largest growth and flux, strong zonal flows |
+| `itg_weak_drive` | 8.99 | 1.67 | 7.37 | 1.59 | nonlinear | the lowest temperature gradient, closest to threshold; zonal flows dominate the $k_y$ spectrum |
+| `itg_strong_low_shear` | 8.06 | 0.57 | 10.91 | 0.94 | linear | low shear and a steep temperature gradient: the fastest linear growth ($\gamma_{max}$ = 0.65) |
 
 | case | $Q_i$ `gyaradax` | $Q_i$ GKW | $z(Q_i)$ | $z(\Pi_i)$ | $k_y$ KS / $r$ | $k_x$ KS / $r$ |
 |---|---|---|---|---|---|---|
@@ -42,20 +46,64 @@ Averages over the window, with autocorrelation-corrected standard errors. $z$ is
 | `adiabatic_itg_high_q` | 128.2 ± 20.3 | 140.5 ± 13.1 | 0.51 | 0.69 | 0.083 / 0.997 | 0.118 / 0.917 |
 | `itg_weak_drive` | 75.6 ± 8.4 | 66.6 ± 3.7 | 0.98 | 0.16 | 0.341 / 0.917 | 0.130 / 0.942 |
 
+$z$ is the difference over the combined error. KS and $r$ compare the time-averaged spectra. Linear growth rates agree within 1.1e-4, 1.9e-5 and 6.3e-6 (largest relative difference over the $k_y$ with $\gamma$ above a quarter of the maximum).
+
+```{figure} ../_static/figs/production/fluxes.png
+:width: 100%
+
+Ion heat flux. Shaded: averaging window.
+```
+
 ```{figure} ../_static/figs/production/spectra.png
 :width: 100%
 
-$k_y$ (top) and $k_x$ (bottom) spectra of $|\phi|^2$, averaged over the window.
+$k_y$ (top) and $k_x$ (bottom) spectra of $|\phi|^2$ over the window.
 ```
-
-The heat and momentum fluxes agree within their errors in all three cases, and so do the spectra away from the largest zonal scale. In `adiabatic_itg_high_q` and `itg_weak_drive` the zonal energy at the smallest nonzero $k_x$ keeps growing in GKW until $t$ = 320, while in `gyaradax` it levels off: for $t \geq 250$ it is 3.3 and 6 to 7 times lower. This sets the $k_y$ KS of `itg_weak_drive`, whose $k_y = 0$ point carries it. The other $k_x$ and the non-zonal spectrum agree. With one run per code, it is open whether this is the spread of a slowly evolving mode or a difference in how the box-scale zonal mode is damped.
-
-## Linear runs
 
 ```{figure} ../_static/figs/production/linear.png
 :width: 100%
 
-Growth rates at $t$ = 320 against GKW.
+Linear growth rates at $t$ = 320.
 ```
 
-Over the $k_y$ with a growth rate above a quarter of the maximum, the largest relative difference is 1.1e-4 (`adiabatic_itg_high_shear`), 1.9e-5 (`adiabatic_itg_high_q`) and 6.3e-6 (`itg_strong_low_shear`).
+In `adiabatic_itg_high_q` and `itg_weak_drive` the zonal energy at the smallest nonzero $k_x$ keeps growing in GKW and levels off in `gyaradax`: 3.3 and 6 to 7 times lower for $t \geq 250$. It sets the $k_y$ KS of `itg_weak_drive`; the other $k_x$ and the fluxes agree.
+
+## Kinetic electrons
+
+| setting | value | why |
+|---|---|---|
+| grid $(n_{sp}, n_{v_\parallel}, n_\mu, n_s, n_{k_x}, n_{k_y})$ | (2, 32, 12, 18, 192, 32), $k_y\rho_i \leq 1.5$ | coarser $k_x$, $k_y$ grids did not reach a stationary state |
+| `ikxspace` | 17, 23, 10, 2 for $\hat s$ = 2.67, 3.74, 1.69, 0.28 | scales with $\hat s$ to keep $k_x\rho_i \leq$ 4.6 to 5.6 and $\Delta k_x \approx 0.05$; smaller $k_x$ ranges diverged |
+| electrons | $m_e/m_i$ = 2.72e-4 | deuterium mass ratio |
+| time step | adaptive from 0.004, mean 0.0005 to 0.0018 | electron streaming sets the limit |
+| collisions | on in three cases | one collisionless case for comparison |
+| initial condition | `noise` | seeds every mode |
+| backend | CUDA, mixed precision, `fused_linear` (`linear_arith: ds` on B300 for `kinetic_itg_collisionless`) | production settings, see {doc}`../performance/index` |
+| length | $t$ = 300 or 500 | until the last 30% is stationary: halves differ by 3% at most |
+| linear runs | same config, nonlinear term off, $\Delta t$ at the linear stability limit | run until every $k_y$ settles: relative change below 1e-5 over 6 $R/v_{th}$ |
+
+| case | $q$ | $\hat s$ | $R/L_{T_i}$ | $R/L_{T_e}$ | $R/L_n$ | $T_e/T_i$ | collisions | what the parameters do |
+|---|---|---|---|---|---|---|---|---|
+| `kinetic_tem_low_flux` | 2.92 | 2.67 | 1.85 | 9.18 | 4.82 | 1.35 | yes | electron temperature and density gradients over a nearly flat ion temperature: a trapped-electron mode ($\omega < 0$), electron heat dominates, low flux |
+| `kinetic_itg_mid_flux` | 2.27 | 3.74 | 8.82 | 2.25 | 0.40 | 1.59 | yes | ion gradient with weak electron drive and flat density: ITG ($\omega > 0$), ion heat dominates |
+| `kinetic_itg_collisionless` | 1.86 | 1.69 | 9.51 | 9.22 | 2.61 | 0.54 | no | equal temperature gradients and cold electrons: ITG below $k_y\rho_i \approx 0.8$ and an electron-direction branch above, inward particle flux |
+| `kinetic_tem_high_flux` | 1.09 | 0.28 | 2.33 | 9.27 | 4.65 | 1.99 | yes | low $q$ and shear, steep electron gradients, hot electrons: the strongest trapped-electron mode and the largest fluxes |
+
+| case | window | $Q_i$ | $Q_e$ | $\Gamma$ | $\gamma_{max}$ at $k_y\rho_i$ | $\omega$ at peak | linear converged at |
+|---|---|---|---|---|---|---|---|
+| `kinetic_tem_low_flux` | 213 to 301 | 0.40 ± 0.01 | 3.76 ± 0.11 | 0.22 | 0.170 at 0.48 | −1.38 | $t$ = 122 |
+| `kinetic_itg_mid_flux` | 352 to 502 | 8.60 ± 0.21 | 0.23 ± 0.01 | 0.14 | 0.101 at 0.39 | +1.31 | $t$ = 102 |
+| `kinetic_itg_collisionless` | 352 to 502 | 16.5 ± 0.2 | 3.37 ± 0.05 | −0.15 | 0.157 at 0.48 | +0.80 | $t$ = 355 |
+| `kinetic_tem_high_flux` | 352 to 502 | 24.9 ± 0.3 | 69.3 ± 0.7 | 13.8 | 1.154 at 0.82 | −0.85 | $t$ = 81 |
+
+```{figure} ../_static/figs/production/kinetic.png
+:width: 100%
+
+Heat fluxes (top, shaded: averaging window) and $k_y$ spectrum over the window (bottom).
+```
+
+```{figure} ../_static/figs/production/kinetic_linear.png
+:width: 100%
+
+Converged linear growth rates and frequencies. Positive $\omega$ is the ion diamagnetic direction.
+```

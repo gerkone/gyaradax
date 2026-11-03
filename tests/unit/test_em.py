@@ -270,7 +270,7 @@ class TestEMParams:
         """The nonlinear Waltz EM YAMLs mirror the corresponding GKW input.dat files."""
         case_dir = _load_em_case(case_name)
         input_path = _em_case_input_path(case_dir)
-        config = load_config(os.path.join(REPO_ROOT, "configs", config_name))
+        config = load_config(os.path.join(REPO_ROOT, "configs", "em", config_name))
 
         geometry = compute_geometry_from_input(input_path)
         params_from_input = gkparams_from_input_and_geometry(input_path, geometry)

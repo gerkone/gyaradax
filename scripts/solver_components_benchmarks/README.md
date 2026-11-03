@@ -54,7 +54,7 @@ python bench_nonlinear.py --device N [--config PATH] [--mp] [--z2z]  # tests R2C
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--device N` | 1 | GPU device index (sets `CUDA_VISIBLE_DEVICES`) |
-| `--config PATH` | `configs/iteration_13.yaml` | Solver config |
+| `--config PATH` | `configs/examples/iteration_13.yaml` | Solver config |
 | `--mp` | off | Mixed precision (FP32 forward FFTs) |
 | `--backend {jax,cuda}` | both | Run only specified backend |
 | `--z2z` | off | Test Z2Z FFT mode (nonlinear only) |

@@ -9,7 +9,7 @@ pip install -e ".[cuda13]"
 Run a nonlinear adiabatic ITG case on the standard grid and continue it:
 
 ```bash
-gyaradax run configs/iteration_13.yaml --device 0 --backend cuda
+gyaradax run configs/examples/iteration_13.yaml --device 0 --backend cuda
 gyaradax run outputs_adiabatic_iteration_13 --n-steps 2000
 ```
 
@@ -18,7 +18,7 @@ The same from Python:
 ```python
 import gyaradax as gyx
 
-df, geometry, params, state, pre = gyx.gk_from_config("configs/iteration_13.yaml")
+df, geometry, params, state, pre = gyx.gk_from_config("configs/examples/iteration_13.yaml")
 df, phi, fluxes, state = gyx.gk_run(df, geometry, params, state, 400, pre=pre)
 ```
 

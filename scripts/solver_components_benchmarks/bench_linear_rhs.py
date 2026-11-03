@@ -32,7 +32,7 @@ from common import (
 )
 
 
-def run(config="configs/iteration_13.yaml", mixed_precision=False):
+def run(config="configs/examples/iteration_13.yaml", mixed_precision=False):
     print(f"\n{'=' * 60}")
     print("C3: linear_rhs  (full linear operator)")
     print(f"{'=' * 60}")
@@ -79,7 +79,7 @@ def run(config="configs/iteration_13.yaml", mixed_precision=False):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--device", type=int, default=1)
-    parser.add_argument("--config", type=str, default="configs/iteration_13.yaml")
+    parser.add_argument("--config", type=str, default="configs/examples/iteration_13.yaml")
     parser.add_argument("--mp", action="store_true")
     args = parser.parse_args()
     run(args.config, args.mp)

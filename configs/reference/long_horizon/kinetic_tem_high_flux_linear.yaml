@@ -1,0 +1,70 @@
+# gerkone/gyaradax-tests long_horizon/kinetic_tem_high_flux, linear: gyaradax development version run, TEM, high flux, low shear, collisions
+run:
+  name: kinetic_tem_high_flux
+  block_size: 120
+solver:
+  dt: 0.004
+  naverage: 40
+  disp_par: 1.0
+  disp_vp: 0.2
+  disp_x: 0.1
+  disp_y: 0.1
+  idisp: 2
+  non_linear: false
+  adaptive_dt: true
+  finit: noise
+  n_steps: 132360
+  backend: cuda
+  fused_linear: true
+  linear_arith: fp64
+physics:
+  rlt:
+  - 2.3287
+  - 9.2735
+  rln:
+  - 4.6455
+  - 4.6455
+  mas:
+  - 1.0
+  - 0.000272
+  tmp:
+  - 1.0
+  - 1.9891
+  de:
+  - 1.0
+  - 1.0
+  signz:
+  - 1.0
+  - -1.0
+  dgrid: 1.0
+  tgrid: 1.0
+geometry:
+  geometry_model: circ
+  shat: 0.27923
+  q: 1.0894
+  eps: 0.13679
+  Rref: 100.0
+  d2X: 1.0
+  signB: 1.0
+  dvp: 0.1875
+  sgr_dist: 0.05555555555555555
+grid:
+  nvpar: 32
+  nmu: 12
+  ns: 18
+  nkx: 192
+  nky: 32
+  adiabatic_electrons: false
+  vpar_max: 3.0
+  nperiod: 1
+  krhomax: 1.5
+  ikxspace: 2
+collisions:
+  enabled: true
+  pitch_angle: true
+  en_scatter: true
+  friction: true
+  freq_override: false
+  rref: 6.229
+  nref: 10.0
+  tref: 11.162

@@ -45,6 +45,15 @@ def rel_l2(pred, ref, eps=1e-30):
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
 
+def config_path(name):
+    """Path of a packaged config by file name, searched in configs/examples and configs/em."""
+    for sub in ("examples", "em"):
+        path = os.path.join(REPO_ROOT, "configs", sub, name)
+        if os.path.exists(path):
+            return path
+    raise FileNotFoundError(f"config {name} not found under configs/examples or configs/em")
+
+
 def noisy_case(cfg_name, grid, overrides=None, seed=0, **param_kw):
     """(df, geometry, params, state) for a repo config on a reduced grid with analytic geometry.
 
@@ -60,7 +69,7 @@ def noisy_case(cfg_name, grid, overrides=None, seed=0, **param_kw):
     from gyaradax.core.params import gkparams_from_config, load_config
     from gyaradax.solver.driver import gk_init
 
-    cfg = load_config(os.path.join(REPO_ROOT, "configs", cfg_name))
+    cfg = load_config(config_path(cfg_name))
     for key, value in grid.items():
         cfg.grid[key] = value
     params = replace(gkparams_from_config(cfg, **param_kw), **(overrides or {}))
