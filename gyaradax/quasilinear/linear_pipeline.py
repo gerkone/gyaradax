@@ -129,8 +129,8 @@ def _harvest(geometry, df, phi, state, params=None, apar=None, bpar=None, pre=No
     return out
 
 
-def linear_from_fds(gkw_dir):
-    """Compute QL inputs directly from the FDS file — no time stepping.
+def linear_from_fds(gkw_dir, dump="FDS"):
+    """Compute QL inputs directly from a GKW distribution dump (``FDS`` by default) — no time stepping.
 
     Detects adiabatic / kinetic from input.dat and ES / EM from `params.nlapar`,
     `params.nlbpar`. γ(ky) comes from `growth.dat`. ~1–2 s per ES adiabatic sim.
@@ -143,7 +143,7 @@ def linear_from_fds(gkw_dir):
     n_species = 1 if params.adiabatic_electrons else int(jnp.asarray(params.mas).shape[0])
 
     res = tuple(int(len(geometry[k])) for k in ("intvp", "intmu", "ints", "kxrh", "krho"))
-    df_raw = load_gkw_k_dump(os.path.join(gkw_dir, "FDS"), res, n_species=n_species)
+    df_raw = load_gkw_k_dump(os.path.join(gkw_dir, dump), res, n_species=n_species)
     df = jnp.asarray(df_raw, dtype=jnp.complex128)
 
     pre = linear_precompute(geometry, params)

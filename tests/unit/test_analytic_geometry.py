@@ -8,39 +8,33 @@ import pytest
 import jax
 import jax.numpy as jnp
 
+from conftest import KINETIC_CASES, LINEAR_CASES, NONLINEAR_CASES, REFERENCE  # type: ignore[import-not-found]
+from gyaradax.io import reference_data as refdata
 from gyaradax.io.gkw import load_geometry, parse_input_dat
 from gyaradax.geometry import compute_geometry, compute_geometry_from_input
 
-GKW_DATA_ROOT = os.environ.get(
-    "GKW_DATA_ROOT", os.path.join(os.path.dirname(__file__), "..", "data", "gkw_raw")
-)
-ITERATIONS = [8, 13, 131, 200]
-KINETIC_CASES = [
-    "v3_kiteration_991_half_rlt",
-    "v3_kiteration_991_ntsks128",
-    "v3_kiteration_991_double_rlt",
-]
+ADIABATIC = [("nonlinear", n) for n in NONLINEAR_CASES] + [("linear", n) for n in LINEAR_CASES]
+KINETIC = [("kinetic", n) for n in KINETIC_CASES]
 
 
-@pytest.fixture(params=ITERATIONS)
-def gkw_dir(request):
-    path = os.path.join(GKW_DATA_ROOT, f"iteration_{request.param}")
-    if not os.path.exists(path):
-        pytest.skip(f"reference data not found at {path}")
+def _case(request):
+    kind, name = request.param
+    download = request.config.getoption("--download-test-data") or refdata.download_requested()
+    path = refdata.case_dir(REFERENCE, kind, name, download=download)
+    if path is None:
+        pytest.skip(f"GKW reference case {kind}/{name} not found under {refdata.data_root()}")
     return path
 
 
-@pytest.fixture(params=ITERATIONS + KINETIC_CASES)
+@pytest.fixture(params=ADIABATIC, ids=lambda c: f"{c[0]}/{c[1]}")
+def gkw_dir(request):
+    return _case(request)
+
+
+@pytest.fixture(params=ADIABATIC + KINETIC, ids=lambda c: f"{c[0]}/{c[1]}")
 def gkw_dir_all(request):
     """fixture covering both adiabatic and kinetic electron cases."""
-    param = request.param
-    if isinstance(param, int):
-        path = os.path.join(GKW_DATA_ROOT, f"iteration_{param}")
-    else:
-        path = os.path.join(GKW_DATA_ROOT, "kinetic_electrons", param)
-    if not os.path.exists(path):
-        pytest.skip(f"reference data not found at {path}")
-    return path
+    return _case(request)
 
 
 def test_basic_fields(gkw_dir):

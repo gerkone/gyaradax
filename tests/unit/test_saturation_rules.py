@@ -1,23 +1,23 @@
 """Correctness tests for the QL saturation rules (canonical + RULES zoo).
 
 Fast, CPU-able: pure jax.numpy on tiny synthetic spectra, no solver runs.
-The optional kinetic integration test reads a GKW kinetic-electron FDS
+The optional kinetic integration test reads the last dump of a GKW kinetic-electron run
 (read-only) and is skipped when the data root is not reachable.
 """
 
-import os
 
 import jax.numpy as jnp
 import numpy as np
 import pytest
 
+from conftest import REFERENCE, reference_dumps  # type: ignore[import-not-found]
+from gyaradax.io import reference_data as refdata
 from gyaradax.quasilinear import calibration
 from gyaradax.quasilinear.rules import RULES, dlnpdr_tglf, ql_flux, ql_flux_per_species
 
 NS, NKX, NKY = 8, 5, 6
 
-GKW_DATA_ROOT = os.environ.get("GKW_DATA_ROOT", "/restricteddata/ukaea/gyrokinetics/raw")
-KINETIC_DIR = os.path.join(GKW_DATA_ROOT, "kinetic_electrons", "v3_kiteration_991_ntsks128")
+KINETIC_CASE = "kinetic_mid_te_gradient"
 
 
 def synthetic_spectrum(seed=0, zonal_content=0.0):
@@ -342,15 +342,18 @@ class TestPerSpecies:
         np.testing.assert_array_equal(by_name, by_fn)
 
 
-@pytest.mark.skipif(not os.path.isdir(KINETIC_DIR), reason="GKW kinetic data not reachable")
 class TestKineticIntegration:
-    """End-to-end kinetic harvest + per-species rules on a real GKW FDS (read-only)."""
+    """End-to-end kinetic harvest + per-species rules on the last dump of a GKW kinetic run."""
 
     @pytest.fixture(scope="class")
-    def kinetic_arr(self):
+    def kinetic_arr(self, request):
         from gyaradax.quasilinear.linear_pipeline import linear_from_fds
 
-        return linear_from_fds(KINETIC_DIR)
+        download = request.config.getoption("--download-test-data") or refdata.download_requested()
+        path = refdata.case_dir(REFERENCE, "kinetic", KINETIC_CASE, download=download)
+        if path is None:
+            pytest.skip(f"GKW reference case kinetic/{KINETIC_CASE} not found under {refdata.data_root()}")
+        return linear_from_fds(path, dump=reference_dumps(path)[-1])
 
     def test_harvest_shapes_and_consistency(self, kinetic_arr):
         arr = kinetic_arr

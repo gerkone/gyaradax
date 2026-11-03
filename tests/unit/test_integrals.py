@@ -2,7 +2,7 @@ import jax.numpy as jnp
 import numpy as np
 import os
 import pytest
-from conftest import read_dump_time  # type: ignore[import-not-found]
+from conftest import PHASES, read_dump_time, reference_pair  # type: ignore[import-not-found]
 from gyaradax.diagnostics.fluxes import (
     get_integrals,
     calculate_fluxes,
@@ -32,16 +32,13 @@ def test_flux_integral_shapes(adiabatic_geom, adiabatic_shape):
     assert vflux.shape == ()
 
 
-@pytest.mark.parametrize("idx", [10, 50, 100])
-def test_flux_integral_real_data_parity(adiabatic_dir, adiabatic_geom, adiabatic_shape, idx):
+@pytest.mark.parametrize("phase", PHASES)
+def test_flux_integral_real_data_parity(adiabatic_dir, adiabatic_geom, adiabatic_shape, phase):
     geom = adiabatic_geom
     geom["adiabatic"] = jnp.array(1.0, dtype=jnp.float64)
 
-    ks = K_files(adiabatic_dir)
-    if idx >= len(ks):
-        pytest.skip(f"index {idx} out of range for {adiabatic_dir}")
 
-    k_file = ks[idx]
+    k_file, _ = reference_pair(adiabatic_dir, phase)
     df = load_gkw_k_dump(os.path.join(adiabatic_dir, k_file), adiabatic_shape)
     phi_pred, (pflux_pred, eflux_pred, vflux_pred) = get_integrals(df, geom)
 
@@ -141,14 +138,11 @@ def test_kinetic_flux_species_differ(kinetic_dir, kinetic_geom, kinetic_shape):
     assert not np.isclose(efluxes[0], efluxes[1], rtol=1e-3)
 
 
-@pytest.mark.parametrize("idx", [10, 50])
-def test_kinetic_flux_integral_per_species_parity(kinetic_dir, kinetic_geom, kinetic_shape, idx):
+@pytest.mark.parametrize("phase", PHASES)
+def test_kinetic_flux_integral_per_species_parity(kinetic_dir, kinetic_geom, kinetic_shape, phase):
     """per-species eflux matches gkw reference using kinetic quasineutrality."""
-    ks = K_files(kinetic_dir)
-    if idx >= len(ks):
-        pytest.skip(f"index {idx} out of range")
 
-    k_file = ks[idx]
+    k_file, _ = reference_pair(kinetic_dir, phase)
     df_full = load_gkw_k_dump(os.path.join(kinetic_dir, k_file), kinetic_shape, n_species=2)
 
     k_dat_path = os.path.join(kinetic_dir, f"{k_file}.dat")
@@ -184,8 +178,8 @@ def test_kinetic_flux_integral_per_species_parity(kinetic_dir, kinetic_geom, kin
         )
 
 
-@pytest.mark.parametrize("idx", [10, 50, 100])
-def test_spectrum_parity_with_gkw(adiabatic_dir, adiabatic_geom, adiabatic_shape, idx):
+@pytest.mark.parametrize("phase", PHASES)
+def test_spectrum_parity_with_gkw(adiabatic_dir, adiabatic_geom, adiabatic_shape, phase):
     """ky_spec and kx_spec from phi must match GKW's kxspec/kyspec diagnostics.
 
     GKW conventions:
@@ -195,16 +189,13 @@ def test_spectrum_parity_with_gkw(adiabatic_dir, adiabatic_geom, adiabatic_shape
     geom = adiabatic_geom
     geom["adiabatic"] = jnp.array(1.0, dtype=jnp.float64)
 
-    ks = K_files(adiabatic_dir)
-    if idx >= len(ks):
-        pytest.skip(f"index {idx} out of range for {adiabatic_dir}")
 
     ref_kx_path = os.path.join(adiabatic_dir, "kxspec")
     ref_ky_path = os.path.join(adiabatic_dir, "kyspec")
     if not os.path.exists(ref_kx_path) or not os.path.exists(ref_ky_path):
         pytest.skip(f"kxspec/kyspec not found in {adiabatic_dir}")
 
-    k_file = ks[idx]
+    k_file, _ = reference_pair(adiabatic_dir, phase)
     k_dat_path = os.path.join(adiabatic_dir, f"{k_file}.dat")
     if not os.path.exists(k_dat_path):
         pytest.skip(f"metadata {k_dat_path} not found")
