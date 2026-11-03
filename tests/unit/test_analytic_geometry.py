@@ -8,39 +8,27 @@ import pytest
 import jax
 import jax.numpy as jnp
 
+from conftest import KINETIC_CASES, LINEAR_CASES, NONLINEAR_CASES, reference_dir  # type: ignore[import-not-found]
 from gyaradax.io.gkw import load_geometry, parse_input_dat
 from gyaradax.geometry import compute_geometry, compute_geometry_from_input
 
-GKW_DATA_ROOT = os.environ.get(
-    "GKW_DATA_ROOT", os.path.join(os.path.dirname(__file__), "..", "data", "gkw_raw")
-)
-ITERATIONS = [8, 13, 131, 200]
-KINETIC_CASES = [
-    "v3_kiteration_991_half_rlt",
-    "v3_kiteration_991_ntsks128",
-    "v3_kiteration_991_double_rlt",
-]
+ADIABATIC = [("nonlinear", n) for n in NONLINEAR_CASES] + [("linear", n) for n in LINEAR_CASES]
+KINETIC = [("kinetic", n) for n in KINETIC_CASES]
 
 
-@pytest.fixture(params=ITERATIONS)
+def _case(request):
+    return reference_dir(request, *request.param)
+
+
+@pytest.fixture(params=ADIABATIC, ids=lambda c: f"{c[0]}/{c[1]}")
 def gkw_dir(request):
-    path = os.path.join(GKW_DATA_ROOT, f"iteration_{request.param}")
-    if not os.path.exists(path):
-        pytest.skip(f"reference data not found at {path}")
-    return path
+    return _case(request)
 
 
-@pytest.fixture(params=ITERATIONS + KINETIC_CASES)
+@pytest.fixture(params=ADIABATIC + KINETIC, ids=lambda c: f"{c[0]}/{c[1]}")
 def gkw_dir_all(request):
     """fixture covering both adiabatic and kinetic electron cases."""
-    param = request.param
-    if isinstance(param, int):
-        path = os.path.join(GKW_DATA_ROOT, f"iteration_{param}")
-    else:
-        path = os.path.join(GKW_DATA_ROOT, "kinetic_electrons", param)
-    if not os.path.exists(path):
-        pytest.skip(f"reference data not found at {path}")
-    return path
+    return _case(request)
 
 
 def test_basic_fields(gkw_dir):

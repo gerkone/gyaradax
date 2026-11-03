@@ -5,6 +5,9 @@ from conftest import (  # type: ignore[import-not-found]
     ALL_BACKENDS,
     CUDA_BACKENDS,
     HAS_CUDA,
+    PHASES,
+    reference_dumps,
+    reference_pair,
 )
 import jax
 import jax.numpy as jnp
@@ -148,7 +151,7 @@ def _subset_mask_from_mode_chains(mode_label, ixzero, ky_list):
 
 
 @pytest.mark.parametrize("backend, use_z2z, mixed_precision", ALL_BACKENDS)
-@pytest.mark.parametrize("start_name, end_name, steps", [("100", "101", 120)])
+@pytest.mark.parametrize("phase", PHASES)
 def test_iteration_parity(
     backend,
     use_z2z,
@@ -156,20 +159,21 @@ def test_iteration_parity(
     nonlin_dir,
     nonlin_geom,
     nonlin_shape,
-    start_name,
-    end_name,
-    steps,
+    phase,
 ):
     """verify trajectory parity against GKW reference dumps."""
 
+    start_name, end_name = reference_pair(nonlin_dir, phase)
     start_df = load_gkw_k_dump(f"{nonlin_dir}/{start_name}", nonlin_shape)
     end_df_ref = load_gkw_k_dump(f"{nonlin_dir}/{end_name}", nonlin_shape)
 
     params = gkparams_from_input_dat(f"{nonlin_dir}/input.dat", non_linear=True)
     params = replace(params, backend=backend, use_z2z=use_z2z, mixed_precision=mixed_precision)
+    t_start = read_dump_time(f"{nonlin_dir}/{start_name}.dat")
+    steps = int(round((read_dump_time(f"{nonlin_dir}/{end_name}.dat") - t_start) / params.dt))
     nky = len(nonlin_geom["krho"])
     state = GKState(
-        time=jnp.array(read_dump_time(f"{nonlin_dir}/{start_name}.dat"), dtype=jnp.float64),
+        time=jnp.array(t_start, dtype=jnp.float64),
         step=jnp.array(0, dtype=jnp.int32),
         accumulated_norm_factor=jnp.ones(nky, dtype=jnp.float64),
         window_start_amp=jnp.ones(nky, dtype=jnp.float64),
@@ -254,7 +258,7 @@ def test_cuda_bracket_padded_size(
 # ── Kinetic electron tests ──────────────────────────────────────────────────
 
 
-def _kinetic_params_from_dir(kinetic_dir, dump_name="100", **overrides):
+def _kinetic_params_from_dir(kinetic_dir, dump_name, **overrides):
     """Build GKParams for kinetic case, using the actual dtim from the dump metadata.
 
     GKW uses adaptive timestep control, so the actual dt may differ from input.dat.
@@ -287,7 +291,8 @@ def test_kinetic_adaptive_dt_consistency(
     """
 
     n_species = 2
-    params_jax = _kinetic_params_from_dir(kinetic_dir, dump_name="100")
+    start_name, _ = reference_pair(kinetic_dir, "mid")
+    params_jax = _kinetic_params_from_dir(kinetic_dir, dump_name=start_name)
 
     # Force adaptive_dt=True to test CFL control path
     from dataclasses import replace
@@ -298,7 +303,9 @@ def test_kinetic_adaptive_dt_consistency(
     )
 
     # Load initial condition
-    start_df = load_gkw_k_dump(os.path.join(kinetic_dir, "100"), kinetic_shape, n_species=n_species)
+    start_df = load_gkw_k_dump(
+        os.path.join(kinetic_dir, start_name), kinetic_shape, n_species=n_species
+    )
 
     nky = len(kinetic_geom["krho"])
     state = GKState(
@@ -345,7 +352,7 @@ def test_kinetic_adaptive_dt_consistency(
 
 
 @pytest.mark.parametrize("backend, use_z2z, mixed_precision", ALL_BACKENDS)
-@pytest.mark.parametrize("start_name, end_name", [("100", "101")])
+@pytest.mark.parametrize("phase", PHASES)
 def test_kinetic_iteration_parity(
     backend,
     use_z2z,
@@ -353,14 +360,13 @@ def test_kinetic_iteration_parity(
     kinetic_dir,
     kinetic_geom,
     kinetic_shape,
-    start_name,
-    end_name,
+    phase,
 ):
     """Verify multi-species kinetic trajectory parity against GKW reference dumps.
 
-    Loads the kinetic distribution at dump 100, computes the exact number
-    of small timesteps from the time difference and actual dtim, then
-    advances that many steps and compares with dump 101.
+    Loads the kinetic distribution at the start dump of a pair, computes the exact
+    number of small timesteps from the time difference and actual dtim, then
+    advances that many steps and compares with the end dump.
 
     NOTE: Assumes constant dtim between dumps. GKW uses CFL-adaptive timestep,
     so this test is only valid for cases where dtim is stable. Cases with
@@ -371,6 +377,7 @@ def test_kinetic_iteration_parity(
     """
 
     n_species = 2
+    start_name, end_name = reference_pair(kinetic_dir, phase)
     start_df = load_gkw_k_dump(
         os.path.join(kinetic_dir, start_name), kinetic_shape, n_species=n_species
     )
@@ -418,20 +425,11 @@ def test_kinetic_flux_trajectory(kinetic_dir, kinetic_geom, kinetic_shape):
     Note: This test is backend-agnostic as it only tests integral calculations
     (calculate_phi_kinetic, calculate_fluxes_kinetic), not the solver backend.
     """
-    from gyaradax.io.gkw import K_files
-
     n_species = 2
-    ks = K_files(kinetic_dir)
-    if len(ks) < 20:
-        pytest.skip(f"Not enough K files in {kinetic_dir}")
-
     fluxes_ref = np.loadtxt(os.path.join(kinetic_dir, "fluxes.dat"))
     orig_times = np.loadtxt(os.path.join(kinetic_dir, "time.dat"))
 
-    # Test at multiple dumps
-    test_indices = [5, 15]
-    for idx in test_indices:
-        k_file = ks[idx]
+    for k_file in reference_dumps(kinetic_dir):
         df_full = load_gkw_k_dump(
             os.path.join(kinetic_dir, k_file), kinetic_shape, n_species=n_species
         )
@@ -470,13 +468,9 @@ def test_adiabatic_fallback_identity(adiabatic_dir, adiabatic_geom, adiabatic_sh
     different equations. This test validates that the kinetic path is self-consistent
     when called with single-species data (correct shapes, finite output).
     """
-    from gyaradax.io.gkw import K_files
-
-    ks = K_files(adiabatic_dir)
-    if len(ks) == 0:
-        pytest.skip(f"No K files in {adiabatic_dir}")
-
-    df_1sp = load_gkw_k_dump(os.path.join(adiabatic_dir, ks[0]), adiabatic_shape)
+    df_1sp = load_gkw_k_dump(
+        os.path.join(adiabatic_dir, reference_dumps(adiabatic_dir)[0]), adiabatic_shape
+    )
 
     # Kinetic path with single species: add species axis
     df_kinetic = df_1sp[None, ...]  # (1, nvpar, nmu, ns, nkx, nky)

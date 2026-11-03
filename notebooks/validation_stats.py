@@ -1,10 +1,14 @@
-"""Statistical validation of gyaradax against GKW reference data.
+"""Statistical validation of gyaradax against the reference runs of gerkone/gyaradax-tests.
 
 Provides quantitative metrics for spectra, growth rates, flux averages,
-and stationarity to complement the qualitative visual comparisons.
+and stationarity to complement the qualitative visual comparisons. References
+are the ``nonlinear.json`` / ``linear.json`` diagnostics of the dataset, runs are
+gyaradax output directories.
 """
 
+import json
 import os
+
 import numpy as np
 from scipy import stats
 
@@ -326,148 +330,141 @@ def flux_comparison(sim_ts, ref_ts):
 # ---------------------------------------------------------------------------
 
 
-def compare_config(sim_dirs, ref_dir, avg_sim=80, avg_ref=240):
+FLUX_NAMES = ("particle", "heat", "momentum")
+FLUX_KEYS = ("pflux", "eflux", "vflux")
+
+
+def reference_cases(root):
+    """(label, directory) of every case of the dataset under root that has JSON diagnostics."""
+    manifest = json.load(open(os.path.join(root, "manifest.json")))
+    cases = [(f"{kind}/{name}", os.path.join(root, kind, name)) for kind, v in manifest["cases"].items() for name in v]
+    index = os.path.join(root, "long_horizon", "index.json")
+    if os.path.exists(index):
+        cases += [(f"long_horizon/{n}", os.path.join(root, "long_horizon", n)) for n in json.load(open(index))["cases"]]
+    return [(label, d) for label, d in cases if os.path.isdir(d)]
+
+
+def load_reference(case_dir, kind="nonlinear"):
+    path = os.path.join(case_dir, f"{kind}.json")
+    return json.load(open(path)) if os.path.exists(path) else None
+
+
+def load_run(out_dir):
+    """Time traces of a gyaradax output directory, fluxes as (time, species, 3)."""
+    try:
+        f = np.load(os.path.join(out_dir, "fluxes.npz"))
+    except FileNotFoundError:
+        return None
+    fluxes = f["fluxes"]
+    run = {"time": f["time"], "fluxes": fluxes[:, None, :] if fluxes.ndim == 2 else fluxes}
+    for name, key in (("kyspec", "ky_spec"), ("kxspec", "kx_spec"), ("growth", "growth")):
+        try:
+            run[key] = np.load(os.path.join(out_dir, f"{name}.npz"))[key]
+        except (FileNotFoundError, KeyError):
+            pass
+    return run
+
+
+def run_window(run_time, ref):
+    """The reference window, or the same fraction at the end of a run that does not reach it."""
+    t0, t1 = ref["average"]["window"]
+    if run_time[-1] >= t1 - 1e-6:
+        return t0, t1
+    frac = (t1 - t0) / (ref["time"][-1] - ref["time"][0])
+    return run_time[-1] - frac * (run_time[-1] - run_time[0]), run_time[-1]
+
+
+def _in(t, window):
+    return (t >= window[0] - 1e-9) & (t <= window[1] + 1e-9)
+
+
+def compare_config(sim_dirs, ref, species=0):
     """Run all statistical comparisons for one configuration group.
 
     Parameters
     ----------
     sim_dirs : list of str
-        Paths to simulation output directories (multiple runs).
-    ref_dir : str
-        Path to GKW reference data directory.
-    avg_sim : int
-        Number of trailing windows to average for simulation.
-    avg_ref : int
-        Number of trailing windows to average for reference.
+        Paths to gyaradax output directories (one or more runs of the same config).
+    ref : dict
+        Reference ``nonlinear.json`` of the case.
+    species : int
+        Species index of the flux comparison.
 
     Returns
     -------
-    dict with all comparison results, or None on failure.
+    dict with all comparison results, or None when no run has diagnostics.
     """
-    # --- load simulation data ---
-    all_fluxes, all_growths = [], []
-    all_kx_specs, all_ky_specs = [], []
-
-    for d in sim_dirs:
-        try:
-            fluxes = np.load(os.path.join(d, "fluxes.npz"))["fluxes"]
-            growth = np.load(os.path.join(d, "growth.npz"))["growth"]
-            all_fluxes.append(fluxes)
-            all_growths.append(growth)
-        except (FileNotFoundError, KeyError):
-            continue
-
-        try:
-            all_kx_specs.append(np.load(os.path.join(d, "kxspec.npz"))["kx_spec"])
-            all_ky_specs.append(np.load(os.path.join(d, "kyspec.npz"))["ky_spec"])
-        except (FileNotFoundError, KeyError):
-            pass
-
-    if not all_fluxes:
+    runs = [r for r in (load_run(d) for d in sim_dirs) if r is not None]
+    if not runs:
         return None
-
-    # --- load reference data ---
-    try:
-        ref_fluxes_raw = np.loadtxt(os.path.join(ref_dir, "fluxes.dat"))
-    except (FileNotFoundError, OSError):
-        return None
-
+    rt = np.asarray(ref["time"])
+    rwin = ref["average"]["window"]
+    rmask = _in(rt, rwin)
     results = {}
-    sim_ky_avg, ref_ky_spec = None, None
 
-    # ---- stationarity test on ky spectra (proxy for |phi|^2) ----
-    if all_ky_specs:
-        # use total spectral energy = sum over ky of ky_spec
-        first_spec = all_ky_specs[0]  # (n_time, nky)
-        total_energy = np.sum(first_spec, axis=1)  # (n_time,)
-        results["stationarity"] = stationarity_test(total_energy)
+    if "ky_spec" in runs[0]:
+        results["stationarity"] = stationarity_test(np.sum(runs[0]["ky_spec"], axis=1))
 
-    # ---- spectra comparison ----
-    if all_kx_specs and all_ky_specs:
-        min_spec_len = min(len(s) for s in all_kx_specs)
+    def sim_avg(key):
+        per_run = [np.mean(r[key][_in(r["time"], run_window(r["time"], ref))], axis=0) for r in runs if key in r]
+        return np.mean(per_run, axis=0) if per_run else None
 
-        sim_kx = np.stack([s[:min_spec_len] for s in all_kx_specs])
-        sim_ky = np.stack([s[:min_spec_len] for s in all_ky_specs])
-
-        w_sim = min(avg_sim, min_spec_len)
-        kx_per_run = np.mean(sim_kx[:, -w_sim:, :], axis=1)  # (n_runs, nkx)
-        ky_per_run = np.mean(sim_ky[:, -w_sim:, :], axis=1)  # (n_runs, nky)
-        sim_kx_avg = np.mean(kx_per_run, axis=0)
-        sim_ky_avg = np.mean(ky_per_run, axis=0)
-
-        # ref spectra
-        ref_kx_spec, ref_ky_spec = None, None
-        try:
-            ref_kx_raw = np.loadtxt(os.path.join(ref_dir, "kxspec"))
-            ref_ky_raw = np.loadtxt(os.path.join(ref_dir, "kyspec"))
-            w_ref = min(avg_ref, len(ref_kx_raw))
-            ref_kx_spec = np.mean(ref_kx_raw[-w_ref:], axis=0)
-            ref_ky_spec = np.mean(ref_ky_raw[-w_ref:], axis=0)
-        except (FileNotFoundError, OSError):
-            pass
-
-        if ref_ky_spec is not None and len(ref_ky_spec) == len(sim_ky_avg):
-            ks_s = ks_test_spectra(sim_ky_avg, ref_ky_spec)
-            pr_r, pr_p = pearson_corr(sim_ky_avg, ref_ky_spec)
-            results["ky_spec"] = {
-                "ks_stat": ks_s,
+    sim_ky_avg = sim_avg("ky_spec")
+    sim_kx_avg = sim_avg("kx_spec")
+    ref_ky_spec = np.mean(np.asarray(ref["ky_spectrum"])[rmask], axis=0)
+    ref_kx_spec = np.mean(np.asarray(ref["kx_spectrum"])[rmask], axis=0)
+    for key, sim_spec, ref_spec in (("ky_spec", sim_ky_avg, ref_ky_spec), ("kx_spec", sim_kx_avg, ref_kx_spec)):
+        if sim_spec is not None and len(sim_spec) == len(ref_spec):
+            pr_r, pr_p = pearson_corr(sim_spec, ref_spec)
+            results[key] = {
+                "ks_stat": ks_test_spectra(sim_spec, ref_spec),
                 "pearson_r": pr_r,
                 "pearson_p": pr_p,
-                "log_rel_l2": log_relative_l2(sim_ky_avg, ref_ky_spec),
+                "log_rel_l2": log_relative_l2(sim_spec, ref_spec),
             }
 
-        if ref_kx_spec is not None and len(ref_kx_spec) == len(sim_kx_avg):
-            ks_s = ks_test_spectra(sim_kx_avg, ref_kx_spec)
-            pr_r, pr_p = pearson_corr(sim_kx_avg, ref_kx_spec)
-            results["kx_spec"] = {
-                "ks_stat": ks_s,
-                "pearson_r": pr_r,
-                "pearson_p": pr_p,
-                "log_rel_l2": log_relative_l2(sim_kx_avg, ref_kx_spec),
-            }
-
-    # ---- growth rate comparison ----
-    if all_growths:
-        min_g_len = min(len(g) for g in all_growths)
-        sim_growth_stack = np.stack([g[:min_g_len] for g in all_growths])
-
-        ref_growth_2d = None
-        try:
-            ref_growth_2d = np.loadtxt(os.path.join(ref_dir, "growth.dat"))
-        except (FileNotFoundError, OSError):
-            pass
-
-        # pass ky spectra as energy weights so scalar summary is
-        # weighted by mode energy (avoids noisy high-ky modes dominating)
+    growth_runs = [r["growth"][_in(r["time"], run_window(r["time"], ref))] for r in runs if "growth" in r]
+    if growth_runs and "growth" in ref:
+        n = min(len(g) for g in growth_runs)
+        ref_growth = np.asarray(ref["growth"])[rmask]
         results["growth"] = growth_rate_stats(
-            sim_growth_stack,
-            ref_growth_2d,
+            np.stack([g[-n:] for g in growth_runs]),
+            ref_growth,
             sim_ky_spec=sim_ky_avg,
             ref_ky_spec=ref_ky_spec,
-            avg_window_sim=avg_sim,
-            avg_window_ref=avg_ref,
+            avg_window_sim=n,
+            avg_window_ref=len(ref_growth),
         )
 
-    # ---- flux comparison ----
-    # Pool last avg_sim windows across all sim runs into one time series per flux.
-    # Compare against last avg_ref windows of reference.
-    # Use autocorrelation-corrected SE for proper uncertainty.
-    min_f_len = min(len(f) for f in all_fluxes)
-    sim_fluxes_arr = np.stack([f[:min_f_len] for f in all_fluxes])  # (n_runs, n_time, 3)
-    w_f = min(avg_sim, min_f_len)
-    sim_flux_windows = sim_fluxes_arr[:, -w_f:, :].reshape(-1, sim_fluxes_arr.shape[-1])
-
-    ref_fluxes_t = ref_fluxes_raw.T  # (n_cols, n_time)
-    n_ref_time = ref_fluxes_t.shape[1]
-    w_rf = min(avg_ref, n_ref_time)
-    ref_flux_windows = ref_fluxes_t[:3, -w_rf:]  # (3, w_rf)
-
-    flux_names = ["pflux", "eflux", "vflux"]
-    for i, name in enumerate(flux_names):
-        if i < sim_flux_windows.shape[1] and i < ref_flux_windows.shape[0]:
-            results[name] = flux_comparison(sim_flux_windows[:, i], ref_flux_windows[i])
-
+    sp = ref["species"][species]
+    sim_windows = np.concatenate([r["fluxes"][_in(r["time"], run_window(r["time"], ref)), species] for r in runs])
+    for i, (name, key) in enumerate(zip(FLUX_NAMES, FLUX_KEYS)):
+        results[key] = flux_comparison(sim_windows[:, i], np.asarray(ref["fluxes"][sp][name])[rmask])
     return results
+
+
+def compare_linear(sim_dir, ref, min_fraction=0.25):
+    """Growth rates at the end of a linear run against the converged reference, per ky.
+
+    The summary covers the ky whose reference growth rate exceeds ``min_fraction`` of
+    the maximum; marginal and damped ky converge slowly and are less well defined.
+    """
+    try:
+        g = np.load(os.path.join(sim_dir, "growth.npz"))
+    except FileNotFoundError:
+        return None
+    sim = np.asarray(g["growth"])[-1]
+    gamma = np.asarray(ref["gamma"])
+    mask = gamma > min_fraction * gamma.max()
+    rel = np.abs(sim - gamma) / np.maximum(np.abs(gamma), 1e-12)
+    return {
+        "ky": np.asarray(ref["ky"]),
+        "sim_gamma": sim,
+        "ref_gamma": gamma,
+        "rel_diff": rel,
+        "max_rel_diff": float(rel[mask].max()) if mask.any() else float("nan"),
+        "t_end": float(g["time"][-1]),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -597,7 +594,7 @@ def results_to_latex(aggregated, per_config=None):
     lines.append(r"\begin{table}[h]")
     lines.append(r"\centering")
     lines.append(
-        rf"\caption{{Statistical validation: gyaradax vs GKW (aggregated over ${n}$ trajectories)}}"
+        rf"\caption{{Statistical validation: gyaradax vs reference (aggregated over ${n}$ trajectories)}}"
     )
     lines.append(r"\label{tab:validation_stats}")
     lines.append(r"\begin{tabular}{l c c c c}")
@@ -721,7 +718,7 @@ def results_to_markdown(aggregated, per_config=None):
 
     lines = []
     lines.append(
-        f"**Statistical validation: gyaradax vs GKW** (aggregated over {n} trajectories)\n"
+        f"**Statistical validation: gyaradax vs reference** (aggregated over {n} trajectories)\n"
     )
 
     # ---- Stationarity ----

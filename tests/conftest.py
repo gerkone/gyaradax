@@ -1,3 +1,4 @@
+import json
 import os
 import re
 import pytest
@@ -91,37 +92,111 @@ def read_dump_dtim(dat_path):
     return float(m.group(1))
 
 
-GKW_DATA_ROOT = os.environ.get(
-    "GKW_DATA_ROOT", os.path.join(os.path.dirname(__file__), "data", "gkw_raw")
+# ── GKW reference runs ───────────────────────────────────────────────────────
+# Cases and dump pairs come from tests/data/gkw_reference.json, a copy of the
+# manifest of the Hugging Face dataset. They are read from $GYARADAX_TEST_DATA
+# and downloaded only with --download-test-data, GYARADAX_DOWNLOAD_TEST_DATA=1
+# or download_test_data = true in the pytest ini options; otherwise the tests
+# that need them skip.
+
+REPO_ID = "gerkone/gyaradax-tests"
+DATA_ROOT = os.path.abspath(
+    os.path.expanduser(os.environ.get("GYARADAX_TEST_DATA") or "~/.cache/gyaradax/test_data")
 )
-ITERATIONS = [8, 13, 131, 200]
+with open(os.path.join(os.path.dirname(__file__), "data", "gkw_reference.json")) as _f:
+    REFERENCE = json.load(_f)
+NONLINEAR_CASES = sorted(REFERENCE["cases"]["nonlinear"])
+LINEAR_CASES = sorted(REFERENCE["cases"]["linear"])
+KINETIC_CASES = sorted(REFERENCE["cases"]["kinetic"])
+PHASES = ("early", "mid", "late")
 
 
-@pytest.fixture(params=ITERATIONS)
+def pytest_addoption(parser):
+    parser.addoption(
+        "--download-test-data",
+        action="store_true",
+        help=f"download missing GKW reference cases from {REPO_ID} into $GYARADAX_TEST_DATA",
+    )
+    parser.addini(
+        "download_test_data",
+        type="bool",
+        default=False,
+        help="download missing GKW reference cases, as --download-test-data",
+    )
+
+
+def _download_requested(config):
+    return (
+        config.getoption("--download-test-data")
+        or config.getini("download_test_data")
+        or os.environ.get("GYARADAX_DOWNLOAD_TEST_DATA", "").lower() in ("1", "true", "yes")
+    )
+
+
+def _complete(path, files):
+    return all(
+        os.path.isfile(os.path.join(path, f)) and os.path.getsize(os.path.join(path, f)) == meta["size"]
+        for f, meta in files.items()
+    )
+
+
+def reference_dir(request, kind, name):
+    """Directory of a reference case, downloaded first when asked; skips when missing."""
+    files = REFERENCE["cases"][kind][name]["files"]
+    path = os.path.join(DATA_ROOT, kind, name)
+    if not _complete(path, files) and _download_requested(request.config):
+        try:
+            from huggingface_hub import snapshot_download
+        except ImportError:
+            pytest.skip("downloading the GKW reference runs needs huggingface_hub: pip install -e '.[test]'")
+        snapshot_download(
+            repo_id=REPO_ID, repo_type="dataset", local_dir=DATA_ROOT, allow_patterns=[f"{kind}/{name}/*"]
+        )
+    if not _complete(path, files):
+        pytest.skip(
+            f"GKW reference case {kind}/{name} not found under {DATA_ROOT}; pass --download-test-data to fetch it"
+        )
+    return path
+
+
+def _reference_dir(request, kind):
+    return reference_dir(request, kind, request.param)
+
+
+def reference_case(path):
+    """Manifest entry of a reference case directory."""
+    kind, name = os.path.split(os.path.normpath(path))[-2:]
+    kind = os.path.basename(kind)
+    return REFERENCE["cases"][kind][name]
+
+
+def reference_pair(path, phase):
+    """(start, end) dump names of the early, mid or late pair of a case."""
+    pair = reference_case(path)["pairs"][phase]
+    return pair["start"], pair["end"]
+
+
+def reference_dumps(path):
+    """All dump names of a case, in time order."""
+    return [name for phase in PHASES for name in reference_pair(path, phase)]
+
+
+@pytest.fixture(params=NONLINEAR_CASES)
 def adiabatic_dir(request):
-    """base directory for adiabatic electron simulations."""
-    path = os.path.join(GKW_DATA_ROOT, f"iteration_{request.param}")
-    if not os.path.exists(path):
-        pytest.skip(f"adiabatic reference data not found at {path}")
-    return path
+    """nonlinear adiabatic-electron reference case."""
+    return _reference_dir(request, "nonlinear")
 
 
-@pytest.fixture(params=ITERATIONS)
+@pytest.fixture(params=LINEAR_CASES)
 def lin_dir(request):
-    """directory for linear-only adiabatic simulations."""
-    path = os.path.join(GKW_DATA_ROOT, f"iteration_{request.param}_Lin")
-    if not os.path.exists(path):
-        pytest.skip(f"linear reference data not found at {path}")
-    return path
+    """linear adiabatic-electron reference case."""
+    return _reference_dir(request, "linear")
 
 
-@pytest.fixture(params=ITERATIONS)
+@pytest.fixture(params=NONLINEAR_CASES)
 def nonlin_dir(request):
-    """directory for nonlinear adiabatic simulations."""
-    path = os.path.join(GKW_DATA_ROOT, f"iteration_{request.param}")
-    if not os.path.exists(path):
-        pytest.skip(f"nonlinear reference data not found at {path}")
-    return path
+    """nonlinear adiabatic-electron reference case."""
+    return _reference_dir(request, "nonlinear")
 
 
 @pytest.fixture
@@ -164,20 +239,10 @@ def nonlin_shape(nonlin_geom):
     return _get_shape(nonlin_geom)
 
 
-KINETIC_CASES = [
-    "v3_kiteration_991_half_rlt",
-    "v3_kiteration_991_ntsks128",
-    "v3_kiteration_991_double_rlt",
-]
-
-
 @pytest.fixture(params=KINETIC_CASES)
 def kinetic_dir(request):
-    """Directory for kinetic electron simulations."""
-    path = os.path.join(GKW_DATA_ROOT, "kinetic_electrons", request.param)
-    if not os.path.exists(path):
-        pytest.skip(f"kinetic reference data not found at {path}")
-    return path
+    """kinetic-electron reference case."""
+    return _reference_dir(request, "kinetic")
 
 
 @pytest.fixture
