@@ -8,6 +8,7 @@ gyaradax output directories.
 
 import json
 import os
+import warnings
 
 import numpy as np
 from scipy import stats
@@ -103,7 +104,9 @@ def stationarity_test(x):
         adf_stat, adf_p = np.nan, np.nan
 
     try:
-        kpss_result = kpss_test(x, regression="c", nlags="auto")
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")  # p-value capped at the table edge
+            kpss_result = kpss_test(x, regression="c", nlags="auto")
         kpss_stat, kpss_p = float(kpss_result[0]), float(kpss_result[1])
     except Exception:
         kpss_stat, kpss_p = np.nan, np.nan
