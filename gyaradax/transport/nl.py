@@ -44,7 +44,7 @@ class GyaradaxNLTransportModel(base.GyaradaxTransportModel):
 
 
 class GyaradaxNLConfig(base.SolverConfig):
-    """Config of the nl-gyx transport model (fields in docs/TORAX.md)."""
+    """Config of the nl-gyx transport model (fields in docs/applications/torax.md)."""
 
     model_name: Annotated[Literal["nl-gyx"], STATIC] = "nl-gyx"
     n_steps_nl: Annotated[int, STATIC] = 30000

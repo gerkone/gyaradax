@@ -2,7 +2,7 @@
 
 gyaradax returns fluxes in GKW gyroBohm units; every conversion to TORAX happens here.
 A convention fixes the thermal velocity (sqrt(2T/m) or sqrt(T/m)), the reference length
-of the flux and the temperature inside the chi factor. See docs/TORAX.md.
+of the flux and the temperature inside the chi factor. See docs/applications/torax.md.
 """
 
 import dataclasses

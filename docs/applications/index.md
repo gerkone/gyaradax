@@ -1,10 +1,11 @@
 # Applications
 
-Besides time stepping, `gyx` gives three tools built on the same linear operator:
+Besides time stepping, `gyx` gives three tools built on the same linear operator, and a TORAX transport model built on them:
 
 - {doc}`eigenmodes`: the dominant and subdominant linear modes, per $k_y$, with an Arnoldi solver.
 - {doc}`quasilinear`: turbulent fluxes from one linear solve and a saturation rule.
 - {doc}`differentiable`: gradients of anything computed from a run, by JAX automatic differentiation, for sensitivities and inverse problems.
+- {doc}`torax`: the `ql-gyx` and `nl-gyx` turbulent transport models for the TORAX transport code.
 
 {doc}`production` runs the reference configurations of the test dataset from scratch and compares them with long GKW runs.
 
@@ -38,6 +39,7 @@ base = GKParams(
 
 eigenmodes
 quasilinear
+torax
 differentiable
 production
 ```

@@ -65,12 +65,15 @@ Any other TORAX config uses the models the same way, after `import gyaradax.tran
 | `linear_arith` | both | `fp64` | CUDA: `ds` runs the linear RHS in double-single arithmetic, faster on weak-FP64 GPUs such as B300 |
 | `batching` | both | `devices` | how the radii run: `devices` splits them evenly over the local GPUs and vmaps each share (the last radius is repeated to fill the final share and its result dropped), `vmap` vmaps all on one GPU, `loop` runs one at a time |
 | `kinetic`, `em` | both | false | kinetic electrons, A_par (experimental) |
+| `collisions` | both | true | linearised Fokker-Planck collisions, with frequencies from the local n_e and T_i (as `coll_nref`, `coll_tref`) and R_major (`coll_rref`) |
+| `ikxspace_choices`, `ikxspace_per_shat` | both | kinetic preset: 1, 2, 3, 4, 6, 8, 12, 16; 6.53 | per radius, ikxspace is the largest choice below floor(6.53 abs(s_hat)); empty keeps the fixed `ikxspace`. Each choice adds one prebuilt topology (about 18 MB at the kinetic grid) |
 | `diagnostics_path` | both | | one jsonl row per call and radius (padding radii included): local parameters, fluxes, steps, time |
-| `rule`, `rule_options` | ql | `sat2` | saturation rule (`sat2`, `canonical`, `sat0`), and its options |
+| `rule`, `rule_options` | ql | `sat2` | saturation rule (`sat2`, `satx_mlp`, `canonical`, `sat0`), and its options |
 | `calibration`, `cn` | ql | `auto` | calibration name or JSON path (`auto`: the rule's default in `gyaradax/quasilinear/weights/`); `cn` overrides its amplitude |
 | `n_steps_linear`, `early_stop` | ql | 2000, true | cap on RK4 steps, and stopping on converged growth rates |
 | `n_steps_nl`, `nl_tail_blocks`, `nl_block` | nl | 30000, 12, 500 | run length and averaging window |
 
-The local inputs at each radius are R/L_Ti, R/L_Te, R/L_n, q, s_hat, eps and T_e/T_i from the
-TORAX profiles, clipped into `clip_*`. Remaining fields (geometry and solver settings, clip boxes,
+The local inputs at each radius are R/L_Ti, R/L_Te, R/L_n, q, s_hat, eps, T_e/T_i, n_e and T_i from
+the TORAX profiles, clipped into `clip_*`. The flux tube is circular with a pure deuterium plasma:
+shaping, impurities, Z_eff and a DT main ion are not modelled yet. Remaining fields (geometry and solver settings, clip boxes,
 particle-transport options) are listed in `gyaradax/transport/base.py`.

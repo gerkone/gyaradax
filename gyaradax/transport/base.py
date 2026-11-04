@@ -15,6 +15,7 @@ from typing import Annotated, Any, Dict, Literal, Optional, Tuple
 import chex
 import jax
 import jax.numpy as jnp
+import numpy as np
 import pydantic
 import torax
 from torax import transport
@@ -38,6 +39,8 @@ _EPS_MIN, _EPS_MAX = 0.02, 0.5
 _BETA_MAX = 0.05
 # GKW deuterium-reference electron mass ratio
 _ELECTRON_MASS_RATIO = 2.72e-4
+# unit of gyaradax's coll_nref [m^-3]
+_COLL_NREF_UNIT = 1e19
 
 _GKPARAMS_DT = 0.005
 _VPAR_MAX = 3.0
@@ -51,11 +54,17 @@ _GRID_PRESETS = {
     "adiabatic": dict(nvpar=32, nmu=8, ns=16, nkx=85, nky=32, ikxspace=5, krhomax=1.4),
     "kinetic": dict(nvpar=32, nmu=12, ns=18, nkx=191, nky=32, ikxspace=16, krhomax=1.5),
 }
+# ikxspace = floor(slope |shat|) per radius
+_IKXSPACE_PER_SHAT = 6.53
+# ikxspace values the shat rule snaps to; each costs one prebuilt topology
+_IKXSPACE_CHOICES = {"adiabatic": (), "kinetic": (1, 2, 3, 4, 6, 8, 12, 16)}
 
 
-def ikxspace_for_shat(shat, lo: int = 1, hi: int = 32) -> int:
-    """ikxspace = floor(6.53 |shat|), clamped to [lo, hi], as in the stored runs."""
-    return int(min(max(int(abs(float(shat)) * 6.53), lo), hi))
+def ikxspace_for_shat(shat, choices, slope: float = _IKXSPACE_PER_SHAT):
+    """Index into ``choices`` (ascending) of the largest one <= floor(slope |shat|); traceable."""
+    target = jnp.floor(slope * jnp.abs(shat))
+    n_le = jnp.sum(jnp.asarray(choices) <= target)
+    return jnp.clip(n_le - 1, 0, len(choices) - 1)
 
 
 @jax.tree_util.register_dataclass
@@ -69,6 +78,42 @@ class RuntimeParams(transport.ComponentRuntimeParams):
 @lru_cache(maxsize=8)
 def topology(nkx: int, nky: int, ikxspace: int, ns: int):
     return build_topology(nkx=nkx, nky=nky, ikxspace=ikxspace, ns=ns)
+
+
+@lru_cache(maxsize=4)
+def topology_bank(nkx: int, nky: int, ns: int, choices: Tuple[int, ...]):
+    """Topologies of every ikxspace in ``choices``, stacked along a leading axis."""
+    topos = [topology(nkx, nky, int(k), ns) for k in choices]
+
+    def merge(values):
+        # entries equal for every choice stay concrete; the rest are stacked
+        if all(np.array_equal(np.asarray(v), np.asarray(values[0])) for v in values):
+            return values[0]
+        if not hasattr(values[0], "shape"):
+            raise ValueError("a scalar topology entry differs between ikxspace values")
+        return _Stacked(jnp.stack(values))
+
+    bank = {}
+    for key, v in topos[0].items():
+        if key == "flipped":
+            bank[key] = {k: merge([t[key][k] for t in topos]) for k in v}
+        else:
+            bank[key] = merge([t[key] for t in topos])
+    return bank
+
+
+@dataclasses.dataclass(frozen=True)
+class _Stacked:
+    values: Any
+
+
+def select_topology(bank, i):
+    """The topology at (traced) index ``i`` of a :func:`topology_bank`."""
+    def pick(v):
+        return v.values[i] if isinstance(v, _Stacked) else v
+
+    return {k: ({kk: pick(vv) for kk, vv in v.items()} if k == "flipped" else pick(v))
+            for k, v in bank.items()}
 
 
 def resolve_grid(cfg) -> dict:
@@ -162,6 +207,15 @@ def gkparams_for_radius(rho_idx, ql_inputs, core_profiles, geo, config) -> GKPar
         )
     else:
         species = dict(rlt=rlt, rln=rln, adiabatic_electrons=True)
+    coll = {}
+    if config.collisions:
+        # coulomb-log frequencies from the local n_e, T_i (T_ref) and the major radius (R_ref)
+        coll = dict(
+            collisions=True,
+            coll_rref=jnp.asarray(geo.R_major, dtype=jnp.float64),
+            coll_nref=core_profiles.n_e.face_value()[rho_idx] / _COLL_NREF_UNIT,
+            coll_tref=core_profiles.T_i.face_value()[rho_idx],
+        )
     return GKParams(
         q=q,
         shat=shat,
@@ -175,10 +229,11 @@ def gkparams_for_radius(rho_idx, ql_inputs, core_profiles, geo, config) -> GKPar
         fused_linear=config.fused_linear,
         linear_arith=config.linear_arith,
         **species,
+        **coll,
     )
 
 
-def geometry_at(q, shat, eps, config, topo: Dict[str, Any]) -> Dict[str, Any]:
+def geometry_at(q, shat, eps, config, topo: Dict[str, Any], ikxspace=None) -> Dict[str, Any]:
     return compute_continuous_geometry(
         q=q,
         shat=shat,
@@ -192,7 +247,7 @@ def geometry_at(q, shat, eps, config, topo: Dict[str, Any]) -> Dict[str, Any]:
         nperiod=config.nperiod,
         kxmax=0.0,
         krhomax=config.krhomax,
-        ikxspace=config.ikxspace,
+        ikxspace=config.ikxspace if ikxspace is None else ikxspace,
         signB=1.0,
         Rref=config.rref,
         geom_type=config.geom_type,
@@ -220,6 +275,9 @@ class GyaradaxTransportModel(transport.ComponentTransportModel):
     em: bool = False
     grid_preset: str = ""
     ikxspace_per_radius: Tuple[int, ...] = ()
+    ikxspace_choices: Tuple[int, ...] = ()
+    ikxspace_per_shat: float = _IKXSPACE_PER_SHAT
+    collisions: bool = True
     vpar_max: float = _VPAR_MAX
     nperiod: int = _NPERIOD
     geom_type: str = _GEOM_TYPE
@@ -282,8 +340,15 @@ class GyaradaxTransportModel(transport.ComponentTransportModel):
         if fis is not None and float(fis.get_value(0.0)) != 0.0:
             raise NotImplementedError(f"{cls.__name__} does not implement fast_ion_stabilization.")
         grid = resolve_grid(cfg)
-        # warm the cache outside jit, so the topology arrays never become tracers
+        preset = cfg.grid_preset or ("kinetic" if cfg.kinetic else "adiabatic")
+        choices = cfg.ikxspace_choices if cfg.ikxspace_choices is not None else _IKXSPACE_CHOICES[preset]
+        choices = tuple(sorted(int(k) for k in choices))
+        if choices and cfg.ikxspace_per_radius:
+            raise ValueError("set ikxspace_choices or ikxspace_per_radius, not both")
+        # warm the caches outside jit, so the topology arrays never become tracers
         topology(int(grid["nkx"]), int(grid["nky"]), int(grid["ikxspace"]), int(grid["ns"]))
+        if choices:
+            topology_bank(int(grid["nkx"]), int(grid["nky"]), int(grid["ns"]), choices)
         optional = (
             "vpar_max",
             "nperiod",
@@ -297,6 +362,8 @@ class GyaradaxTransportModel(transport.ComponentTransportModel):
             "clip_q",
             "clip_shat",
             "clip_eps",
+            "ikxspace_per_shat",
+            "collisions",
         )
         return dict(
             rho_match=tuple(cfg.rho_match),
@@ -316,6 +383,7 @@ class GyaradaxTransportModel(transport.ComponentTransportModel):
             grid_preset=cfg.grid_preset or "",
             **{k: getattr(cfg, k) for k in optional if getattr(cfg, k, None) is not None},
             ikxspace_per_radius=tuple(cfg.ikxspace_per_radius or ()),
+            ikxspace_choices=choices,
             kinetic=cfg.kinetic,
             diagnostics_path=cfg.diagnostics_path or "",
         )
@@ -342,7 +410,14 @@ class GyaradaxTransportModel(transport.ComponentTransportModel):
 
     def _per_radius_from_profiles(self, rho_idx, ql_inputs, core_profiles, geo, topo=None):
         params = gkparams_for_radius(rho_idx, ql_inputs, core_profiles, geo, self)
-        geom = geometry_at(params.q, params.shat, params.eps, self, topo or self.topology)
+        ikxspace = None
+        if self.ikxspace_choices and topo is None:
+            i = ikxspace_for_shat(params.shat, self.ikxspace_choices, self.ikxspace_per_shat)
+            topo = select_topology(
+                topology_bank(self.nkx, self.nky, self.ns, self.ikxspace_choices), i
+            )
+            ikxspace = jnp.asarray(self.ikxspace_choices)[i]
+        geom = geometry_at(params.q, params.shat, params.eps, self, topo or self.topology, ikxspace)
         q_i, q_e, pfe, extra = self._per_radius(params, geom)
         diag_lib.record(
             self.sink,
@@ -356,6 +431,9 @@ class GyaradaxTransportModel(transport.ComponentTransportModel):
                 "shat": params.shat,
                 "eps": params.eps,
                 "beta": params.beta,
+                "ikxspace": self.ikxspace if ikxspace is None else ikxspace,
+                "coll_nref": params.coll_nref,
+                "coll_tref": params.coll_tref,
                 "qi_gb": q_i,
                 "qe_gb": q_e,
                 "pfe_gb": pfe,
@@ -405,7 +483,7 @@ class GyaradaxTransportModel(transport.ComponentTransportModel):
 
 
 class GyaradaxConfig(transport.ComponentTransportBase):
-    """Config fields shared by every gyaradax transport model (see docs/TORAX.md)."""
+    """Config fields shared by every gyaradax transport model (see docs/applications/torax.md)."""
 
     rho_match: Annotated[Tuple[float, ...], STATIC] = (0.35, 0.55, 0.75, 0.875)
     DV_effective: Annotated[bool, STATIC] = True
@@ -441,6 +519,9 @@ class SolverConfig(GyaradaxConfig):
     em: Annotated[bool, STATIC] = False
     grid_preset: Annotated[Optional[str], STATIC] = None
     ikxspace_per_radius: Annotated[Optional[Tuple[int, ...]], STATIC] = None
+    ikxspace_choices: Annotated[Optional[Tuple[int, ...]], STATIC] = None
+    ikxspace_per_shat: Annotated[Optional[float], STATIC] = None
+    collisions: Annotated[Optional[bool], STATIC] = None
     vpar_max: Annotated[Optional[float], STATIC] = None
     nperiod: Annotated[Optional[int], STATIC] = None
     geom_type: Annotated[Optional[str], STATIC] = None

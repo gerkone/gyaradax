@@ -23,6 +23,7 @@ class GyaradaxQLTransportModel(base.GyaradaxTransportModel):
     rule: str = "sat2"
     rule_options: Tuple[Tuple[str, Any], ...] = ()
     cn: float = 1.0
+    calibration: str = ""
     early_stop: bool = True
     early_stop_block: int = 100
     early_stop_atol: float = 1e-4
@@ -38,13 +39,16 @@ class GyaradaxQLTransportModel(base.GyaradaxTransportModel):
         if cfg.kinetic and cfg.cn is None and "kinetic" not in cal.get("electrons", ()):
             raise ValueError(f"calibration {cfg.calibration!r} has no kinetic fit: set `cn`.")
         cn = float(cfg.cn) if cfg.cn is not None else cal["parameters"]["cn"]
-        options = {**(calibration.rule_kwargs(cal) if cal else {}), **(cfg.rule_options or {})}
+        # records with fitted arrays stay in the calibration cache, not in the static options
+        fitted = {} if cfg.rule in point_eval.RULES_WITH_OMEGA else (calibration.rule_kwargs(cal) if cal else {})
+        options = {**fitted, **(cfg.rule_options or {})}
         return cls(
             **cls._base_kwargs(cfg),
             n_steps_linear=cfg.n_steps_linear,
             rule=cfg.rule,
             rule_options=tuple(sorted(options.items())),
             cn=cn,
+            calibration=cfg.calibration or "",
             early_stop=cfg.early_stop,
             early_stop_block=cfg.early_stop_block,
             early_stop_atol=cfg.early_stop_atol,
@@ -53,6 +57,13 @@ class GyaradaxQLTransportModel(base.GyaradaxTransportModel):
             early_stop_patience=cfg.early_stop_patience,
         )
 
+    def _rule_options(self):
+        options = dict(self.rule_options)
+        if self.rule in point_eval.RULES_WITH_OMEGA:
+            cal = calibration.load(self.calibration, self.rule)
+            options = {**calibration.rule_kwargs(cal), **options}
+        return options
+
     def _per_radius(self, params: GKParams, geom: Dict[str, Any]):
         return point_eval.ql_at_point(
             params,
@@ -60,7 +71,7 @@ class GyaradaxQLTransportModel(base.GyaradaxTransportModel):
             (self.nvpar, self.nmu, self.ns, self.nkx, self.nky),
             cn=jnp.asarray(self.cn),
             rule=self.rule,
-            rule_options=dict(self.rule_options),
+            rule_options=self._rule_options(),
             n_steps_linear=self.n_steps_linear,
             early_stop=self.early_stop,
             early_stop_opts=dict(
@@ -75,7 +86,7 @@ class GyaradaxQLTransportModel(base.GyaradaxTransportModel):
 
 
 class GyaradaxQLConfig(base.SolverConfig):
-    """Config of the ql-gyx transport model (fields in docs/TORAX.md)."""
+    """Config of the ql-gyx transport model (fields in docs/applications/torax.md)."""
 
     model_name: Annotated[Literal["ql-gyx"], STATIC] = "ql-gyx"
     n_steps_linear: Annotated[int, STATIC] = 2000

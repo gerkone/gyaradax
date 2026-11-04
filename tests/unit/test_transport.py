@@ -16,6 +16,7 @@ from torax._src.test_utils import default_configs
 from gyaradax.quasilinear import calibration
 from gyaradax.transport import GyaradaxNLConfig, GyaradaxQLConfig, GyaradaxQLTransportModel
 from gyaradax.transport import diagnostics, units
+from gyaradax.transport.base import topology
 
 GRID = dict(nvpar=32, nmu=8, ns=16, nkx=85, nky=32, ikxspace=5, krhomax=1.4)
 
@@ -157,3 +158,55 @@ def test_ql_linear_solve():
     )
     chi = np.asarray(coeffs.chi_face_ion)
     assert np.all(np.isfinite(chi)) and np.all(chi >= 0.0) and chi.max() > 0.0
+
+
+def test_ikxspace_follows_shat():
+    from gyaradax.transport.base import ikxspace_for_shat
+
+    choices = (1, 2, 3, 4, 6, 8, 12, 16)
+    for shat, want in ((0.05, 1), (0.4, 2), (0.8, 4), (1.0, 6), (2.0, 12), (5.0, 16), (-1.0, 6)):
+        assert choices[int(ikxspace_for_shat(shat, choices))] == want
+
+
+def test_topology_bank_matches_static_topologies():
+    from gyaradax.transport.base import select_topology, topology, topology_bank
+
+    choices = (2, 5, 9)
+    bank = topology_bank(85, 32, 16, choices)
+    for i, k in enumerate(choices):
+        ref, got = topology(85, 32, k, 16), select_topology(bank, jnp.asarray(i))
+        for key, v in ref.items():
+            if key == "flipped":
+                for kk, vv in v.items():
+                    np.testing.assert_array_equal(np.asarray(got[key][kk]), np.asarray(vv))
+            elif hasattr(v, "shape"):
+                np.testing.assert_array_equal(np.asarray(got[key]), np.asarray(v))
+            else:
+                assert got[key] == v
+
+
+def test_radius_params_carry_collisions_and_shat_ikxspace(monkeypatch):
+    seen = []
+
+    def record(self, params, geom):
+        seen.append((params, geom))
+        return jnp.asarray(1.0), jnp.asarray(1.0), jnp.asarray(0.0), {}
+
+    monkeypatch.setattr(GyaradaxQLTransportModel, "_per_radius", record)
+    fields = {"model_name": "ql-gyx", "rho_match": (0.3, 0.7), **GRID, "ikxspace_choices": (1, 2, 4, 8)}
+    model, _, geo, cp = transport_call(fields)
+    qli = units.build_quasilinear_inputs(cp, geo)
+    seen.clear()
+    model._per_radius_from_profiles(10, qli, cp, geo)
+    params, geom = seen[0]
+    assert params.collisions
+    np.testing.assert_allclose(float(params.coll_nref), float(cp.n_e.face_value()[10]) / 1e19)
+    np.testing.assert_allclose(float(params.coll_tref), float(cp.T_i.face_value()[10]))
+    np.testing.assert_allclose(float(params.coll_rref), float(geo.R_major))
+    want = (1, 2, 4, 8)[int(np.searchsorted((1, 2, 4, 8), np.floor(6.53 * abs(float(params.shat))), "right")) - 1]
+    ref = topology(GRID["nkx"], GRID["nky"], max(want, 1), GRID["ns"])
+    np.testing.assert_array_equal(np.asarray(geom["mode_label"]), np.asarray(ref["mode_label"]))
+    off = build(**{**fields, "collisions": False})
+    seen.clear()
+    off._per_radius_from_profiles(10, qli, cp, geo)
+    assert not seen[0][0].collisions
