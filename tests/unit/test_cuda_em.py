@@ -4,6 +4,7 @@ Cases are built from the repo YAML configs on a reduced grid with analytic geome
 so no GKW reference data is needed.
 """
 
+import logging
 from dataclasses import replace
 from functools import partial
 
@@ -26,7 +27,7 @@ SMALL_GRID = dict(nvpar=16, nmu=4, ns=16, nkx=21, nky=5)
 POW2_GRID = dict(nvpar=16, nmu=4, ns=16, nkx=9, nky=5)
 # ns * nky = 1280 > 1024 -> ky-tiled linear kernel
 TILED_GRID = dict(nvpar=8, nmu=2, ns=32, nkx=11, nky=40)
-# nky = 23 -> 70-point dealiased ky planes, not instantiated by the v6 row kernels
+# nky = 23 -> 70-point dealiased ky planes, a length cuFFTDx runs only with a workspace
 NKY23_GRID = dict(SMALL_GRID, nky=23)
 GRIDS = {"small": SMALL_GRID, "pow2": POW2_GRID, "tiled": TILED_GRID, "nky23": NKY23_GRID}
 
@@ -34,16 +35,16 @@ GRIDS = {"small": SMALL_GRID, "pow2": POW2_GRID, "tiled": TILED_GRID, "nky23": N
 _OLD_COLL = dict(coll_freq=0.05, coll_freq_override=True, coll_mass_conserve=True)
 
 CASES = {
-    "kinetic_es": ("nl_em_waltz_b01.yaml", dict(nlapar=False, beta=0.0)),
-    "kinetic_apar": ("nl_em_waltz_b01.yaml", dict()),
-    "kinetic_apar_bpar": ("nl_em_waltz_b01.yaml", dict(nlbpar=True)),
-    "kinetic_bpar": ("nl_em_waltz_b01.yaml", dict(nlapar=False, nlbpar=True)),
-    "kinetic_apar_dpc": ("nl_em_waltz_b01.yaml", dict(disp_par_conserve=1)),
-    "kinetic_apar_dpc3": ("nl_em_waltz_b01.yaml", dict(disp_par_conserve=3)),
-    "adiabatic_apar": ("iteration_13.yaml", dict(non_linear=True, nlapar=True, beta=0.002)),
-    "adiabatic_collisions": ("iteration_13.yaml", dict(collisions=True, **_OLD_COLL)),
+    "kinetic_es": ("em/nl_em_waltz_b01.yaml", dict(nlapar=False, beta=0.0)),
+    "kinetic_apar": ("em/nl_em_waltz_b01.yaml", dict()),
+    "kinetic_apar_bpar": ("em/nl_em_waltz_b01.yaml", dict(nlbpar=True)),
+    "kinetic_bpar": ("em/nl_em_waltz_b01.yaml", dict(nlapar=False, nlbpar=True)),
+    "kinetic_apar_dpc": ("em/nl_em_waltz_b01.yaml", dict(disp_par_conserve=1)),
+    "kinetic_apar_dpc3": ("em/nl_em_waltz_b01.yaml", dict(disp_par_conserve=3)),
+    "adiabatic_apar": ("adiabatic/nonlinear/itg_high_shear.yaml", dict(non_linear=True, nlapar=True, beta=0.002)),
+    "adiabatic_collisions": ("adiabatic/nonlinear/itg_high_shear.yaml", dict(collisions=True, **_OLD_COLL)),
     "adiabatic_collisions_cons": (
-        "iteration_13.yaml",
+        "adiabatic/nonlinear/itg_high_shear.yaml",
         dict(
             collisions=True, **_OLD_COLL, coll_mom_conservation=True, coll_ene_conservation=True
         ),
@@ -234,10 +235,50 @@ def test_bracket_v6_matches_v5(monkeypatch, name, mixed_precision, tol):
 
 
 @pytest.mark.skipif(not HAS_CUDA or not _has_bracket_v6(), reason="v6 bracket not built")
-def test_bracket_v6_runs_v5_for_unsupported_planes(monkeypatch):
-    df, geometry, params, _, pre = _setup("kinetic_apar", mixed_precision=True, grid="nky23")
-    assert pre["nl_mphi"] == 70
+@pytest.mark.parametrize("mixed_precision, tol", [(False, 1e-13), (True, 1e-5)])
+def test_bracket_v6_pads_unbuilt_row_size(monkeypatch, mixed_precision, tol):
+    from gyaradax.backends import _cuda
+
+    df, geometry, params, _, pre = _setup(
+        "kinetic_apar", mixed_precision=mixed_precision, grid="nky23"
+    )
+    assert pre["nl_mphi"] == 70 and 70 not in _cuda.v6_build(not mixed_precision)[1]
+    phi, apar, _ = _fields(df, geometry, params, pre)
+    v5 = _bracket(monkeypatch, "v5", df, phi, apar, geometry, pre, mixed_precision)
+    auto = _bracket(monkeypatch, "auto", df, phi, apar, geometry, pre, mixed_precision)
+    assert rel_l2(auto, v5) < tol
+    assert not np.array_equal(np.asarray(auto), np.asarray(v5))
+
+
+@pytest.mark.skipif(not HAS_CUDA or not _has_bracket_v6(), reason="v6 bracket not built")
+def test_bracket_v6_warns_when_running_v5(monkeypatch, caplog):
+    from gyaradax.backends import _cuda, ops
+
+    df, geometry, params, _, pre = _setup("kinetic_apar", mixed_precision=True)
     phi, apar, _ = _fields(df, geometry, params, pre)
     v5 = _bracket(monkeypatch, "v5", df, phi, apar, geometry, pre, True)
-    auto = _bracket(monkeypatch, "auto", df, phi, apar, geometry, pre, True)
+    # a build without row kernels for this GPU's sizes
+    monkeypatch.setattr(_cuda, "v6_build", lambda fp64, sm=None: ((sm,), ()))
+    monkeypatch.setattr(ops, "_warned", set())
+    _cuda._v6_row_size.cache_clear()
+    try:
+        with caplog.at_level(logging.WARNING, logger=_cuda.__name__):
+            auto = _bracket(monkeypatch, "auto", df, phi, apar, geometry, pre, True)
+    finally:
+        _cuda._v6_row_size.cache_clear()
     assert np.array_equal(np.asarray(auto), np.asarray(v5))
+    assert "runs v5 instead of v6" in caplog.text and "BRACKET_V6_NKY_MAX" in caplog.text
+
+
+@pytest.mark.skipif(not HAS_CUDA or not _has_bracket_v6(), reason="v6 bracket not built")
+def test_fused_bracket_matches_unfused(monkeypatch):
+    monkeypatch.setenv("GYARADAX_BRACKET", "auto")
+    df, geometry, params, _, pre = _setup("kinetic_apar_bpar", mixed_precision=True)
+    phi, apar, _ = _fields(df, geometry, params, pre)
+    out = []
+    for fused in (False, True):
+        ops = create_ops(pre, backend="cuda", mixed_precision=True, fused_bracket=fused)
+        leaves, tree = jax.tree_util.tree_flatten(ops)
+        assert jax.tree_util.tree_unflatten(tree, leaves).fused_bracket is fused
+        out.append(jax.jit(lambda d, p, a: ops.nonlinear_term_iii(d, p, geometry, apar=a))(df, phi, apar))
+    assert rel_l2(out[1], out[0]) < 1e-6

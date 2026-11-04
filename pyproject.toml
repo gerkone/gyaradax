@@ -1,7 +1,7 @@
 [project]
 name = "gyaradax"
 authors = [{ name = "Gianluca Galletti" }, { name = "Eric Volkmann" }]
-version = "0.0.1"
+version = "0.2.0"
 description = "Gyrokinetic Vlasov-Poisson solver in JAX"
 requires-python = ">=3.12"
 dependencies = [
@@ -20,6 +20,8 @@ gyaradax = "gyaradax.cli:main"
 [project.optional-dependencies]
 cuda13 = ["jax[cuda13-local]", "nvidia-mathdx", "nvidia-nccl-cu13"]
 dev = ["pytest", "ruff", "black"]
+test = ["pytest", "huggingface_hub"]
+docs = ["sphinx>=8", "furo", "myst-parser>=4", "sphinx-copybutton", "sphinx-design", "sphinx-argparse", "sphinx-llms-txt"]
 torax = ["torax @ git+https://github.com/google-deepmind/torax.git"]
 
 [tool.setuptools.packages.find]

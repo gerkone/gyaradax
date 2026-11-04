@@ -1,29 +1,17 @@
-"""
-Gyrokinetic Vlasov-Poisson solver for the local flux-tube limit.
+"""Explicit RK4 time integration of the flux-tube gyrokinetic equation.
 
-Supports both adiabatic-electron (single species) and kinetic-electron
-(multi-species) configurations.
-
-Implemented Equations:
-The solver evolves the perturbed distribution function `f` in phase space.
-Adiabatic: (vpar, mu, s, kx, ky).  Kinetic: (nsp, vpar, mu, s, kx, ky).
-
-Active RHS Terms from the GKW formulation:
-1. Term I   — Parallel Advection: v_par nabla_par f
-2. Term II  — Drift Advection: v_d . nabla_perp f
-3. Term III — Nonlinear ExB Advection: v_E . nabla_perp f (pseudospectral)
-4. Term IV  — Trapping/Mirror: parallel velocity space advection
-5. Term V   — Equilibrium Drive: v_E . nabla F_M
-6. Term VII — Parallel Field Drive: v_par nabla_par phi coupling
-7. Term VIII— Drift Field Drive: v_d . nabla phi coupling
-
-Dissipation: parallel (4th order), velocity space, perpendicular hyper-diffusion.
-
-Time Integration: Explicit RK4 with optional per-ky normalization (linear mode).
+The state is the distribution function, ``(nvpar, nmu, ns, nkx, nky)`` for adiabatic
+electrons and ``(nsp, nvpar, nmu, ns, nkx, nky)`` for kinetic ones; with ``nlapar``
+it is the mixed variable g. Every RK4 stage solves the fields, evaluates the linear
+RHS (GKW Terms I, II, IV, V, VII, VIII, X, XI, dissipation and collisions) and, for
+nonlinear runs, the ExB bracket (Term III). :func:`gksolve` runs ``n_steps`` steps in
+one ``jax.lax.scan``, with a fixed or CFL-adaptive timestep; linear runs renormalise
+every ``naverage`` steps and track per-ky growth rates.
 """
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 from gyaradax.core.jax_config import enable_x64
 
@@ -47,6 +35,14 @@ from gyaradax.solver.cfl import estimate_linear_timestep, estimate_nl_timestep
 
 
 def default_state(nky: int = 1) -> GKState:
+    """State at t = 0 for ``nky`` binormal modes.
+
+    Args:
+        nky: Number of binormal modes.
+
+    Returns:
+        GKState with unit amplitudes and zero growth rates.
+    """
     return GKState(
         time=jnp.array(0.0, dtype=jnp.float64),
         step=jnp.array(0, dtype=jnp.int32),
@@ -57,11 +53,18 @@ def default_state(nky: int = 1) -> GKState:
 
 
 def mode_amplitude(phi: jnp.ndarray, geometry: Dict[str, jnp.ndarray], eps: float) -> jnp.ndarray:
-    """
-    Per-ky mode amplitude over the connected kx chain containing kx=0.
+    """Per-ky amplitude of the potential over the connected kx chain through kx = 0.
 
-    Matches GKW convention (diagnos_growth_freq.f90): only kx modes sharing
-    the same mode_label as kx=0 contribute to the amplitude for each ky.
+    As GKW diagnos_growth_freq.f90, only kx modes with the same ``mode_label`` as
+    kx = 0 contribute.
+
+    Args:
+        phi: Potential, (ns, nkx, nky).
+        geometry: Geometry dict (``ints``, ``mode_label``, ``ixzero``).
+        eps: Floor of the squared amplitude.
+
+    Returns:
+        Amplitude per ky, (nky,).
     """
     ds = jnp.asarray(geometry["ints"], dtype=jnp.float64)[0]
     mode_label = jnp.asarray(geometry["mode_label"], dtype=jnp.int32)
@@ -77,6 +80,18 @@ def normalize_per_ky(
     params: GKParams,
     pre: Optional[Precompute] = None,
 ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """Scale every connected kx chain of every ky to unit amplitude (linear runs).
+
+    Args:
+        df: Distribution function, 5D or 6D.
+        geometry: Geometry dict.
+        params: Run parameters (``norm_eps``).
+        pre: Precomputed coefficients, or None.
+
+    Returns:
+        ``(df_normalised, inv, amp)``: the scaled distribution, the per-ky factor
+        applied to the kx = 0 chain and the per-ky amplitude before scaling.
+    """
     phi = calculate_phi(geometry, df, params=params, pre=pre)
     # per-ky amplitude over the kx=0 chain (GKW diagnos_growth_freq convention);
     # returned for the growth-rate bookkeeping in advance_state, so gamma is unchanged
@@ -111,7 +126,24 @@ def nonlinear_term_iii(
     backend: str = "jax",
     use_z2z: bool = False,
 ) -> jnp.ndarray:
-    """Nonlinear ExB advection via pseudospectral method. df is 5D."""
+    """Nonlinear ExB term (Term III) of a 5D distribution, for diagnostics.
+
+    Args:
+        df: Distribution function, (nvpar, nmu, ns, nkx, nky).
+        phi: Potential, (ns, nkx, nky).
+        geometry: Geometry dict.
+        pre: Precomputed coefficients.
+        efun_sign: Sign of the ExB bracket.
+        fft_prefactor: Prefactor of the FFTs.
+        exclude_zero_mode: Zero the (kx, ky) = (0, 0) mode.
+        mixed_precision: FP32 FFTs.
+        ops: Backend operations; built from ``backend`` when None.
+        backend: ``"jax"`` or ``"cuda"``.
+        use_z2z: Z2Z FFTs in the JAX backend.
+
+    Returns:
+        Term III, same shape as ``df``.
+    """
     if ops is None:
         ops = create_ops(pre, backend=backend, use_z2z=use_z2z, mixed_precision=mixed_precision)
 
@@ -138,29 +170,29 @@ def init_f(
     params=None,
     out_sharding=None,
 ) -> jnp.ndarray:
-    """Initialize the distribution function.
+    """Initial distribution function, as GKW ``init_fdis``.
 
-    Supported finit modes (matching GKW):
-        cosine2 (default): amp * (cos(2*pi*s) + 1), flat in velocity space
-        cosine:  amp * cos(2*pi*s), flat in velocity space
-        cosine3: like cosine2 but weighted by exp(-E) in velocity space
-        sine:    amp * de(is) * (sin(2*pi*s) + 1), density-weighted
-        noise:   uniform random on [-1, 1] (real + imag)
-        gnoise:  gaussian random (Box-Muller transform)
-        zonal:   Rosenbluth-Hinton test — only ky=0, kx=±1 with Maxwellian weight
+    ``finit`` modes: ``cosine2`` (default, ``amp (cos 2 pi s + 1)``, flat in
+    velocity), ``cosine`` (``amp cos 2 pi s``), ``cosine3`` (as ``cosine2`` times
+    the Maxwellian), ``sine`` (``amp de (sin 2 pi s + 1)``), ``noise`` (uniform in
+    [-1, 1]), ``gnoise`` (Gaussian) and ``zonal`` (Rosenbluth-Hinton test:
+    ky = 0, kx = +-1, Maxwellian weight). The zonal mode is zeroed except for ``zonal``,
+    which also ignores the sharding and normalisation options.
 
     Args:
-        geometry: Geometry dictionary
-        finit: Initialization mode
-        amp_init_real: Initial amplitude (real part)
-        amp_init_imag: Initial amplitude (imaginary part)
-        normalize_per_toroidal_mode: Whether to normalize per toroidal mode
-        norm_eps: Normalization epsilon
-        n_species: Number of species
-        seed: Random seed for noise modes
-        params: Optional params object. If provided with n_gpus_* > 1, uses sharded init.
-        out_sharding: Optional JAX sharding to apply to output. If None and params
-            indicates multi-GPU, auto-detects and applies sharding.
+        geometry: Geometry dict.
+        finit: Initial condition.
+        amp_init_real: Real part of the amplitude.
+        amp_init_imag: Imaginary part of the amplitude.
+        normalize_per_toroidal_mode: Normalise every ky to unit amplitude.
+        norm_eps: Amplitude floor of that normalisation.
+        n_species: Number of species; 6D output when above 1.
+        seed: Seed of the noise modes.
+        params: Run parameters; a multi-GPU mesh in them shards the output.
+        out_sharding: Sharding of the output; overrides the one from ``params``.
+
+    Returns:
+        The distribution, 5D or 6D, complex128.
     """
     # auto-detect multi-GPU sharding when params indicates it (don't override explicit)
     if out_sharding is None and params is not None:
@@ -251,13 +283,11 @@ def init_f(
     elif finit == "zonal":
         # Rosenbluth-Hinton: spectral kx = ±1 around kx=0 with ±i*amp*fmaxwl/2,
         # ions only (signz > 0). GKW init.f90:1471-1514.
-        kxrh = jnp.asarray(geometry["kxrh"], dtype=jnp.float64)
-        ixzero = int(jnp.argmin(jnp.abs(kxrh)).item())
-        iy0 = int(
-            jnp.asarray(
-                geometry.get("iyzero", jnp.argmin(jnp.abs(jnp.asarray(geometry["krho"]))))
-            ).item()
-        )
+        ixzero = int(np.argmin(np.abs(np.asarray(geometry["kxrh"]))))
+        if "iyzero" in geometry:
+            iy0 = int(np.asarray(geometry["iyzero"]))
+        else:
+            iy0 = int(np.argmin(np.abs(np.asarray(geometry["krho"]))))
 
         df = jnp.zeros(full_shape, dtype=jnp.complex128)
 
@@ -285,13 +315,12 @@ def init_f(
 
     df = df.astype(jnp.complex128)
 
-    # zero out the zonal mode (ky=0) — not for zonal init which IS the zonal mode
+    # zero out the zonal mode (ky=0): not for zonal init which IS the zonal mode
     if nky > 1:
-        iy0 = int(
-            jnp.asarray(
-                geometry.get("iyzero", jnp.argmin(jnp.abs(jnp.asarray(geometry["krho"]))))
-            ).item()
-        )
+        if "iyzero" in geometry:
+            iy0 = int(np.asarray(geometry["iyzero"]))
+        else:
+            iy0 = int(np.argmin(np.abs(np.asarray(geometry["krho"]))))
         df = df.at[..., iy0].set(0.0)
 
     if normalize_per_toroidal_mode:
@@ -327,6 +356,22 @@ def advance_state(
     per_mode_norm_fac: jnp.ndarray,
     dt_used: Optional[jnp.ndarray] = None,
 ) -> GKState:
+    """Advance time and step and update the per-ky growth rate of the current window.
+
+    The growth rate is ``log(amp / window_start_amp) / t_window``; at a window end
+    the start amplitude resets to the amplitude after normalisation.
+
+    Args:
+        state: State before the step.
+        params: Run parameters (``dt``, ``naverage``, ``norm_eps``).
+        is_window_end: Whether this step ends a ``naverage`` window.
+        per_mode_amp: Per-ky amplitude after the step.
+        per_mode_norm_fac: Per-ky normalisation factor applied at the window end.
+        dt_used: Timestep of the step; ``params.dt`` when None.
+
+    Returns:
+        The new GKState.
+    """
     dt = dt_used if dt_used is not None else jnp.array(params.dt, dtype=jnp.float64)
     new_step = state.step + jnp.array(1, dtype=jnp.int32)
     new_time = state.time + dt
@@ -366,7 +411,27 @@ def gkstep_single(
     Tuple[jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]],
     GKState,
 ]:
-    """Single small-step RK4 time integration with backend dispatch."""
+    """One RK4 step.
+
+    The four stages are summed in the order of the closed form, behind
+    ``optimization_barrier``, so each stage's RHS is freed before the next. A CUDA
+    ``fused_linear`` step runs each stage as one kernel. Nonlinear runs also return
+    the CFL estimate ``2 / m``, with ``m`` the largest over the four stages of
+    ``max|grad phi|`` and ``2 vthrat_max vpar_max max|grad A_par|``. Linear runs
+    renormalise at the end of every ``naverage`` window.
+
+    Args:
+        prev_df: Distribution (mixed variable g with ``nlapar``).
+        geometry: Geometry dict.
+        params: Run parameters.
+        state: State at the start of the step.
+        pre: Precomputed coefficients.
+        ops: Backend operations; built from ``params`` when None.
+        dt_override: Timestep to use instead of ``params.dt``.
+
+    Returns:
+        ``(next_df, (phi, (0, 0, dt_nl_estimate)), next_state)``.
+    """
     if ops is None:
         ops = create_ops(
             pre,
@@ -374,6 +439,7 @@ def gkstep_single(
             use_z2z=params.use_z2z,
             mixed_precision=params.mixed_precision,
             mesh=build_mesh(params),
+            fused_bracket=params.fused_bracket,
         )
 
     dt = dt_override if dt_override is not None else jnp.array(params.dt, dtype=jnp.float64)
@@ -523,17 +589,26 @@ def gksolve(
     Tuple[jnp.ndarray, Tuple[jnp.ndarray, Any], GKState]
     | Tuple[jnp.ndarray, Tuple[jnp.ndarray, Any], GKState, Dict[str, Any]]
 ):
-    """Gyrokinetics solver forward.
+    """Advance ``n_steps`` RK4 steps in one jitted ``jax.lax.scan``.
 
-    Executes multiple time steps via jax.lax.scan.
-    When params.adaptive_dt is True, uses CFL-adaptive timestep with
-    one-step lag (current step uses CFL estimate from previous step's phi).
-    Returns (final_df, (final_phi, final_fluxes), final_state) by default.
-    When ``return_dt_info`` is True, returns an extra trailing dict with
-    per-step arrays ``dt_used``/``dt_nl``/``dt_lin`` (shape (n_steps,)) and
-    scalar ``dt_input``. The fixed-dt path steps with ``params.dt`` reduced to
-    the linear stability estimate when it exceeds it (as GKW does for every
-    explicit run); ``dt_lin`` holds that estimate and ``dt_nl`` is zero.
+    With ``adaptive_dt`` (nonlinear runs) each step uses the CFL estimate of the
+    previous one: the minimum of the nonlinear estimate times ``fac_dtim_nl``, the
+    linear estimate and ``params.dt``, growing by at most 5 % per step. Otherwise
+    the step is ``params.dt``, reduced to the linear stability estimate when it is
+    larger (as GKW does). Fields and fluxes are computed from the physical f.
+
+    Args:
+        df: Initial distribution, 5D or 6D.
+        geometry: Geometry dict.
+        params: Run parameters.
+        state: Initial state.
+        n_steps: Number of steps (static).
+        pre: Precomputed coefficients; built with ``linear_precompute`` when None.
+        return_dt_info: Also return the per-step ``dt_used``, ``dt_nl``, ``dt_lin``
+            arrays and the scalar ``dt_input``.
+
+    Returns:
+        ``(df, (phi, fluxes), state)``, plus the ``dt_info`` dict when requested.
     """
     if pre is None:
         pre = linear_precompute(geometry, params)
@@ -569,6 +644,7 @@ def _gksolve(
         use_z2z=params.use_z2z,
         mixed_precision=params.mixed_precision,
         mesh=build_mesh(params),
+        fused_bracket=params.fused_bracket,
     )
 
     dt_input_scalar = jnp.array(params.dt, dtype=jnp.float64)

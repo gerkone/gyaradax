@@ -1,9 +1,14 @@
-"""Linear precompute helpers for the gyrokinetic solver."""
+"""One-time precompute of every static coefficient the RHS needs (:func:`linear_precompute`).
+
+Bessel functions, Maxwellians, drifts and drives per species, the fused parallel
+stencil tables, dissipation, field-solve weights, the EM factors, the collision
+stencil and the dealiased FFT layout of the nonlinear bracket.
+"""
 
 from __future__ import annotations
 
 import math
-from typing import Dict, Tuple, cast
+from typing import Dict, Tuple
 
 import jax
 import jax.numpy as jnp
@@ -25,17 +30,16 @@ from gyaradax.operators.poisson import (
 enable_x64()
 
 
-def kx_ky_grids(geometry: Dict[str, jnp.ndarray]) -> Tuple[jnp.ndarray, jnp.ndarray]:
-    kx = jnp.asarray(geometry["kxrh"], dtype=jnp.float64)
-    ky = jnp.asarray(geometry["krho"], dtype=jnp.float64)
-    if kx.ndim == 2:
-        kx = kx[0]
-    if ky.ndim == 2:
-        ky = ky[:, 0]
-    return kx, ky
-
-
 def prime_factors_smallereq_than(number: int, max_prime: int) -> bool:
+    """Whether every prime factor of ``number`` is at most ``max_prime``.
+
+    Args:
+        number: Integer to factor.
+        max_prime: Largest allowed prime.
+
+    Returns:
+        True when ``number`` is ``max_prime``-smooth.
+    """
     i = 2
     n = int(number)
     while True:
@@ -48,6 +52,17 @@ def prime_factors_smallereq_than(number: int, max_prime: int) -> bool:
 
 
 def extended_firstdim_fft_size(nmod: int) -> Tuple[int, int]:
+    """Dealiased real-space length ``mphi`` along y and its half-spectrum length, as GKW.
+
+    Starts at ``3 nmod - 2`` (3/2 rule for the half spectrum), rounds up to an even
+    7-smooth length and takes a power of two instead when one lies within 16.
+
+    Args:
+        nmod: Number of ky modes.
+
+    Returns:
+        ``(mphi, mphi // 2 + 1)``.
+    """
     posspace_size = 3 * nmod - 2
     if posspace_size % 2 != 0:
         posspace_size += 1
@@ -62,6 +77,17 @@ def extended_firstdim_fft_size(nmod: int) -> Tuple[int, int]:
 
 
 def extended_seconddim_fft_size(nx: int) -> int:
+    """Dealiased real-space length ``mrad`` along x, as GKW.
+
+    Starts at ``ceil(1.5 (nx + 1)) + 1``, rounds up to a 7-smooth length and takes a
+    power of two instead when one lies within 8.
+
+    Args:
+        nx: Number of kx modes.
+
+    Returns:
+        ``mrad``.
+    """
     dum = int(math.ceil(1.5 * float(nx + 1)) + 1)
     while not prime_factors_smallereq_than(dum, 7):
         dum += 1
@@ -133,7 +159,7 @@ def _precompute_shared(
     # grid-independent; the geometry's own kxmax/kymax are the truth (params
     # carries the config-derived value as fallback for legacy dicts). With
     # the 1.0 defaults of direct-GKParams users the dissipation is
-    # misnormalized by (kmax)^4 — catastrophic for wide-kx boxes.
+    # misnormalized by (kmax)^4: catastrophic for wide-kx boxes.
     kymax_n = jnp.asarray(geometry.get("kymax", params.kymax), dtype=jnp.float64)
     kxmax_n = jnp.asarray(geometry.get("kxmax", params.kxmax), dtype=jnp.float64)
     hyper = -(
@@ -391,7 +417,12 @@ def _compute_species_coeffs(
 
 def _linear_precompute_core(geometry: Dict[str, jnp.ndarray], params: GKParams) -> "GKPre":
     """Core implementation of linear_precompute (no auto-sharding logic)."""
-    kx, ky = kx_ky_grids(geometry)
+    kx = jnp.asarray(geometry["kxrh"], dtype=jnp.float64)
+    ky = jnp.asarray(geometry["krho"], dtype=jnp.float64)
+    if kx.ndim == 2:
+        kx = kx[0]
+    if ky.ndim == 2:
+        ky = ky[:, 0]
 
     # rotation tensors (None when absent in legacy geometry dicts -> the
     # vcor/uprim terms are skipped; compute_geometry always provides them)
@@ -670,7 +701,7 @@ def _linear_precompute_core(geometry: Dict[str, jnp.ndarray], params: GKParams) 
             sp["upar"], sp["abs_dum2_par"], sp["term7_fac"], params.disp_par, out["sgr_dist"]
         )
         if params.disp_par_conserve:
-            # conservative parallel dissipation — see kinetic branch above
+            # conservative parallel dissipation: see kinetic branch above
             sp["s_disp_par_tab"] = s_disp_tab
             intmu_p = jnp.asarray(geometry["intmu"], dtype=jnp.float64).reshape(
                 1, -1, 1, 1, 1)
@@ -685,7 +716,7 @@ def _linear_precompute_core(geometry: Dict[str, jnp.ndarray], params: GKParams) 
                           axis=(0, 1), keepdims=True)
             mode = int(params.disp_par_conserve)
             if mode == 3:
-                # CGYRO functional — see kinetic branch
+                # CGYRO functional: see kinetic branch
                 av = jnp.abs(vpgr_p)
                 gaa = jnp.sum(w_base * av**2 * sp["bessel"] * sp["fmaxwl"],
                               axis=(0, 1), keepdims=True)
@@ -765,9 +796,19 @@ def _linear_precompute_core(geometry: Dict[str, jnp.ndarray], params: GKParams) 
 
 
 def linear_precompute(geometry: Dict[str, jnp.ndarray], params: GKParams) -> "GKPre":
-    """Precompute static geometry-dependent coefficients and Bessel terms.
+    """Precompute the static coefficients of a run.
 
-    Automatically uses sharded computation if params indicates multi-GPU config.
+    Called once before time stepping; the result is reused by every RK4 stage.
+    With a multi-GPU mesh in ``params`` the coefficients are built already
+    distributed (:func:`gyaradax.sharding.precompute_sharded`).
+
+    Args:
+        geometry: Geometry dict.
+        params: Run parameters (concrete grid sizes; build outside ``jit``).
+
+    Returns:
+        :class:`~gyaradax.core.state.GKPre` with the coefficient arrays and the
+        static FFT sizes (``nl_mrad``, ``nl_mphi``, ...).
     """
     n_gpus_sp = int(getattr(params, "n_gpus_sp", 1))
     n_gpus_vp = int(getattr(params, "n_gpus_vp", 1))
@@ -785,6 +826,17 @@ def linear_precompute(geometry: Dict[str, jnp.ndarray], params: GKParams) -> "GK
 def pack_half_spectrum(
     spec_kxky: jnp.ndarray, jind: jnp.ndarray, mrad: int, mphiw3: int
 ) -> jnp.ndarray:
+    """Scatter modes into the zero-padded half spectrum of the dealiased grid.
+
+    Args:
+        spec_kxky: Modes, (..., nkx, nky).
+        jind: FFT-order index of each kx mode.
+        mrad: Dealiased x length.
+        mphiw3: Half-spectrum y length.
+
+    Returns:
+        Half spectrum, (..., mrad, mphiw3).
+    """
     out_shape = spec_kxky.shape[:-2] + (mrad, mphiw3)
     out = jnp.zeros(out_shape, dtype=jnp.complex128)
     nky = spec_kxky.shape[-1]

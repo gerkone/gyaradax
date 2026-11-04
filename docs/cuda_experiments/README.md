@@ -11,7 +11,7 @@ experiment is needed.
 
 The production kernels in `gyaradax/backends/cuda_kernels/` started as experiments here (the
 prototypes are in git history before `7b49a2e`). Times are per evaluation on an H100 for the
-2 x 32 x 8 x 16 x 85 x 32 grid, mixed precision; see `docs/NOTES.md` §10.14 and §13 for details.
+2 x 32 x 8 x 16 x 85 x 32 grid, mixed precision; see the Performance page of the documentation.
 
 | kernel | before (master) | now | what changed |
 |---|---|---|---|

@@ -1,7 +1,7 @@
 # solver_components_benchmarks
 
 Isolated benchmarks for gyaradax solver components. Each benchmark loads real solver state
-from `iteration_13.yaml`, runs JIT-compiled, and validates output against saved baselines.
+from `configs/adiabatic/nonlinear/itg_high_shear.yaml`, runs JIT-compiled, and validates output against saved baselines.
 
 ## Files
 
@@ -54,7 +54,7 @@ python bench_nonlinear.py --device N [--config PATH] [--mp] [--z2z]  # tests R2C
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--device N` | 1 | GPU device index (sets `CUDA_VISIBLE_DEVICES`) |
-| `--config PATH` | `configs/iteration_13.yaml` | Solver config |
+| `--config PATH` | `configs/adiabatic/nonlinear/itg_high_shear.yaml` | Solver config |
 | `--mp` | off | Mixed precision (FP32 forward FFTs) |
 | `--backend {jax,cuda}` | both | Run only specified backend |
 | `--z2z` | off | Test Z2Z FFT mode (nonlinear only) |

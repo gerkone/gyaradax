@@ -3,10 +3,11 @@
 
 #include "ds_arith.cuh"
 #include "radius_batch.cuh"
+#include "shard_halo.cuh"
 
 namespace xla_ffi = xla::ffi;
 
-// electrostatic linear rhs in double-single arithmetic, one block per (sp, mu, kx, vpar chunk)
+// electrostatic linear rhs in double-single arithmetic, one block per (sp, mu, kx, vpar chunk, ky tile)
 struct LinearRhsDsArgs {
     const double2* df;        // (nsp, nv, nmu, ns, nkx, nky)
     const double2* phi;       // (ns, nkx, nky)
@@ -32,7 +33,11 @@ struct LinearRhsDsArgs {
     const double* coef;
     double2* acc_out;
     double2* stage_out;
+    // sharded (vpar, mu) blocks: neighbour planes past the block edges (shard_halo.cuh), else null
+    const double2* vp_halo;
+    const double2* mu_halo;
     int nsp, nv, nmu, ns, nkx, nky, n_class;
+    int ky_tile;
 };
 
 constexpr int TAP_LO = 2;
@@ -41,24 +46,30 @@ constexpr int TAP_OFFKX = 1 << 30;
 constexpr int RING = 5;
 constexpr int MAX_THREADS = 576;
 
-template <int VCH, bool COLL>
+template <int VCH, bool COLL, bool HALO>
 __global__ __launch_bounds__(MAX_THREADS, 2) void linear_rhs_ds_kernel(const LinearRhsDsArgs a) {
-    const int ns = a.ns, nky = a.nky, nv = a.nv, nmu = a.nmu, nkx = a.nkx;
-    const int nt = ns * nky;
+    const int ns = a.ns, nky = a.nky, nv = a.nv, nmu = a.nmu, nkx = a.nkx, kyt = a.ky_tile;
+    const int nt = ns * kyt;
 
     extern __shared__ unsigned char smem_raw[];
     cds* ring = reinterpret_cast<cds*>(smem_raw);
     cds* sm_gy = ring + RING * nt;
 
     const int tid = threadIdx.x;
-    const int n_vch = nv / VCH;
-    const int vch = blockIdx.x % n_vch;
-    const int mu = (blockIdx.x / n_vch) % nmu;
-    const int kx = (blockIdx.x / (n_vch * nmu)) % nkx;
-    const int sp = blockIdx.x / (n_vch * nmu * nkx);
-    const int s = tid / nky;
-    const int ky = tid % nky;
+    const int n_tiles = (nky + kyt - 1) / kyt;
+    const int n_vch = (nv + VCH - 1) / VCH;
+    const int tile = blockIdx.x % n_tiles;
+    const int vch = (blockIdx.x / n_tiles) % n_vch;
+    const int mu = (blockIdx.x / (n_tiles * n_vch)) % nmu;
+    const int kx = (blockIdx.x / (n_tiles * n_vch * nmu)) % nkx;
+    const int sp = blockIdx.x / (n_tiles * n_vch * nmu * nkx);
+    const int s = tid / kyt;
+    const int ky_local = tid % kyt;
+    // padding threads of a partial last tile load a valid ky and never store
+    const bool live = tile * kyt + ky_local < nky;
+    const int ky = live ? tile * kyt + ky_local : nky - 1;
     const int v0 = vch * VCH;
+    const int v1 = min(v0 + VCH, nv);
 
     const int nspat = ns * nkx * nky;
     const int spatial = s * (nkx * nky) + kx * nky + ky;
@@ -73,7 +84,7 @@ __global__ __launch_bounds__(MAX_THREADS, 2) void linear_rhs_ds_kernel(const Lin
     for (int i = 0; i < TAP_HI - TAP_LO; ++i) {
         const int2 m = __ldg(&a.packed_maps[(TAP_LO + i) * nspat + spatial]);
         tap[i] = m.x < 0 ? -1
-               : (m.y == kx ? m.x * nky + ky : (TAP_OFFKX | (m.x * (nkx * nky) + m.y * nky + ky)));
+               : (m.y == kx ? m.x * kyt + ky_local : (TAP_OFFKX | (m.x * (nkx * nky) + m.y * nky + ky)));
     }
     const ds bes = ds_ldg(&bessel_mu[spatial]);
     const cds phi_val = cds_load(a.phi, spatial);
@@ -90,13 +101,18 @@ __global__ __launch_bounds__(MAX_THREADS, 2) void linear_rhs_ds_kernel(const Lin
     #pragma unroll
     for (int d = -2; d < 2; ++d) {
         const int vv = v0 + d;
-        ring[((vv + RING) % RING) * nt + tid] = (vv >= 0 && vv < nv) ? cds_load(a.df, base0 + vv * plane) : z;
+        const bool in = vv >= 0 && vv < nv;
+        ptrdiff_t shift = 0;
+        const bool halo = !in && HALO && halo_shift(a.df, a.vp_halo, nullptr, sp, vv, mu, nv, nmu, nspat, shift);
+        ring[((vv + RING) % RING) * nt + tid] = in || halo ? cds_load(a.df + shift, base0 + vv * plane) : z;
     }
 
     #pragma unroll 1
-    for (int v = v0; v < v0 + VCH; ++v) {
+    for (int v = v0; v < v1; ++v) {
         const int vn = v + 2;
-        ring[(vn % RING) * nt + tid] = vn < nv ? cds_load(a.df, base0 + vn * plane) : z;
+        ptrdiff_t shift = 0;
+        const bool halo = vn >= nv && HALO && halo_shift(a.df, a.vp_halo, nullptr, sp, vn, mu, nv, nmu, nspat, shift);
+        ring[(vn % RING) * nt + tid] = vn < nv || halo ? cds_load(a.df + shift, base0 + vn * plane) : z;
         __syncthreads();
         const cds* cur = ring + (v % RING) * nt;
         const cds my_df = cur[tid];
@@ -158,8 +174,10 @@ __global__ __launch_bounds__(MAX_THREADS, 2) void linear_rhs_ds_kernel(const Lin
                     const int dm = k < 5 ? (k == 3 ? 1 : -1) : (k < 7 ? 1 : -1);
                     const int dv = k < 5 ? 0 : ((k & 1) ? 1 : -1);
                     const int vv = v + dv, mm = mu + dm;
-                    if (vv >= 0 && vv < nv && mm >= 0 && mm < nmu) {
-                        const cds f = cds_load(a.df, ((sp * nv + vv) * nmu + mm) * nspat + spatial);
+                    const bool in = vv >= 0 && vv < nv && mm >= 0 && mm < nmu;
+                    ptrdiff_t shift = 0;
+                    if (in || (HALO && halo_shift(a.df, a.vp_halo, a.mu_halo, sp, vv, mm, nv, nmu, nspat, shift))) {
+                        const cds f = cds_load(a.df + shift, ((sp * nv + vv) * nmu + mm) * nspat + spatial);
                         c = ds_ldg(&cs[k * cstride]);
                         rx.fma(f.x, c);
                         ry.fma(f.y, c);
@@ -179,6 +197,7 @@ __global__ __launch_bounds__(MAX_THREADS, 2) void linear_rhs_ds_kernel(const Lin
         rx.fma(ds_neg(drive_c), my_gyro.y);
         ry.fma(drive_c, my_gyro.x);
         double2 kk = make_double2(ds_to_d(rx.fin()), ds_to_d(ry.fin()));
+        if (!live) continue;
         if (a.acc_out == nullptr) {
             a.rhs_out[field] = kk;
             continue;
@@ -197,16 +216,23 @@ __global__ __launch_bounds__(MAX_THREADS, 2) void linear_rhs_ds_kernel(const Lin
     }
 }
 
-template <int VCH, bool COLL>
+template <int VCH, bool COLL, bool HALO>
 static cudaError_t launch_ds(const LinearRhsDsArgs& a, cudaStream_t stream) {
-    const int nt = a.ns * a.nky;
-    const int blocks = a.nsp * a.nmu * a.nkx * (a.nv / VCH);
+    const int nt = a.ns * a.ky_tile;
+    const int blocks = a.nsp * a.nmu * a.nkx * ((a.nv + VCH - 1) / VCH) * ((a.nky + a.ky_tile - 1) / a.ky_tile);
     const size_t smem = (RING + 1) * (size_t)nt * sizeof(cds);
-    cudaError_t e = cudaFuncSetAttribute(linear_rhs_ds_kernel<VCH, COLL>,
+    cudaError_t e = cudaFuncSetAttribute(linear_rhs_ds_kernel<VCH, COLL, HALO>,
                                          cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem);
     if (e != cudaSuccess) return e;
-    linear_rhs_ds_kernel<VCH, COLL><<<blocks, nt, smem, stream>>>(a);
+    linear_rhs_ds_kernel<VCH, COLL, HALO><<<blocks, nt, smem, stream>>>(a);
     return cudaGetLastError();
+}
+
+template <bool COLL, bool HALO>
+static cudaError_t launch_ds_vch(const LinearRhsDsArgs& a, cudaStream_t stream) {
+    return a.nv % 32 == 0 ? launch_ds<32, COLL, HALO>(a, stream)
+         : a.nv % 16 == 0 ? launch_ds<16, COLL, HALO>(a, stream)
+         :                  launch_ds<8, COLL, HALO>(a, stream);
 }
 
 #define DS_TABLE_ARGS                                       \
@@ -245,24 +271,24 @@ static cudaError_t launch_ds(const LinearRhsDsArgs& a, cudaStream_t stream) {
     a.ky_vals = batch_at<const ds>(ky_vals, n, i);            \
     a.coll = batch_at<const ds>(coll, n, i)
 
+#define DS_HALO_FILL(a, n, i)                                                       \
+    a.vp_halo = has_vp_halo ? batch_at<const double2>(vp_halo, n, i) : nullptr;     \
+    a.mu_halo = has_mu_halo ? batch_at<const double2>(mu_halo, n, i) : nullptr
+
 static xla_ffi::Error run_ds(LinearRhsDsArgs& a, int nsp, int nv, int nmu, int ns, int nkx, int nky,
                              int n_class, int has_coll, cudaStream_t stream) {
-    if (ns * nky > MAX_THREADS)
-        return xla_ffi::Error(XLA_FFI_Error_Code_INVALID_ARGUMENT,
-                              "linear_rhs_ds: ns * nky must be <= 576");
-    if (nv % 8 != 0)
-        return xla_ffi::Error(XLA_FFI_Error_Code_INVALID_ARGUMENT,
-                              "linear_rhs_ds: nv must be a multiple of 8");
+    if (ns > MAX_THREADS)
+        return xla_ffi::Error(XLA_FFI_Error_Code_INVALID_ARGUMENT, "linear_rhs_ds: needs ns <= 576");
     if ((long long)nsp * nv * nmu * ns * nkx * nky >= (1LL << 31))
         return xla_ffi::Error(XLA_FFI_Error_Code_INVALID_ARGUMENT,
                               "linear_rhs_ds: grid too large for 32-bit indices");
     a.nsp = nsp; a.nv = nv; a.nmu = nmu; a.ns = ns; a.nkx = nkx; a.nky = nky; a.n_class = n_class;
-    const cudaError_t err = has_coll ? (nv % 32 == 0 ? launch_ds<32, true>(a, stream)
-                                      : nv % 16 == 0 ? launch_ds<16, true>(a, stream)
-                                      :                launch_ds<8, true>(a, stream))
-                                     : (nv % 32 == 0 ? launch_ds<32, false>(a, stream)
-                                      : nv % 16 == 0 ? launch_ds<16, false>(a, stream)
-                                      :                launch_ds<8, false>(a, stream));
+    // fewest ky tiles that fit the block, split evenly
+    const int n_tiles = (ns * nky + MAX_THREADS - 1) / MAX_THREADS;
+    a.ky_tile = (nky + n_tiles - 1) / n_tiles;
+    const bool halo = a.vp_halo != nullptr || a.mu_halo != nullptr;
+    const cudaError_t err = has_coll ? (halo ? launch_ds_vch<true, true>(a, stream) : launch_ds_vch<true, false>(a, stream))
+                                     : (halo ? launch_ds_vch<false, true>(a, stream) : launch_ds_vch<false, false>(a, stream));
     if (err != cudaSuccess)
         return xla_ffi::Error(XLA_FFI_Error_Code_INTERNAL, cudaGetErrorString(err));
     return xla_ffi::Error::Success();
@@ -271,15 +297,18 @@ static xla_ffi::Error run_ds(LinearRhsDsArgs& a, int nsp, int nv, int nmu, int n
 xla_ffi::Error LinearRhsDsImpl(
     cudaStream_t stream,
     DS_TABLE_ARGS,
+    xla_ffi::Buffer<xla_ffi::DataType::C128> vp_halo,
+    xla_ffi::Buffer<xla_ffi::DataType::C128> mu_halo,
     xla_ffi::Result<xla_ffi::Buffer<xla_ffi::DataType::C128>> rhs_out,
     int32_t nsp, int32_t nv, int32_t nmu, int32_t ns, int32_t nkx, int32_t nky, int32_t n_class,
-    int32_t has_coll)
+    int32_t has_coll, int32_t has_vp_halo, int32_t has_mu_halo)
 {
     const int64_t n = batch_count(*rhs_out, (int64_t)nsp * nv * nmu * ns * nkx * nky);
     for (int64_t i = 0; i < n; ++i) {
         LinearRhsDsArgs a{};
         DS_TABLE_FILL(a, n, i);
         a.rhs_out = batch_at<double2>(*rhs_out, n, i);
+        DS_HALO_FILL(a, n, i);
         const xla_ffi::Error e = run_ds(a, nsp, nv, nmu, ns, nkx, nky, n_class, has_coll, stream);
         if (e.failure()) return e;
     }
@@ -293,10 +322,12 @@ xla_ffi::Error LinearRhsDsRkImpl(
     xla_ffi::Buffer<xla_ffi::DataType::C128> acc_in,
     xla_ffi::Buffer<xla_ffi::DataType::C128> extra,
     xla_ffi::Buffer<xla_ffi::DataType::F64>  coef,
+    xla_ffi::Buffer<xla_ffi::DataType::C128> vp_halo,
+    xla_ffi::Buffer<xla_ffi::DataType::C128> mu_halo,
     xla_ffi::Result<xla_ffi::Buffer<xla_ffi::DataType::C128>> acc_out,
     xla_ffi::Result<xla_ffi::Buffer<xla_ffi::DataType::C128>> stage_out,
     int32_t nsp, int32_t nv, int32_t nmu, int32_t ns, int32_t nkx, int32_t nky, int32_t n_class,
-    int32_t has_coll, int32_t has_extra, int32_t has_stage)
+    int32_t has_coll, int32_t has_extra, int32_t has_stage, int32_t has_vp_halo, int32_t has_mu_halo)
 {
     const int64_t n = batch_count(*acc_out, (int64_t)nsp * nv * nmu * ns * nkx * nky);
     for (int64_t i = 0; i < n; ++i) {
@@ -308,6 +339,7 @@ xla_ffi::Error LinearRhsDsRkImpl(
         a.coef = batch_at<const double>(coef, n, i);
         a.acc_out = batch_at<double2>(*acc_out, n, i);
         a.stage_out = has_stage ? batch_at<double2>(*stage_out, n, i) : nullptr;
+        DS_HALO_FILL(a, n, i);
         const xla_ffi::Error e = run_ds(a, nsp, nv, nmu, ns, nkx, nky, n_class, has_coll, stream);
         if (e.failure()) return e;
     }
@@ -334,6 +366,8 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(
         .Arg<xla_ffi::Buffer<xla_ffi::DataType::F32>>()  // kx_vals
         .Arg<xla_ffi::Buffer<xla_ffi::DataType::F32>>()  // ky_vals
         .Arg<xla_ffi::Buffer<xla_ffi::DataType::F32>>()  // coll
+        .Arg<xla_ffi::Buffer<xla_ffi::DataType::C128>>() // vp_halo
+        .Arg<xla_ffi::Buffer<xla_ffi::DataType::C128>>() // mu_halo
         .Ret<xla_ffi::Buffer<xla_ffi::DataType::C128>>() // rhs_out
         .Attr<int32_t>("nsp")
         .Attr<int32_t>("nv")
@@ -343,6 +377,8 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(
         .Attr<int32_t>("nky")
         .Attr<int32_t>("n_class")
         .Attr<int32_t>("has_coll")
+        .Attr<int32_t>("has_vp_halo")
+        .Attr<int32_t>("has_mu_halo")
 );
 
 XLA_FFI_DEFINE_HANDLER_SYMBOL(
@@ -369,6 +405,8 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(
         .Arg<xla_ffi::Buffer<xla_ffi::DataType::C128>>() // acc_in
         .Arg<xla_ffi::Buffer<xla_ffi::DataType::C128>>() // extra
         .Arg<xla_ffi::Buffer<xla_ffi::DataType::F64>>()  // coef
+        .Arg<xla_ffi::Buffer<xla_ffi::DataType::C128>>() // vp_halo
+        .Arg<xla_ffi::Buffer<xla_ffi::DataType::C128>>() // mu_halo
         .Ret<xla_ffi::Buffer<xla_ffi::DataType::C128>>() // acc_out
         .Ret<xla_ffi::Buffer<xla_ffi::DataType::C128>>() // stage_out
         .Attr<int32_t>("nsp")
@@ -381,4 +419,6 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(
         .Attr<int32_t>("has_coll")
         .Attr<int32_t>("has_extra")
         .Attr<int32_t>("has_stage")
+        .Attr<int32_t>("has_vp_halo")
+        .Attr<int32_t>("has_mu_halo")
 );

@@ -1,62 +1,123 @@
+"""Run parameters: the :class:`GKParams` pytree and its builders from YAML and GKW input."""
+
+import math
+import os
+from dataclasses import dataclass
+from typing import Any, Dict
+
 import jax
 import jax.numpy as jnp
+import numpy as np
+from omegaconf import OmegaConf
 
 from gyaradax.core.jax_config import enable_x64
+from gyaradax.io.gkw import as_int, load_runtime_params, load_scalars, parse_input_dat, species_blocks
 
-# enforce 64-bit precision
 enable_x64()
-
-import os
-from omegaconf import OmegaConf
-from dataclasses import dataclass
-from typing import Dict, Any
-from gyaradax.io.gkw import as_int, load_scalars, species_blocks
 
 
 @jax.tree_util.register_pytree_node_class
 @dataclass(frozen=True)
 class GKParams:
-    """
-    Runtime controls and physical parameters for the gyrokinetic solver.
+    """Physical parameters and solver controls of a gyrokinetic run.
 
-    This dataclass mirrors the GKW 'control', 'gridsize', and 'species' namelists,
-    handling numerical hyperparameters and physical constants required for the
-    gyrokinetic Vlasov-Poisson system (electrostatic and electromagnetic).
+    A frozen dataclass registered as a JAX pytree. The fields in ``_STATIC_FIELDS``
+    are static (pytree auxiliary data), so changing them retraces. These are the
+    flags, strings, timestep, dissipation and scalar species values. The other
+    fields are leaves and can be differentiated, e.g. the gradients ``rlt`` and
+    ``rln`` and ``beta``. The geometry scalars (``shat``, ``q``, ``eps``, ...) are
+    informational: the solver reads them from the geometry dict, so differentiate
+    through :func:`~gyaradax.geometry.geom.compute_geometry` instead.
+    Species fields (``rlt``, ``rln``, ``mas``, ``tmp``, ``de``, ``signz``,
+    ``vthrat``) are scalars for one species or arrays of length ``nsp``.
+    Field names follow the GKW namelists (``control``, ``gridsize``,
+    ``species``, ``geom``, ``collisions``, ``rotation``).
 
     Attributes:
-        dt: Small time step for RK4 integration.
-        naverage: Number of steps between mode normalization and growth rate calculation.
-        disp_par: Parallel dissipation coefficient.
-        disp_vp: Parallel velocity space dissipation coefficient.
+        dt: Time step (``dtim``); with ``adaptive_dt`` the starting value and the upper bound.
+        naverage: Steps per normalisation / growth-rate window.
+        disp_par: Parallel (s) hyper-dissipation coefficient.
+        disp_vp: Parallel-velocity dissipation coefficient.
         disp_x: Radial (kx) hyper-dissipation coefficient.
         disp_y: Binormal (ky) hyper-dissipation coefficient.
-        idisp: Dissipation method selector.
-        drive_scale: Scaling factor for equilibrium drive terms.
-        norm_eps: Numerical floor for mode amplitude normalization.
-        non_linear: Toggle for nonlinear term inclusion.
-        rlt: Inverse temperature gradient scale length (R/LT).
-        rln: Inverse density gradient scale length (R/LN).
-        mas: Atomic mass of the kinetic species.
-        tmp: Temperature of the kinetic species.
-        de: Density of the kinetic species.
-        signz: Charge sign of the species.
-        vthrat: Thermal velocity ratio.
-        shat: Magnetic shear parameter.
+        idisp: Dissipation scaling, as GKW ``idisp`` (1 / -1: abs(vpar), 2: rms velocity).
+        disp_par_conserve: Conservative parallel dissipation. 0 off, 1 removes
+            the Ampere current moment from the dissipated part, 2 also the
+            Poisson moment, 3 removes one ``|vpar|``-weighted moment (as CGYRO).
+        disp_par_conserve_kycut: Apply the conservative projection only to modes
+            with ``0 < krho * kthnorm <= kycut``; ``<= 0`` applies it to every ky.
+        drive_scale: Scale of the gradient drives (Terms V and VIII); keep at 1.
+        norm_eps: Floor of the per-ky mode amplitude in the normalisation.
+        non_linear: Include the ExB nonlinearity (Term III).
+        disable_per_ky_norm: Skip the per-ky amplitude renormalisation of linear runs.
+        finit: Initial condition (``cosine2``, ``cosine``, ``cosine3``, ``sine``,
+            ``noise``, ``gnoise``, ``zonal``), see :func:`gyaradax.solver.rk4.init_f`.
+        amp_init: Initial amplitude.
+        adiabatic_electrons: Adiabatic (Boltzmann) electrons instead of a kinetic species.
+        adaptive_dt: Adapt dt every step from the CFL estimate (nonlinear runs).
+        cfl_safety: Not read by the solver (``fac_dtim_nl`` is used); kept for old configs.
+        fac_dtim_est: Safety factor of the linear CFL estimate (GKW ``fac_dtim_est``).
+        fac_dtim_nl: Nonlinear CFL factor (GKW ``fac_dtim_nl``).
+        spectral_radius: Not read by the solver; kept for old configs.
+        mixed_precision: Run the nonlinear FFTs in FP32 (fields and linear terms stay FP64).
+        backend: ``"jax"``, ``"cuda"`` or ``"auto"``.
+        use_z2z: Z2Z instead of R2C FFTs in the JAX bracket (CUDA always uses Z2Z).
+        fused_linear: CUDA: one fused electrostatic linear kernel (with
+            collisions, RK4 stage updates and field moments).
+        fused_bracket: CUDA: pack and unpack the mixed-precision v6 bracket
+            inside the cuFFT callbacks.
+        linear_arith: ``"fp64"`` or ``"ds"`` (double-single electrostatic linear RHS, CUDA).
+        vcor: Rigid toroidal rotation ``Rref * Omega / vthref`` (Coriolis drift).
+        uprim: Toroidal velocity gradient per species.
+        nlapar: Evolve the parallel vector potential A_par.
+        nlbpar: Evolve the parallel magnetic perturbation B_par.
+        beta: Reference plasma beta ``2 mu0 n_ref T_ref / B_ref^2``.
+        betaprime: Pressure-gradient correction of the curvature drift (GKW
+            ``betaprime_ref``; negative for a peaked profile).
+        drift_gradp_type: ``"full_drift"`` (vpar^2 term on the full drift) or
+            ``"curv_only"`` (vpar^2 + B mu), as GKW ``drift_gradp_type``.
+        collisions: Enable the linearised Fokker-Planck operator.
+        coll_pitch_angle: Pitch-angle scattering.
+        coll_en_scatter: Energy scattering.
+        coll_friction: Friction.
+        coll_freq: Collision frequency, used with ``coll_freq_override``.
+        coll_freq_override: Use ``coll_freq`` instead of the Coulomb-log frequency.
+        coll_mass_conserve: Enforce particle conservation.
+        coll_rref: Reference major radius for the Coulomb log [m].
+        coll_tref: Reference temperature for the Coulomb log [keV].
+        coll_nref: Reference density for the Coulomb log [1e19 m^-3].
+        coll_bg_mas: Masses of the collision backgrounds (kinetic and adiabatic species).
+        coll_bg_signz: Charges of the collision backgrounds.
+        coll_bg_tmp: Temperatures of the collision backgrounds.
+        coll_bg_de: Densities of the collision backgrounds.
+        coll_bg_vthrat: Thermal-velocity ratios of the collision backgrounds.
+        coll_mom_conservation: Momentum conservation correction (Xu).
+        coll_ene_conservation: Energy conservation correction (Xu).
+        rlt: Normalised temperature gradient R/L_T.
+        rln: Normalised density gradient R/L_n.
+        mas: Mass, in reference masses.
+        tmp: Temperature, in reference temperatures.
+        de: Density, in reference densities.
+        signz: Charge number.
+        vthrat: Thermal-velocity ratio ``sqrt(tmp / mas)``.
+        shat: Magnetic shear.
         q: Safety factor.
-        eps: Local aspect ratio.
-        kthnorm: Wavevector normalization factor.
-        Rref: Reference major radius.
-        d2X: Geometry-dependent scaling factor.
-        signB: Direction of the magnetic field.
-        dvp: Parallel velocity grid spacing.
-        sgr_dist: Field-line grid spacing.
-        kxmax: Maximum radial wavevector.
-        kymax: Maximum binormal wavevector.
-        dgrid: Global density scaling.
-        tgrid: Global temperature scaling.
+        eps: Inverse aspect ratio r/R.
+        kthnorm: Binormal wavenumber normalisation.
+        Rref: Reference major radius (normalised).
+        d2X: Radial derivative normalisation of the geometry.
+        signB: Sign of the magnetic field.
+        dvp: Parallel-velocity grid spacing.
+        sgr_dist: Parallel (s) grid spacing.
+        kxmax: Largest radial wavenumber (internal units); fallback when the geometry has none.
+        kymax: Largest binormal wavenumber (internal units); fallback when the geometry has none.
+        dgrid: Grid density normalisation of the Maxwellian.
+        tgrid: Grid temperature normalisation.
+        n_gpus_sp: Devices on the species axis.
+        n_gpus_vp: Devices on the vpar axis.
+        n_gpus_mu: Devices on the mu axis.
     """
 
-    # runtime controls
     dt: float = 0.01
     naverage: int = 40
     disp_par: float = 1.0
@@ -64,22 +125,11 @@ class GKParams:
     disp_x: float = 0.1
     disp_y: float = 0.1
     idisp: int = 2
-    # CGYRO-style conservative parallel dissipation: project out of the
-    # dissipated distribution the components that source the field solves,
-    # so disp_par cannot drive phi/A_par (cures the GKW issue #201 EM
-    # low-ky numerical instability). 0/False = off; 1 = null the Ampere
-    # current moment (J0*vpar) only; 2/True = null Poisson (J0) + Ampere
-    # moments (leaves the full F_M*J0*{1,vpar} subspace undissipated —
-    # can host a long-time spurious mode; prefer 1).
     disp_par_conserve: int = 0
-    # apply the conservative-dissipation projection only to modes with
-    # krho <= this cutoff (the instability lives at kthrho < ~0.1; modes
-    # above keep the plain dissipation). <= 0 means no ky gating.
     disp_par_conserve_kycut: float = 0.0
     drive_scale: float = 1.0
     norm_eps: float = 1.0e-14
     non_linear: bool = False
-    # when True, skip the per-ky mode-amplitude renormalization in gksolve
     disable_per_ky_norm: bool = False
     finit: str = "cosine2"
     amp_init: float = 1.0e-4
@@ -92,35 +142,20 @@ class GKParams:
     mixed_precision: bool = True
     backend: str = "jax"
     use_z2z: bool = False
-    # cuda backend: fused electrostatic linear kernel (collisions, rk4 stage updates, field moments)
     fused_linear: bool = False
-    # "ds": double-single electrostatic linear rhs on the CUDA backend
+    fused_bracket: bool = False
     linear_arith: str = "fp64"
 
-    # rotation (GKW &ROTATION): rigid toroidal rotation in the co-moving
-    # frame. vcor = Rref*Omega/vthref adds the Coriolis drift
-    # (2*mas*vthrat*vpar*vcor*hfun, linear_terms.f90 drift()); uprim is the
-    # per-species toroidal velocity gradient entering the Maxwellian
-    # gradient drive (dmaxwel). Centrifugal terms (cf_trap/cf_drift) are
-    # NOT implemented.
+    # rotation: centrifugal terms are not implemented
     vcor: float = 0.0
     uprim: Any = 0.0
 
-    # electromagnetic controls
-    nlapar: bool = False  # enable A_parallel (shear Alfven)
-    nlbpar: bool = False  # enable B_parallel (magnetic compression)
-    beta: float = 0.0  # reference plasma beta = 2*mu0*n_ref*T_ref/B_ref^2
-    # beta-prime: pressure-gradient (finite-beta) correction of the curvature
-    # drift (GKW veta_prime, linear_terms.f90 drift()). Resolved value of
-    # GKW's betaprime_ref / betaprime_type='sp' (input parsing in io/gkw.py).
-    # GKW convention: betaprime <= 0 for a normal (peaked) pressure profile.
+    nlapar: bool = False
+    nlbpar: bool = False
+    beta: float = 0.0
     betaprime: float = 0.0
-    # 'full_drift': correction uses vpar^2 only (applied on curvature +
-    # grad-B drift combined); 'curv_only': uses vpar^2 + B*mu (GKW
-    # drift_gradp_type, components.f90).
     drift_gradp_type: str = "full_drift"
 
-    # collision operator controls (GKW &collisions namelist)
     collisions: bool = False
     coll_pitch_angle: bool = True
     coll_en_scatter: bool = True
@@ -128,21 +163,17 @@ class GKParams:
     coll_freq: float = 0.0
     coll_freq_override: bool = False
     coll_mass_conserve: bool = False
-    # references for Coulomb log: Rref [m], Tref [keV], Nref [1e19 m^-3]
     coll_rref: float = 1.0
     coll_tref: float = 1.0
     coll_nref: float = 1.0
-    # collision backgrounds incl. adiabatic species; none uses the kinetic species
     coll_bg_mas: Any = None
     coll_bg_signz: Any = None
     coll_bg_tmp: Any = None
     coll_bg_de: Any = None
     coll_bg_vthrat: Any = None
-    # conservation corrections (Xu variant only; GKW default cons_type='Xu')
     coll_mom_conservation: bool = False
     coll_ene_conservation: bool = False
 
-    # physical parameters (typically from the kinetic species)
     rlt: float = 1.0
     rln: float = 1.0
     mas: float = 1.0
@@ -151,7 +182,6 @@ class GKParams:
     signz: float = 1.0
     vthrat: float = 1.0
 
-    # geometry scalars
     shat: float = 0.0
     q: float = 1.0
     eps: float = 0.0
@@ -160,7 +190,6 @@ class GKParams:
     d2X: float = 1.0
     signB: float = 1.0
 
-    # grid metadata and scaling
     dvp: float = 1.0
     sgr_dist: float = 1.0
     kxmax: float = 1.0
@@ -168,15 +197,11 @@ class GKParams:
     dgrid: float = 1.0
     tgrid: float = 1.0
 
-    # multi-GPU grid parallelism; sharding logic lives in gyaradax/sharding.py.
-    # These fields only carry mesh shape and are static (part of trace signature).
     n_gpus_sp: int = 1
     n_gpus_vp: int = 1
     n_gpus_mu: int = 1
-    n_gpus_s: int = 1
 
-    # non-JAX-traceable fields (strings, control-flow booleans) — stored as
-    # pytree auxiliary data rather than leaves.
+    # stored as pytree auxiliary data, not leaves
     _STATIC_FIELDS = (
         "finit",
         "adiabatic_electrons",
@@ -187,6 +212,7 @@ class GKParams:
         "backend",
         "use_z2z",
         "fused_linear",
+        "fused_bracket",
         "linear_arith",
         "nlapar",
         "nlbpar",
@@ -210,7 +236,6 @@ class GKParams:
         "n_gpus_sp",
         "n_gpus_vp",
         "n_gpus_mu",
-        "n_gpus_s",
         "dt",
         "naverage",
         "disp_par",
@@ -270,7 +295,16 @@ class GKParams:
 
 
 def gkparams_from_runtime(runtime: Dict[str, Any], **overrides: Any) -> GKParams:
-    """Build GKParams from a GKW-compatible runtime-controls dictionary."""
+    """GKParams from a dict of GKW-style runtime controls (as from ``load_scalars``).
+
+    Args:
+        runtime: GKW names (``dtim``, ``naverage``, ``non_linear``, ``nl_dtim_est``, ...)
+            and species and geometry scalars.
+        overrides: Parameter overrides, applied last.
+
+    Returns:
+        GKParams.
+    """
     non_linear = bool(runtime.get("non_linear", False))
     nl_dtim_est = bool(runtime.get("nl_dtim_est", True))
     fac_dtim_est = float(runtime.get("fac_dtim_est", 0.95))
@@ -293,6 +327,7 @@ def gkparams_from_runtime(runtime: Dict[str, Any], **overrides: Any) -> GKParams
         "spectral_radius": bool(runtime.get("spectral_radius", True)),
         "backend": str(runtime.get("backend", "jax")),
         "fused_linear": bool(runtime.get("fused_linear", False)),
+        "fused_bracket": bool(runtime.get("fused_bracket", False)),
         "linear_arith": str(runtime.get("linear_arith", "fp64")),
         "nlapar": bool(runtime.get("nlapar", False)),
         "nlbpar": bool(runtime.get("nlbpar", False)),
@@ -314,7 +349,6 @@ def gkparams_from_runtime(runtime: Dict[str, Any], **overrides: Any) -> GKParams
         "n_gpus_sp": int(runtime.get("n_gpus_sp", 1)),
         "n_gpus_vp": int(runtime.get("n_gpus_vp", 1)),
         "n_gpus_mu": int(runtime.get("n_gpus_mu", 1)),
-        "n_gpus_s": int(runtime.get("n_gpus_s", 1)),
     }
     for k in ("coll_bg_mas", "coll_bg_signz", "coll_bg_tmp", "coll_bg_de", "coll_bg_vthrat"):
         if k in runtime:
@@ -368,14 +402,20 @@ def gkparams_from_input_dat(input_dat_path: str, **overrides: Any) -> GKParams:
 def gkparams_from_input_and_geometry(
     input_dat_path: str, geometry: Dict[str, Any], **overrides: Any
 ) -> GKParams:
-    """Build GKParams from input.dat + a pre-computed geometry dict.
+    """Build GKParams from a GKW ``input.dat`` and a computed geometry dict.
 
-    unlike gkparams_from_input_dat, this does not require geom.dat or
-    other GKW output files — geometry scalars come from the dict.
+    Unlike :func:`gkparams_from_input_dat` this needs no ``geom.dat`` or other
+    GKW output: the geometry scalars come from ``geometry``. Adiabatic runs keep
+    only the ion species; every species block becomes a collision background.
+
+    Args:
+        input_dat_path: Path to the GKW ``input.dat``.
+        geometry: Geometry dict, e.g. from :func:`gyaradax.geometry.compute_geometry_from_input`.
+        overrides: Parameter overrides.
+
+    Returns:
+        GKParams.
     """
-    import numpy as np
-    from gyaradax.io.gkw import load_runtime_params, parse_input_dat
-
     runtime = load_runtime_params(input_dat_path)
     inp = parse_input_dat(input_dat_path)
 
@@ -402,25 +442,11 @@ def gkparams_from_input_and_geometry(
     num_sp = as_int(inp.get("gridsize", {}).get("number_of_species", 1), 1)
     all_species = species_blocks(inp)
     species = species_blocks(inp, limit=num_sp)
-    all_mas = (
-        np.array([float(sp.get("mass", 1.0)) for sp in all_species])
-        if all_species
-        else np.array([])
-    )
-    all_tmp = (
-        np.array([float(sp.get("temp", 1.0)) for sp in all_species])
-        if all_species
-        else np.array([])
-    )
-    all_de = (
-        np.array([float(sp.get("dens", 1.0)) for sp in all_species])
-        if all_species
-        else np.array([])
-    )
-    all_signz = (
-        np.array([float(sp.get("z", 1.0)) for sp in all_species]) if all_species else np.array([])
-    )
-    all_vthrat = np.sqrt(all_tmp / all_mas) if len(all_mas) else np.array([])
+    all_mas = np.array([float(sp.get("mass", 1.0)) for sp in all_species])
+    all_tmp = np.array([float(sp.get("temp", 1.0)) for sp in all_species])
+    all_de = np.array([float(sp.get("dens", 1.0)) for sp in all_species])
+    all_signz = np.array([float(sp.get("z", 1.0)) for sp in all_species])
+    all_vthrat = np.sqrt(all_tmp / all_mas)
 
     if species:
         sp_mas = np.array([float(sp.get("mass", 1.0)) for sp in species])
@@ -484,27 +510,28 @@ def load_config(config_path: str) -> Any:
 
 
 def gkparams_from_config(config: Any, **overrides: Any) -> GKParams:
+    """Build GKParams from a YAML run configuration.
+
+    Reads the ``solver``, ``physics``, ``geometry``, ``grid``, ``sharding`` and
+    ``collisions`` sections. Grid spacings (``sgr_dist``, ``dvp``) and the
+    largest wavenumbers (``kxmax``, ``kymax``) are derived from ``grid`` when the
+    config does not set them.
+
+    Args:
+        config: Config from :func:`load_config`.
+        overrides: Parameter overrides, applied last.
+
+    Returns:
+        GKParams.
+    """
     solver_cfg = config.solver
     physics_cfg = getattr(config, "physics", {})
     geometry_cfg = getattr(config, "geometry", {})
 
-    def _has_cfg_key(container: Any, key: str) -> bool:
-        try:
-            return key in container
-        except TypeError:
-            return hasattr(container, key)
-
     fac_dtim_nl = float(
-        getattr(
-            solver_cfg,
-            "fac_dtim_nl",
-            getattr(solver_cfg, "cfl_safety", 0.95),
-        )
+        getattr(solver_cfg, "fac_dtim_nl", getattr(solver_cfg, "cfl_safety", 0.95))
     )
-    if _has_cfg_key(solver_cfg, "fac_dtim_nl"):
-        cfl_safety = fac_dtim_nl
-    else:
-        cfl_safety = float(getattr(solver_cfg, "cfl_safety", 0.95))
+    cfl_safety = fac_dtim_nl
 
     params_dict: dict[str, Any] = {
         "dt": float(getattr(solver_cfg, "dt", 0.01)),
@@ -534,6 +561,7 @@ def gkparams_from_config(config: Any, **overrides: Any) -> GKParams:
         "mixed_precision": bool(getattr(solver_cfg, "mixed_precision", True)),
         "use_z2z": bool(getattr(solver_cfg, "use_z2z", False)),
         "fused_linear": bool(getattr(solver_cfg, "fused_linear", False)),
+        "fused_bracket": bool(getattr(solver_cfg, "fused_bracket", False)),
         "linear_arith": str(getattr(solver_cfg, "linear_arith", "fp64")),
         "disable_per_ky_norm": bool(getattr(solver_cfg, "disable_per_ky_norm", False)),
         "beta": float(getattr(physics_cfg, "beta", 0.0)),
@@ -541,13 +569,12 @@ def gkparams_from_config(config: Any, **overrides: Any) -> GKParams:
         "drift_gradp_type": str(getattr(physics_cfg, "drift_gradp_type", "full_drift")),
     }
 
-    # optional sharding: config.sharding.{n_gpus_sp, n_gpus_vp, n_gpus_mu, n_gpus_s}
+    # optional sharding: config.sharding.{n_gpus_sp, n_gpus_vp, n_gpus_mu}
     shard_cfg = getattr(config, "sharding", None)
     if shard_cfg is not None:
         params_dict["n_gpus_sp"] = int(getattr(shard_cfg, "n_gpus_sp", 1))
         params_dict["n_gpus_vp"] = int(getattr(shard_cfg, "n_gpus_vp", 1))
         params_dict["n_gpus_mu"] = int(getattr(shard_cfg, "n_gpus_mu", 1))
-        params_dict["n_gpus_s"] = int(getattr(shard_cfg, "n_gpus_s", 1))
 
     # collision operator: optional 'collisions' section in the YAML config
     coll_cfg = getattr(config, "collisions", None)
@@ -585,7 +612,7 @@ def gkparams_from_config(config: Any, **overrides: Any) -> GKParams:
             if k in _SPECIES_PARAMS and hasattr(v, "__iter__") and not isinstance(v, str):
                 params_dict[k] = jnp.array([float(x) for x in v])
             elif hasattr(v, "__iter__") and not isinstance(v, str):
-                # scalar param stored as list in yaml (e.g. dgrid: [1.0, 1.0]) — take first
+                # scalar param stored as list in yaml (e.g. dgrid: [1.0, 1.0]): take first
                 params_dict[k] = float(list(v)[0])
             else:
                 params_dict[k] = float(v)
@@ -593,11 +620,9 @@ def gkparams_from_config(config: Any, **overrides: Any) -> GKParams:
     # GKW defines vthrat = sqrt(T_s/m_s); old configs used sqrt(tgrid/mas) which
     # was wrong for electrons (missing T_e factor). Default to sqrt(tmp/mas).
     if not _vthrat_explicit and "tmp" in params_dict and "mas" in params_dict:
-        import numpy as _np
-
-        _tmp = _np.asarray(params_dict["tmp"], dtype=float)
-        _mas = _np.asarray(params_dict["mas"], dtype=float)
-        params_dict["vthrat"] = _np.sqrt(_tmp / _mas)
+        _tmp = np.asarray(params_dict["tmp"], dtype=float)
+        _mas = np.asarray(params_dict["mas"], dtype=float)
+        params_dict["vthrat"] = np.sqrt(_tmp / _mas)
 
     # geometry scalars
     for k in ["shat", "q", "eps", "kthnorm", "Rref", "d2X", "signB"]:
@@ -635,8 +660,6 @@ def gkparams_from_config(config: Any, **overrides: Any) -> GKParams:
         eps = float(getattr(geometry_cfg, "eps", 0.1))
         ikxspace = int(getattr(grid_cfg, "ikxspace", 5))
         geom_type = str(getattr(geometry_cfg, "geometry_model", "s-alpha"))
-        import math
-
         if geom_type == "s-alpha":
             kthnorm = q / (2.0 * math.pi * eps)
         elif geom_type == "circ":

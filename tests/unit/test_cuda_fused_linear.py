@@ -15,15 +15,15 @@ pytestmark = pytest.mark.skipif(not HAS_CUDA, reason="CUDA not available")
 GRID = dict(nvpar=32, nmu=8, ns=16, nkx=85, nky=32)
 
 CASES = {
-    "adiabatic": ("iteration_13.yaml", dict(non_linear=False)),
-    "adiabatic_nl": ("iteration_13.yaml", dict(non_linear=True)),
-    "kinetic": ("kinetic.yaml", dict(non_linear=False, adaptive_dt=False)),
+    "adiabatic": ("adiabatic/nonlinear/itg_high_shear.yaml", dict(non_linear=False)),
+    "adiabatic_nl": ("adiabatic/nonlinear/itg_high_shear.yaml", dict(non_linear=True)),
+    "kinetic": ("kinetic/nonlinear/benchmark.yaml", dict(non_linear=False, adaptive_dt=False)),
     "kinetic_collisions": (
-        "kinetic.yaml",
+        "kinetic/nonlinear/benchmark.yaml",
         dict(non_linear=False, adaptive_dt=False, collisions=True, coll_freq=1e-3),
     ),
     "kinetic_collisions_cons": (
-        "kinetic.yaml",
+        "kinetic/nonlinear/benchmark.yaml",
         dict(
             non_linear=False, adaptive_dt=False, collisions=True, coll_freq=1e-3,
             coll_mom_conservation=True, coll_ene_conservation=True,
@@ -32,10 +32,10 @@ CASES = {
 }
 
 
-def _run(name, fused):
+def _run(name, fused, grid=GRID):
     cfg_name, overrides = CASES[name]
     df, geometry, params, state = noisy_case(
-        cfg_name, GRID, {**overrides, "fused_linear": fused, "backend": "cuda"},
+        cfg_name, grid, {**overrides, "fused_linear": fused, "backend": "cuda"},
         seed=7, mixed_precision=False,
     )
     pre = linear_precompute(geometry, params)
@@ -54,10 +54,26 @@ def test_fused_linear_matches_default(name):
     assert np.max(np.abs(out - out_ref)) / np.max(np.abs(out_ref)) < 1e-13
 
 
+@pytest.mark.parametrize(
+    "grid",
+    [
+        {**GRID, "nky": 64},
+        {**GRID, "nky": 37},
+        {**GRID, "nvpar": 36},
+    ],
+    ids=["two_ky_tiles", "partial_ky_tile", "vpar_tail"],
+)
+def test_fused_linear_any_grid(grid):
+    (rhs_ref, out_ref), (rhs, out) = _run("kinetic_collisions", False, grid), _run("kinetic_collisions", True, grid)
+    assert not np.array_equal(rhs, rhs_ref), "fused path did not run"
+    assert np.max(np.abs(rhs - rhs_ref)) / np.max(np.abs(rhs_ref)) < 1e-14
+    assert np.max(np.abs(out - out_ref)) / np.max(np.abs(out_ref)) < 1e-13
+
+
 @pytest.mark.parametrize("fused", [False, True])
 def test_vmap_matches_single_calls(fused):
     df, geometry, params, _ = noisy_case(
-        "kinetic.yaml", GRID, {**CASES["kinetic"][1], "fused_linear": fused, "backend": "cuda"},
+        "kinetic/nonlinear/benchmark.yaml", GRID, {**CASES["kinetic"][1], "fused_linear": fused, "backend": "cuda"},
         seed=7, mixed_precision=False,
     )
     pre = linear_precompute(geometry, params)

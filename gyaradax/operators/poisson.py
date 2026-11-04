@@ -18,12 +18,16 @@ def j0(x):
 
 
 def j1_hat(x):
-    """Modified J1 Bessel: 2*J_1(x)/x.
+    """``2 J_1(x) / x``, the gyro-average of B_par, with value 1 at x = 0.
 
-    Matches GKW ``mod_besselj1_gkw`` (functions.f90:119-142).
-    GKW returns 0.5 when krloc < 1e-5 (zero-mode convention).
-    For non-zero x the mathematical limit is 1.0, but we follow GKW exactly.
-    The caller must pass ``krloc_is_zero`` to select the zero-mode value.
+    GKW ``mod_besselj1_gkw`` (functions.f90). :func:`~gyaradax.operators.ampere.precompute_bpar`
+    sets 0.5 at ``k_perp = 0`` instead, as GKW does there.
+
+    Args:
+        x: Argument ``k_perp rho``.
+
+    Returns:
+        ``2 J_1(x) / x``, same shape as ``x``.
     """
     safe_x = jnp.where(jnp.abs(x) < 1e-30, 1.0, x)
     # bessel_jn(x, v=n) returns [J_0, J_1, ..., J_n]; index [1] for J_1
@@ -32,17 +36,30 @@ def j1_hat(x):
 
 
 def i1e(b):
-    """Gamma_1(b) = I_1(b)*exp(-b), the scaled modified Bessel of order 1.
+    """``Gamma_1(b) = I_1(b) exp(-b)``, GKW ``gamma1_gkw`` (functions.f90).
 
-    Matches GKW ``gamma1_gkw`` (functions.f90:42-56) via ``expbessi1``.
+    Args:
+        b: Argument ``(k_perp rho)^2 / 2``.
+
+    Returns:
+        ``I_1(b) exp(-b)``, same shape as ``b``.
     """
     return jax.scipy.special.i1e(b)
 
 
 def geom_tensors(geometry: Dict[str, jnp.ndarray], params: Any = None) -> Dict[str, jnp.ndarray]:
-    """Expand geometry constants for broadcasting and compute Bessel terms.
+    """Geometry arrays broadcast to 6D, with the single-species J0 and Gamma_0.
 
-    Single-species. Species params are scalars reshaped to (1,1,1,1,1,1).
+    Species scalars are reshaped to (1, 1, 1, 1, 1, 1); the leading axis is the
+    species axis of length one.
+
+    Args:
+        geometry: Geometry dict.
+        params: Run parameters; their species scalars override the geometry's.
+
+    Returns:
+        Dict of broadcast arrays (``krho``, ``ints``, ``bn``, ...) plus ``bessel``,
+        ``gamma``, ``has_zonal``, ``ixzero`` and ``iyzero``.
     """
     geom_ = {}
     geom_["krho"] = rearrange(geometry["krho"], "y -> 1 1 1 1 1 y")
@@ -114,7 +131,7 @@ def _phi_adiabatic(geom: Dict[str, jnp.ndarray], df: jnp.ndarray) -> jnp.ndarray
     """Adiabatic electron phi from single-species quasineutrality.
 
     df: (nvpar, nmu, ns, nkx, nky).
-    Internal — use calculate_phi() as the public interface.
+    Internal: use calculate_phi() as the public interface.
     """
     de = geom["de"]
     signz, tmp, bn = geom["signz"], geom["tmp"], geom["bn"]
@@ -168,7 +185,16 @@ def _phi_adiabatic(geom: Dict[str, jnp.ndarray], df: jnp.ndarray) -> jnp.ndarray
 
 
 def precompute_phi_adiabatic(geometry: Dict[str, jnp.ndarray], params: Any):
-    """Precompute static arrays for the adiabatic phi solve."""
+    """Static arrays of the adiabatic-electron quasineutrality solve.
+
+    Args:
+        geometry: Geometry dict.
+        params: Run parameters (ion species scalars).
+
+    Returns:
+        ``(phi_weight, phi_corr_weight, tmp, de, signz, gamma, ints, has_zonal,
+        ixzero, iyzero)``, the arguments of :func:`calculate_phi_adiabatic` after ``df``.
+    """
     geom = geom_tensors(geometry, params=params)
 
     # squeeze leading nsp=1 dimension to simplify to 5D: (v, mu, s, kx, ky)
@@ -219,7 +245,27 @@ def calculate_phi_adiabatic(
     ixzero: int,
     iyzero: int,
 ) -> jnp.ndarray:
-    """Hot path for adiabatic phi solve."""
+    """Potential from quasineutrality with adiabatic electrons, from precomputed weights.
+
+    The zonal mode gets the flux-surface-average correction of the adiabatic
+    electron response (GKW ``poisson_zf``).
+
+    Args:
+        df: Ion distribution, (nvpar, nmu, ns, nkx, nky).
+        phi_weight: Velocity-space weight ``Z n J0 B intvp intmu``.
+        phi_corr_weight: Zonal correction weight.
+        tmp: Ion temperature.
+        de: Ion density.
+        signz: Ion charge.
+        gamma: Gamma_0 of the ions.
+        ints: Parallel integration weights.
+        has_zonal: 1 when the grid holds ky = 0.
+        ixzero: Index of kx = 0.
+        iyzero: Index of ky = 0.
+
+    Returns:
+        Potential, (ns, nkx, nky).
+    """
     phi_raw = jnp.sum(phi_weight * df, axis=(0, 1), keepdims=True)
     bufphi = jnp.sum(phi_corr_weight * phi_raw, axis=2, keepdims=True)
 
@@ -287,11 +333,16 @@ def _species_bessel_gamma(geometry):
 
 
 def precompute_phi_kinetic(geometry: Dict[str, jnp.ndarray]):
-    """Precompute static arrays for the kinetic phi solve.
+    """Static arrays of the kinetic quasineutrality solve.
 
-    Returns (phi_weight, phi_diag) where:
-        phi_weight: (nsp, nvpar, nmu, ns, nkx, nky) — Poisson integral weight
-        phi_diag: (ns, nkx, nky) — Poisson diagonal (zonal mode set to 1)
+    Args:
+        geometry: Geometry dict with per-species ``mas``, ``signz``, ``tmp``, ``de``,
+            ``vthrat``.
+
+    Returns:
+        ``(phi_weight, phi_diag)``: the Poisson weight, (nsp, nvpar, nmu, ns, nkx, nky),
+        and the diagonal ``sum_s Z^2 n (Gamma_0 - 1) / T``, (ns, nkx, nky), set to 1
+        at (kx, ky) = (0, 0).
     """
     bessel, gamma = _species_bessel_gamma(geometry)
 
@@ -377,7 +428,7 @@ def _phi_kinetic(
     the same contraction.
 
     df: (nsp, nvpar, nmu, ns, nkx, nky).
-    Internal — use calculate_phi() as the public interface.
+    Internal: use calculate_phi() as the public interface.
     """
     if phi_weight is None or phi_diag is None:
         phi_weight, phi_diag = precompute_phi_kinetic(geometry)
@@ -391,18 +442,18 @@ def calculate_phi(
     params: Any = None,
     pre: Optional[Precompute] = None,
 ) -> jnp.ndarray:
-    """
-    Compute electrostatic potential from quasineutrality.
-
-    Unified interface for both adiabatic and kinetic electron models.
-    Uses precomputed arrays from pre when available.
+    """Electrostatic potential from quasineutrality, adiabatic or kinetic electrons.
 
     Args:
-        geometry: base geometry dict (or expanded geom_tensors for legacy calls).
-        df: distribution function — (nvpar, nmu, ns, nkx, nky) for adiabatic,
-            (nsp, nvpar, nmu, ns, nkx, nky) for kinetic.
-        params: GKParams (used to determine adiabatic vs kinetic and species scalars).
-        pre: precomputed arrays from linear_precompute (optional, for performance).
+        geometry: Geometry dict, or a :func:`geom_tensors` dict (adiabatic only).
+        df: Distribution, (nvpar, nmu, ns, nkx, nky) for adiabatic electrons or
+            (nsp, nvpar, nmu, ns, nkx, nky) for kinetic ones.
+        params: Run parameters; select the electron model. Without them the
+            model follows ``df.ndim``.
+        pre: Precomputed coefficients, used when given.
+
+    Returns:
+        Potential, (ns, nkx, nky).
     """
     # legacy entry: calculate_phi(geom_tensors_dict, df) detected via "bessel" key
     if "bessel" in geometry:

@@ -7,6 +7,8 @@ import sys
 from pathlib import Path
 from types import ModuleType
 
+import pytest
+
 
 def _load_runtime_config() -> ModuleType:
     """Load runtime_config without importing the gyaradax package or JAX."""
@@ -17,6 +19,12 @@ def _load_runtime_config() -> ModuleType:
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+@pytest.fixture(autouse=True)
+def _restore_device_order(monkeypatch):
+    monkeypatch.setenv("CUDA_DEVICE_ORDER", "PCI_BUS_ID")
+    monkeypatch.delenv("CUDA_DEVICE_ORDER")
 
 
 def test_runtime_config_module_does_not_import_jax(monkeypatch) -> None:
@@ -35,6 +43,29 @@ def test_device_sets_cuda_visible_devices(monkeypatch) -> None:
     module.configure_runtime_env(device=3)
 
     assert module.os.environ["CUDA_VISIBLE_DEVICES"] == "3"
+
+
+def test_device_sets_pci_order_unless_set(monkeypatch) -> None:
+    module = _load_runtime_config()
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    monkeypatch.delenv("CUDA_DEVICE_ORDER", raising=False)
+
+    module.configure_runtime_env(device=1)
+    assert module.os.environ["CUDA_DEVICE_ORDER"] == "PCI_BUS_ID"
+
+    monkeypatch.setenv("CUDA_DEVICE_ORDER", "FASTEST_FIRST")
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES")
+    module.configure_runtime_env(device=2)
+    assert module.os.environ["CUDA_DEVICE_ORDER"] == "FASTEST_FIRST"
+
+
+def test_device_warns_when_replacing_visible_devices(monkeypatch) -> None:
+    module = _load_runtime_config()
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "3")
+
+    with pytest.warns(UserWarning, match="CUDA_VISIBLE_DEVICES=3"):
+        module.configure_runtime_env(device=0)
+    assert module.os.environ["CUDA_VISIBLE_DEVICES"] == "0"
 
 
 def test_device_list_takes_precedence(monkeypatch) -> None:

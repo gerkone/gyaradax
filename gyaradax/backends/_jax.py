@@ -88,11 +88,11 @@ class _StencilTable:
 
 @jax.tree_util.register_pytree_node_class
 class JAXOps(SolverOps):
-    """JAX implementation of solver operations.
+    """Pure JAX implementation of the solver operations; differentiable.
 
-    Supports both R2C (real-to-complex) and Z2Z (complex-to-complex) FFTs
-    via the use_z2z flag. Mixed precision (FP32 FFTs) is controlled by
-    the mixed_precision flag.
+    The bracket uses R2C FFTs, or Z2Z with ``use_z2z``, in FP32 with
+    ``mixed_precision``. Kinetic runs vmap the linear RHS and the bracket over
+    species; large grids loop over species and vpar chunks in the bracket.
     """
 
     def __init__(self, pre: GKPre, use_z2z: bool = False, mixed_precision: bool = True, mesh=None):
@@ -321,13 +321,6 @@ class JAXOps(SolverOps):
         apar: jnp.ndarray | None = None,
         bpar: jnp.ndarray | None = None,
     ) -> jnp.ndarray:
-        """Nonlinear ExB advection with shape dispatch.
-
-        Dispatches on df.ndim: 5D direct, 6D via vmap over species with per-species bessel.
-        Mixed precision is controlled by self.mixed_precision (set at construction time).
-        chi_correction: velocity-dependent EM correction added to gyro_phi to form chi;
-        built from apar/bpar when those are given instead.
-        """
         if apar is not None or bpar is not None:
             if chi_correction is not None:
                 raise ValueError("pass either chi_correction or apar/bpar, not both")
@@ -428,7 +421,7 @@ class JAXOps(SolverOps):
         Drive terms V, VIII use chi/phi; Term VII uses gyro_phi only.
 
         Term I (streaming) and parallel dissipation share a fused 9-point stencil
-        ('s_upar_tab') — exposed together in the dict as 'I_par_streaming_plus_diss'.
+        ('s_upar_tab'): exposed together in the dict as 'I_par_streaming_plus_diss'.
         """
         gyro_phi = pre["bessel"] * phi[None, None, :, :, :]
 
@@ -564,12 +557,6 @@ class JAXOps(SolverOps):
         apar: jnp.ndarray | None = None,
         bpar: jnp.ndarray | None = None,
     ) -> jnp.ndarray:
-        """Linear RHS with shape dispatch.
-
-        Implements Terms I, II, IV, V, VII, VIII, X, XI + dissipation.
-        Dispatches on df.ndim: 5D direct, 6D via vmap over species.
-        When apar/bpar are provided, includes EM coupling terms.
-        """
         # stencils coupling velocity points run on the shards with halos (sharded runs only)
         extra: dict[str, Any] = {}
         if self.mesh is not None and self.mesh.shape["vp"] > 1:
@@ -632,7 +619,7 @@ class JAXOps(SolverOps):
 def _pack_full_z2z(field, kx_vec, ky_vec, jind, rev_jind, mrad, mphi, mphiw3, nky, dtype):
     """Scatter from packed [nkx, nky] directly to full z2z workspace [mrad, mphi].
 
-    Gathers field values at each output position via rev_jind — no intermediate
+    Gathers field values at each output position via rev_jind: no intermediate
     [mrad, mphiw3] buffer, no scatter ops.
 
     Packing convention: ws = (i·ky − kx)·F, so Re(IFFT(ws)) = ∂y·F, Im(IFFT(ws)) = ∂x·F.
@@ -771,7 +758,7 @@ def _per_s_z2z(
     Packs two spectral derivatives into one complex field and uses
     ifft2 (C2C) instead of irfft2 (C2R), halving the inverse FFT count.
     _pack_full_z2z gathers directly from [nkx, nky] into [mrad, mphi]
-    via rev_jind — no intermediate half-spectrum buffer, no scatter ops.
+    via rev_jind: no intermediate half-spectrum buffer, no scatter ops.
     """
     fft_dtype = jnp.complex64 if mixed_precision else jnp.complex128
     real_dtype = jnp.float32 if mixed_precision else jnp.float64

@@ -54,6 +54,14 @@ def _now() -> str:
 
 
 def device_memory(devices) -> dict[str, list[float]]:
+    """Peak and current memory of each device, in GiB, from ``memory_stats``.
+
+    Args:
+        devices: JAX devices.
+
+    Returns:
+        ``{"process_peak_gib": [...], "in_use_gib": [...]}``.
+    """
     peak, in_use = [], []
     for d in devices:
         try:
@@ -105,6 +113,16 @@ class RunTelemetry:
         dt_info: Any = None,
         profiled: bool = False,
     ) -> None:
+        """Append the record of one block.
+
+        Args:
+            step: Step at the end of the block.
+            sim_time: Time at the end of the block.
+            n_steps: Steps in the block.
+            wall: Wall time of the block, in seconds.
+            dt_info: Per-step timestep diagnostics, or None.
+            profiled: Whether the block was traced (and so slower).
+        """
         record: dict[str, Any] = {
             "event": "block",
             "profiled": profiled,
@@ -128,6 +146,13 @@ class RunTelemetry:
         self._write(record)
 
     def close(self, total_wall: float, steps: int, status: str = "completed") -> None:
+        """Append the ``end`` record.
+
+        Args:
+            total_wall: Wall time of the run, in seconds.
+            steps: Steps run.
+            status: ``"completed"`` or ``"diverged"``.
+        """
         self._write(
             {
                 "event": "end",
@@ -140,7 +165,17 @@ class RunTelemetry:
 
 
 def kernel_summary(trace_dir: str, n_steps: int, top: int = 40) -> dict[str, Any]:
-    """GPU time per kernel from a JAX profiler trace (CUPTI), per step and in total."""
+    """GPU time per kernel of a JAX profiler trace (CUPTI), per step and in total.
+
+    Args:
+        trace_dir: Profiler output directory.
+        n_steps: Steps in the traced block.
+        top: Number of kernels listed.
+
+    Returns:
+        Dict with ``n_steps``, ``gpu_ms_per_step`` and the ``kernels`` list
+        (name, ms per step, share, calls per step).
+    """
     from jax.profiler import ProfileData
 
     paths = glob.glob(os.path.join(trace_dir, "**", "*.xplane.pb"), recursive=True)
@@ -177,9 +212,14 @@ def kernel_summary(trace_dir: str, n_steps: int, top: int = 40) -> dict[str, Any
 
 @contextlib.contextmanager
 def profile_block(output_dir: str, n_steps: int, step: int) -> Iterator[None]:
-    """Trace the enclosed block, which starts at ``step``, into ``<output_dir>/profile/step_NNNNNN``.
+    """Context manager that traces the enclosed block into ``<output_dir>/profile/step_NNNNNN``.
 
-    ``profile_summary.json`` gets the kernel times of this trace only.
+    ``profile_summary.json`` gets the kernel times of this trace.
+
+    Args:
+        output_dir: Run directory.
+        n_steps: Steps in the block.
+        step: First step of the block.
     """
     trace_dir = os.path.join(output_dir, "profile", f"step_{step:06d}")
     shutil.rmtree(trace_dir, ignore_errors=True)
