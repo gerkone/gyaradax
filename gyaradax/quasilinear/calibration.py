@@ -3,8 +3,11 @@
 A calibration holds the rule it belongs to, the fitted `parameters` (always `cn`, plus e.g. sat2's
 `flux_exponent`), the rule `options` held fixed during the fit, the `electrons` models it was
 fitted on, and the `fit` method and date. The bundled ones live in `weights/`, one JSON each.
-`fit_canonical` and `fit_sat2` fit one parameter set of their rule for the adiabatic and kinetic
-sets together, and return the record with its test and cross-validation metrics alongside.
+`fit_canonical` and `fit_sat2` fit one parameter set of their rule on every summary table
+(one per electron model) together, and return the record with its metrics alongside.
+
+The summary tables are per-run parquets of nonlinear gyrokinetic runs: inputs, the linear run
+(``lin_*``), and the nonlinear time averages, with ``test_set`` naming the held-out rows.
 """
 
 import datetime
@@ -17,7 +20,7 @@ import numpy as np
 _DIR = pathlib.Path(__file__).parent / "weights"
 
 # the calibration `auto` resolves to, per rule
-DEFAULTS = {"canonical": "canonical_v2", "sat2": "sat2_v1"}
+DEFAULTS = {"canonical": "canonical_v2", "sat2": "sat2_v2"}
 
 
 def names():
@@ -26,7 +29,15 @@ def names():
 
 @functools.lru_cache(maxsize=16)
 def load(spec, rule=None):
-    """Calibration from a bundled name, a JSON path, or `auto` (the rule's default); None if empty."""
+    """A calibration record: a bundled name, a JSON path, or ``"auto"`` for the rule's default.
+
+    Args:
+        spec: Name, path or ``"auto"``.
+        rule: Rule whose default ``"auto"`` picks.
+
+    Returns:
+        The record dict, or None when ``spec`` is empty.
+    """
     if not spec:
         return None
     if spec == "auto":
@@ -52,76 +63,127 @@ def save(cal, path):
         f.write("\n")
 
 
-SETS = ("adiabatic", "kinetic")
+# summary schema: per flux channel, the nonlinear target, the linear weight, and the
+# (species, channel) of the per-mode linear flux in lin_flux_kxy_sp
+CHANNELS = {
+    "Qi": ("Qi_fluxavg", "lin_weight_Qi", (0, 1)),
+    "Qe": ("Qe_fluxavg", "lin_weight_Qe", (1, 1)),
+    "Gamma": ("Gamma_fluxavg", "lin_weight_Gamma", (1, 0)),
+}
+TRAIN = "train"
 
 
-def summary_rows(kind, summary, collisional=False):
-    """sat2 inputs and Qi of the saturated rows with settled QL weights in one summary table."""
+def tables(summary):
+    """The summary tables in a directory, by name (the file stem, e.g. ``adiabatic``)."""
+    import pandas as pd
+
+    return {p.stem: pd.read_parquet(p) for p in sorted(pathlib.Path(summary).glob("*.parquet"))}
+
+
+def _finite(r, key):
+    v = r.get(key)
+    return v is not None and np.isfinite(v)
+
+
+def summary_rows(summary, channels=("Qi", "Qe"), collisional=True, kinds=None):
+    """Fit rows of the summary tables: one per run and flux channel the run has.
+
+    A run counts when its linear growth rate and the channel's weight exist. Stable runs
+    (no ``saturation_time``) are kept with their flux, so metrics can check the rule
+    predicts little there; the fits themselves only use positive fluxes.
+
+    Args:
+        summary: Directory of the summary tables.
+        channels: Flux channels to take, keys of :data:`CHANNELS`.
+        collisional: Keep collisional runs.
+        kinds: Table names to read; all when None.
+
+    Returns:
+        List of row dicts: ``kind``, ``channel``, ``split`` (``test_set`` or ``"train"``),
+        ``stable``, ``Q``, the sat2 inputs ``ky, g, w, dlnpdr, gq, grad_r0`` and the table ``row``.
+    """
     import pandas as pd
 
     rows = []
-    for _, r in pd.read_parquet(f"{summary}/{kind}.parquet").iterrows():
-        if r.run_class != "saturated" or not np.isfinite(r.get("Qi_avg", np.nan)):
+    for kind, table in tables(summary).items():
+        if kinds is not None and kind not in kinds:
             continue
-        if r.get("lin_weight_settled") is False:
-            continue
-        if kind == "kinetic" and not collisional and (r.get("collisionality") or 0.0) > 0.0:
-            continue
-        if r.lin_weight_Qi is None or np.size(r.lin_weight_Qi) == 0:
-            continue
-        if not (np.isfinite(r.get("lin_gq", np.nan)) and np.isfinite(r.get("lin_grad_r0", np.nan))):
-            continue
-        ky, g, w = (np.asarray(x, float) for x in (r.lin_ky, r.lin_gamma, r.lin_weight_Qi))
-        n = min(ky.size, g.size, w.size)
-        ky, g, w = ky[:n], g[:n], w[:n]
-        m = np.isfinite(ky) & (ky > 0) & np.isfinite(g) & np.isfinite(w)
-        if m.sum() < 4 or not (g[m] > 0).any():
-            continue
-        o = np.argsort(ky[m])
-        # lin_ky is k_theta*rho, the rule's physical axis when kthnorm = 1
-        rows.append(dict(ky=ky[m][o], g=np.maximum(g[m], 0.0)[o], w=w[m][o], Q=float(r.Qi_avg),
-                         dlnpdr=float(r.dlnpdr_tglf), gq=float(r.lin_gq),
-                         grad_r0=float(r.lin_grad_r0), row=r))
+        for _, r in table.iterrows():
+            if not collisional and (r.get("collisionality") or 0.0) > 0.0:
+                continue
+            if r.get("lin_gamma") is None or not all(_finite(r, k) for k in ("lin_gq", "lin_grad_r0", "dlnpdr_tglf")):
+                continue
+            split = r.get("test_set")
+            for ch in channels:
+                target, weight, _ = CHANNELS[ch]
+                if target not in r or weight not in r or not _finite(r, target) or r[weight] is None:
+                    continue
+                ky, g, w = (np.asarray(x, float) for x in (r.lin_ky, r.lin_gamma, r[weight]))
+                n = min(ky.size, g.size, w.size)
+                ky, g, w = ky[:n], g[:n], w[:n]
+                m = np.isfinite(ky) & (ky > 0) & np.isfinite(g) & np.isfinite(w)
+                if m.sum() < 4:
+                    continue
+                o = np.argsort(ky[m])
+                # lin_ky is k_theta rho, the rule's physical axis when kthnorm = 1
+                rows.append(dict(
+                    kind=kind, channel=ch, split=split if isinstance(split, str) else TRAIN,
+                    stable=bool(pd.isna(r.get("saturation_time"))), Q=float(r[target]),
+                    ky=ky[m][o], g=np.maximum(g[m], 0.0)[o], w=w[m][o], dlnpdr=float(r.dlnpdr_tglf),
+                    gq=float(r.lin_gq), grad_r0=float(r.lin_grad_r0), row=r,
+                ))
     return rows
 
 
 def sat2_predict(rows, cn, options):
+    """:func:`~gyaradax.quasilinear.rules.ql_flux_sat2` evaluated on summary rows.
+
+    Args:
+        rows: Rows from :func:`summary_rows`.
+        cn: Amplitude calibration.
+        options: Further keyword arguments of the rule.
+
+    Returns:
+        Predicted flux per row.
+    """
+    import jax
     import jax.numpy as jnp
 
     from .rules import ql_flux_sat2
 
-    return np.array([
-        float(ql_flux_sat2(
-            jnp.asarray(r["g"]), None, jnp.ones((1, r["ky"].size)), jnp.asarray(r["w"])[None, :],
-            jnp.asarray(r["ky"]), jnp.zeros(1), None, None, cn=cn, dlnpdr=r["dlnpdr"],
-            kthnorm=1.0, grad_r0=r["grad_r0"], gq=r["gq"], **options,
-        ))
-        for r in rows
-    ])
+    def one(g, w, ky, dlnpdr, grad_r0, gq):
+        return ql_flux_sat2(g, None, jnp.ones((1, ky.size)), w[None, :], ky, jnp.zeros(1), None, None,
+                            cn=cn, dlnpdr=dlnpdr, kthnorm=1.0, grad_r0=grad_r0, gq=gq, **options)
 
-
-def stratified_test(y, frac=0.10, nbin=10, seed=0):
-    """Deterministic test mask: a fraction `frac` of each decile of log(y)."""
-    y = np.asarray(y, float)
-    ok = np.isfinite(y) & (y > 0)
-    mask = np.zeros(y.size, bool)
-    ly = np.full(y.size, np.nan)
-    ly[ok] = np.log10(y[ok])
-    edges = np.nanquantile(ly[ok], np.linspace(0, 1, nbin + 1))
-    edges[-1] += 1e-9
-    rng = np.random.default_rng(seed)
-    for lo, hi in zip(edges[:-1], edges[1:]):
-        idx = np.where(ok & (ly >= lo) & (ly < hi))[0]
-        if idx.size:
-            k = max(1, int(round(frac * idx.size)))
-            mask[rng.choice(idx, size=min(k, idx.size), replace=False)] = True
-    return mask
+    batched = jax.vmap(one)
+    out = np.zeros(len(rows))
+    by_n = {}
+    for i, r in enumerate(rows):
+        by_n.setdefault(r["ky"].size, []).append(i)
+    # rows sharing a ky grid run as one batch
+    for idx in by_n.values():
+        sel = [rows[i] for i in idx]
+        args = [jnp.asarray(np.stack([r[k] for r in sel])) for k in ("g", "w", "ky")]
+        args += [jnp.asarray([r[k] for r in sel]) for k in ("dlnpdr", "grad_r0", "gq")]
+        out[idx] = np.asarray(batched(*args))
+    return out
 
 
 def flux_metrics(y, p):
+    """Error metrics of predicted against true fluxes, over the rows where both are positive.
+
+    Args:
+        y: True fluxes.
+        p: Predicted fluxes.
+
+    Returns:
+        Dict with ``n``, ``rmse``, ``mean_error``, ``rmse_log10`` and ``med_rel``.
+    """
     y, p = np.asarray(y, float), np.asarray(p, float)
     m = np.isfinite(y) & np.isfinite(p) & (y > 0) & (p > 0)
     y, p = y[m], p[m]
+    if not m.any():
+        return dict(n=0)
     return dict(n=int(m.sum()), rmse=float(np.sqrt(np.mean((p - y) ** 2))),
                 mean_error=float(np.mean(p - y)),
                 rmse_log10=float(np.sqrt(np.mean(np.log10(p / y) ** 2))),
@@ -141,8 +203,8 @@ def _best(x_by_p, y, mask, exponents):
     return best[1], best[2]
 
 
-def canonical_inputs(r):
-    """ql_flux inputs of one summary row, from its raw linear-eigenmode columns."""
+def canonical_inputs(r, channel="Qi"):
+    """ql_flux inputs of one summary row and flux channel, from its raw linear-eigenmode columns."""
     from gyaradax.geometry.grids import _build_mode_label
 
     from .rules import kx_chain0
@@ -156,11 +218,16 @@ def canonical_inputs(r):
     nkx, nky = phi2.shape[1:]
     gamma = np.asarray(r.lin_gamma, float)[:nky]
     labels = _build_mode_label(nkx, nky, int(r.lin_ikxspace))
+    if channel == "Qi" and r.get("lin_flux_kxy") is not None:
+        flux = arr("lin_flux_kxy")
+    else:
+        sp, c = CHANNELS[channel][2]
+        flux = arr("lin_flux_kxy_sp")[sp, c]
     return dict(
         growth_rate=np.where(np.isfinite(gamma), gamma, 0.0),
         phi2=phi2,
         phi2_kxy=np.sum(phi2 * ints[:, None, None], axis=0),
-        flux_kxy=arr("lin_flux_kxy"),
+        flux_kxy=flux,
         # little_g carries kthnorm^2, so the rule's krho is lin_ky / kthnorm
         krho=np.asarray(r.lin_ky, float)[:nky] / float(r.kthnorm),
         kxrh=kxrh,
@@ -176,75 +243,94 @@ def canonical_predict(rows, cn):
     from .rules import ql_flux
 
     return np.array([
-        float(ql_flux(cn=cn, **{k: jnp.asarray(v) for k, v in canonical_inputs(r["row"]).items()}))
+        float(ql_flux(cn=cn, **{k: jnp.asarray(v) for k, v in canonical_inputs(r["row"], r["channel"]).items()}))
         for r in rows
     ])
 
 
-def _fit(x_by_p, y, kind, exponents, folds):
-    """(p index, cn) on 90% of each set, with the test and `folds`-fold cross-validation metrics."""
-    test = np.zeros(y.size, bool)
-    for k in SETS:
-        sel = kind == k
-        test[sel] = stratified_test(y[sel])
-    i, cn = _best(x_by_p, y, ~test, exponents)
+def _groups(rows):
+    return sorted({(r["kind"], r["channel"]) for r in rows})
+
+
+def _fit(x_by_p, rows, exponents, folds):
+    """(p index, cn) on the training rows, with cross-validation and held-out metrics.
+
+    The folds split runs, so the channels of one run stay together. Each held-out split
+    (``test_set``) is scored with the fit on all training rows. ``stable_over_1`` is the
+    fraction of stable runs predicted above one gyro-Bohm unit.
+    """
+    y = np.array([r["Q"] for r in rows])
+    split = np.array([r["split"] for r in rows])
+    stable = np.array([r["stable"] for r in rows])
+    train = (split == TRAIN) & ~stable
+    i, cn = _best(x_by_p, y, train, exponents)
     pred = cn * x_by_p[i]
 
-    fold = np.random.default_rng(0).permutation(y.size) % folds
+    runs = np.array([f'{r["kind"]}/{r["row"]["name"]}' for r in rows])
+    uniq = np.unique(runs[split == TRAIN])
+    fold_of = dict(zip(uniq, np.random.default_rng(0).permutation(uniq.size) % folds))
+    fold = np.array([fold_of.get(n, -1) for n in runs])
     cv = np.full(y.size, np.nan)
     for f in range(folds):
-        j, c = _best(x_by_p, y, fold != f, exponents)
-        cv[fold == f] = c * x_by_p[j][fold == f]
+        j, c = _best(x_by_p, y, train & (fold != f), exponents)
+        sel = (split == TRAIN) & (fold == f)
+        cv[sel] = c * x_by_p[j][sel]
+
+    def by_group(p, mask):
+        out = {}
+        for kind, ch in _groups(rows):
+            g = mask & np.array([(r["kind"], r["channel"]) == (kind, ch) for r in rows])
+            if not g.any():
+                continue
+            m = flux_metrics(y[g & ~stable], p[g & ~stable])
+            if (g & stable).any():
+                m["stable_over_1"] = float(np.mean(p[g & stable] > 1.0))
+            out[f"{kind}/{ch}"] = m
+        return out
 
     metrics = dict(
-        n_train={k: int(((kind == k) & ~test).sum()) for k in SETS},
-        test={k: flux_metrics(y[(kind == k) & test], pred[(kind == k) & test]) for k in SETS},
-        cross_validation={k: flux_metrics(y[kind == k], cv[kind == k]) for k in SETS},
+        n_train={f"{k}/{c}": int((train & np.array([(r["kind"], r["channel"]) == (k, c) for r in rows])).sum())
+                 for k, c in _groups(rows)},
+        cross_validation=by_group(cv, split == TRAIN),
+        **{s: by_group(pred, split == s) for s in sorted(set(split) - {TRAIN})},
     )
     return i, cn, metrics
 
 
-def _record(rule, parameters, options, method):
+def _record(rule, parameters, options, method, rows):
     return dict(
         rule=rule,
         parameters=parameters,
         options=options,
-        electrons=list(SETS),
+        electrons=sorted({r["kind"] for r in rows if r["split"] == TRAIN}),
+        channels=sorted({r["channel"] for r in rows if r["split"] == TRAIN}),
         fit=dict(method=f"gyaradax.quasilinear.calibration.{method}",
                  date=datetime.date.today().isoformat()),
     )
 
 
-def _sets(summary, collisional):
-    sets = {k: summary_rows(k, summary, collisional) for k in SETS}
-    kind = np.concatenate([[k] * len(v) for k, v in sets.items()])
-    rows = [r for k in SETS for r in sets[k]]
-    return rows, kind, np.array([r["Q"] for r in rows])
+def fit_canonical(summary, channels=("Qi", "Qe"), collisional=True, folds=10):
+    """(record, metrics) of ql_flux fitted on every summary table together.
 
-
-def fit_canonical(summary, collisional=False, folds=10):
-    """(record, metrics) of ql_flux fitted jointly on the adiabatic and kinetic tables, Qi only.
-
-    One cn, the log-mean ratio over 90% of each set (the test rows are 10% of each log-flux
-    decile), with <k_perp^2> on the kx = 0 chain as `point_eval` evaluates it.
+    One cn, the log-mean ratio over the training rows, with <k_perp^2> on the kx = 0 chain
+    as `point_eval` evaluates it.
     """
-    rows, kind, y = _sets(summary, collisional)
+    rows = summary_rows(summary, channels, collisional)
     x = canonical_predict(rows, 1.0)
-    _, cn, metrics = _fit(x[None], y, kind, [1.0], folds)
-    return _record("canonical", dict(cn=cn), {}, "fit_canonical"), metrics
+    _, cn, metrics = _fit(x[None], rows, [1.0], folds)
+    return _record("canonical", dict(cn=cn), {}, "fit_canonical", rows), metrics
 
 
-def fit_sat2(summary, options=None, collisional=False, exponents=None, folds=10):
-    """(record, metrics) of ql_flux_sat2 fitted on the adiabatic and kinetic tables, Qi only.
+def fit_sat2(summary, options=None, channels=("Qi", "Qe"), collisional=True, exponents=None, folds=10):
+    """(record, metrics) of ql_flux_sat2 fitted on every summary table together.
 
-    p over `exponents`, cn the log-mean ratio over 90% of each set (the test rows are 10% of each
-    log-flux decile), minimising log10 RMSE.
+    p over `exponents`, cn the log-mean ratio over the training rows, minimising log10 RMSE.
     """
     options = dict(options or {"gate_sharpness": 20.0, "kx_width_model": "tglf"})
     exponents = np.arange(0.30, 1.35, 0.01) if exponents is None else np.asarray(exponents)
     exponents = np.round(exponents, 4)
-    rows, kind, y = _sets(summary, collisional)
+    rows = summary_rows(summary, channels, collisional)
     x_by_p = np.array([sat2_predict(rows, 1.0, {**options, "flux_exponent": p}) for p in exponents])
-    i, cn, metrics = _fit(x_by_p, y, kind, exponents, folds)
+    i, cn, metrics = _fit(x_by_p, rows, exponents, folds)
     parameters = dict(cn=cn, flux_exponent=float(exponents[i]))
-    return _record("sat2", parameters, options, "fit_sat2"), metrics
+    return _record("sat2", parameters, options, "fit_sat2", rows), metrics

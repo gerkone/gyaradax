@@ -1,0 +1,23 @@
+{
+ "rule": "sat2",
+ "parameters": {
+  "cn": 0.9719512237940621,
+  "flux_exponent": 0.5
+ },
+ "options": {
+  "gate_sharpness": 20.0,
+  "kx_width_model": "tglf"
+ },
+ "electrons": [
+  "adiabatic",
+  "kinetic"
+ ],
+ "channels": [
+  "Qe",
+  "Qi"
+ ],
+ "fit": {
+  "method": "gyaradax.quasilinear.calibration.fit_sat2",
+  "date": "2026-11-04"
+ }
+}

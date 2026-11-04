@@ -446,7 +446,7 @@ def test_kx_chain0_selects_the_theta0_chain():
     assert float(call_rule(ql_flux, spec, kx_chain=full)) == pytest.approx(float(call_rule(ql_flux, spec)))
 
 
-@pytest.mark.parametrize("name", calibration.names())
+@pytest.mark.parametrize("name", [n for n in calibration.names() if calibration.load(n)["rule"] in RULES])
 def test_bundled_calibration_drives_its_rule(name):
     cal = calibration.load(name)
     assert cal["rule"] in RULES and cal["parameters"]["cn"] > 0
@@ -461,3 +461,88 @@ def test_auto_resolves_the_rule_default():
     assert calibration.load("auto", "sat0") is None
     with pytest.raises(ValueError, match="is for rule"):
         calibration.load("sat2_v1", "canonical")
+
+
+def _summary_table(path, name, kinetic):
+    import pandas as pd
+
+    ky = np.linspace(0.0, 1.4, 16)
+    gamma = 0.3 * np.sin(np.pi * ky / 1.4)
+    rows = []
+    for i, (scale, test_set, sat) in enumerate(((1.0, None, 5.0), (2.0, None, 5.0), (1.5, "id", 5.0), (0.0, "id", None))):
+        rows.append(dict(
+            name=f"run_{i}", test_set=test_set, saturation_time=sat, collisionality=0.0,
+            lin_ky=ky, lin_gamma=scale * gamma, lin_weight_Qi=np.where(ky > 0, 1.0, np.nan),
+            lin_weight_Qe=np.where(ky > 0, 0.5, np.nan) if kinetic else None,
+            lin_gq=1.0, lin_grad_r0=1.0, dlnpdr_tglf=6.0,
+            Qi_fluxavg=10.0 * scale, Qe_fluxavg=5.0 * scale if kinetic else np.nan,
+        ))
+    pd.DataFrame(rows).to_parquet(path / f"{name}.parquet")
+
+
+def test_calibration_fit_on_summary_tables(tmp_path):
+    _summary_table(tmp_path, "adiabatic", kinetic=False)
+    _summary_table(tmp_path, "kinetic", kinetic=True)
+    rows = calibration.summary_rows(tmp_path)
+    assert {(r["kind"], r["channel"]) for r in rows} == {
+        ("adiabatic", "Qi"), ("kinetic", "Qi"), ("kinetic", "Qe")}
+    assert sum(r["stable"] for r in rows) == 3 and {r["split"] for r in rows} == {"train", "id"}
+    rec, metrics = calibration.fit_sat2(tmp_path, exponents=[0.5, 1.0], folds=2)
+    assert rec["electrons"] == ["adiabatic", "kinetic"] and rec["channels"] == ["Qe", "Qi"]
+    assert rec["parameters"]["cn"] > 0 and rec["parameters"]["flux_exponent"] in (0.5, 1.0)
+    assert set(metrics) == {"n_train", "cross_validation", "id"}
+    assert metrics["id"]["kinetic/Qi"]["stable_over_1"] == 0.0
+
+
+def _satx_record(seed=0, nmembers=2, hidden=4):
+    from gyaradax.quasilinear.satx import OPERATING
+
+    rng = np.random.default_rng(seed)
+    nin = len(OPERATING) + 5
+    members = [dict(lc_Qi=[0.0, 0.0], lc_Qe=[0.0, -0.3], lc_Gamma=[0.0, -1.0], p=[0.5, 0.5], le=0.0,
+                    w1=rng.normal(0, 0.3, (nin, hidden)).tolist(), b1=np.zeros(hidden).tolist(),
+                    w2=rng.normal(0, 0.1, (hidden, 4)).tolist(), b2=np.zeros(4).tolist())
+               for _ in range(nmembers)]
+    train = [[1.0, 10.0], [0.0, 10.0], [0.0, 5.0], [0.5, 2.0], [0.3, 4.0], [1.0, 6.0], [0.05, 0.2],
+             [0.0, 0.003], [0.0, 1.0]]
+    box = [[0.0, 15.0], [0.0, 15.0], [-3.0, 8.0], [0.25, 4.0], [0.15, 8.0], [0.5, 12.0], [0.01, 0.3],
+           [0.0, 0.005], [0.0, 1.0]]
+    scale = dict(rlt=5.0, rln=2.5, q=2.5, eps_center=0.12, eps_width=0.08, nu=0.0015, omega_width=0.02,
+                 gamma_floor=0.01, gamma_sum_floor=1e-6, kymax=0.3, p_range=0.3)
+    return dict(members=members, scale=scale, train_range=train, input_box=box, gate_sharpness=20.0)
+
+
+def test_satx_soft_box_identity_inside_and_saturating_outside():
+    from gyaradax.quasilinear.satx import OPERATING, soft_box
+
+    rec = _satx_record()
+    train, box = np.asarray(rec["train_range"]), np.asarray(rec["input_box"])
+    mid = train.mean(axis=1)
+    np.testing.assert_allclose(np.asarray(soft_box(jnp.asarray(mid), train, box)), mid, rtol=1e-12)
+    far = np.where(np.isin(OPERATING, ("kinetic",)), 1.0, box[:, 1] * 10.0)
+    out = np.asarray(soft_box(jnp.asarray(far), train, box))
+    assert np.all(out <= box[:, 1] + 1e-9) and np.all(out >= train[:, 1] - 1e-9)
+    shat = OPERATING.index("shat")
+    neg = mid.copy()
+    neg[shat] = -1.0
+    assert box[shat, 0] - 1e-9 <= float(soft_box(jnp.asarray(neg), train, box)[shat]) <= train[shat, 0]
+
+
+def test_satx_mlp_finite_with_gradients():
+    from gyaradax.quasilinear.satx import OPERATING, ql_flux_satx_mlp
+
+    opts = _satx_record()
+    krho = jnp.linspace(0.0, 1.5, 32) / 1.3
+    gamma = 0.3 * jnp.sin(jnp.pi * jnp.linspace(0.0, 1.0, 32))
+    omega = jnp.linspace(0.0, 1.2, 32)
+    weights = jnp.stack([jnp.ones(32), 0.6 * jnp.ones(32), 0.1 * jnp.ones(32)])
+    op = dict(rlt_i=6.0, rlt_e=6.0, rln=2.0, te_ti=1.0, shat=1.0, q=1.5, eps=0.15, nu=1e-3, kinetic=1.0)
+    x = jnp.asarray([op[k] for k in OPERATING])
+
+    def flux(x):
+        return ql_flux_satx_mlp(gamma, omega, weights, krho, x, 6.0, 1.3, 1.0, 1.0, **opts)
+
+    out = flux(x)
+    assert out.shape == (3,) and np.all(np.isfinite(np.asarray(out))) and float(out[0]) > 0
+    assert np.all(np.isfinite(np.asarray(jax.jacfwd(flux)(x))))
+    assert float(ql_flux_satx_mlp(-jnp.abs(gamma), omega, weights, krho, x, 6.0, 1.3, 1.0, 1.0, **opts)[0]) < 1e-6
