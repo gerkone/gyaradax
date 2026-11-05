@@ -138,7 +138,7 @@ def nonlinear_term_iii(
         exclude_zero_mode: Zero the (kx, ky) = (0, 0) mode.
         mixed_precision: FP32 FFTs.
         ops: Backend operations; built from ``backend`` when None.
-        backend: ``"jax"`` or ``"cuda"``.
+        backend: ``"jax"``, ``"cuda"`` or ``"hip"``.
         use_z2z: Z2Z FFTs in the JAX backend.
 
     Returns:

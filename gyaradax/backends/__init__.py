@@ -1,4 +1,4 @@
-"""Backend selection: :func:`create_ops` returns the JAX or CUDA :class:`SolverOps`.
+"""Backend selection: :func:`create_ops` returns the JAX, CUDA or HIP :class:`SolverOps`.
 
 Example::
 
@@ -7,6 +7,7 @@ Example::
     ops = create_ops(pre)          # CUDA when the library and a GPU are present, else JAX
     ops = create_ops(pre, "jax")   # pure JAX
     ops = create_ops(pre, "cuda")  # CUDA, raises if unavailable
+    ops = create_ops(pre, "hip")   # HIP on AMD GPUs, raises if unavailable
 """
 
 import logging
@@ -26,6 +27,20 @@ def _load_cuda_backend():
     return CUDAOps, is_available
 
 
+def _load_hip_backend():
+    """Import HIP backend objects only when HIP selection needs them."""
+    from gyaradax.backends._hip import HIPOps, is_available
+
+    return HIPOps, is_available
+
+
+def _on_rocm() -> bool:
+    return any(
+        "rocm" in str(getattr(getattr(d, "client", None), "platform_version", ""))
+        for d in jax.devices()
+    )
+
+
 def create_ops(
     pre,
     backend: str = "auto",
@@ -38,8 +53,9 @@ def create_ops(
 
     Args:
         pre: Precomputed coefficients from :func:`~gyaradax.operators.precompute.linear_precompute`.
-        backend: ``"auto"``, ``"jax"`` or ``"cuda"``. ``"auto"`` picks CUDA when a GPU
-            and the compiled library are present and warns when it falls back to JAX on a GPU.
+        backend: ``"auto"``, ``"jax"``, ``"cuda"`` or ``"hip"``. ``"auto"`` picks the vendor
+            kernels when a GPU and the compiled library are present and warns when it falls
+            back to JAX on a GPU.
         use_z2z: Z2Z instead of R2C FFTs in the JAX bracket (the CUDA backend is Z2Z only).
         mixed_precision: FP32 FFTs in the nonlinear bracket; ``False`` keeps FP64.
         mesh: Device mesh of a sharded run (:func:`gyaradax.sharding.build_mesh`); the
@@ -53,6 +69,23 @@ def create_ops(
         z2z_str = " (z2z)" if use_z2z else ""
         mp_str = " (mixed)" if mixed_precision else " (fp64)"
         log.info("Backend: JAX%s%s", z2z_str, mp_str)
+        return JAXOps(pre, use_z2z=use_z2z, mixed_precision=mixed_precision, mesh=mesh)
+
+    if backend == "hip" or (backend == "auto" and _on_rocm()):
+        HIPOps, is_available = _load_hip_backend()
+        if is_available():
+            mp_str = " (mixed)" if mixed_precision else " (fp64)"
+            log.info("Backend: HIP%s", mp_str)
+            return HIPOps(
+                pre,
+                use_z2z=use_z2z,
+                mixed_precision=mixed_precision,
+                mesh=mesh,
+                fused_bracket=fused_bracket,
+            )
+        if backend == "hip":
+            raise RuntimeError("backend='hip' but no ROCm GPU or the HIP library is not built")
+        warn_once(log, "backend 'auto' runs JAX on a GPU: the HIP library is not built")
         return JAXOps(pre, use_z2z=use_z2z, mixed_precision=mixed_precision, mesh=mesh)
 
     if backend in ("cuda", "auto"):
@@ -89,4 +122,4 @@ def create_ops(
             log.info("Backend: JAX (GPU not found or CUDA not available)")
             return JAXOps(pre, use_z2z=use_z2z, mixed_precision=mixed_precision, mesh=mesh)
 
-    raise ValueError(f"Unknown backend: {backend!r}. Use 'jax', 'cuda', or 'auto'.")
+    raise ValueError(f"Unknown backend: {backend!r}. Use 'jax', 'cuda', 'hip' or 'auto'.")

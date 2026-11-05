@@ -55,28 +55,30 @@ def _cuda_zero_mode_index(pre: GKPre, key: str, size: int) -> np.int32:
     return np.int32(idx)
 
 
-def _register_ffi():
+def _register_ffi(lib_path=LIB_PATH, platform="CUDA"):
     global _ffi_registered, _has_bracket_v6, _has_linear_es, _has_collision_rhs, _has_linear_ds
     if _ffi_registered:
         return True
 
-    if not LIB_PATH.exists():
+    if not lib_path.exists():
         return False
 
     try:
-        _lib = ctypes.cdll.LoadLibrary(str(LIB_PATH))
+        _lib = ctypes.cdll.LoadLibrary(str(lib_path))
     except (OSError, AttributeError):
         return False
 
     targets = {
-        # Nonlinear bracket kernels (production variants)
-        "cufft_graph_bracket_true_fp32_ffi": _lib.cufft_graph_bracket_true_fp32_ffi,
-        "cufft_graph_bracket_fp64_ffi": _lib.cufft_graph_bracket_fp64_ffi,
         "linear_rhs_fused_ffi": _lib.linear_rhs_fused_ffi,
         "field_moments_ffi": _lib.field_moments_ffi,
     }
 
-    for name in ("cufft_bracket_v6_fp32_ffi", "cufft_bracket_v6_fp64_ffi"):
+    for name in (
+        "cufft_graph_bracket_true_fp32_ffi",
+        "cufft_graph_bracket_fp64_ffi",
+        "cufft_bracket_v6_fp32_ffi",
+        "cufft_bracket_v6_fp64_ffi",
+    ):
         if hasattr(_lib, name):
             targets[name] = getattr(_lib, name)
     _has_bracket_v6 = "cufft_bracket_v6_fp32_ffi" in targets
@@ -95,7 +97,7 @@ def _register_ffi():
 
     for name, symbol in targets.items():
         try:
-            ffi.register_ffi_target(name, ffi.pycapsule(symbol), platform="CUDA")
+            ffi.register_ffi_target(name, ffi.pycapsule(symbol), platform=platform)
         except (AttributeError, RuntimeError):
             pass
     if hasattr(_lib, "gyaradax_set_warn_hook"):
@@ -107,7 +109,12 @@ def _register_ffi():
 
 def is_available():
     """Check if CUDA FFI kernels are compiled and a GPU is present."""
-    return LIB_PATH.exists() and bool(jax.devices("cuda"))
+    if not LIB_PATH.exists():
+        return False
+    try:
+        return bool(jax.devices("cuda"))
+    except RuntimeError:
+        return False
 
 
 # parallel-stencil taps summed by linear_rhs_fused.cu
@@ -301,6 +308,12 @@ class CUDAOps(SolverOps):
     def tree_unflatten(cls, aux_data, children):
         use_z2z, mixed_precision, mesh, fused_bracket = aux_data
         return cls(children[0], use_z2z, mixed_precision, mesh, fused_bracket)
+
+    def _bracket_row_size(self, fp64, mphi, nky, b_df, nsp, b_inner):
+        return _bracket_v6_row_size(fp64, mphi, nky, b_df, nsp, b_inner)
+
+    def _bracket_kx_size(self, native, nkx, ixzero, strides, fp64):
+        return _bracket_mrad(native, nkx, ixzero, strides, fp64)
 
     def _pack_shift_maps(self):
         """Pack precomputed shift maps into (9, ns, nkx, nky, 2) int32 array."""
@@ -1095,13 +1108,13 @@ class CUDAOps(SolverOps):
         b_df, b_inner = nsp * nv * nmu * ns, n_pot_v * nmu * ns
         vel = ("sp", "vp", "mu") if df.ndim == 6 else ("vp", "mu")
         n_dev = 1 if self.mesh is None else math.prod(self.mesh.shape[a] for a in vel)
-        m_row = _bracket_v6_row_size(fp64, mphi, nky, b_df // n_dev, nsp, b_inner)
+        m_row = self._bracket_row_size(fp64, mphi, nky, b_df // n_dev, nsp, b_inner)
         v6 = m_row is not None
         if v6:
             kernel_name = "cufft_bracket_v6_fp64_ffi" if fp64 else "cufft_bracket_v6_fp32_ffi"
             b_pot = nsp * b_inner * (1 + em)
             strides = ((b_df + b_pot) * (2 * nky - 1), b_df * nky)
-            m = _bracket_mrad(mrad, nkx, ixzero, strides, fp64)
+            m = self._bracket_kx_size(mrad, nkx, ixzero, strides, fp64)
             if (m, m_row) != (mrad, mphi):
                 mrad, mphi = m, m_row
                 jind = build_jind(nkx, mrad, ixzero)

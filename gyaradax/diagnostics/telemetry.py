@@ -91,7 +91,7 @@ class RunTelemetry:
             "env": {
                 k: v
                 for k, v in os.environ.items()
-                if k.startswith(("XLA_", "CUDA_VISIBLE", "GYARADAX_", "JAX_"))
+                if k.startswith(("XLA_", "CUDA_VISIBLE", "HIP_VISIBLE", "GYARADAX_", "JAX_"))
             },
             **info,
         }
