@@ -1,6 +1,7 @@
 """HIP backend for AMD GPUs: the CUDA kernels built with hipcc, and a hipFFT v6 bracket."""
 
 import logging
+import os
 from pathlib import Path
 
 import jax
@@ -8,6 +9,7 @@ import jax
 from gyaradax.backends import _cuda
 from gyaradax.backends.ops import warn_once
 from gyaradax.core.state import GKPre
+from gyaradax.operators.precompute import prime_factors_smallereq_than
 
 log = logging.getLogger(__name__)
 
@@ -47,4 +49,15 @@ class HIPOps(_cuda.CUDAOps):
         return mphi
 
     def _bracket_kx_size(self, native, nkx, ixzero, strides, fp64):
-        return native
+        """Padded kx size: the smallest alias-free 5-smooth length; ``GYARADAX_BRACKET_MRAD`` overrides."""
+        kn, kp = ixzero, nkx - 1 - ixzero
+        m_min = max(2 * kp + kn, 2 * kn + kp) + 1
+        choice = os.environ.get("GYARADAX_BRACKET_MRAD", "auto")
+        if choice == "native":
+            return native
+        if choice != "auto":
+            m = int(choice)
+            if m < m_min:
+                raise ValueError(f"GYARADAX_BRACKET_MRAD={m} aliases: the kx product needs {m_min}")
+            return m
+        return next((m for m in range(m_min, native) if prime_factors_smallereq_than(m, 5)), native)

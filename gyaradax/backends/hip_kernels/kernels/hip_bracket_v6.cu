@@ -1,4 +1,4 @@
-// v6 bracket on hipfft, with the layout of cuda_kernels/kernels/cufft_bracket_v6.cu and every pass explicit:
+// v6 bracket on hipfft, every pass explicit and every fft contiguous:
 //   pack, inverse column fft along mrad, row expand, inverse row fft, bracket into pairs, forward row fft,
 //   hermitian split, forward column fft, unpack
 // exports the ffi symbols of the cuda v6 bracket, so the python call is shared.
@@ -32,62 +32,65 @@ template <> struct Prec<double> {
     }
 };
 
-// one thread per element: blocks cycle over the range when n exceeds the launch limit
-#define GYX_ELEMENTS(k, n) \
-    for (unsigned long long k = blockIdx.x * (unsigned long long)blockDim.x + threadIdx.x; k < (n); \
-         k += (unsigned long long)gridDim.x * blockDim.x)
+// flat launches: one thread per element, 32-bit element index
+#define GYX_INDEX(k) const unsigned k = blockIdx.x * blockDim.x + threadIdx.x
 
-static inline unsigned gyx_blocks(unsigned long long n) {
-    const unsigned long long blocks = (n + 255) / 256;
-    return (unsigned)(blocks < 65535ull * 64 ? blocks : 65535ull * 64);
-}
+constexpr unsigned GYX_WG = 1024;
+static inline unsigned gyx_blocks(unsigned long long n) { return (unsigned)((n + GYX_WG - 1) / GYX_WG); }
 
+// a: [n_planes][n_cols][mrad]
 template <class T>
-__global__ void pack_kernel(typename Prec<T>::cplx* a, const V6ColInfo ci, unsigned long long n) {
-    GYX_ELEMENTS(k, n) {
-        int gb, i, j;
-        v6_col_split(k, &ci, &gb, &i, &j);
-        if constexpr (sizeof(T) == 4) a[k] = v5_z2z_true_fp32_pack_at(gb, i, j, &ci.z);
-        else a[k] = v5_z2z_pack_at(gb, i, j, &ci.z);
-    }
+__global__ void pack_kernel(typename Prec<T>::cplx* a, const V6ColInfo ci, unsigned n) {
+    GYX_INDEX(k);
+    if (k >= n) return;
+    const unsigned mrad = ci.z.mrad;
+    const int i = k % mrad;
+    const unsigned r = k / mrad;
+    const int gb = r / ci.n_cols;
+    const int j = v6_col_to_j(r - gb * ci.n_cols, ci.z.nky, ci.z.mphi);
+    if constexpr (sizeof(T) == 4) a[k] = v5_z2z_true_fp32_pack_at(gb, i, j, &ci.z);
+    else a[k] = v5_z2z_pack_at(gb, i, j, &ci.z);
 }
 
-// retained columns -> full rows of length mphi, zero in the dealiased band
+// retained columns -> rows: [n_planes][mrad][mphi], zero in the dealiased band
 template <class T>
 __global__ void expand_kernel(const typename Prec<T>::cplx* __restrict__ a, typename Prec<T>::cplx* __restrict__ rows,
-                              int n_cols, int mphi, int nky, unsigned long long n) {
+                              int n_cols, int mrad, int mphi, int nky, unsigned n) {
     using C = typename Prec<T>::cplx;
-    GYX_ELEMENTS(k, n) {
-        const unsigned long long row = k / mphi;
-        const int j = (int)(k - row * mphi);
-        int jj = -1;
-        if (j < nky) jj = j;
-        else if (j > mphi - nky) jj = j - (mphi - 2 * nky + 1);
-        rows[k] = jj >= 0 ? a[row * n_cols + jj] : C{T(0), T(0)};
-    }
+    GYX_INDEX(k);
+    if (k >= n) return;
+    const unsigned r = k / mphi;
+    const int j = k - r * mphi;
+    int jj = -1;
+    if (j < nky) jj = j;
+    else if (j > mphi - nky) jj = j - (mphi - 2 * nky + 1);
+    if (jj < 0) { rows[k] = C{T(0), T(0)}; return; }
+    const unsigned gb = r / mrad;
+    const unsigned i = r - gb * mrad;
+    rows[k] = a[(gb * n_cols + jj) * mrad + i];
 }
 
 template <class T>
 struct BracketArgs {
-    const typename Prec<T>::cplx* rows;  // [mrad][n_planes][mphi]
-    typename Prec<T>::cplx*       z;     // [mrad][n_pairs][mphi]
+    const typename Prec<T>::cplx* rows;  // [n_planes][mrad][mphi]
+    typename Prec<T>::cplx*       z;     // [n_pairs][mrad][mphi]
     const double* dum_s;
     const double* vfac;
-    int n_pairs, n_planes, b_df, b_phi, b_sp, b_inner, nv, nspec, mphi, em;
+    int mrad, b_df, b_phi, b_sp, b_inner, nv, nspec, mphi, em;
     T scale;
 };
 
+// real bracket value of df plane gb at offset rij inside a plane
 template <class T>
-__device__ __forceinline__ T bracket_at(const BracketArgs<T>& a, unsigned long long i, int gb, int j) {
+__device__ __forceinline__ T bracket_at(const BracketArgs<T>& a, unsigned plane, unsigned rij, int gb) {
     using C = typename Prec<T>::cplx;
-    const unsigned long long plane0 = i * a.n_planes;
-    const C x = a.rows[(plane0 + gb) * a.mphi + j];
+    const C x = a.rows[gb * plane + rij];
     const int pidx = (gb / a.b_sp) * a.b_inner + gb % a.b_inner;
-    const unsigned long long pot = (plane0 + a.b_df + pidx) * a.mphi + j;
+    const unsigned pot = (a.b_df + pidx) * plane + rij;
     C p = a.rows[pot];
     if (a.em) {
         const T w = (T)a.vfac[(gb / a.b_sp) * a.nv + (gb % a.b_sp) / a.b_inner];
-        const C q = a.rows[pot + (unsigned long long)a.b_phi * a.mphi];
+        const C q = a.rows[pot + a.b_phi * plane];
         p = C{p.x + w * q.x, p.y + w * q.y};
     }
     return a.scale * (T)a.dum_s[gb % a.nspec] * (p.x * x.y - p.y * x.x);
@@ -95,50 +98,48 @@ __device__ __forceinline__ T bracket_at(const BracketArgs<T>& a, unsigned long l
 
 // two real bracket planes as the real and imaginary part of one complex row
 template <class T>
-__global__ void bracket_kernel(const BracketArgs<T> a, unsigned long long n) {
-    GYX_ELEMENTS(k, n) {
-        const unsigned long long row = k / a.mphi;
-        const int j = (int)(k - row * a.mphi);
-        const unsigned long long i = row / a.n_pairs;
-        const int gb0 = 2 * (int)(row - i * a.n_pairs);
-        const T br0 = bracket_at<T>(a, i, gb0, j);
-        const T br1 = gb0 + 1 < a.b_df ? bracket_at<T>(a, i, gb0 + 1, j) : T(0);
-        a.z[k] = typename Prec<T>::cplx{br0, br1};
-    }
+__global__ void bracket_kernel(const BracketArgs<T> a, unsigned n) {
+    GYX_INDEX(k);
+    if (k >= n) return;
+    const unsigned plane = (unsigned)a.mrad * a.mphi;
+    const unsigned pair = k / plane;
+    const unsigned rij = k - pair * plane;
+    const int gb0 = 2 * pair;
+    const T br0 = bracket_at<T>(a, plane, rij, gb0);
+    const T br1 = gb0 + 1 < a.b_df ? bracket_at<T>(a, plane, rij, gb0 + 1) : T(0);
+    a.z[k] = typename Prec<T>::cplx{br0, br1};
 }
 
-// X[k] = (Z[k] + conj Z[N-k]) / 2, Y[k] = (Z[k] - conj Z[N-k]) / 2i
+// X[k] = (Z[k] + conj Z[N-k]) / 2, Y[k] = (Z[k] - conj Z[N-k]) / 2i; b: [b_df][nky][mrad]
 template <class T>
 __global__ void split_kernel(const typename Prec<T>::cplx* __restrict__ z, typename Prec<T>::cplx* __restrict__ b,
-                             int n_pairs, int b_df, int nky, int mphi, unsigned long long n) {
+                             int mrad, int mphi, int nky, unsigned n) {
     using C = typename Prec<T>::cplx;
-    GYX_ELEMENTS(t, n) {
-        const unsigned long long r = t / nky;
-        const int q = (int)(t - r * nky);
-        const unsigned long long i = r / b_df;
-        const int gb = (int)(r - i * b_df);
-        const unsigned long long row = (i * n_pairs + gb / 2) * mphi;
-        const C zk = z[row + q];
-        const C zm = z[row + (mphi - q) % mphi];
-        b[t] = (gb & 1) == 0 ? C{T(0.5) * (zk.x + zm.x), T(0.5) * (zk.y - zm.y)}
-                             : C{T(0.5) * (zk.y + zm.y), T(0.5) * (zm.x - zk.x)};
-    }
+    GYX_INDEX(t);
+    if (t >= n) return;
+    const unsigned r = t / mrad;
+    const unsigned i = t - r * mrad;
+    const unsigned gb = r / nky;
+    const unsigned q = r - gb * nky;
+    const unsigned row = ((gb / 2) * mrad + i) * mphi;
+    const C zk = z[row + q], zm = z[row + (mphi - q) % mphi];
+    b[t] = (gb & 1) == 0 ? C{T(0.5) * (zk.x + zm.x), T(0.5) * (zk.y - zm.y)}
+                         : C{T(0.5) * (zk.y + zm.y), T(0.5) * (zm.x - zk.x)};
 }
 
 template <class T>
 __global__ void unpack_kernel(const typename Prec<T>::cplx* __restrict__ b, const V6StoreInfo si,
-                              const int* __restrict__ jind) {
-    const unsigned long long n = (unsigned long long)si.n_df * si.nkx * si.nky;
-    GYX_ELEMENTS(t, n) {
-        const int k = (int)(t % si.nky);
-        const unsigned long long r = t / si.nky;
-        const int i_pack = (int)(r % si.nkx);
-        const int gb = (int)(r / si.nkx);
-        const typename Prec<T>::cplx v = b[((unsigned long long)jind[i_pack] * si.n_df + gb) * si.nky + k];
-        const double2 u = (i_pack == si.ixzero && k == si.iyzero) ? make_double2(0.0, 0.0)
-                                                                  : make_double2((double)v.x, (double)v.y);
-        si.out_packed[t] = si.fold ? v6_scale_c(si.scale_re, si.scale_im, u.x, u.y) : u;
-    }
+                              const int* __restrict__ jind, int mrad, unsigned n) {
+    GYX_INDEX(t);
+    if (t >= n) return;
+    const unsigned r = t / si.nky;
+    const int k = t - r * si.nky;
+    const unsigned gb = r / si.nkx;
+    const int i_pack = r - gb * si.nkx;
+    const typename Prec<T>::cplx v = b[(gb * si.nky + k) * mrad + jind[i_pack]];
+    const double2 u = (i_pack == si.ixzero && k == si.iyzero) ? make_double2(0.0, 0.0)
+                                                              : make_double2((double)v.x, (double)v.y);
+    si.out_packed[t] = si.fold ? v6_scale_c(si.scale_re, si.scale_im, u.x, u.y) : u;
 }
 
 struct Key {
@@ -171,13 +172,14 @@ std::mutex g_mutex;
     if (res_ != HIPFFT_SUCCESS) return xla_ffi::Error::Internal(std::string("hipFFT code ") + std::to_string((int)res_)); \
 } while (0)
 
+// batch of contiguous transforms of length len
 template <class T>
-hipfftResult make_plan(hipfftHandle* plan, int len, int stride, int dist, int batch) {
-    int n[1] = {len}, emb[1] = {len};
+hipfftResult make_plan(hipfftHandle* plan, int len, int batch) {
+    int n[1] = {len};
     size_t ws = 0;
     hipfftResult r = hipfftCreate(plan);
     if (r != HIPFFT_SUCCESS) return r;
-    return hipfftMakePlanMany(*plan, 1, n, emb, stride, dist, emb, stride, dist, Prec<T>::type, batch, &ws);
+    return hipfftMakePlanMany(*plan, 1, n, nullptr, 1, len, nullptr, 1, len, Prec<T>::type, batch, &ws);
 }
 
 template <class T>
@@ -218,6 +220,9 @@ xla_ffi::Error BracketImpl(
     const unsigned long long n_rows = (unsigned long long)mrad * n_planes * mphi;
     const unsigned long long n_z = (unsigned long long)mrad * n_pairs * mphi;
     const unsigned long long n_b = (unsigned long long)mrad * b_df * nky;
+    const unsigned long long n_out = (unsigned long long)b_df * nkx * nky;
+    if (n_rows >> 32 || n_a >> 32)
+        return xla_ffi::Error(XLA_FFI_Error_Code_INVALID_ARGUMENT, "bracket: grid exceeds 32-bit element indices");
 
     Key key = {device, b_df, b_pot, mrad, mphi, nkx, nky, em, sizeof(T) == 8};
     std::lock_guard<std::mutex> lock(g_mutex);
@@ -229,11 +234,10 @@ xla_ffi::Error BracketImpl(
         CHECK_HIP(hipMalloc(&s->rows, n_rows * sizeof(C)));
         CHECK_HIP(hipMalloc(&s->z, n_z * sizeof(C)));
         CHECK_HIP(hipMalloc(&s->b, n_b * sizeof(C)));
-        const int col_stride = n_planes * n_cols, out_stride = b_df * nky;
-        CHECK_FFT(make_plan<T>(&s->col_inv, mrad, col_stride, 1, col_stride));
-        CHECK_FFT(make_plan<T>(&s->row_inv, mphi, 1, mphi, mrad * n_planes));
-        CHECK_FFT(make_plan<T>(&s->row_fwd, mphi, 1, mphi, mrad * n_pairs));
-        CHECK_FFT(make_plan<T>(&s->col_fwd, mrad, out_stride, 1, out_stride));
+        CHECK_FFT(make_plan<T>(&s->col_inv, mrad, n_planes * n_cols));
+        CHECK_FFT(make_plan<T>(&s->row_inv, mphi, mrad * n_planes));
+        CHECK_FFT(make_plan<T>(&s->row_fwd, mphi, mrad * n_pairs));
+        CHECK_FFT(make_plan<T>(&s->col_fwd, mrad, b_df * nky));
     }
     for (hipfftHandle p : {s->col_inv, s->row_inv, s->row_fwd, s->col_fwd}) CHECK_FFT(hipfftSetStream(p, stream));
 
@@ -243,24 +247,24 @@ xla_ffi::Error BracketImpl(
     const V6StoreInfo store = {(double2*)out->typed_data(), inverse_jind.typed_data(), mrad, b_df, nkx, nky,
                                ixzero, iyzero, fold, out_scale_re, out_scale_im};
     const T scale = (T)(1.0 / ((double)mrad * mphi * (double)mrad * mphi));
-    const BracketArgs<T> args = {(const C*)s->rows, (C*)s->z, dum_s.typed_data(), vfac.typed_data(), n_pairs, n_planes,
+    const BracketArgs<T> args = {(const C*)s->rows, (C*)s->z, dum_s.typed_data(), vfac.typed_data(), mrad,
                                  b_df, b_phi, b_sp, b_inner, nv, nspec, mphi, em, scale};
 
-    pack_kernel<T><<<gyx_blocks(n_a), 256, 0, stream>>>((C*)s->a, col, n_a);
+    pack_kernel<T><<<gyx_blocks(n_a), GYX_WG, 0, stream>>>((C*)s->a, col, (unsigned)n_a);
     CHECK_HIP(hipGetLastError());
     CHECK_FFT(Prec<T>::exec(s->col_inv, (C*)s->a, HIPFFT_BACKWARD));
-    expand_kernel<T><<<gyx_blocks(n_rows), 256, 0, stream>>>((const C*)s->a, (C*)s->rows, n_cols, mphi, nky, n_rows);
+    expand_kernel<T><<<gyx_blocks(n_rows), GYX_WG, 0, stream>>>((const C*)s->a, (C*)s->rows, n_cols, mrad, mphi, nky, (unsigned)n_rows);
     CHECK_HIP(hipGetLastError());
     CHECK_FFT(Prec<T>::exec(s->row_inv, (C*)s->rows, HIPFFT_BACKWARD));
-    bracket_kernel<T><<<gyx_blocks(n_z), 256, 0, stream>>>(args, n_z);
+    bracket_kernel<T><<<gyx_blocks(n_z), GYX_WG, 0, stream>>>(args, (unsigned)n_z);
     CHECK_HIP(hipGetLastError());
     CHECK_FFT(Prec<T>::exec(s->row_fwd, (C*)s->z, HIPFFT_FORWARD));
-    split_kernel<T><<<gyx_blocks(n_b), 256, 0, stream>>>((const C*)s->z, (C*)s->b, n_pairs, b_df, nky, mphi, n_b);
+    split_kernel<T><<<gyx_blocks(n_b), GYX_WG, 0, stream>>>((const C*)s->z, (C*)s->b, mrad, mphi, nky, (unsigned)n_b);
     CHECK_HIP(hipGetLastError());
     CHECK_FFT(Prec<T>::exec(s->col_fwd, (C*)s->b, HIPFFT_FORWARD));
-    unpack_kernel<T><<<gyx_blocks((unsigned long long)b_df * nkx * nky), 256, 0, stream>>>((const C*)s->b, store,
-                                                                                         jind.typed_data());
+    unpack_kernel<T><<<gyx_blocks(n_out), GYX_WG, 0, stream>>>((const C*)s->b, store, jind.typed_data(), mrad, (unsigned)n_out);
     CHECK_HIP(hipGetLastError());
+   
     return xla_ffi::Error::Success();
 }
 
