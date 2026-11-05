@@ -65,7 +65,8 @@ def _register_ffi():
 
     try:
         _lib = ctypes.cdll.LoadLibrary(str(LIB_PATH))
-    except (OSError, AttributeError):
+    except (OSError, AttributeError) as exc:
+        log.warning("CUDA library failed to load: %s", exc)
         return False
 
     targets = {

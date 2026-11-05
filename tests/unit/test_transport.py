@@ -9,14 +9,12 @@ pytest.importorskip("torax")
 
 import jax.numpy as jnp
 import torax
-from torax._src.config import build_runtime_params
-from torax._src.core_profiles import initialization
-from torax._src.test_utils import default_configs
+from torax._src.test_utils import core_profile_helpers, default_configs
 
 from gyaradax.quasilinear import calibration
 from gyaradax.transport import GyaradaxNLConfig, GyaradaxQLConfig, GyaradaxQLTransportModel
-from gyaradax.transport import diagnostics, units
-from gyaradax.transport.base import topology
+from gyaradax.transport import diagnostics
+from gyaradax.transport.base import face_profiles, quasilinear_inputs, topology
 
 GRID = dict(nvpar=32, nmu=8, ns=16, nkx=85, nky=32, ikxspace=5, krhomax=1.4)
 
@@ -29,21 +27,15 @@ def torax_config(transport):
 
 def transport_call(transport):
     tc = torax_config(transport)
-    rp = build_runtime_params.RuntimeParamsProvider.from_config(tc)(t=tc.numerics.t_initial)
-    geo = tc.geometry.build_provider(t=tc.numerics.t_initial)
-    cp = initialization.initial_core_profiles(
-        runtime_params=rp,
-        geo=geo,
-        source_models=tc.sources.build_models(),
-        neoclassical_model=tc.neoclassical.build_model(),
-    )
+    cp, rp, geo = core_profile_helpers.make_initial_inputs(tc)
     model = tc.transport.core_transport_models["gyaradax"].build_transport_model()
-    coeffs = model.call_implementation(
+    coeffs, _ = model.call_implementation(
         rp.transport.core_transport_model_params["gyaradax"],
         rp,
         geo,
         cp,
         np.zeros_like(geo.rho_face_norm, dtype=bool),
+        model.initial_state(rp),
     )
     return model, coeffs, geo, cp
 
@@ -59,9 +51,9 @@ def build(**fields):
 def test_fluxes_reach_torax_in_its_units(monkeypatch):
     monkeypatch.setattr(GyaradaxQLTransportModel, "_per_radius", constant_flux)
     _, coeffs, geo, cp = transport_call({"model_name": "ql-gyx", **GRID})
-    qli = units.build_quasilinear_inputs(cp, geo)
-    # 1 GKW gyroBohm -> chi = 2 sqrt(2) chiGB / (R/L_T); the axis has R/L_T -> 0
-    gkw = 2.0 * math.sqrt(2.0) * np.asarray(qli.chiGB)
+    qli = quasilinear_inputs(cp, geo)
+    # 1 GKW gyroBohm -> chi = 2 sqrt(2) chiGB(L_ref = R) / (R/L_T); the axis has R/L_T -> 0
+    gkw = 2.0 * math.sqrt(2.0) * np.asarray(qli.chiGB) * float(geo.a_minor / geo.R_major)
     np.testing.assert_allclose(
         np.asarray(coeffs.chi_face_ion)[1:], (gkw / np.asarray(qli.lref_over_lti))[1:], rtol=1e-6
     )
@@ -146,7 +138,7 @@ def test_diagnostics_rows(monkeypatch, tmp_path):
         {"model_name": "ql-gyx", "rho_match": (0.3, 0.6), "diagnostics_path": path, **GRID}
     )
     rows = diagnostics.load_jsonl(path)
-    assert sorted((r["call"], r["radius"]) for r in rows) == [(0, 0), (0, 1)]
+    assert {r["radius"] for r in rows if r["call"] == rows[-1]["call"]} == {0, 1}
     assert len({r["rho_face"] for r in rows}) == 2
     assert all(r["qi_gb"] == 1.0 and isinstance(r["shat"], float) for r in rows)
 
@@ -195,18 +187,29 @@ def test_radius_params_carry_collisions_and_shat_ikxspace(monkeypatch):
     monkeypatch.setattr(GyaradaxQLTransportModel, "_per_radius", record)
     fields = {"model_name": "ql-gyx", "rho_match": (0.3, 0.7), **GRID, "ikxspace_choices": (1, 2, 4, 8)}
     model, _, geo, cp = transport_call(fields)
-    qli = units.build_quasilinear_inputs(cp, geo)
+    qli = quasilinear_inputs(cp, geo)
     seen.clear()
-    model._per_radius_from_profiles(10, qli, cp, geo)
+    model._per_radius_from_profiles(10, qli, face_profiles(cp, geo), geo)
     params, geom = seen[0]
     assert params.collisions
-    np.testing.assert_allclose(float(params.coll_nref), float(cp.n_e.face_value()[10]) / 1e19)
-    np.testing.assert_allclose(float(params.coll_tref), float(cp.T_i.face_value()[10]))
+    np.testing.assert_allclose(float(params.coll_nref), float(cp.kinetic.n_e.face_value()[10]) / 1e19)
+    np.testing.assert_allclose(float(params.coll_tref), float(cp.kinetic.T_i.face_value()[10]))
     np.testing.assert_allclose(float(params.coll_rref), float(geo.R_major))
     want = (1, 2, 4, 8)[int(np.searchsorted((1, 2, 4, 8), np.floor(6.53 * abs(float(params.shat))), "right")) - 1]
     ref = topology(GRID["nkx"], GRID["nky"], max(want, 1), GRID["ns"])
     np.testing.assert_array_equal(np.asarray(geom["mode_label"]), np.asarray(ref["mode_label"]))
     off = build(**{**fields, "collisions": False})
     seen.clear()
-    off._per_radius_from_profiles(10, qli, cp, geo)
+    off._per_radius_from_profiles(10, qli, face_profiles(cp, geo), geo)
     assert not seen[0][0].collisions
+
+
+def test_loop_batching_runs_a_simulation(monkeypatch):
+    def stiff_flux(self, params, geom):
+        q_i = 0.5 * jnp.maximum(params.rlt - 4.0, 0.0) ** 1.5
+        return q_i, q_i, jnp.asarray(0.0), {}
+
+    monkeypatch.setattr(GyaradaxQLTransportModel, "_per_radius", stiff_flux)
+    tc = torax_config({"model_name": "ql-gyx", "rho_match": (0.3, 0.6, 0.85), "batching": "loop", **GRID})
+    history = torax.run_simulation(tc, progress_bar=False, max_steps=2)
+    assert np.all(np.isfinite(np.asarray(history.simulation_output_to_xr().profiles.T_i)))

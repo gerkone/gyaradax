@@ -10,17 +10,8 @@ from .base import GyaradaxConfig, GyaradaxTransportModel, ikxspace_for_shat
 from .nl import GyaradaxNLConfig, GyaradaxNLTransportModel
 from .ql import GyaradaxQLConfig, GyaradaxQLTransportModel
 
-_REGISTERED = set()
-
-
-def register(*configs) -> None:
-    for config in configs or (GyaradaxQLConfig, GyaradaxNLConfig):
-        if config not in _REGISTERED:
-            _transport.register_transport_model(config)
-            _REGISTERED.add(config)
-
-
-register()
+_transport.register_transport_model(GyaradaxQLConfig)
+_transport.register_transport_model(GyaradaxNLConfig)
 
 __all__ = [
     "GyaradaxConfig",

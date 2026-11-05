@@ -2,8 +2,8 @@
 
 `GyaradaxTransportModel` owns what does not depend on how the fluxes are produced: the
 flux-tube grid, the local GKParams and geometry at each `rho_match` radius, the batching over
-radii, the GKW gyroBohm -> TORAX conversion and the diagnostics sink. Subclasses supply
-the flux model through `_per_radius` (or `_per_radius_from_profiles`).
+radii and the diagnostics sink. Subclasses supply the flux model through `_per_radius`. TORAX's
+QuaLiKiz base class turns the gyroBohm fluxes into transport coefficients.
 """
 
 import dataclasses
@@ -17,19 +17,17 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pydantic
-import torax
-from torax import transport
-from torax._src import constants
+from torax import constants, torax_pydantic, transport
 from torax._src.physics import psi_calculations
+from torax._src.transport_model import qualikiz_based_transport_model as qualikiz
 from torax._src.transport_model import quasilinear_utils
 
 from gyaradax.core.params import GKParams
 from gyaradax.geometry import build_topology, compute_continuous_geometry
 
 from . import diagnostics as diag_lib
-from . import units
 
-STATIC = torax.JAX_STATIC
+STATIC = torax_pydantic.JAX_STATIC
 
 _RLT_MIN, _RLT_MAX = 0.0, 30.0
 _RLN_MIN, _RLN_MAX = -15.0, 15.0
@@ -56,6 +54,8 @@ _GRID_PRESETS = {
 }
 # ikxspace = floor(slope |shat|) per radius
 _IKXSPACE_PER_SHAT = 6.53
+# (sqrt 2)^3 from gyaradax's v_th = sqrt(2T/m) against sqrt(T/m)
+_VTH_SQRT2_FLUX_FACTOR = 2.0 * math.sqrt(2.0)
 # ikxspace values the shat rule snaps to; each costs one prebuilt topology
 _IKXSPACE_CHOICES = {"adiabatic": (), "kinetic": (1, 2, 3, 4, 6, 8, 12, 16)}
 
@@ -70,9 +70,42 @@ def ikxspace_for_shat(shat, choices, slope: float = _IKXSPACE_PER_SHAT):
 @jax.tree_util.register_dataclass
 @dataclasses.dataclass(frozen=True)
 class RuntimeParams(transport.ComponentRuntimeParams):
-    DV_effective: bool = dataclasses.field(metadata={"static": True})
+    DV_effective: bool = jax.tree.static()
     An_min: float
     DV_effective_smooth_width: float
+
+
+@jax.tree_util.register_dataclass
+@dataclasses.dataclass(frozen=True)
+class QuasilinearInputs:
+    """Face-grid chiGB (L_ref = a_minor) and R/L gradients, as TORAX's QuaLiKiz models use them."""
+
+    chiGB: jax.Array
+    lref_over_lti: jax.Array
+    lref_over_lte: jax.Array
+    lref_over_lne: jax.Array
+
+
+def quasilinear_inputs(core_profiles, geo, two_point_mask=None) -> QuasilinearInputs:
+    grads = quasilinear_utils.NormalizedLogarithmicGradients.from_profiles(
+        core_profiles=core_profiles,
+        radial_coordinate=geo.r_mid,
+        radial_face_coordinate=geo.r_mid_face,
+        reference_length=geo.R_major,
+        two_point_mask=two_point_mask,
+    )
+    chi_gb = quasilinear_utils.calculate_chiGB(
+        reference_temperature=core_profiles.kinetic.T_i.face_value(),
+        reference_magnetic_field=geo.B_0,
+        reference_mass=core_profiles.ions.A_i,
+        reference_length=geo.a_minor,
+    )
+    return QuasilinearInputs(chi_gb, grads.lref_over_lti, grads.lref_over_lte, grads.lref_over_lne)
+
+
+def gkw_to_qualikiz_flux(geo):
+    """Factor from GKW gyroBohm fluxes (R, v_th with sqrt 2) to TORAX's QuaLiKiz ones (a_minor, T_i)."""
+    return _VTH_SQRT2_FLUX_FACTOR * (geo.a_minor / geo.R_major) ** 2
 
 
 @lru_cache(maxsize=8)
@@ -128,6 +161,7 @@ def resolve_grid(cfg) -> dict:
             f"gyaradax nkx must be odd (got {grid['nkx']}): the kx grid is symmetric about "
             f"kx=0. Use {int(grid['nkx']) - 1}."
         )
+    grid = {k: int(v) if k != "krhomax" else float(v) for k, v in grid.items()}
     for key, floor in _GRID_FLOOR.items():
         if int(grid[key]) < floor:
             warnings.warn(
@@ -172,18 +206,33 @@ def face_indices_for_radii(geo, rho_match: Tuple[float, ...]) -> jax.Array:
     return jnp.argmin(jnp.abs(rho_face[:, None] - jnp.asarray(rho_match)[None, :]), axis=0)
 
 
-def gkparams_for_radius(rho_idx, ql_inputs, core_profiles, geo, config) -> GKParams:
+def face_profiles(core_profiles, geo) -> Dict[str, jax.Array]:
+    """Face-grid profiles the flux tubes need, computed once outside the loop over radii.
+
+    TORAX caches derived grids on its profile objects (cached properties); computing them
+    inside a scan or shard_map over radii would leak tracers into that cache.
+    """
+    kinetic = core_profiles.kinetic
+    return dict(
+        q=core_profiles.poloidal_flux.q_face,
+        shat=psi_calculations.calc_s_rmid(geo, core_profiles.poloidal_flux.psi),
+        eps=jnp.asarray(geo.epsilon_face),
+        n_e=kinetic.n_e.face_value(),
+        T_i=kinetic.T_i.face_value(),
+        T_e=kinetic.T_e.face_value(),
+    )
+
+
+def gkparams_for_radius(rho_idx, ql_inputs, faces, geo, config) -> GKParams:
     """Local GKParams of one flux tube, clipped into the model's operating box."""
     rlt = jnp.clip(ql_inputs.lref_over_lti[rho_idx], *config.clip_rlt)
     rln = jnp.clip(ql_inputs.lref_over_lne[rho_idx], *config.clip_rln)
-    q = jnp.clip(core_profiles.q_face[rho_idx], *config.clip_q)
-    shat = jnp.clip(
-        psi_calculations.calc_s_rmid(geo, core_profiles.psi)[rho_idx], *config.clip_shat
-    )
-    eps = jnp.clip(jnp.asarray(geo.epsilon_face)[rho_idx], *config.clip_eps)
+    q = jnp.clip(faces["q"][rho_idx], *config.clip_q)
+    shat = jnp.clip(faces["shat"][rho_idx], *config.clip_shat)
+    eps = jnp.clip(faces["eps"][rho_idx], *config.clip_eps)
     if config.em:
-        n_e = core_profiles.n_e.face_value()[rho_idx]
-        t_i = core_profiles.T_i.face_value()[rho_idx] * constants.CONSTANTS.keV_to_J
+        n_e = faces["n_e"][rho_idx]
+        t_i = faces["T_i"][rho_idx] * constants.CONSTANTS.keV_to_J
         beta = jnp.clip(
             2.0 * constants.CONSTANTS.mu_0 * n_e * t_i / geo.B_0**2, 0.0, config.beta_max
         )
@@ -192,7 +241,7 @@ def gkparams_for_radius(rho_idx, ql_inputs, core_profiles, geo, config) -> GKPar
     if config.kinetic:
         # [ion, electron] with T_ref = T_i; one rln for both (gradient quasineutrality)
         rlt_e = jnp.clip(ql_inputs.lref_over_lte[rho_idx], *config.clip_rlt)
-        te_ti = core_profiles.T_e.face_value()[rho_idx] / core_profiles.T_i.face_value()[rho_idx]
+        te_ti = faces["T_e"][rho_idx] / faces["T_i"][rho_idx]
         tmp = jnp.stack([jnp.ones_like(te_ti), te_ti])
         mas = jnp.array([1.0, config.electron_mass_ratio])
         species = dict(
@@ -213,8 +262,8 @@ def gkparams_for_radius(rho_idx, ql_inputs, core_profiles, geo, config) -> GKPar
         coll = dict(
             collisions=True,
             coll_rref=jnp.asarray(geo.R_major, dtype=jnp.float64),
-            coll_nref=core_profiles.n_e.face_value()[rho_idx] / _COLL_NREF_UNIT,
-            coll_tref=core_profiles.T_i.face_value()[rho_idx],
+            coll_nref=faces["n_e"][rho_idx] / _COLL_NREF_UNIT,
+            coll_tref=faces["T_i"][rho_idx],
         )
     return GKParams(
         q=q,
@@ -256,151 +305,61 @@ def geometry_at(q, shat, eps, config, topo: Dict[str, Any], ikxspace=None) -> Di
 
 
 @dataclasses.dataclass(kw_only=True, frozen=True, eq=False)
-class GyaradaxTransportModel(transport.ComponentTransportModel):
+class GyaradaxTransportModel(qualikiz.QualikizBasedTransportModel):
     """Grid, geometry and TORAX wiring shared by the gyaradax transport models."""
 
-    rho_match: Tuple[float, ...] = (0.35, 0.55, 0.75, 0.875)
-    backend: str = "jax"
-    mixed_precision: bool = True
-    fused_linear: bool = True
-    linear_arith: str = "fp64"
-    batching: str = "devices"
-    nvpar: int = 32
-    nmu: int = 8
-    ns: int = 16
-    nkx: int = 85
-    nky: int = 32
-    ikxspace: int = 5
-    krhomax: float = 1.4
-    em: bool = False
-    grid_preset: str = ""
-    ikxspace_per_radius: Tuple[int, ...] = ()
-    ikxspace_choices: Tuple[int, ...] = ()
-    ikxspace_per_shat: float = _IKXSPACE_PER_SHAT
-    collisions: bool = True
-    vpar_max: float = _VPAR_MAX
-    nperiod: int = _NPERIOD
-    geom_type: str = _GEOM_TYPE
-    gkparams_dt: float = _GKPARAMS_DT
-    rref: float = _RREF
-    electron_mass_ratio: float = _ELECTRON_MASS_RATIO
-    beta_max: float = _BETA_MAX
-    clip_rlt: Tuple[float, float] = (_RLT_MIN, _RLT_MAX)
-    clip_rln: Tuple[float, float] = (_RLN_MIN, _RLN_MAX)
-    clip_q: Tuple[float, float] = (_Q_MIN, _Q_MAX)
-    clip_shat: Tuple[float, float] = (_SHAT_MIN, _SHAT_MAX)
-    clip_eps: Tuple[float, float] = (_EPS_MIN, _EPS_MAX)
-    kinetic: bool = False
-    diagnostics_path: str = ""
-
-    def _make_core_transport(
-        self, qi, qe, pfe, ql_inputs, transport_params, geo, core_profiles, two_point_mask
-    ) -> transport.TransportCoeffs:
-        """TORAX transport coefficients from face-grid fluxes in the TORAX_QL convention."""
-        lref_grad = units.gradient_reference_length(geo)
-        lref_flux = units.flux_reference_length(units.TORAX_QL, geo)
-        pfe_si = pfe * core_profiles.n_e.face_value() * ql_inputs.chiGB / lref_flux
-        # chi[GB] = Q[GB] / (Lref/LT), rescaled when the two reference lengths differ
-        chi_face_ion = ((lref_grad / lref_flux) * qi) / ql_inputs.lref_over_lti * ql_inputs.chiGB
-        chi_face_el = ((lref_grad / lref_flux) * qe) / ql_inputs.lref_over_lte * ql_inputs.chiGB
-        if transport_params.DV_effective:
-            d_face_el, v_face_el = quasilinear_utils.calculate_dv_effective(
-                particle_flux_SI=pfe_si,
-                normalized_particle_flux=pfe,
-                n_e=core_profiles.n_e,
-                geo=geo,
-                gradient_reference_length=lref_grad,
-                An_min=transport_params.An_min,
-                DV_effective_smooth_width=transport_params.DV_effective_smooth_width,
-                two_point_mask=two_point_mask,
-            )
-        else:
-            # D tied to chi_e, V set so the total particle flux matches
-            chex.assert_rank(pfe, 1)
-            d_face_el = chi_face_el
-            v_face_el = (
-                pfe_si / core_profiles.n_e.face_value()
-                - ql_inputs.lref_over_lne
-                * d_face_el
-                / lref_grad
-                * geo.g1_over_vpr2_face
-                * geo.rho_b**2
-            ) / (geo.g0_over_vpr_face * geo.rho_b)
-        return transport.TransportCoeffs(
-            chi_face_ion=chi_face_ion,
-            chi_face_el=chi_face_el,
-            d_face_el=d_face_el,
-            v_face_el=v_face_el,
-        )
+    rho_match: Tuple[float, ...]
+    backend: str
+    mixed_precision: bool
+    fused_linear: bool
+    linear_arith: str
+    batching: str
+    nvpar: int
+    nmu: int
+    ns: int
+    nkx: int
+    nky: int
+    ikxspace: int
+    krhomax: float
+    em: bool
+    ikxspace_choices: Tuple[int, ...]
+    ikxspace_per_shat: float
+    collisions: bool
+    vpar_max: float
+    nperiod: int
+    geom_type: str
+    gkparams_dt: float
+    rref: float
+    electron_mass_ratio: float
+    beta_max: float
+    clip_rlt: Tuple[float, float]
+    clip_rln: Tuple[float, float]
+    clip_q: Tuple[float, float]
+    clip_shat: Tuple[float, float]
+    clip_eps: Tuple[float, float]
+    kinetic: bool
+    diagnostics_path: str
 
     @classmethod
-    def _base_kwargs(cls, cfg) -> dict:
-        """Constructor arguments of the fields defined on this base, from a config."""
-        fis = getattr(cfg, "fast_ion_stabilization", None)
-        if fis is not None and float(fis.get_value(0.0)) != 0.0:
+    def from_config(cls, cfg, **overrides):
+        """The model from a config: shared fields by name, then the resolved grid and overrides."""
+        if float(cfg.fast_ion_stabilization.get_value(0.0)) != 0.0:
             raise NotImplementedError(f"{cls.__name__} does not implement fast_ion_stabilization.")
         grid = resolve_grid(cfg)
         preset = cfg.grid_preset or ("kinetic" if cfg.kinetic else "adiabatic")
         choices = cfg.ikxspace_choices if cfg.ikxspace_choices is not None else _IKXSPACE_CHOICES[preset]
         choices = tuple(sorted(int(k) for k in choices))
-        if choices and cfg.ikxspace_per_radius:
-            raise ValueError("set ikxspace_choices or ikxspace_per_radius, not both")
         # warm the caches outside jit, so the topology arrays never become tracers
         topology(int(grid["nkx"]), int(grid["nky"]), int(grid["ikxspace"]), int(grid["ns"]))
         if choices:
             topology_bank(int(grid["nkx"]), int(grid["nky"]), int(grid["ns"]), choices)
-        optional = (
-            "vpar_max",
-            "nperiod",
-            "geom_type",
-            "gkparams_dt",
-            "rref",
-            "electron_mass_ratio",
-            "beta_max",
-            "clip_rlt",
-            "clip_rln",
-            "clip_q",
-            "clip_shat",
-            "clip_eps",
-            "ikxspace_per_shat",
-            "collisions",
-        )
-        return dict(
-            rho_match=tuple(cfg.rho_match),
-            backend=cfg.backend,
-            mixed_precision=cfg.mixed_precision,
-            fused_linear=cfg.fused_linear,
-            linear_arith=cfg.linear_arith,
-            batching=cfg.batching,
-            nvpar=int(grid["nvpar"]),
-            nmu=int(grid["nmu"]),
-            ns=int(grid["ns"]),
-            nkx=int(grid["nkx"]),
-            nky=int(grid["nky"]),
-            ikxspace=int(grid["ikxspace"]),
-            krhomax=float(grid["krhomax"]),
-            em=cfg.em,
-            grid_preset=cfg.grid_preset or "",
-            **{k: getattr(cfg, k) for k in optional if getattr(cfg, k, None) is not None},
-            ikxspace_per_radius=tuple(cfg.ikxspace_per_radius or ()),
-            ikxspace_choices=choices,
-            kinetic=cfg.kinetic,
-            diagnostics_path=cfg.diagnostics_path or "",
-        )
-
-    @classmethod
-    def from_config(cls, cfg):
-        return cls(**cls._base_kwargs(cfg))
+        fields = {f.name: getattr(cfg, f.name) for f in dataclasses.fields(cls) if hasattr(cfg, f.name)}
+        fields.update(grid, ikxspace_choices=choices, diagnostics_path=cfg.diagnostics_path or "")
+        return cls(**{**fields, **overrides})
 
     @property
     def topology(self):
         return topology(self.nkx, self.nky, self.ikxspace, self.ns)
-
-    def topology_at(self, k: int):
-        """Topology of the k-th radius: ikxspace sizes the connectivity, so it is static."""
-        if not self.ikxspace_per_radius:
-            return self.topology
-        return topology(self.nkx, self.nky, int(self.ikxspace_per_radius[k]), self.ns)
 
     @property
     def sink(self) -> Any:
@@ -408,16 +367,16 @@ class GyaradaxTransportModel(transport.ComponentTransportModel):
             self.diagnostics_path, math.prod(radius_shares(len(self.rho_match), self.batching))
         )
 
-    def _per_radius_from_profiles(self, rho_idx, ql_inputs, core_profiles, geo, topo=None):
-        params = gkparams_for_radius(rho_idx, ql_inputs, core_profiles, geo, self)
-        ikxspace = None
-        if self.ikxspace_choices and topo is None:
+    def _per_radius_from_profiles(self, rho_idx, ql_inputs, faces, geo):
+        params = gkparams_for_radius(rho_idx, ql_inputs, faces, geo, self)
+        topo, ikxspace = self.topology, None
+        if self.ikxspace_choices:
             i = ikxspace_for_shat(params.shat, self.ikxspace_choices, self.ikxspace_per_shat)
             topo = select_topology(
                 topology_bank(self.nkx, self.nky, self.ns, self.ikxspace_choices), i
             )
             ikxspace = jnp.asarray(self.ikxspace_choices)[i]
-        geom = geometry_at(params.q, params.shat, params.eps, self, topo or self.topology, ikxspace)
+        geom = geometry_at(params.q, params.shat, params.eps, self, topo, ikxspace)
         q_i, q_e, pfe, extra = self._per_radius(params, geom)
         diag_lib.record(
             self.sink,
@@ -447,57 +406,42 @@ class GyaradaxTransportModel(transport.ComponentTransportModel):
         raise NotImplementedError
 
     def call_implementation(
-        self, transport_runtime_params, runtime_params, geo, core_profiles, two_point_mask
-    ) -> transport.TransportCoeffs:
+        self, transport_runtime_params, runtime_params, geo, core_profiles, two_point_mask, component_state
+    ):
         del runtime_params
-        ql_inputs = units.build_quasilinear_inputs(core_profiles, geo)
+        ql_inputs = quasilinear_inputs(core_profiles, geo, two_point_mask)
         match_idx = face_indices_for_radii(geo, self.rho_match)
+        faces = face_profiles(core_profiles, geo)
         sink = self.sink
 
-        def per_radius(idx, topo=None):
+        def per_radius(idx):
             idx = diag_lib.mark_begin(sink, idx)
-            return self._per_radius_from_profiles(idx, ql_inputs, core_profiles, geo, topo)
+            return self._per_radius_from_profiles(idx, ql_inputs, faces, geo)
 
-        if self.ikxspace_per_radius:
-            # one topology per radius, so the radii cannot share a vmap
-            out = [
-                per_radius(match_idx[k], self.topology_at(k)) for k in range(len(self.rho_match))
-            ]
-            qi_m, qe_m, pfe_m = (jnp.stack([o[i] for o in out]) for i in range(3))
-        else:
-            qi_m, qe_m, pfe_m = over_radii(per_radius, match_idx, self.batching)
-
-        rho_face = geo.rho_face_norm
-        rho_match = jnp.asarray(self.rho_match)
-        gb = units.gb_flux_conversion_factor(units.GYARADAX, units.TORAX_QL, geo)
-        return self._make_core_transport(
-            qi=jnp.interp(rho_face, rho_match, qi_m) * gb,
-            qe=jnp.interp(rho_face, rho_match, qe_m) * gb,
-            pfe=jnp.interp(rho_face, rho_match, pfe_m) * gb,
-            ql_inputs=ql_inputs,
-            transport_params=transport_runtime_params,
-            geo=geo,
-            core_profiles=core_profiles,
-            two_point_mask=two_point_mask,
+        fluxes = over_radii(per_radius, match_idx, self.batching)
+        rho_tubes = geo.rho_face_norm[match_idx]
+        qi, qe, pfe = (jnp.interp(geo.rho_face_norm, rho_tubes, f) * gkw_to_qualikiz_flux(geo) for f in fluxes)
+        coeffs = self._make_transport_coeffs(
+            qi, qe, pfe, ql_inputs, transport_runtime_params, geo, core_profiles, two_point_mask
         )
+        return coeffs, component_state
 
 
-class GyaradaxConfig(transport.ComponentTransportBase):
+class GyaradaxConfig(transport.ComponentTransportConfigBase):
     """Config fields shared by every gyaradax transport model (see docs/applications/torax.md)."""
 
     rho_match: Annotated[Tuple[float, ...], STATIC] = (0.35, 0.55, 0.75, 0.875)
     DV_effective: Annotated[bool, STATIC] = True
-    An_min: Annotated[float, STATIC] = 0.05
+    An_min: pydantic.PositiveFloat = 0.05
     DV_effective_smooth_width: pydantic.NonNegativeFloat = 0.01
     diagnostics_path: Annotated[Optional[str], STATIC] = None
 
     def build_runtime_params(self, t: chex.Numeric) -> RuntimeParams:
-        base_kwargs = dataclasses.asdict(super().build_runtime_params(t))
         return RuntimeParams(
             DV_effective=self.DV_effective,
             An_min=self.An_min,
             DV_effective_smooth_width=self.DV_effective_smooth_width,
-            **base_kwargs,
+            **vars(super().build_runtime_params(t)),
         )
 
 
@@ -518,20 +462,19 @@ class SolverConfig(GyaradaxConfig):
     krhomax: Annotated[Optional[float], STATIC] = None
     em: Annotated[bool, STATIC] = False
     grid_preset: Annotated[Optional[str], STATIC] = None
-    ikxspace_per_radius: Annotated[Optional[Tuple[int, ...]], STATIC] = None
     ikxspace_choices: Annotated[Optional[Tuple[int, ...]], STATIC] = None
-    ikxspace_per_shat: Annotated[Optional[float], STATIC] = None
-    collisions: Annotated[Optional[bool], STATIC] = None
-    vpar_max: Annotated[Optional[float], STATIC] = None
-    nperiod: Annotated[Optional[int], STATIC] = None
-    geom_type: Annotated[Optional[str], STATIC] = None
-    gkparams_dt: Annotated[Optional[float], STATIC] = None
-    rref: Annotated[Optional[float], STATIC] = None
-    electron_mass_ratio: Annotated[Optional[float], STATIC] = None
-    beta_max: Annotated[Optional[float], STATIC] = None
-    clip_rlt: Annotated[Optional[Tuple[float, float]], STATIC] = None
-    clip_rln: Annotated[Optional[Tuple[float, float]], STATIC] = None
-    clip_q: Annotated[Optional[Tuple[float, float]], STATIC] = None
-    clip_shat: Annotated[Optional[Tuple[float, float]], STATIC] = None
-    clip_eps: Annotated[Optional[Tuple[float, float]], STATIC] = None
+    ikxspace_per_shat: Annotated[float, STATIC] = _IKXSPACE_PER_SHAT
+    collisions: Annotated[bool, STATIC] = True
+    vpar_max: Annotated[float, STATIC] = _VPAR_MAX
+    nperiod: Annotated[int, STATIC] = _NPERIOD
+    geom_type: Annotated[str, STATIC] = _GEOM_TYPE
+    gkparams_dt: Annotated[float, STATIC] = _GKPARAMS_DT
+    rref: Annotated[float, STATIC] = _RREF
+    electron_mass_ratio: Annotated[float, STATIC] = _ELECTRON_MASS_RATIO
+    beta_max: Annotated[float, STATIC] = _BETA_MAX
+    clip_rlt: Annotated[Tuple[float, float], STATIC] = (_RLT_MIN, _RLT_MAX)
+    clip_rln: Annotated[Tuple[float, float], STATIC] = (_RLN_MIN, _RLN_MAX)
+    clip_q: Annotated[Tuple[float, float], STATIC] = (_Q_MIN, _Q_MAX)
+    clip_shat: Annotated[Tuple[float, float], STATIC] = (_SHAT_MIN, _SHAT_MAX)
+    clip_eps: Annotated[Tuple[float, float], STATIC] = (_EPS_MIN, _EPS_MAX)
     kinetic: Annotated[bool, STATIC] = False

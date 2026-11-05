@@ -13,7 +13,7 @@ gyroBohm units (a factor 2 sqrt 2 from GKW's v_th = sqrt(2T/m)).
 
 ## Install
 
-The models need TORAX main; the 1.4.3 release on PyPI predates its plugin API.
+The models need TORAX 2. They register through its plugin API (`torax.transport.register_transport_model`) and reuse its quasilinear helpers, so the extra pins a minor release.
 
 ```bash
 python3.12 -m venv .venv
@@ -29,10 +29,10 @@ ql-gyx in QLKNN's place:
 ```python
 QL = {
     "model_name": "ql-gyx",
-    "rho_min": 0.25,
+    "rho_min": 0.15,
     "rho_max": 0.95,
-    "rho_match": (0.3, 0.5, 0.7, 0.9),
-    "grid_preset": "adiabatic",  # 85x32
+    "rho_match": (0.3, 0.45, 0.6, 0.75, 0.85, 0.9),
+    "kinetic": True,  # 32x12x18x191x32, two species
     "rule": "sat2",
     "backend": "cuda",
     "fused_linear": True,
@@ -50,9 +50,16 @@ import torax
 from gyaradax.transport.cases import iterhybrid
 
 history = torax.run_simulation(torax.ToraxConfig.from_dict(iterhybrid.CONFIG))
+output = history.simulation_output_to_xr()
 ```
 
 Any other TORAX config uses the models the same way, after `import gyaradax.transport`.
+
+### First transport call
+
+The figure compares the turbulent coefficients on the initial iterhybrid profiles (t = 0): `ql-gyx` with the bundled SAT2 weights (kinetic electrons, native 32x12x18x191x32 grid, 8 radii, linear solves capped at 10000 steps), against QLKNN and TGLF SAT2 as shipped by TORAX. It is one transport call, not an evolved discharge: the linear solves all stopped at the cap, and the growth rates at rho 0.4 and 0.88 are not yet understood, so the rise of chi_e and D_e near rho 0.4 should not be read as physics.
+
+![Turbulent transport on the initial iterhybrid profiles](figures/torax_iterhybrid_t0.png)
 
 ## Configuration
 

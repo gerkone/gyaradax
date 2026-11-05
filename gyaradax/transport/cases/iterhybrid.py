@@ -12,10 +12,10 @@ import gyaradax.transport  # noqa: F401
 
 QL = {
     "model_name": "ql-gyx",
-    "rho_min": 0.25,
+    "rho_min": 0.15,
     "rho_max": 0.95,
-    "rho_match": (0.3, 0.5, 0.7, 0.9),
-    "grid_preset": "adiabatic",
+    "rho_match": (0.3, 0.45, 0.6, 0.75, 0.85, 0.9),
+    "kinetic": True,
     "rule": "sat2",
     "backend": "cuda",
     "fused_linear": True,
@@ -28,3 +28,4 @@ CONFIG["transport"]["core_transport_models"] = {
     "turbulent" if name == "qlknn" else name: QL if name == "qlknn" else model
     for name, model in CONFIG["transport"]["core_transport_models"].items()
 }
+CONFIG["time_step_calculator"]["max_steps"] = 2000

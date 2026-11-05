@@ -16,20 +16,15 @@ from .base import STATIC
 class GyaradaxNLTransportModel(base.GyaradaxTransportModel):
     """Nonlinear gyaradax transport model (ground truth, not for production loops)."""
 
-    n_steps_nl: int = 30000
-    nl_tail_blocks: int = 12
-    nl_block: int = 500
+    n_steps_nl: int
+    nl_tail_blocks: int
+    nl_block: int
 
     @classmethod
     def from_config(cls, cfg) -> "GyaradaxNLTransportModel":
         if cfg.kinetic:
             raise NotImplementedError("nl-gyx runs adiabatic electrons only.")
-        return cls(
-            **cls._base_kwargs(cfg),
-            n_steps_nl=cfg.n_steps_nl,
-            nl_tail_blocks=cfg.nl_tail_blocks,
-            nl_block=cfg.nl_block,
-        )
+        return super().from_config(cfg)
 
     def _per_radius(self, params: GKParams, geom: Dict[str, Any]):
         q_i, q_e, pfe = point_eval.nl_at_point(

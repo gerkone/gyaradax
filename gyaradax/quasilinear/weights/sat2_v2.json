@@ -1,7 +1,7 @@
 {
  "rule": "sat2",
  "parameters": {
-  "cn": 0.9719512237940621,
+  "cn": 0.9593246972671423,
   "flux_exponent": 0.5
  },
  "options": {
@@ -18,6 +18,6 @@
  ],
  "fit": {
   "method": "gyaradax.quasilinear.calibration.fit_sat2",
-  "date": "2026-11-04"
+  "date": "2026-11-05"
  }
 }

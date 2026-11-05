@@ -19,17 +19,17 @@ RuntimeParams = base.RuntimeParams
 class GyaradaxQLTransportModel(base.GyaradaxTransportModel):
     """Quasilinear gyaradax transport model."""
 
-    n_steps_linear: int = 2000
-    rule: str = "sat2"
-    rule_options: Tuple[Tuple[str, Any], ...] = ()
-    cn: float = 1.0
-    calibration: str = ""
-    early_stop: bool = True
-    early_stop_block: int = 100
-    early_stop_atol: float = 1e-4
-    early_stop_rtol: float = 1e-3
-    early_stop_min_steps: int = 200
-    early_stop_patience: int = 2
+    n_steps_linear: int
+    rule: str
+    rule_options: Tuple[Tuple[str, Any], ...]
+    cn: float
+    calibration: str
+    early_stop: bool
+    early_stop_block: int
+    early_stop_atol: float
+    early_stop_rtol: float
+    early_stop_min_steps: int
+    early_stop_patience: int
 
     @classmethod
     def from_config(cls, cfg) -> "GyaradaxQLTransportModel":
@@ -42,19 +42,8 @@ class GyaradaxQLTransportModel(base.GyaradaxTransportModel):
         # records with fitted arrays stay in the calibration cache, not in the static options
         fitted = {} if cfg.rule in point_eval.RULES_WITH_OMEGA else (calibration.rule_kwargs(cal) if cal else {})
         options = {**fitted, **(cfg.rule_options or {})}
-        return cls(
-            **cls._base_kwargs(cfg),
-            n_steps_linear=cfg.n_steps_linear,
-            rule=cfg.rule,
-            rule_options=tuple(sorted(options.items())),
-            cn=cn,
-            calibration=cfg.calibration or "",
-            early_stop=cfg.early_stop,
-            early_stop_block=cfg.early_stop_block,
-            early_stop_atol=cfg.early_stop_atol,
-            early_stop_rtol=cfg.early_stop_rtol,
-            early_stop_min_steps=cfg.early_stop_min_steps,
-            early_stop_patience=cfg.early_stop_patience,
+        return super().from_config(
+            cfg, rule_options=tuple(sorted(options.items())), cn=cn, calibration=cfg.calibration or ""
         )
 
     def _rule_options(self):
