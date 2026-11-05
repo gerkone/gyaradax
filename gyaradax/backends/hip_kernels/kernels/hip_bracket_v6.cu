@@ -264,7 +264,6 @@ xla_ffi::Error BracketImpl(
     CHECK_FFT(Prec<T>::exec(s->col_fwd, (C*)s->b, HIPFFT_FORWARD));
     unpack_kernel<T><<<gyx_blocks(n_out), GYX_WG, 0, stream>>>((const C*)s->b, store, jind.typed_data(), mrad, (unsigned)n_out);
     CHECK_HIP(hipGetLastError());
-   
     return xla_ffi::Error::Success();
 }
 
