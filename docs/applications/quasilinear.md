@@ -43,9 +43,6 @@ qi, qe, pfe = ql_at_point(
 | `canonical` | $C \sum_{k_y} W\, \hat\gamma / \langle k_\perp^2\rangle$ | mixing length: a mode saturates when its eddies turn over at its growth rate |
 | `sat0` | $C \sum_{k_y} W\, k_y (\hat\gamma / \langle k_\perp^2\rangle)^2$ | Waltz mixing rule: the potential saturates at $\phi \sim \hat\gamma/\langle k_\perp^2\rangle$, the intensity is its square, and $k_y$ comes from the $E\times B$ velocity |
 | `sat2` | $C \sum_{k_y} W\, I(k_y)^p$ | SAT2 ({doc}`Staebler et al. 2021 <../references>`): zonal-flow mixing couples the modes |
-| `satx_mlp` | $e^{l_c} \sum_{k_y} W\, I(k_y)^p\, [f_\mathrm{ion} + (1 - f_\mathrm{ion}) e^{l_e}]$ | SAT2's intensity, with the amplitude per channel, the exponent and the electron-mode level set by a small MLP ensemble of the operating point and the linear spectrum |
-
-`satx_mlp` ({mod}`gyaradax.quasilinear.satx`) also needs the real frequency per $k_y$ ($f_\mathrm{ion}$ is a sigmoid of $\omega$, positive for ion modes) and the operating parameters ($R/L_{Ti}$, $R/L_{Te}$, $R/L_n$, $T_e/T_i$, $\hat s$, $q$, $\epsilon$, the ion-ion collision frequency, the electron model). `ql_at_point` measures $\omega$ from the phase advance of $\phi$ on the $\theta_0 = 0$ chain after the growth rates converge. Inside the training range the operating parameters pass unchanged; beyond it they saturate smoothly at a wider input box stored with the calibration.
 
 `sat2` first finds $k_{y,\max}$, the peak of $\hat\gamma/k_y$ at ion scales. Above it the growth rate is limited by the zonal-flow mixing rate. The intensity is
 

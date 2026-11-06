@@ -4,6 +4,7 @@ jit/vmap-safe, the path the TORAX ql-gyx model takes: `initial_df`, `linear_earl
 `ql_at_point`; `nl_at_point` for the nonlinear ground truth.
 """
 
+import dataclasses
 from typing import Any, Dict, Tuple
 
 import jax
@@ -12,6 +13,7 @@ import jax.numpy as jnp
 from gyaradax.diagnostics.fluxes import calculate_fluxes
 from gyaradax.operators.poisson import geom_tensors
 from gyaradax.operators.precompute import linear_precompute
+from gyaradax.solver.cfl import estimate_linear_timestep
 from gyaradax.solver.rk4 import default_state, gksolve
 
 from .rules import (
@@ -24,11 +26,6 @@ from .rules import (
     kx_chain0,
     ql_flux_per_species,
 )
-from .satx import OPERATING as SATX_OPERATING
-from .satx import ql_flux_satx_mlp
-
-# rules that take the real frequency and the operating parameters
-RULES_WITH_OMEGA = ("satx_mlp",)
 
 DF_SEED_AMPLITUDE = 1e-3
 
@@ -91,7 +88,7 @@ def linear_early_stop(
         sim_state: Initial GKState.
         pre: Precomputed coefficients.
         block: Steps per block.
-        max_steps: Most steps.
+        max_steps: Most steps; may be traced.
         min_steps: Fewest steps.
         atol: Absolute tolerance on the change of the growth rates between blocks.
         rtol: Tolerance relative to the largest growth rate.
@@ -102,7 +99,7 @@ def linear_early_stop(
         ``(df, phi, state)``, plus the block count with ``return_blocks``.
     """
     block = int(block)
-    max_blocks = max(int(max_steps) // block, 1)
+    max_blocks = jnp.maximum(jnp.asarray(max_steps) // block, 1)
     min_blocks = max(int(min_steps) // block, 1)
 
     df1, (phi1, _flx), sim1 = gksolve(df, geom, params, sim_state, n_steps=block, pre=pre)
@@ -143,6 +140,8 @@ def ql_at_point(
     qi_clip=1e3,
     qi_tiny=1e-8,
     return_diagnostics=False,
+    df0=None,
+    return_df=False,
 ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Linear solve and saturation rule at one point, in GKW gyro-Bohm units.
 
@@ -166,13 +165,16 @@ def ql_at_point(
         qi_tiny: Fluxes below this are set to zero.
         return_diagnostics: Also return a dict of solver diagnostics (blocks and
             steps run, growth rates).
+        df0: Starting distribution (e.g. the previous call's); the seed of
+            :func:`initial_df` when None.
+        return_df: Also return the final distribution.
 
     Returns:
-        ``(qi, qe, pfe)``, plus the diagnostics dict when requested.
+        ``(qi, qe, pfe)``, then the diagnostics dict and the final distribution when requested.
     """
     spec, n_blocks, n_steps, gamma, flux_kxy_sp, final = _linear_harvest(
         params, geom, grid_shape, n_steps_linear=n_steps_linear,
-        early_stop=early_stop, early_stop_opts=early_stop_opts,
+        early_stop=early_stop, early_stop_opts=early_stop_opts, df0=df0,
     )
     extra = ({"dlnpdr": _dlnpdr_from_params(params)}
              if rule in RULES_WITH_DLNPDR else {})
@@ -185,28 +187,11 @@ def ql_at_point(
     extra.update(dict(rule_options or {}))
 
     def _clean(q, lo=0.0):
-        q = jnp.where(jnp.isfinite(q), jnp.clip(q, lo, qi_clip), 0.0)
+        q = jnp.clip(q, lo, qi_clip)
         # zero below noise floor so linear transients don't feed TORAX gradients
         return jnp.where(jnp.abs(q) < qi_tiny, 0.0, q)
 
-    if rule in RULES_WITH_OMEGA:
-        df_f, phi_f, st_f, pre_f = final
-        omega = real_frequency(df_f, phi_f, geom, params, st_f, pre_f)
-        den = jnp.maximum(jnp.sum(spec["phi2_kxy"], axis=0), 1e-30)
-        if flux_kxy_sp is not None:
-            w = jnp.stack([jnp.sum(flux_kxy_sp[sp, c], axis=0) / den for sp, c in ((0, 1), (1, 1), (1, 0))])
-        else:
-            wi = jnp.sum(spec["flux_kxy"], axis=0) / den
-            w = jnp.stack([wi, jnp.zeros_like(wi), jnp.zeros_like(wi)])
-        opts = dict(rule_options or {})
-        f = ql_flux_satx_mlp(
-            gamma, omega, w, spec["krho"], _operating_params(params, flux_kxy_sp is not None),
-            _dlnpdr_from_params(params), jnp.asarray(geom.get("kthnorm", 1.0), dtype=jnp.float64),
-            *geom_sat2_factors(geom), cn=cn, **opts,
-        )
-        q_i = _clean(f[0])
-        q_e, pfe = (_clean(f[1]), _clean(f[2], lo=-qi_clip)) if flux_kxy_sp is not None else (q_i, jnp.asarray(0.0))
-    elif flux_kxy_sp is not None:
+    if flux_kxy_sp is not None:
         # one shared saturated intensity; species and channels differ only in their weights
         rest = {k: v for k, v in spec.items() if k != "flux_kxy"}
         f = ql_flux_per_species(rule, flux_kxy_sp=flux_kxy_sp, cn=cn, **rest, **extra)
@@ -214,15 +199,12 @@ def ql_at_point(
     else:
         q_i = _clean(RULES[rule](cn=cn, **spec, **extra))
         q_e, pfe = q_i, jnp.asarray(0.0)
+    out = (q_i, q_e, pfe)
     if return_diagnostics:
-        diagnostics = {
-            "n_blocks": n_blocks,
-            "n_steps": n_steps,
-            "gamma_max": jnp.max(gamma),
-            "cn": jnp.asarray(cn),
-        }
-        return q_i, q_e, pfe, diagnostics
-    return q_i, q_e, pfe
+        out += ({"n_blocks": n_blocks, "n_steps": n_steps, "gamma_max": jnp.max(gamma), "cn": jnp.asarray(cn)},)
+    if return_df:
+        out += (final[0],)
+    return out
 
 
 def _species_geom(geom, params):
@@ -244,14 +226,18 @@ def _linear_harvest(
     n_steps_linear,
     early_stop,
     early_stop_opts,
+    df0=None,
 ):
     """Linear solve -> the (gamma, spectra, geometry) kwargs every rule consumes."""
     nv, nmu, ns, nkx, nky = grid_shape
     kinetic = not bool(getattr(params, "adiabatic_electrons", True))
     nsp = jnp.asarray(params.mas).size if kinetic else 0
-    df = initial_df(nv, nmu, ns, nkx, nky, nsp=nsp)
+    df = initial_df(nv, nmu, ns, nkx, nky, nsp=nsp) if df0 is None else jnp.asarray(df0, jnp.complex128)
     sim_state = default_state(nky=nky)
     pre = linear_precompute(geom, params)
+    if kinetic:
+        # electron streaming sets the limit: the input dt is a cap, as in the stored linear runs
+        params = dataclasses.replace(params, dt=jnp.minimum(params.dt, estimate_linear_timestep(pre, params)))
     opts = dict(early_stop_opts or {})
     if early_stop:
         df_final, phi, sim_final, n_blocks = linear_early_stop(
@@ -304,47 +290,7 @@ def _linear_harvest(
         little_g=lg.T if lg.shape[0] != 3 else lg,
         ds=jnp.mean(ints),
     )
-    return spec, n_blocks, n_steps, sim_final.last_growth_rate, flux_kxy_sp, (df_final, phi, sim_final, pre)
-
-
-def real_frequency(df, phi, geom, params, state, pre, blocks=4, steps=10):
-    """Real frequency per ky from the phase advance of phi over ``blocks`` runs of ``steps`` steps.
-
-    ``omega = d arg(sum phi) / dt``, the sum over s and the kx chain through kx = 0, with GKW's
-    sign (ion-diamagnetic modes positive). The blocks are short so that ``|omega| dt < pi``.
-    """
-    chain = kx_chain0(jnp.asarray(geom["mode_label"]), jnp.asarray(geom["kxrh"]))
-
-    def phase(p):
-        return jnp.sum(p * chain[None], axis=(0, 1))
-
-    def block(carry, _):
-        df, a, t, st = carry
-        df, (p, _fl), st = gksolve(df, geom, params, st, n_steps=steps, pre=pre)
-        b = phase(p)
-        return (df, b, st.time, st), jnp.angle(jnp.conj(a) * b) / (st.time - t)
-
-    _, w = jax.lax.scan(block, (df, phase(phi), state.time, state), None, length=blocks)
-    return jnp.mean(w, axis=0)
-
-
-def _operating_params(params, kinetic):
-    """satx_mlp's operating parameters from GKParams, ion first; nu is the ion-ion frequency."""
-    rlt = jnp.atleast_1d(jnp.asarray(params.rlt, dtype=jnp.float64))
-    rln = jnp.atleast_1d(jnp.asarray(params.rln, dtype=jnp.float64))
-    tmp = jnp.atleast_1d(jnp.asarray(params.tmp if params.tmp is not None else 1.0, dtype=jnp.float64))
-    if params.collisions:
-        from gyaradax.operators.collisions import collision_frequencies
-
-        nu = collision_frequencies(params)[1][0, 0]
-    else:
-        nu = jnp.asarray(0.0)
-    values = dict(
-        rlt_i=rlt[0], rlt_e=rlt[1] if kinetic else 0.0, rln=rln[0],
-        te_ti=tmp[1] / tmp[0] if kinetic else 1.0, shat=params.shat, q=params.q, eps=params.eps,
-        nu=nu, kinetic=1.0 if kinetic else 0.0,
-    )
-    return jnp.stack([jnp.asarray(values[k], dtype=jnp.float64) for k in SATX_OPERATING])
+    return spec, n_blocks, n_steps, sim_final.last_growth_rate, flux_kxy_sp, (df_final, phi, sim_final, pre, params)
 
 
 def _dlnpdr_from_params(params):
@@ -393,7 +339,6 @@ def nl_at_point(
     Returns:
         ``(qi, qe, pfe)``, plus the distribution with ``return_df``.
     """
-    import dataclasses
 
     params = dataclasses.replace(
         params, non_linear=True, disable_per_ky_norm=False, adaptive_dt=True
@@ -418,7 +363,7 @@ def nl_at_point(
 
     (df_f, _sim), ef_blocks = jax.lax.scan(body, (df, sim_state), None, length=int(tail_blocks))
     q_i = jnp.mean(ef_blocks)
-    q_i = jnp.where(jnp.isfinite(q_i), jnp.clip(q_i, 0.0, qi_clip), 0.0)
+    q_i = jnp.clip(q_i, 0.0, qi_clip)
     if return_df:
         return q_i, q_i, jnp.asarray(0.0), df_f
     return q_i, q_i, jnp.asarray(0.0)

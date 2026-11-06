@@ -69,9 +69,10 @@ Any other TORAX config uses the models the same way, after `import gyaradax.tran
 | `collisions` | both | true | linearised Fokker-Planck collisions, with frequencies from the local n_e and T_i (as `coll_nref`, `coll_tref`) and R_major (`coll_rref`) |
 | `ikxspace_choices`, `ikxspace_per_shat` | both | kinetic preset: 1, 2, 3, 4, 6, 8, 12, 16; 6.53 | per radius, ikxspace is the largest choice below floor(6.53 abs(s_hat)); empty keeps the fixed `ikxspace`. Each choice adds one prebuilt topology (about 18 MB at the kinetic grid) |
 | `diagnostics_path` | both | | one jsonl row per call and radius (padding radii included): local parameters, fluxes, steps, time |
-| `rule`, `rule_options` | ql | `sat2` | saturation rule (`sat2`, `satx_mlp`, `canonical`, `sat0`), and its options |
+| `rule`, `rule_options` | ql | `sat2` | saturation rule (`sat2`, `canonical`, `sat0`), and its options |
 | `calibration`, `cn` | ql | `auto` | calibration name or JSON path (`auto`: the rule's default in `gyaradax/quasilinear/weights/`); `cn` overrides its amplitude |
 | `n_steps_linear`, `early_stop` | ql | 2000, true | cap on RK4 steps, and stopping on converged growth rates |
+| `warm_start`, `warm_start_steps` | ql | true, 1000 | start each radius from its final distribution of the previous transport step (cold when the ikxspace changes), and the step cap of such a warm solve |
 | `n_steps_nl`, `nl_tail_blocks`, `nl_block` | nl | 30000, 12, 500 | run length and averaging window |
 
 The local inputs at each radius are R/L_Ti, R/L_Te, R/L_n, q, s_hat, eps, T_e/T_i, n_e and T_i from

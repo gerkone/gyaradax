@@ -7,6 +7,7 @@ QuaLiKiz base class turns the gyroBohm fluxes into transport coefficients.
 """
 
 import dataclasses
+import logging
 import math
 import warnings
 from functools import lru_cache
@@ -21,6 +22,7 @@ from torax import constants, torax_pydantic, transport
 from torax._src.physics import psi_calculations
 from torax._src.transport_model import qualikiz_based_transport_model as qualikiz
 from torax._src.transport_model import quasilinear_utils
+from torax._src.transport_model import transport_state
 
 from gyaradax.core.params import GKParams
 from gyaradax.geometry import build_topology, compute_continuous_geometry
@@ -28,6 +30,7 @@ from gyaradax.geometry import build_topology, compute_continuous_geometry
 from . import diagnostics as diag_lib
 
 STATIC = torax_pydantic.JAX_STATIC
+_LOG = logging.getLogger("gyaradax.transport")
 
 _RLT_MIN, _RLT_MAX = 0.0, 30.0
 _RLN_MIN, _RLN_MAX = -15.0, 15.0
@@ -40,7 +43,7 @@ _ELECTRON_MASS_RATIO = 2.72e-4
 # unit of gyaradax's coll_nref [m^-3]
 _COLL_NREF_UNIT = 1e19
 
-_GKPARAMS_DT = 0.005
+_GKPARAMS_DT = {"adiabatic": 0.005, "kinetic": 0.004}
 _VPAR_MAX = 3.0
 _RREF = 100.0
 _NPERIOD = 1
@@ -73,6 +76,15 @@ class RuntimeParams(transport.ComponentRuntimeParams):
     DV_effective: bool = jax.tree.static()
     An_min: float
     DV_effective_smooth_width: float
+
+
+@jax.tree_util.register_dataclass
+@dataclasses.dataclass(frozen=True)
+class WarmStartState(transport_state.ComponentTransportState):
+    """Final distribution per radius of the previous transport step, with the ikxspace index it was run at (-1: none)."""
+
+    df: jax.Array
+    ikxspace_index: jax.Array
 
 
 @jax.tree_util.register_dataclass
@@ -179,16 +191,18 @@ def radius_shares(n: int, batching: str) -> Tuple[int, int]:
     return -(-n // per), per
 
 
-def over_radii(fn, idx, batching: str = "devices"):
-    """Map fn over the radii: in a loop, vmapped, or vmapped in shards over the local devices."""
+def over_radii(fn, args, batching: str = "devices"):
+    """Map fn over the leading (radius) axis of the pytree args: in a loop, vmapped, or vmapped in shards over the local devices."""
     if batching == "loop":
-        return jax.lax.map(fn, idx)
-    n = idx.shape[0]
+        return jax.lax.map(fn, args)
+    n = jax.tree.leaves(args)[0].shape[0]
     n_dev, per = radius_shares(n, batching)
     if n_dev == 1:
-        return jax.vmap(fn)(idx)
-    # the last radius pads the final shard and its result is dropped
-    padded = jnp.concatenate([idx, jnp.repeat(idx[-1:], n_dev * per - n)])
+        return jax.vmap(fn)(args)
+    padded = args
+    if n_dev * per > n:
+        # the last radius pads the final shard and its result is dropped
+        padded = jax.tree.map(lambda a: jnp.concatenate([a, jnp.repeat(a[-1:], n_dev * per - n, axis=0)]), args)
     mesh = jax.make_mesh(
         (n_dev,),
         ("radii",),
@@ -197,8 +211,16 @@ def over_radii(fn, idx, batching: str = "devices"):
     )
     spec = jax.sharding.PartitionSpec("radii")
     sharded = jax.shard_map(jax.vmap(fn), mesh=mesh, in_specs=spec, out_specs=spec, check_vma=False)
-    out = sharded(padded)
-    return tuple(o[:n] for o in out)
+    return jax.tree.map(lambda o: o[:n], sharded(padded))
+
+
+def _report_divergence(finite, model, rho, q, shat, eps, rlt, rln):
+    if not bool(finite):
+        _LOG.error(
+            "%s: the solve at rho = %.3f is not finite (q = %.3f, shat = %.3f, eps = %.3f, R/LT = %s, R/Ln = %s); "
+            "the NaN is passed to TORAX, which stops the run",
+            model, float(rho), float(q), float(shat), float(eps), np.round(rlt, 3).tolist(), np.round(rln, 3).tolist(),
+        )
 
 
 def face_indices_for_radii(geo, rho_match: Tuple[float, ...]) -> jax.Array:
@@ -355,6 +377,7 @@ class GyaradaxTransportModel(qualikiz.QualikizBasedTransportModel):
             topology_bank(int(grid["nkx"]), int(grid["nky"]), int(grid["ns"]), choices)
         fields = {f.name: getattr(cfg, f.name) for f in dataclasses.fields(cls) if hasattr(cfg, f.name)}
         fields.update(grid, ikxspace_choices=choices, diagnostics_path=cfg.diagnostics_path or "")
+        fields["gkparams_dt"] = cfg.gkparams_dt or _GKPARAMS_DT["kinetic" if cfg.kinetic else "adiabatic"]
         return cls(**{**fields, **overrides})
 
     @property
@@ -367,17 +390,37 @@ class GyaradaxTransportModel(qualikiz.QualikizBasedTransportModel):
             self.diagnostics_path, math.prod(radius_shares(len(self.rho_match), self.batching))
         )
 
-    def _per_radius_from_profiles(self, rho_idx, ql_inputs, faces, geo):
+    def _warm_df_shape(self) -> Optional[Tuple[int, ...]]:
+        """Shape of the distribution carried between transport steps, or None for a stateless model."""
+        return None
+
+    def initial_state(self, runtime_params):
+        shape = self._warm_df_shape()
+        if shape is None:
+            return super().initial_state(runtime_params)
+        n = len(self.rho_match)
+        return WarmStartState(
+            df=jnp.zeros((n, *shape), jnp.complex64), ikxspace_index=jnp.full((n,), -1, jnp.int32)
+        )
+
+    def _per_radius_from_profiles(self, rho_idx, ql_inputs, faces, geo, warm=None):
+        """Fluxes at one radius; with a (df, ikxspace_index) warm start also the new one."""
         params = gkparams_for_radius(rho_idx, ql_inputs, faces, geo, self)
-        topo, ikxspace = self.topology, None
+        topo, ikxspace, i = self.topology, None, jnp.asarray(0, jnp.int32)
         if self.ikxspace_choices:
-            i = ikxspace_for_shat(params.shat, self.ikxspace_choices, self.ikxspace_per_shat)
+            i = ikxspace_for_shat(params.shat, self.ikxspace_choices, self.ikxspace_per_shat).astype(jnp.int32)
             topo = select_topology(
                 topology_bank(self.nkx, self.nky, self.ns, self.ikxspace_choices), i
             )
             ikxspace = jnp.asarray(self.ikxspace_choices)[i]
         geom = geometry_at(params.q, params.shat, params.eps, self, topo, ikxspace)
-        q_i, q_e, pfe, extra = self._per_radius(params, geom)
+        if warm is None:
+            q_i, q_e, pfe, extra = self._per_radius(params, geom)
+        else:
+            # a distribution on another kx connectivity is no start
+            df_prev, i_prev = warm
+            q_i, q_e, pfe, extra, df_new = self._per_radius(params, geom, df_prev, i_prev == i)
+            extra = {**extra, "warm": (i_prev == i).astype(jnp.int32)}
         diag_lib.record(
             self.sink,
             {"model": type(self).__name__},
@@ -399,10 +442,23 @@ class GyaradaxTransportModel(qualikiz.QualikizBasedTransportModel):
                 **extra,
             },
         )
-        return q_i, q_e, pfe
+        finite = jnp.isfinite(q_i) & jnp.isfinite(q_e) & jnp.isfinite(pfe)
+        if warm is not None:
+            finite = finite & jnp.all(jnp.isfinite(df_new))
+        jax.debug.callback(
+            _report_divergence, finite, type(self).__name__, jnp.asarray(geo.rho_face_norm)[rho_idx],
+            params.q, params.shat, params.eps, jnp.atleast_1d(params.rlt), jnp.atleast_1d(params.rln),
+        )
+        if warm is None:
+            return q_i, q_e, pfe
+        return q_i, q_e, pfe, (df_new.astype(jnp.complex64), i)
 
-    def _per_radius(self, params: GKParams, geom: Dict[str, Any]):
-        """(qi, qe, pfe) in GKW gyroBohm units and a dict of per-call diagnostics."""
+    def _per_radius(self, params: GKParams, geom: Dict[str, Any], df_prev=None, warm=None):
+        """(qi, qe, pfe) in GKW gyroBohm units and a dict of per-call diagnostics.
+
+        Models with a warm start (`_warm_df_shape`) get the previous distribution and whether to use it,
+        and also return the final distribution.
+        """
         raise NotImplementedError
 
     def call_implementation(
@@ -414,11 +470,18 @@ class GyaradaxTransportModel(qualikiz.QualikizBasedTransportModel):
         faces = face_profiles(core_profiles, geo)
         sink = self.sink
 
-        def per_radius(idx):
-            idx = diag_lib.mark_begin(sink, idx)
-            return self._per_radius_from_profiles(idx, ql_inputs, faces, geo)
+        stateful = isinstance(component_state, WarmStartState)
 
-        fluxes = over_radii(per_radius, match_idx, self.batching)
+        def per_radius(args):
+            idx = diag_lib.mark_begin(sink, args[0])
+            warm = args[1:] if stateful else None
+            return self._per_radius_from_profiles(idx, ql_inputs, faces, geo, warm)
+
+        args = (match_idx, component_state.df, component_state.ikxspace_index) if stateful else (match_idx,)
+        out = over_radii(per_radius, args, self.batching)
+        fluxes = out[:3]
+        if stateful:
+            component_state = WarmStartState(df=out[3][0], ikxspace_index=out[3][1])
         rho_tubes = geo.rho_face_norm[match_idx]
         qi, qe, pfe = (jnp.interp(geo.rho_face_norm, rho_tubes, f) * gkw_to_qualikiz_flux(geo) for f in fluxes)
         coeffs = self._make_transport_coeffs(
@@ -468,7 +531,7 @@ class SolverConfig(GyaradaxConfig):
     vpar_max: Annotated[float, STATIC] = _VPAR_MAX
     nperiod: Annotated[int, STATIC] = _NPERIOD
     geom_type: Annotated[str, STATIC] = _GEOM_TYPE
-    gkparams_dt: Annotated[float, STATIC] = _GKPARAMS_DT
+    gkparams_dt: Annotated[Optional[float], STATIC] = None
     rref: Annotated[float, STATIC] = _RREF
     electron_mass_ratio: Annotated[float, STATIC] = _ELECTRON_MASS_RATIO
     beta_max: Annotated[float, STATIC] = _BETA_MAX

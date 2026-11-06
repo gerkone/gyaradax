@@ -7,6 +7,7 @@ import pytest
 
 pytest.importorskip("torax")
 
+import jax
 import jax.numpy as jnp
 import torax
 from torax._src.test_utils import core_profile_helpers, default_configs
@@ -40,8 +41,17 @@ def transport_call(transport):
     return model, coeffs, geo, cp
 
 
-def constant_flux(self, params, geom):
-    return jnp.asarray(1.0), jnp.asarray(0.5), jnp.asarray(0.0), {}
+def stub(flux):
+    """A `_per_radius` that returns ``flux(params)`` and hands a warm start back unchanged."""
+
+    def per_radius(self, params, geom, df_prev=None, warm=None):
+        out = (*flux(params), {})
+        return out if df_prev is None else (*out, df_prev)
+
+    return per_radius
+
+
+constant_flux = stub(lambda params: (jnp.asarray(1.0), jnp.asarray(0.5), jnp.asarray(0.0)))
 
 
 def build(**fields):
@@ -65,9 +75,11 @@ def test_fluxes_reach_torax_in_its_units(monkeypatch):
 
 
 def test_transport_run_with_cheap_flux(monkeypatch):
-    def stiff_flux(self, params, geom):
+    def stiff(params):
         q_i = 0.5 * jnp.maximum(params.rlt - 4.0, 0.0) ** 1.5
-        return q_i, q_i, jnp.asarray(0.0), {}
+        return q_i, q_i, jnp.asarray(0.0)
+
+    stiff_flux = stub(stiff)
 
     monkeypatch.setattr(GyaradaxQLTransportModel, "_per_radius", stiff_flux)
     tc = torax_config({"model_name": "ql-gyx", "rho_match": (0.3, 0.6, 0.85), **GRID})
@@ -78,8 +90,7 @@ def test_transport_run_with_cheap_flux(monkeypatch):
 
 @pytest.mark.parametrize("batching", ["vmap", "loop"])
 def test_batching_matches_devices(monkeypatch, batching):
-    def stiff_flux(self, params, geom):
-        return params.rlt**1.5, params.rln, params.q, {}
+    stiff_flux = stub(lambda params: (params.rlt**1.5, params.rln, params.q))
 
     monkeypatch.setattr(GyaradaxQLTransportModel, "_per_radius", stiff_flux)
     fields = {"model_name": "ql-gyx", "rho_match": (0.3, 0.5, 0.7), **GRID}
@@ -180,9 +191,10 @@ def test_topology_bank_matches_static_topologies():
 def test_radius_params_carry_collisions_and_shat_ikxspace(monkeypatch):
     seen = []
 
-    def record(self, params, geom):
+    def record(self, params, geom, df_prev=None, warm=None):
         seen.append((params, geom))
-        return jnp.asarray(1.0), jnp.asarray(1.0), jnp.asarray(0.0), {}
+        out = (jnp.asarray(1.0), jnp.asarray(1.0), jnp.asarray(0.0), {})
+        return out if df_prev is None else (*out, df_prev)
 
     monkeypatch.setattr(GyaradaxQLTransportModel, "_per_radius", record)
     fields = {"model_name": "ql-gyx", "rho_match": (0.3, 0.7), **GRID, "ikxspace_choices": (1, 2, 4, 8)}
@@ -205,11 +217,43 @@ def test_radius_params_carry_collisions_and_shat_ikxspace(monkeypatch):
 
 
 def test_loop_batching_runs_a_simulation(monkeypatch):
-    def stiff_flux(self, params, geom):
+    def stiff(params):
         q_i = 0.5 * jnp.maximum(params.rlt - 4.0, 0.0) ** 1.5
-        return q_i, q_i, jnp.asarray(0.0), {}
+        return q_i, q_i, jnp.asarray(0.0)
+
+    stiff_flux = stub(stiff)
 
     monkeypatch.setattr(GyaradaxQLTransportModel, "_per_radius", stiff_flux)
     tc = torax_config({"model_name": "ql-gyx", "rho_match": (0.3, 0.6, 0.85), "batching": "loop", **GRID})
     history = torax.run_simulation(tc, progress_bar=False, max_steps=2)
     assert np.all(np.isfinite(np.asarray(history.simulation_output_to_xr().profiles.T_i)))
+
+
+def test_warm_start_carries_the_distribution(monkeypatch, caplog):
+    calls = []
+
+    def per_radius(self, params, geom, df_prev=None, warm=None):
+        calls.append(warm)
+        return jnp.asarray(1.0), jnp.asarray(1.0), jnp.asarray(0.0), {}, df_prev + 1.0
+
+    monkeypatch.setattr(GyaradaxQLTransportModel, "_per_radius", per_radius)
+    tc = torax_config({"model_name": "ql-gyx", "rho_match": (0.3, 0.6), "batching": "loop", **GRID})
+    cp, rp, geo = core_profile_helpers.make_initial_inputs(tc)
+    model = tc.transport.core_transport_models["gyaradax"].build_transport_model()
+    state = model.initial_state(rp)
+    assert state.df.shape == (2, 32, 8, 16, 85, 32) and np.all(np.asarray(state.ikxspace_index) == -1)
+    args = (rp.transport.core_transport_model_params["gyaradax"], rp, geo, cp, np.zeros_like(geo.rho_face_norm, dtype=bool))
+    _, state = model.call_implementation(*args, state)
+    assert np.all(np.asarray(state.ikxspace_index) == 0) and np.allclose(np.asarray(state.df), 1.0)
+    _, state = model.call_implementation(*args, state)
+    assert np.allclose(np.asarray(state.df), 2.0)
+    assert not build(warm_start=False, **GRID)._warm_df_shape()
+    monkeypatch.setattr(
+        GyaradaxQLTransportModel, "_per_radius",
+        lambda self, params, geom, df_prev=None, warm=None: (*(jnp.asarray(jnp.nan),) * 3, {}, df_prev * jnp.nan),
+    )
+    with caplog.at_level("ERROR", logger="gyaradax.transport"):
+        coeffs, _ = model.call_implementation(*args, state)
+        jax.effects_barrier()
+    assert np.isnan(np.asarray(coeffs.chi_face_ion)).any()
+    assert sum("is not finite" in r.getMessage() for r in caplog.records) == 2
