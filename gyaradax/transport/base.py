@@ -223,15 +223,19 @@ def clear_warm_start() -> None:
     _WARM.clear()
 
 
-def _warm_load(key, rho_idx, shape):
-    df, i = _WARM.get((key, int(rho_idx)), (None, None))
-    if df is None:
-        return np.zeros(shape, np.complex64), np.asarray(-1, np.int32)
-    return df, i
-
-
 def _warm_store(key, rho_idx, df, i):
     _WARM[(key, int(rho_idx))] = (np.asarray(df), np.asarray(i, np.int32))
+
+
+def _warm_load_all(key, rho_idx, shape):
+    zero = (np.zeros(shape, np.complex64), np.asarray(-1, np.int32))
+    got = [_WARM.get((key, int(r)), zero) for r in np.asarray(rho_idx)]
+    return np.stack([g[0] for g in got]), np.stack([g[1] for g in got]).astype(np.int32)
+
+
+def _warm_store_all(key, rho_idx, df, i):
+    for r, d, k in zip(np.asarray(rho_idx), np.asarray(df), np.asarray(i)):
+        _warm_store(key, r, d, k)
 
 
 def face_indices_for_radii(geo, rho_match: Tuple[float, ...]) -> jax.Array:
@@ -405,8 +409,8 @@ class GyaradaxTransportModel(qualikiz.QualikizBasedTransportModel):
         """Shape of the distribution carried between transport steps, or None for a stateless model."""
         return None
 
-    def _per_radius_from_profiles(self, rho_idx, ql_inputs, faces, geo):
-        """Fluxes at one radius; a model with a warm start starts from this radius's final distribution of the previous call."""
+    def _per_radius_from_profiles(self, rho_idx, ql_inputs, faces, geo, warm=None):
+        """Fluxes at one radius; with a ``(df, ikxspace_index)`` warm start also the final ones."""
         params = gkparams_for_radius(rho_idx, ql_inputs, faces, geo, self)
         topo, ikxspace, i = self.topology, None, jnp.asarray(0, jnp.int32)
         if self.ikxspace_choices:
@@ -416,16 +420,11 @@ class GyaradaxTransportModel(qualikiz.QualikizBasedTransportModel):
             )
             ikxspace = jnp.asarray(self.ikxspace_choices)[i]
         geom = geometry_at(params.q, params.shat, params.eps, self, topo, ikxspace)
-        shape = self._warm_df_shape()
-        if shape is None:
+        if warm is None:
             q_i, q_e, pfe, extra = self._per_radius(params, geom)
         else:
-            # TORAX keeps every step's state in its output history, too large for the distributions
-            spec = (jax.ShapeDtypeStruct(shape, jnp.complex64), jax.ShapeDtypeStruct((), jnp.int32))
-            df_prev, i_prev = jax.experimental.io_callback(
-                functools.partial(_warm_load, id(self), shape=shape), spec, rho_idx, ordered=False
-            )
             # a distribution on another kx connectivity is no start
+            df_prev, i_prev = warm
             q_i, q_e, pfe, extra, df_new = self._per_radius(params, geom, df_prev, i_prev == i)
             extra = {**extra, "warm": (i_prev == i).astype(jnp.int32)}
         diag_lib.record(
@@ -450,16 +449,15 @@ class GyaradaxTransportModel(qualikiz.QualikizBasedTransportModel):
             },
         )
         finite = jnp.isfinite(q_i) & jnp.isfinite(q_e) & jnp.isfinite(pfe)
-        if shape is not None:
+        if warm is not None:
             finite = finite & jnp.all(jnp.isfinite(df_new))
-            jax.experimental.io_callback(
-                functools.partial(_warm_store, id(self)), None, rho_idx, df_new.astype(jnp.complex64), i, ordered=False
-            )
         jax.debug.callback(
             _report_divergence, finite, type(self).__name__, jnp.asarray(geo.rho_face_norm)[rho_idx],
             params.q, params.shat, params.eps, jnp.atleast_1d(params.rlt), jnp.atleast_1d(params.rln),
         )
-        return q_i, q_e, pfe
+        if warm is None:
+            return q_i, q_e, pfe
+        return q_i, q_e, pfe, (df_new.astype(jnp.complex64), i)
 
     def _per_radius(self, params: GKParams, geom: Dict[str, Any], df_prev=None, warm=None):
         """(qi, qe, pfe) in GKW gyroBohm units and a dict of per-call diagnostics.
@@ -478,11 +476,26 @@ class GyaradaxTransportModel(qualikiz.QualikizBasedTransportModel):
         faces = face_profiles(core_profiles, geo)
         sink = self.sink
 
-        def per_radius(idx):
-            idx = diag_lib.mark_begin(sink, idx)
-            return self._per_radius_from_profiles(idx, ql_inputs, faces, geo)
+        shape = self._warm_df_shape()
 
-        fluxes = over_radii(per_radius, match_idx, self.batching)
+        def per_radius(args):
+            idx = diag_lib.mark_begin(sink, args[0])
+            return self._per_radius_from_profiles(idx, ql_inputs, faces, geo, args[1:] if shape else None)
+
+        if shape is None:
+            fluxes = over_radii(per_radius, (match_idx,), self.batching)
+        else:
+            # TORAX keeps every step's state in its run history, too large for the distributions, so they stay
+            # on the host; loaded and stored outside the per-device solves, where all devices are in step
+            n = len(self.rho_match)
+            spec = (jax.ShapeDtypeStruct((n, *shape), jnp.complex64), jax.ShapeDtypeStruct((n,), jnp.int32))
+            df_prev, i_prev = jax.experimental.io_callback(
+                functools.partial(_warm_load_all, id(self), shape=shape), spec, match_idx, ordered=False
+            )
+            *fluxes, (df_new, i_new) = over_radii(per_radius, (match_idx, df_prev, i_prev), self.batching)
+            jax.experimental.io_callback(
+                functools.partial(_warm_store_all, id(self)), None, match_idx, df_new, i_new, ordered=False
+            )
         rho_tubes = geo.rho_face_norm[match_idx]
         qi, qe, pfe = (jnp.interp(geo.rho_face_norm, rho_tubes, f) * gkw_to_qualikiz_flux(geo) for f in fluxes)
         coeffs = self._make_transport_coeffs(
