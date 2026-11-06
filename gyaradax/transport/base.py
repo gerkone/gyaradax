@@ -7,6 +7,7 @@ QuaLiKiz base class turns the gyroBohm fluxes into transport coefficients.
 """
 
 import dataclasses
+import functools
 import logging
 import math
 import warnings
@@ -15,6 +16,7 @@ from typing import Annotated, Any, Dict, Literal, Optional, Tuple
 
 import chex
 import jax
+import jax.experimental
 import jax.numpy as jnp
 import numpy as np
 import pydantic
@@ -22,7 +24,6 @@ from torax import constants, torax_pydantic, transport
 from torax._src.physics import psi_calculations
 from torax._src.transport_model import qualikiz_based_transport_model as qualikiz
 from torax._src.transport_model import quasilinear_utils
-from torax._src.transport_model import transport_state
 
 from gyaradax.core.params import GKParams
 from gyaradax.geometry import build_topology, compute_continuous_geometry
@@ -76,15 +77,6 @@ class RuntimeParams(transport.ComponentRuntimeParams):
     DV_effective: bool = jax.tree.static()
     An_min: float
     DV_effective_smooth_width: float
-
-
-@jax.tree_util.register_dataclass
-@dataclasses.dataclass(frozen=True)
-class WarmStartState(transport_state.ComponentTransportState):
-    """Final distribution per radius of the previous transport step, with the ikxspace index it was run at (-1: none)."""
-
-    df: jax.Array
-    ikxspace_index: jax.Array
 
 
 @jax.tree_util.register_dataclass
@@ -221,6 +213,25 @@ def _report_divergence(finite, model, rho, q, shat, eps, rlt, rln):
             "the NaN is passed to TORAX, which stops the run",
             model, float(rho), float(q), float(shat), float(eps), np.round(rlt, 3).tolist(), np.round(rln, 3).tolist(),
         )
+
+
+# final distribution and ikxspace index per (model, face index), kept on the host between transport calls
+_WARM: Dict[Tuple[int, int], Tuple[np.ndarray, np.ndarray]] = {}
+
+
+def clear_warm_start() -> None:
+    _WARM.clear()
+
+
+def _warm_load(key, rho_idx, shape):
+    df, i = _WARM.get((key, int(rho_idx)), (None, None))
+    if df is None:
+        return np.zeros(shape, np.complex64), np.asarray(-1, np.int32)
+    return df, i
+
+
+def _warm_store(key, rho_idx, df, i):
+    _WARM[(key, int(rho_idx))] = (np.asarray(df), np.asarray(i, np.int32))
 
 
 def face_indices_for_radii(geo, rho_match: Tuple[float, ...]) -> jax.Array:
@@ -394,17 +405,8 @@ class GyaradaxTransportModel(qualikiz.QualikizBasedTransportModel):
         """Shape of the distribution carried between transport steps, or None for a stateless model."""
         return None
 
-    def initial_state(self, runtime_params):
-        shape = self._warm_df_shape()
-        if shape is None:
-            return super().initial_state(runtime_params)
-        n = len(self.rho_match)
-        return WarmStartState(
-            df=jnp.zeros((n, *shape), jnp.complex64), ikxspace_index=jnp.full((n,), -1, jnp.int32)
-        )
-
-    def _per_radius_from_profiles(self, rho_idx, ql_inputs, faces, geo, warm=None):
-        """Fluxes at one radius; with a (df, ikxspace_index) warm start also the new one."""
+    def _per_radius_from_profiles(self, rho_idx, ql_inputs, faces, geo):
+        """Fluxes at one radius; a model with a warm start starts from this radius's final distribution of the previous call."""
         params = gkparams_for_radius(rho_idx, ql_inputs, faces, geo, self)
         topo, ikxspace, i = self.topology, None, jnp.asarray(0, jnp.int32)
         if self.ikxspace_choices:
@@ -414,11 +416,16 @@ class GyaradaxTransportModel(qualikiz.QualikizBasedTransportModel):
             )
             ikxspace = jnp.asarray(self.ikxspace_choices)[i]
         geom = geometry_at(params.q, params.shat, params.eps, self, topo, ikxspace)
-        if warm is None:
+        shape = self._warm_df_shape()
+        if shape is None:
             q_i, q_e, pfe, extra = self._per_radius(params, geom)
         else:
+            # TORAX keeps every step's state in its output history, too large for the distributions
+            spec = (jax.ShapeDtypeStruct(shape, jnp.complex64), jax.ShapeDtypeStruct((), jnp.int32))
+            df_prev, i_prev = jax.experimental.io_callback(
+                functools.partial(_warm_load, id(self), shape=shape), spec, rho_idx, ordered=False
+            )
             # a distribution on another kx connectivity is no start
-            df_prev, i_prev = warm
             q_i, q_e, pfe, extra, df_new = self._per_radius(params, geom, df_prev, i_prev == i)
             extra = {**extra, "warm": (i_prev == i).astype(jnp.int32)}
         diag_lib.record(
@@ -443,15 +450,16 @@ class GyaradaxTransportModel(qualikiz.QualikizBasedTransportModel):
             },
         )
         finite = jnp.isfinite(q_i) & jnp.isfinite(q_e) & jnp.isfinite(pfe)
-        if warm is not None:
+        if shape is not None:
             finite = finite & jnp.all(jnp.isfinite(df_new))
+            jax.experimental.io_callback(
+                functools.partial(_warm_store, id(self)), None, rho_idx, df_new.astype(jnp.complex64), i, ordered=False
+            )
         jax.debug.callback(
             _report_divergence, finite, type(self).__name__, jnp.asarray(geo.rho_face_norm)[rho_idx],
             params.q, params.shat, params.eps, jnp.atleast_1d(params.rlt), jnp.atleast_1d(params.rln),
         )
-        if warm is None:
-            return q_i, q_e, pfe
-        return q_i, q_e, pfe, (df_new.astype(jnp.complex64), i)
+        return q_i, q_e, pfe
 
     def _per_radius(self, params: GKParams, geom: Dict[str, Any], df_prev=None, warm=None):
         """(qi, qe, pfe) in GKW gyroBohm units and a dict of per-call diagnostics.
@@ -470,18 +478,11 @@ class GyaradaxTransportModel(qualikiz.QualikizBasedTransportModel):
         faces = face_profiles(core_profiles, geo)
         sink = self.sink
 
-        stateful = isinstance(component_state, WarmStartState)
+        def per_radius(idx):
+            idx = diag_lib.mark_begin(sink, idx)
+            return self._per_radius_from_profiles(idx, ql_inputs, faces, geo)
 
-        def per_radius(args):
-            idx = diag_lib.mark_begin(sink, args[0])
-            warm = args[1:] if stateful else None
-            return self._per_radius_from_profiles(idx, ql_inputs, faces, geo, warm)
-
-        args = (match_idx, component_state.df, component_state.ikxspace_index) if stateful else (match_idx,)
-        out = over_radii(per_radius, args, self.batching)
-        fluxes = out[:3]
-        if stateful:
-            component_state = WarmStartState(df=out[3][0], ikxspace_index=out[3][1])
+        fluxes = over_radii(per_radius, match_idx, self.batching)
         rho_tubes = geo.rho_face_norm[match_idx]
         qi, qe, pfe = (jnp.interp(geo.rho_face_norm, rho_tubes, f) * gkw_to_qualikiz_flux(geo) for f in fluxes)
         coeffs = self._make_transport_coeffs(

@@ -235,30 +235,37 @@ def test_loop_batching_runs_a_simulation(monkeypatch):
 
 
 def test_warm_start_carries_the_distribution(monkeypatch, caplog):
+    from gyaradax.transport import base
+
     calls = []
 
     def per_radius(self, params, geom, df_prev=None, warm=None):
-        calls.append(warm)
-        return jnp.asarray(1.0), jnp.asarray(1.0), jnp.asarray(0.0), {}, df_prev + 1.0
+        calls.append(1)
+        q_i = 0.5 * jnp.maximum(params.rlt - 4.0, 0.0) ** 1.5
+        return q_i, q_i, jnp.asarray(0.0), {}, df_prev + 1.0
 
     monkeypatch.setattr(GyaradaxQLTransportModel, "_per_radius", per_radius)
-    tc = torax_config({"model_name": "ql-gyx", "rho_match": (0.3, 0.6), "batching": "loop", **GRID})
-    cp, rp, geo = core_profile_helpers.make_initial_inputs(tc)
-    model = tc.transport.core_transport_models["gyaradax"].build_transport_model()
-    state = model.initial_state(rp)
-    assert state.df.shape == (2, 32, 8, 16, 85, 32) and np.all(np.asarray(state.ikxspace_index) == -1)
-    args = (rp.transport.core_transport_model_params["gyaradax"], rp, geo, cp, np.zeros_like(geo.rho_face_norm, dtype=bool))
-    _, state = model.call_implementation(*args, state)
-    assert np.all(np.asarray(state.ikxspace_index) == 0) and np.allclose(np.asarray(state.df), 1.0)
-    _, state = model.call_implementation(*args, state)
-    assert np.allclose(np.asarray(state.df), 2.0)
+    base.clear_warm_start()
+    tc = torax_config({"model_name": "ql-gyx", "rho_match": (0.3, 0.6), **GRID})
+    history = torax.run_simulation(tc, progress_bar=False, max_steps=3)
+    assert np.all(np.isfinite(np.asarray(history.simulation_output_to_xr().profiles.T_i)))
+    # every call inside TORAX's loop added one to the stored distribution of each radius
+    assert len(base._WARM) == 2
+    counts = {float(np.asarray(df).real.flat[0]) for df, _ in base._WARM.values()}
+    assert len(counts) == 1 and counts.pop() >= 3
+    assert all(int(i) == 0 for _, i in base._WARM.values())
     assert not build(warm_start=False, **GRID)._warm_df_shape()
+
     monkeypatch.setattr(
         GyaradaxQLTransportModel, "_per_radius",
         lambda self, params, geom, df_prev=None, warm=None: (*(jnp.asarray(jnp.nan),) * 3, {}, df_prev * jnp.nan),
     )
+    cp, rp, geo = core_profile_helpers.make_initial_inputs(tc)
+    model = tc.transport.core_transport_models["gyaradax"].build_transport_model()
+    args = (rp.transport.core_transport_model_params["gyaradax"], rp, geo, cp, np.zeros_like(geo.rho_face_norm, dtype=bool))
     with caplog.at_level("ERROR", logger="gyaradax.transport"):
-        coeffs, _ = model.call_implementation(*args, state)
+        coeffs, _ = model.call_implementation(*args, model.initial_state(rp))
         jax.effects_barrier()
     assert np.isnan(np.asarray(coeffs.chi_face_ion)).any()
     assert sum("is not finite" in r.getMessage() for r in caplog.records) == 2
+    base.clear_warm_start()

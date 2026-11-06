@@ -72,7 +72,7 @@ Any other TORAX config uses the models the same way, after `import gyaradax.tran
 | `rule`, `rule_options` | ql | `sat2` | saturation rule (`sat2`, `canonical`, `sat0`), and its options |
 | `calibration`, `cn` | ql | `auto` | calibration name or JSON path (`auto`: the rule's default in `gyaradax/quasilinear/weights/`, `sat2_v3` or `canonical_v3`), with parameters per electron model and flux channel; `cn` instead sets one amplitude for every channel |
 | `n_steps_linear`, `early_stop` | ql | 2000, true | cap on RK4 steps, and stopping on converged growth rates |
-| `warm_start`, `warm_start_steps` | ql | true, 1000 | start each radius from its final distribution of the previous transport step (cold when the ikxspace changes), and the step cap of such a warm solve |
+| `warm_start`, `warm_start_steps` | ql | true, 1000 | start each radius from its final distribution of the previous transport call, kept in host memory (cold when the ikxspace changes), and the step cap of such a warm solve |
 | `n_steps_nl`, `nl_tail_blocks`, `nl_block` | nl | 30000, 12, 500 | run length and averaging window |
 
 The local inputs at each radius are R/L_Ti, R/L_Te, R/L_n, q, s_hat, eps, T_e/T_i, n_e and T_i from
