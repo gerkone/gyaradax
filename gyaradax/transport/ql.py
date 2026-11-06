@@ -13,6 +13,7 @@ from . import base
 from .base import STATIC
 
 RuntimeParams = base.RuntimeParams
+_CHANNELS = {"adiabatic": ("Qi",), "kinetic": ("Qi", "Qe", "Gamma")}
 
 
 @dataclasses.dataclass(kw_only=True, frozen=True, eq=False)
@@ -22,8 +23,7 @@ class GyaradaxQLTransportModel(base.GyaradaxTransportModel):
     n_steps_linear: int
     rule: str
     rule_options: Tuple[Tuple[str, Any], ...]
-    cn: float
-    calibration: str
+    channel_params: Tuple[Tuple[str, Tuple[Tuple[str, float], ...]], ...]
     early_stop: bool
     early_stop_block: int
     early_stop_atol: float
@@ -36,14 +36,18 @@ class GyaradaxQLTransportModel(base.GyaradaxTransportModel):
     @classmethod
     def from_config(cls, cfg) -> "GyaradaxQLTransportModel":
         cal = calibration.load(cfg.calibration or "", cfg.rule)
-        if cfg.cn is None and cal is None:
+        electrons = "kinetic" if cfg.kinetic else "adiabatic"
+        if cfg.cn is not None:
+            channels = {ch: {"cn": float(cfg.cn)} for ch in _CHANNELS[electrons]}
+        elif cal is None:
             raise ValueError(f"no calibration for rule {cfg.rule!r}: set `calibration` or `cn`.")
-        if cfg.kinetic and cfg.cn is None and "kinetic" not in cal.get("electrons", ()):
-            raise ValueError(f"calibration {cfg.calibration!r} has no kinetic fit: set `cn`.")
-        cn = float(cfg.cn) if cfg.cn is not None else cal["parameters"]["cn"]
-        options = {**(calibration.rule_kwargs(cal) if cal else {}), **(cfg.rule_options or {})}
+        else:
+            channels = calibration.channel_parameters(cal, electrons)
+        options = {**(cal.get("options", {}) if cal else {}), **(cfg.rule_options or {})}
         return super().from_config(
-            cfg, rule_options=tuple(sorted(options.items())), cn=cn, calibration=cfg.calibration or ""
+            cfg,
+            rule_options=tuple(sorted(options.items())),
+            channel_params=tuple((ch, tuple(sorted(kw.items()))) for ch, kw in sorted(channels.items())),
         )
 
     def _warm_df_shape(self):
@@ -64,9 +68,9 @@ class GyaradaxQLTransportModel(base.GyaradaxTransportModel):
             params,
             geom,
             grid,
-            cn=jnp.asarray(self.cn),
             rule=self.rule,
             rule_options=dict(self.rule_options),
+            channel_params={ch: dict(kw) for ch, kw in self.channel_params},
             n_steps_linear=n_steps,
             early_stop=self.early_stop,
             early_stop_opts=dict(

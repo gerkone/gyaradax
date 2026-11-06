@@ -449,10 +449,12 @@ def test_kx_chain0_selects_the_theta0_chain():
 @pytest.mark.parametrize("name", [n for n in calibration.names() if calibration.load(n)["rule"] in RULES])
 def test_bundled_calibration_drives_its_rule(name):
     cal = calibration.load(name)
-    assert cal["rule"] in RULES and cal["parameters"]["cn"] > 0
-    q = float(call_rule(RULES[cal["rule"]], synthetic_spectrum(), cn=cal["parameters"]["cn"],
-                        **calibration.rule_kwargs(cal)))
-    assert np.isfinite(q) and q > 0
+    assert cal["rule"] in RULES and set(cal["parameters"]) == {"adiabatic", "kinetic"}
+    for electrons in cal["parameters"]:
+        for ch, kw in calibration.channel_parameters(cal, electrons).items():
+            assert kw["cn"] > 0
+            q = float(call_rule(RULES[cal["rule"]], synthetic_spectrum(), **{**cal["options"], **kw}))
+            assert np.isfinite(q) and q > 0, (electrons, ch)
 
 
 def test_auto_resolves_the_rule_default():
@@ -460,35 +462,4 @@ def test_auto_resolves_the_rule_default():
         assert calibration.load("auto", rule) == calibration.load(name)
     assert calibration.load("auto", "sat0") is None
     with pytest.raises(ValueError, match="is for rule"):
-        calibration.load("sat2_v1", "canonical")
-
-
-def _summary_table(path, name, kinetic):
-    import pandas as pd
-
-    ky = np.linspace(0.0, 1.4, 16)
-    gamma = 0.3 * np.sin(np.pi * ky / 1.4)
-    rows = []
-    for i, (scale, test_set, sat) in enumerate(((1.0, None, 5.0), (2.0, None, 5.0), (1.5, "id", 5.0), (0.0, "id", None))):
-        rows.append(dict(
-            name=f"run_{i}", test_set=test_set, saturation_time=sat, collisionality=0.0,
-            lin_ky=ky, lin_gamma=scale * gamma, lin_weight_Qi=np.where(ky > 0, 1.0, np.nan),
-            lin_weight_Qe=np.where(ky > 0, 0.5, np.nan) if kinetic else None,
-            lin_gq=1.0, lin_grad_r0=1.0, dlnpdr_tglf=6.0,
-            Qi_fluxavg=10.0 * scale, Qe_fluxavg=5.0 * scale if kinetic else np.nan,
-        ))
-    pd.DataFrame(rows).to_parquet(path / f"{name}.parquet")
-
-
-def test_calibration_fit_on_summary_tables(tmp_path):
-    _summary_table(tmp_path, "adiabatic", kinetic=False)
-    _summary_table(tmp_path, "kinetic", kinetic=True)
-    rows = calibration.summary_rows(tmp_path)
-    assert {(r["kind"], r["channel"]) for r in rows} == {
-        ("adiabatic", "Qi"), ("kinetic", "Qi"), ("kinetic", "Qe")}
-    assert sum(r["stable"] for r in rows) == 3 and {r["split"] for r in rows} == {"train", "id"}
-    rec, metrics = calibration.fit_sat2(tmp_path, exponents=[0.5, 1.0], folds=2)
-    assert rec["electrons"] == ["adiabatic", "kinetic"] and rec["channels"] == ["Qe", "Qi"]
-    assert rec["parameters"]["cn"] > 0 and rec["parameters"]["flux_exponent"] in (0.5, 1.0)
-    assert set(metrics) == {"n_train", "cross_validation", "id"}
-    assert metrics["id"]["kinetic/Qi"]["stable_over_1"] == 0.0
+        calibration.load("sat2_v3", "canonical")

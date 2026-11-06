@@ -20,12 +20,6 @@ class GyaradaxNLTransportModel(base.GyaradaxTransportModel):
     nl_tail_blocks: int
     nl_block: int
 
-    @classmethod
-    def from_config(cls, cfg) -> "GyaradaxNLTransportModel":
-        if cfg.kinetic:
-            raise NotImplementedError("nl-gyx runs adiabatic electrons only.")
-        return super().from_config(cfg)
-
     def _per_radius(self, params: GKParams, geom: Dict[str, Any]):
         q_i, q_e, pfe = point_eval.nl_at_point(
             params,

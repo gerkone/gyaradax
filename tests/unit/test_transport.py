@@ -105,38 +105,34 @@ def test_config_and_grid():
         tc.transport.core_transport_models["gyaradax"].build_transport_model()
     ).__name__ == ("GyaradaxNLTransportModel")
     model = build(grid_preset="kinetic", nky=48, vpar_max=3.5, rule="sat0", cn=2.0)
-    assert (model.nkx, model.nmu, model.nky, model.vpar_max, model.cn) == (191, 12, 48, 3.5, 2.0)
-    sat2 = calibration.load("auto", "sat2")
-    model = build(rule="sat2", kinetic=True)
-    assert model.cn == sat2["parameters"]["cn"] and model.nkx == 191
-    assert dict(model.rule_options) == calibration.rule_kwargs(sat2)
+    assert (model.nkx, model.nmu, model.nky, model.vpar_max) == (191, 12, 48, 3.5)
+    assert model.channel_params == (("Qi", (("cn", 2.0),)),)
+    for rule in ("sat2", "canonical"):
+        cal = calibration.load("auto", rule)
+        model = build(rule=rule, kinetic=True)
+        want = calibration.channel_parameters(cal, "kinetic")
+        assert {ch: dict(kw) for ch, kw in model.channel_params} == want and set(want) == {"Qi", "Qe", "Gamma"}
+        assert dict(model.rule_options) == cal["options"] and model.nkx == 191
     with pytest.raises(ValueError, match="no calibration"):
         build(rule="sat0")
-    assert (
-        build(rule="canonical", kinetic=True).cn
-        == calibration.load("auto", "canonical")["parameters"]["cn"]
-    )
     with pytest.warns(RuntimeWarning, match="resolution floor"):
         assert build(**{**GRID, "nkx": 43}).nkx == 85
     with pytest.raises(ValueError, match="must be odd"):
         build(nkx=192)
-    with pytest.raises(NotImplementedError, match="adiabatic"):
-        GyaradaxNLConfig.from_dict(
-            {"model_name": "nl-gyx", "kinetic": True}
-        ).build_transport_model()
+    assert GyaradaxNLConfig.from_dict({"model_name": "nl-gyx", "kinetic": True}).build_transport_model().kinetic
 
 
 def test_calibration_from_a_json_file(tmp_path):
     path = tmp_path / "mine.json"
     cal = {
         "rule": "sat2",
-        "parameters": {"cn": 2.0, "flux_exponent": 0.7},
-        "electrons": ["adiabatic"],
+        "options": {"kx_width_model": "tglf"},
+        "parameters": {"adiabatic": {"Qi": {"cn": 2.0, "flux_exponent": 0.7}}},
     }
     calibration.save(cal, path)
     model = build(rule="sat2", calibration=str(path), rule_options={"gate_sharpness": 50.0})
-    assert model.cn == 2.0
-    assert dict(model.rule_options) == {"flux_exponent": 0.7, "gate_sharpness": 50.0}
+    assert model.channel_params == (("Qi", (("cn", 2.0), ("flux_exponent", 0.7))),)
+    assert dict(model.rule_options) == {"kx_width_model": "tglf", "gate_sharpness": 50.0}
     with pytest.raises(ValueError, match="no kinetic fit"):
         build(rule="sat2", calibration=str(path), kinetic=True)
 
@@ -152,6 +148,15 @@ def test_diagnostics_rows(monkeypatch, tmp_path):
     assert {r["radius"] for r in rows if r["call"] == rows[-1]["call"]} == {0, 1}
     assert len({r["rho_face"] for r in rows}) == 2
     assert all(r["qi_gb"] == 1.0 and isinstance(r["shat"], float) for r in rows)
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("kinetic", [False, True])
+def test_nl_solve(kinetic):
+    fields = {"model_name": "nl-gyx", "rho_match": (0.5,), "kinetic": kinetic, "n_steps_nl": 60, "nl_block": 20, "nl_tail_blocks": 2}
+    _, coeffs, _, _ = transport_call({**fields, **GRID, "nvpar": 16, "nmu": 4, "ns": 8})
+    for chi in (coeffs.chi_face_ion, coeffs.chi_face_el):
+        assert np.all(np.isfinite(np.asarray(chi)))
 
 
 @pytest.mark.slow

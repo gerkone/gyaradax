@@ -1,0 +1,27 @@
+{
+ "rule": "canonical",
+ "weights": "kx_chain0",
+ "options": {},
+ "parameters": {
+  "adiabatic": {
+   "Qi": {
+    "cn": 4.006361748364787
+   }
+  },
+  "kinetic": {
+   "Qi": {
+    "cn": 6.3337050091343094
+   },
+   "Qe": {
+    "cn": 4.892614772770525
+   },
+   "Gamma": {
+    "cn": 4.222781839030622
+   }
+  }
+ },
+ "fit": {
+  "form": "amplitude per electron model and flux channel",
+  "date": "2026-11-06"
+ }
+}
