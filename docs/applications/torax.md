@@ -31,13 +31,23 @@ QL = {
     "model_name": "ql-gyx",
     "rho_min": 0.15,
     "rho_max": 0.95,
-    "rho_match": (0.3, 0.45, 0.6, 0.75, 0.85, 0.9),
+    "rho_match": (0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9),
     "kinetic": True,  # 32x12x18x191x32, two species
     "rule": "sat2",
     "backend": "cuda",
     "fused_linear": True,
+    "n_steps_linear": 404250,  # cold first call: t = 300 at the smallest CFL step
+    "warm_start": True,
+    "warm_start_steps": 10000,
+    "early_stop_block": 250,
+    "early_stop_atol": 1e-5,
+    "early_stop_rtol": 1e-5,
+    "early_stop_min_steps": 2000,
+    "early_stop_patience": 24,
 }
 ```
+
+The eight radii run one per GPU on an 8-GPU node. The first transport call is cold and runs to t = 300; every later call starts from the previous call's distributions and runs at most 10000 steps.
 
 Run it as a TORAX config file, or from Python:
 
