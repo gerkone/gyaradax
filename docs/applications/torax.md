@@ -55,12 +55,6 @@ output = history.simulation_output_to_xr()
 
 Any other TORAX config uses the models the same way, after `import gyaradax.transport`.
 
-### First transport call
-
-The figure compares the turbulent coefficients on the initial iterhybrid profiles (t = 0): `ql-gyx` with the bundled SAT2 weights (kinetic electrons, native 32x12x18x191x32 grid, 8 radii, linear solves capped at 10000 steps), against QLKNN and TGLF SAT2 as shipped by TORAX. It is one transport call, not an evolved discharge: the linear solves all stopped at the cap, and the growth rates at rho 0.4 and 0.88 are not yet understood, so the rise of chi_e and D_e near rho 0.4 should not be read as physics.
-
-![Turbulent transport on the initial iterhybrid profiles](figures/torax_iterhybrid_t0.png)
-
 ## Configuration
 
 | field | models | default | meaning |
