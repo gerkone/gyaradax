@@ -198,7 +198,7 @@ def _report_divergence(model, rows):
         )
 
 
-# final distribution and ikxspace index per (model, face index), kept on the radius's device between calls
+# final distribution and ikxspace index per (model, rho_match slot), kept on the radius's device between calls
 _WARM: Dict[Tuple[int, int], Tuple[jax.Array, jax.Array]] = {}
 
 
@@ -466,12 +466,12 @@ class GyaradaxTransportModel(qualikiz.QualikizBasedTransportModel):
                 if shape is None:
                     out[j] = solve(*args)
                     continue
-                df_prev, i_prev = _WARM.get((id(self), radii[j]), (None, None))
+                df_prev, i_prev = _WARM.get((id(self), j), (None, None))
                 if df_prev is None:
                     df_prev = jax.device_put(jnp.zeros(shape, jnp.complex64), devices[k])
                     i_prev = jax.device_put(jnp.asarray(-1, jnp.int32), devices[k])
                 *res, (df_new, i_new) = solve(*args, df_prev, i_prev)
-                _WARM[(id(self), radii[j])] = (df_new, i_new)
+                _WARM[(id(self), j)] = (df_new, i_new)
                 out[j] = tuple(res)
             return jax.device_get(out)
 
@@ -486,7 +486,6 @@ class GyaradaxTransportModel(qualikiz.QualikizBasedTransportModel):
     def call_implementation(
         self, transport_runtime_params, runtime_params, geo, core_profiles, two_point_mask, component_state
     ):
-        del runtime_params
         ql_inputs = quasilinear_inputs(core_profiles, geo, two_point_mask)
         match_idx = face_indices_for_radii(geo, self.rho_match)
         faces = face_profiles(core_profiles, geo)
@@ -504,6 +503,7 @@ class GyaradaxTransportModel(qualikiz.QualikizBasedTransportModel):
         *fluxes, rows = jax.experimental.io_callback(
             functools.partial(self._dispatch, shape, spec), spec, match_idx, ql_inputs, faces, geo_lite, ordered=False
         )
+        rows = dict(rows, t=jnp.full((n,), runtime_params.t, jnp.float32))
         diag_lib.record_rows(sink, {"model": type(self).__name__}, rows)
         jax.debug.callback(_report_divergence, type(self).__name__, rows)
         rho_tubes = geo.rho_face_norm[match_idx]

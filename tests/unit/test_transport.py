@@ -136,7 +136,7 @@ def test_diagnostics_rows(monkeypatch, tmp_path):
     rows = diagnostics.load_jsonl(path)
     assert {r["radius"] for r in rows if r["call"] == rows[-1]["call"]} == {0, 1}
     assert len({r["rho_face"] for r in rows}) == 2
-    assert all(r["qi_gb"] == 1.0 and isinstance(r["shat"], float) for r in rows)
+    assert all(r["qi_gb"] == 1.0 and isinstance(r["shat"], float) and r["t"] == 0.0 for r in rows)
 
 
 @pytest.mark.slow
@@ -237,11 +237,12 @@ def test_warm_start_carries_the_distribution(monkeypatch, caplog):
 
     monkeypatch.setattr(GyaradaxQLTransportModel, "_per_radius", per_radius)
     base.clear_warm_start()
-    tc = torax_config({"model_name": "ql-gyx", "rho_match": (0.3, 0.6), **GRID})
+    # 0.75 and 0.875 share a face on the 4-cell grid; each tube still keeps its own state
+    tc = torax_config({"model_name": "ql-gyx", "rho_match": (0.3, 0.75, 0.875), **GRID})
     history = torax.run_simulation(tc, progress_bar=False, max_steps=3)
     assert np.all(np.isfinite(np.asarray(history.simulation_output_to_xr().profiles.T_i)))
     # every call inside TORAX's loop added one to the stored distribution of each radius
-    assert len(base._WARM) == 2
+    assert len(base._WARM) == 3
     counts = {float(np.asarray(df).real.flat[0]) for df, _ in base._WARM.values()}
     assert len(counts) == 1 and counts.pop() >= 3
     assert all(int(i) == 0 for _, i in base._WARM.values())
