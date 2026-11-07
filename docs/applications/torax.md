@@ -65,6 +65,12 @@ output = history.simulation_output_to_xr()
 
 Any other TORAX config uses the models the same way, after `import gyaradax.transport`.
 
+### Evolved profiles
+
+The figure compares iterhybrid at t = 5 s with `ql-gyx` (bundled SAT2 weights, kinetic electrons, native grid, the 8 radii above) and with QLKNN as shipped by TORAX. The `ql-gyx` run restarts from the QLKNN solution at t = 3.03 s and evolves for 2 s with warm starts between transport calls. T_i settles within a few tenths of a second; T_e and n_e are still evolving at t = 5 s, in both runs. Each warm linear solve is capped at 10000 steps, so the fluxes come from a fixed continuation of the previous distribution rather than from a converged growth rate.
+
+![iterhybrid at t = 5 s, ql-gyx against QLKNN](figures/torax_iterhybrid_t5.png)
+
 ## Configuration
 
 | field | models | default | meaning |
@@ -77,11 +83,11 @@ Any other TORAX config uses the models the same way, after `import gyaradax.tran
 | `kinetic`, `em` | both | false | kinetic electrons, A_par (experimental) |
 | `collisions` | both | true | linearised Fokker-Planck collisions, with frequencies from the local n_e and T_i (as `coll_nref`, `coll_tref`) and R_major (`coll_rref`) |
 | `ikxspace_choices`, `ikxspace_per_shat` | both | kinetic preset: 1, 2, 3, 4, 6, 8, 12, 16; 6.53 | per radius, ikxspace is the largest choice below floor(6.53 abs(s_hat)); empty keeps the fixed `ikxspace`. Each choice adds one prebuilt topology (about 18 MB at the kinetic grid) |
-| `diagnostics_path` | both | | one jsonl row per call and radius (padding radii included): local parameters, fluxes, steps, time |
+| `diagnostics_path` | both | | one jsonl row per call and radius: local parameters, fluxes, steps, wall time and the TORAX time `t` of the call |
 | `rule`, `rule_options` | ql | `sat2` | saturation rule (`sat2`, `canonical`, `sat0`), and its options |
 | `calibration`, `cn` | ql | `auto` | calibration name or JSON path (`auto`: the rule's default in `gyaradax/quasilinear/weights/`, `sat2_v3` or `canonical_v3`), with parameters per electron model and flux channel; `cn` instead sets one amplitude for every channel |
 | `n_steps_linear`, `early_stop` | ql | 2000, true | cap on RK4 steps, and stopping on converged growth rates |
-| `warm_start`, `warm_start_steps` | ql | true, 1000 | start each radius from its final distribution of the previous transport call, kept in host memory (cold when the ikxspace changes), and the step cap of such a warm solve |
+| `warm_start`, `warm_start_steps` | ql | true, 1000 | start each radius from its final distribution of the previous transport call, kept on its device (cold when the ikxspace changes), and the step cap of such a warm solve |
 | `n_steps_nl`, `nl_tail_blocks`, `nl_block` | nl | 30000, 12, 500 | run length and averaging window |
 
 The local inputs at each radius are R/L_Ti, R/L_Te, R/L_n, q, s_hat, eps, T_e/T_i, n_e and T_i from
