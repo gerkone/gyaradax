@@ -22,6 +22,7 @@ cuda13 = ["jax[cuda13-local]", "nvidia-mathdx", "nvidia-nccl-cu13"]
 dev = ["pytest", "ruff", "black"]
 test = ["pytest", "huggingface_hub"]
 docs = ["sphinx>=8", "furo", "myst-parser>=4", "sphinx-copybutton", "sphinx-design", "sphinx-argparse", "sphinx-llms-txt"]
+torax = ["torax>=2.0,<2.1"]
 
 [tool.setuptools.packages.find]
 include = ["gyaradax*"]

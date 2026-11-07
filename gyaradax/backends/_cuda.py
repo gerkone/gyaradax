@@ -65,7 +65,8 @@ def _register_ffi():
 
     try:
         _lib = ctypes.cdll.LoadLibrary(str(LIB_PATH))
-    except (OSError, AttributeError):
+    except (OSError, AttributeError) as exc:
+        log.warning("CUDA library failed to load: %s", exc)
         return False
 
     targets = {
@@ -107,7 +108,12 @@ def _register_ffi():
 
 def is_available():
     """Check if CUDA FFI kernels are compiled and a GPU is present."""
-    return LIB_PATH.exists() and bool(jax.devices("cuda"))
+    if not LIB_PATH.exists():
+        return False
+    try:
+        return bool(jax.devices("cuda"))
+    except RuntimeError:
+        return False
 
 
 # parallel-stencil taps summed by linear_rhs_fused.cu

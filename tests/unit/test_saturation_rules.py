@@ -13,7 +13,14 @@ import pytest
 
 from conftest import reference_dir, reference_dumps  # type: ignore[import-not-found]
 from gyaradax.quasilinear import calibration
-from gyaradax.quasilinear.rules import RULES, dlnpdr_tglf, ql_flux, ql_flux_per_species
+from gyaradax.geometry.grids import _build_mode_label
+from gyaradax.quasilinear.rules import (
+    RULES,
+    dlnpdr_tglf,
+    kx_chain0,
+    ql_flux,
+    ql_flux_per_species,
+)
 
 NS, NKX, NKY = 8, 5, 6
 
@@ -428,13 +435,26 @@ class TestDlnpdr:
             assert q_on == pytest.approx(q_off * (12.0 / 6.0) ** p, rel=1e-10)
 
 
-@pytest.mark.parametrize("name", calibration.names())
+def test_kx_chain0_selects_the_theta0_chain():
+    kxrh = jnp.linspace(-1.0, 1.0, 11)
+    chain = np.asarray(kx_chain0(jnp.asarray(_build_mode_label(11, 3, 2)), kxrh))
+    assert chain[:, 0].nonzero()[0].tolist() == [5]
+    assert chain[:, 1].nonzero()[0].tolist() == [1, 3, 5, 7, 9]
+    assert chain[:, 2].nonzero()[0].tolist() == [1, 5, 9]
+    spec = synthetic_spectrum()
+    full = jnp.ones(spec["phi2"].shape[1:])
+    assert float(call_rule(ql_flux, spec, kx_chain=full)) == pytest.approx(float(call_rule(ql_flux, spec)))
+
+
+@pytest.mark.parametrize("name", [n for n in calibration.names() if calibration.load(n)["rule"] in RULES])
 def test_bundled_calibration_drives_its_rule(name):
     cal = calibration.load(name)
-    assert cal["rule"] in RULES and cal["parameters"]["cn"] > 0
-    q = float(call_rule(RULES[cal["rule"]], synthetic_spectrum(), cn=cal["parameters"]["cn"],
-                        **calibration.rule_kwargs(cal)))
-    assert np.isfinite(q) and q > 0
+    assert cal["rule"] in RULES and set(cal["parameters"]) == {"adiabatic", "kinetic"}
+    for electrons in cal["parameters"]:
+        for ch, kw in calibration.channel_parameters(cal, electrons).items():
+            assert kw["cn"] > 0
+            q = float(call_rule(RULES[cal["rule"]], synthetic_spectrum(), **{**cal["options"], **kw}))
+            assert np.isfinite(q) and q > 0, (electrons, ch)
 
 
 def test_auto_resolves_the_rule_default():
@@ -442,4 +462,4 @@ def test_auto_resolves_the_rule_default():
         assert calibration.load("auto", rule) == calibration.load(name)
     assert calibration.load("auto", "sat0") is None
     with pytest.raises(ValueError, match="is for rule"):
-        calibration.load("sat2_v1", "canonical")
+        calibration.load("sat2_v3", "canonical")
