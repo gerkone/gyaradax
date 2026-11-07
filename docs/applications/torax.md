@@ -67,9 +67,35 @@ Any other TORAX config uses the models the same way, after `import gyaradax.tran
 
 ### Evolved profiles
 
-The figure compares iterhybrid at t = 5 s with `ql-gyx` (bundled SAT2 weights, kinetic electrons, native grid, the 8 radii above) and with QLKNN as shipped by TORAX. The `ql-gyx` run restarts from the QLKNN solution at t = 3.03 s and evolves for 2 s with warm starts between transport calls. T_i settles within a few tenths of a second; T_e and n_e are still evolving at t = 5 s, in both runs. Each warm linear solve is capped at 10000 steps, so the fluxes come from a fixed continuation of the previous distribution rather than from a converged growth rate.
+The figure shows iterhybrid at t = 5 s with `ql-gyx` (bundled SAT2 weights, kinetic electrons, native grid, the 8 radii above) and with QLKNN as shipped by TORAX. The top row has the profiles, the bottom row the turbulent coefficients TORAX received.
 
 ![iterhybrid at t = 5 s, ql-gyx against QLKNN](figures/torax_iterhybrid_t5.png)
+
+The `ql-gyx` run does not start from the initial profiles. It restarts from the QLKNN solution at t = 3.03 s and evolves the last 2 s with `ql-gyx` alone. TORAX calls the transport model about three times per time step, 75 calls in this run. The first call runs every radius cold to t = 300. Every later call starts each radius from its distribution of the previous call and runs at most 10000 steps; every warm solve in this run reached that cap, so its fluxes come from a fixed continuation of the previous distribution rather than from a converged growth rate. Two radii changed ikxspace as their shat drifted (rho 0.48 and rho 0.2) and ran cold once more. All 75 calls were finite.
+
+The two models agree outside rho 0.6. Inside it, `ql-gyx` gives a larger ion diffusivity and a smaller electron one than QLKNN, so T_i is lower (18 against 21.5 keV on axis) and T_e more peaked (40 against 37 keV). Its D_e sits on TORAX's floor outside rho 0.3, so the density peaking comes from the pinch. T_i settles within a few tenths of a second of the restart; T_e and n_e are still evolving at t = 5 s, in both runs.
+
+To reproduce it, run the QLKNN example first, then restart `ql-gyx` from its output. The run needs one GPU per radius for the radii to run in parallel; with fewer GPUs they share them.
+
+```python
+import copy
+
+import torax
+from torax.examples import iterhybrid_predictor_corrector
+
+from gyaradax.transport.cases import iterhybrid
+
+ref = torax.run_simulation(torax.ToraxConfig.from_dict(iterhybrid_predictor_corrector.CONFIG))
+ref.simulation_output_to_xr().to_netcdf("iterhybrid_qlknn.nc")
+
+cfg = copy.deepcopy(iterhybrid.CONFIG)
+cfg["restart"] = {"filename": "iterhybrid_qlknn.nc", "time": 3.026, "do_restart": True, "stitch": False}
+cfg["transport"]["core_transport_models"]["turbulent"]["diagnostics_path"] = "calls.jsonl"
+history = torax.run_simulation(torax.ToraxConfig.from_dict(cfg))
+history.simulation_output_to_xr().to_netcdf("iterhybrid_ql_gyx.nc")
+```
+
+TORAX writes nothing until the run ends; `calls.jsonl` has one row per call and radius as the run goes, with the TORAX time `t`, so progress can be followed there.
 
 ## Configuration
 
