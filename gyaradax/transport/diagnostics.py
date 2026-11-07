@@ -97,11 +97,17 @@ def mark_begin(sink: Optional[DiagnosticsSink], rho_idx):
     return idx + token
 
 
-def record(sink, static, payload) -> None:
-    """Emit one row; `static` is host-side, the payload traced."""
+def record_rows(sink, static, rows) -> None:
+    """Emit one row per entry of the leading axis of the traced `rows`."""
     if sink is None:
         return
-    io_callback(functools.partial(sink.write, static=static), (), payload, ordered=False)
+
+    def write_all(rows):
+        n = len(np.asarray(rows["rho_idx"]))
+        for j in range(n):
+            sink.write({k: np.asarray(v)[j] for k, v in rows.items()}, static=static)
+
+    io_callback(write_all, (), rows, ordered=False)
 
 
 def load_jsonl(path: str) -> List[dict]:

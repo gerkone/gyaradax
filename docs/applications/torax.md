@@ -47,7 +47,7 @@ QL = {
 }
 ```
 
-The eight radii run one per GPU on an 8-GPU node. The first transport call is cold and runs to t = 300; every later call starts from the previous call's distributions and runs at most 10000 steps.
+Each radius is its own solve on one device (radius k on GPU k mod the GPU count), the GPUs in parallel and independent of each other, so the eight radii run one per GPU on an 8-GPU node. TORAX itself runs on the CPU: importing `gyaradax.transport` makes the CPU JAX's default device. The first transport call is cold and runs to t = 300; every later call starts from that radius's previous distribution, kept on its GPU, and runs at most 10000 steps. A radius keeps its ikxspace while shat drifts by one choice, so a warm start survives small shat changes.
 
 Run it as a TORAX config file, or from Python:
 
@@ -74,7 +74,6 @@ Any other TORAX config uses the models the same way, after `import gyaradax.tran
 | `nvpar`, `nmu`, `ns`, `nkx`, `nky`, `ikxspace`, `krhomax` | both | from the preset | flux-tube grid; never below nkx 85, nky 32 |
 | `backend`, `mixed_precision`, `fused_linear` | both | `jax`, true, true | `jax` keeps the call differentiable; `cuda` + `fused_linear` is the fastest |
 | `linear_arith` | both | `fp64` | CUDA: `ds` runs the linear RHS in double-single arithmetic, faster on weak-FP64 GPUs such as B300 |
-| `batching` | both | `devices` | how the radii run: `devices` splits them evenly over the local GPUs and vmaps each share (the last radius is repeated to fill the final share and its result dropped), `vmap` vmaps all on one GPU, `loop` runs one at a time |
 | `kinetic`, `em` | both | false | kinetic electrons, A_par (experimental) |
 | `collisions` | both | true | linearised Fokker-Planck collisions, with frequencies from the local n_e and T_i (as `coll_nref`, `coll_tref`) and R_major (`coll_rref`) |
 | `ikxspace_choices`, `ikxspace_per_shat` | both | kinetic preset: 1, 2, 3, 4, 6, 8, 12, 16; 6.53 | per radius, ikxspace is the largest choice below floor(6.53 abs(s_hat)); empty keeps the fixed `ikxspace`. Each choice adds one prebuilt topology (about 18 MB at the kinetic grid) |

@@ -88,17 +88,6 @@ def test_transport_run_with_cheap_flux(monkeypatch):
     assert history.times.shape[0] == 4 and np.all(np.isfinite(t_i)) and np.all(t_i > 0)
 
 
-@pytest.mark.parametrize("batching", ["vmap", "loop"])
-def test_batching_matches_devices(monkeypatch, batching):
-    stiff_flux = stub(lambda params: (params.rlt**1.5, params.rln, params.q))
-
-    monkeypatch.setattr(GyaradaxQLTransportModel, "_per_radius", stiff_flux)
-    fields = {"model_name": "ql-gyx", "rho_match": (0.3, 0.5, 0.7), **GRID}
-    _, ref, _, _ = transport_call(fields)
-    _, out, _, _ = transport_call({**fields, "batching": batching})
-    np.testing.assert_array_equal(np.asarray(out.chi_face_ion), np.asarray(ref.chi_face_ion))
-
-
 def test_config_and_grid():
     tc = torax_config({"model_name": "nl-gyx", "rho_match": (0.3, 0.6)})
     assert type(
@@ -221,7 +210,7 @@ def test_radius_params_carry_collisions_and_shat_ikxspace(monkeypatch):
     assert not seen[0][0].collisions
 
 
-def test_loop_batching_runs_a_simulation(monkeypatch):
+def test_runs_a_simulation(monkeypatch):
     def stiff(params):
         q_i = 0.5 * jnp.maximum(params.rlt - 4.0, 0.0) ** 1.5
         return q_i, q_i, jnp.asarray(0.0)
@@ -229,13 +218,15 @@ def test_loop_batching_runs_a_simulation(monkeypatch):
     stiff_flux = stub(stiff)
 
     monkeypatch.setattr(GyaradaxQLTransportModel, "_per_radius", stiff_flux)
-    tc = torax_config({"model_name": "ql-gyx", "rho_match": (0.3, 0.6, 0.85), "batching": "loop", **GRID})
+    tc = torax_config({"model_name": "ql-gyx", "rho_match": (0.3, 0.6, 0.85), **GRID})
     history = torax.run_simulation(tc, progress_bar=False, max_steps=2)
     assert np.all(np.isfinite(np.asarray(history.simulation_output_to_xr().profiles.T_i)))
 
 
 def test_warm_start_carries_the_distribution(monkeypatch, caplog):
     from gyaradax.transport import base
+
+    base._jitted_radius_solve.cache_clear()
 
     calls = []
 
@@ -260,6 +251,7 @@ def test_warm_start_carries_the_distribution(monkeypatch, caplog):
         GyaradaxQLTransportModel, "_per_radius",
         lambda self, params, geom, df_prev=None, warm=None: (*(jnp.asarray(jnp.nan),) * 3, {}, df_prev * jnp.nan),
     )
+    base._jitted_radius_solve.cache_clear()
     cp, rp, geo = core_profile_helpers.make_initial_inputs(tc)
     model = tc.transport.core_transport_models["gyaradax"].build_transport_model()
     args = (rp.transport.core_transport_model_params["gyaradax"], rp, geo, cp, np.zeros_like(geo.rho_face_norm, dtype=bool))
@@ -267,5 +259,6 @@ def test_warm_start_carries_the_distribution(monkeypatch, caplog):
         coeffs, _ = model.call_implementation(*args, model.initial_state(rp))
         jax.effects_barrier()
     assert np.isnan(np.asarray(coeffs.chi_face_ion)).any()
-    assert sum("is not finite" in r.getMessage() for r in caplog.records) == 2
+    reported = {r.getMessage().split(" is not finite")[0] for r in caplog.records if "is not finite" in r.getMessage()}
+    assert len(reported) == 2
     base.clear_warm_start()
