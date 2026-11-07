@@ -399,9 +399,6 @@ class GyaradaxTransportModel(qualikiz.QualikizBasedTransportModel):
         topo, ikxspace, i = self.topology, None, jnp.asarray(0, jnp.int32)
         if self.ikxspace_choices:
             i = ikxspace_for_shat(params.shat, self.ikxspace_choices, self.ikxspace_per_shat).astype(jnp.int32)
-            if warm is not None:
-                # keep the previous choice while shat drifts by one step, so the warm start survives
-                i = jnp.where((warm[1] >= 0) & (jnp.abs(i - warm[1]) <= 1), warm[1], i)
             topo = select_topology(
                 topology_bank(self.nkx, self.nky, self.ns, self.ikxspace_choices), i
             )

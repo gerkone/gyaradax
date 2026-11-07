@@ -47,7 +47,7 @@ QL = {
 }
 ```
 
-Each radius is its own solve on one device (radius k on GPU k mod the GPU count), the GPUs in parallel and independent of each other, so the eight radii run one per GPU on an 8-GPU node. TORAX itself runs on the CPU: importing `gyaradax.transport` makes the CPU JAX's default device. The first transport call is cold and runs to t = 300; every later call starts from that radius's previous distribution, kept on its GPU, and runs at most 10000 steps. A radius keeps its ikxspace while shat drifts by one choice, so a warm start survives small shat changes.
+Each radius is its own solve on one device (radius k on GPU k mod the GPU count), the GPUs in parallel and independent of each other, so the eight radii run one per GPU on an 8-GPU node. TORAX itself runs on the CPU: importing `gyaradax.transport` makes the CPU JAX's default device. The first transport call is cold and runs to t = 300; every later call starts from that radius's previous distribution, kept on its GPU, and runs at most 10000 steps. A radius whose ikxspace changes (shat crossing a choice) starts cold again, since its kx connectivity changed.
 
 Run it as a TORAX config file, or from Python:
 
