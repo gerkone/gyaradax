@@ -86,7 +86,7 @@ class GyaradaxQLTransportModel(base.GyaradaxTransportModel):
         )
 
 
-class GyaradaxQLConfig(base.SolverConfig):
+class GyaradaxQLConfig(base.GyaradaxConfig):
     """Config of the ql-gyx transport model (fields in docs/applications/torax.md)."""
 
     model_name: Annotated[Literal["ql-gyx"], STATIC] = "ql-gyx"

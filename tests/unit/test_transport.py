@@ -104,8 +104,6 @@ def test_config_and_grid():
         assert dict(model.rule_options) == cal["options"] and model.nkx == 191
     with pytest.raises(ValueError, match="no calibration"):
         build(rule="sat0")
-    with pytest.warns(RuntimeWarning, match="resolution floor"):
-        assert build(**{**GRID, "nkx": 43}).nkx == 85
     with pytest.raises(ValueError, match="must be odd"):
         build(nkx=192)
     assert GyaradaxNLConfig.from_dict({"model_name": "nl-gyx", "kinetic": True}).build_transport_model().kinetic
@@ -128,7 +126,7 @@ def test_calibration_from_a_json_file(tmp_path):
 
 def test_diagnostics_rows(monkeypatch, tmp_path):
     monkeypatch.setattr(GyaradaxQLTransportModel, "_per_radius", constant_flux)
-    diagnostics.reset_sinks()
+    diagnostics.reset()
     path = str(tmp_path / "diag.jsonl")
     transport_call(
         {"model_name": "ql-gyx", "rho_match": (0.3, 0.6), "diagnostics_path": path, **GRID}
@@ -136,7 +134,7 @@ def test_diagnostics_rows(monkeypatch, tmp_path):
     rows = diagnostics.load_jsonl(path)
     assert {r["radius"] for r in rows if r["call"] == rows[-1]["call"]} == {0, 1}
     assert len({r["rho_face"] for r in rows}) == 2
-    assert all(r["qi_gb"] == 1.0 and isinstance(r["shat"], float) and r["t"] == 0.0 for r in rows)
+    assert all(r["qi_gb"] == 1.0 and isinstance(r["shat"], float) and r["t"] == 0.0 and r["wall_s"] > 0 for r in rows)
 
 
 @pytest.mark.slow
@@ -263,3 +261,16 @@ def test_warm_start_carries_the_distribution(monkeypatch, caplog):
     reported = {r.getMessage().split(" is not finite")[0] for r in caplog.records if "is not finite" in r.getMessage()}
     assert len(reported) == 2
     base.clear_warm_start()
+
+
+def test_diverged_solve_hands_torax_nan(monkeypatch):
+    from gyaradax.transport import base
+
+    def per_radius(self, params, geom, df_prev=None, warm=None):
+        return jnp.asarray(1.0), jnp.asarray(0.5), jnp.asarray(0.0), {}, df_prev * jnp.nan
+
+    monkeypatch.setattr(GyaradaxQLTransportModel, "_per_radius", per_radius)
+    base.clear_warm_start()
+    _, coeffs, _, _ = transport_call({"model_name": "ql-gyx", "rho_match": (0.5,), **GRID})
+    base.clear_warm_start()
+    assert np.isnan(np.asarray(coeffs.chi_face_ion)).any()

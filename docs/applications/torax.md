@@ -103,7 +103,7 @@ TORAX writes nothing until the run ends; `calls.jsonl` has one row per call and 
 |---|---|---|---|
 | `rho_match` | both | 0.35, 0.55, 0.75, 0.875 | the radii that run gyaradax |
 | `grid_preset` | both | from `kinetic` | `adiabatic` (32x8x16x85x32) or `kinetic` (32x12x18x191x32, two species) |
-| `nvpar`, `nmu`, `ns`, `nkx`, `nky`, `ikxspace`, `krhomax` | both | from the preset | flux-tube grid; never below nkx 85, nky 32 |
+| `nvpar`, `nmu`, `ns`, `nkx`, `nky`, `ikxspace`, `krhomax` | both | from the preset | flux-tube grid; the presets are the validated grids |
 | `backend`, `mixed_precision`, `fused_linear` | both | `jax`, true, true | `jax` keeps the call differentiable; `cuda` + `fused_linear` is the fastest |
 | `linear_arith` | both | `fp64` | CUDA: `ds` runs the linear RHS in double-single arithmetic, faster on weak-FP64 GPUs such as B300 |
 | `kinetic`, `em` | both | false | kinetic electrons, A_par (experimental) |
@@ -117,6 +117,6 @@ TORAX writes nothing until the run ends; `calls.jsonl` has one row per call and 
 | `n_steps_nl`, `nl_tail_blocks`, `nl_block` | nl | 30000, 12, 500 | run length and averaging window |
 
 The local inputs at each radius are R/L_Ti, R/L_Te, R/L_n, q, s_hat, eps, T_e/T_i, n_e and T_i from
-the TORAX profiles, clipped into `clip_*`. The flux tube is circular with a pure deuterium plasma:
-shaping, impurities, Z_eff and a DT main ion are not modelled yet. Remaining fields (geometry and solver settings, clip boxes,
-particle-transport options) are listed in `gyaradax/transport/base.py`.
+the TORAX profiles, clipped into a fixed box (`_*_MIN`, `_*_MAX` in `gyaradax/transport/base.py`). The flux tube is circular with a pure deuterium plasma: shaping, impurities, Z_eff and a DT main ion are not modelled yet. The remaining fields (`vpar_max`, `gkparams_dt`, and TORAX's particle-transport options `DV_effective`, `An_min`) are in `GyaradaxConfig` in the same file.
+
+A solve that does not stay finite hands TORAX NaN fluxes, which stops the run; its diagnostics row keeps the raw values. The warm-start distributions stay in a module-level dict on the GPUs rather than in TORAX's per-model `component_state`, which lives in TORAX's CPU loop and is written to its output.

@@ -10,7 +10,7 @@ import dataclasses
 import functools
 import logging
 import math
-import warnings
+import time
 from functools import lru_cache
 from concurrent.futures import ThreadPoolExecutor
 from typing import Annotated, Any, Dict, Literal, NamedTuple, Optional, Tuple
@@ -46,13 +46,8 @@ _ELECTRON_MASS_RATIO = 2.72e-4
 _COLL_NREF_UNIT = 1e19
 
 _GKPARAMS_DT = {"adiabatic": 0.005, "kinetic": 0.004}
-_VPAR_MAX = 3.0
-_RREF = 100.0
-_NPERIOD = 1
-_GEOM_TYPE = "circ"
 
 _GRID_KEYS = ("nvpar", "nmu", "ns", "nkx", "nky", "ikxspace", "krhomax")
-_GRID_FLOOR = {"nkx": 85, "nky": 32}
 _GRID_PRESETS = {
     "adiabatic": dict(nvpar=32, nmu=8, ns=16, nkx=85, nky=32, ikxspace=5, krhomax=1.4),
     "kinetic": dict(nvpar=32, nmu=12, ns=18, nkx=191, nky=32, ikxspace=16, krhomax=1.5),
@@ -166,17 +161,7 @@ def resolve_grid(cfg) -> dict:
             f"gyaradax nkx must be odd (got {grid['nkx']}): the kx grid is symmetric about "
             f"kx=0. Use {int(grid['nkx']) - 1}."
         )
-    grid = {k: int(v) if k != "krhomax" else float(v) for k, v in grid.items()}
-    for key, floor in _GRID_FLOOR.items():
-        if int(grid[key]) < floor:
-            warnings.warn(
-                f"gyaradax: {key}={grid[key]} is below the {floor} resolution floor; raising to "
-                f"{floor}.",
-                RuntimeWarning,
-                stacklevel=2,
-            )
-            grid[key] = floor
-    return grid
+    return {k: int(v) if k != "krhomax" else float(v) for k, v in grid.items()}
 
 
 def solve_devices():
@@ -188,8 +173,9 @@ def solve_devices():
 
 
 def _report_divergence(model, rows):
-    for j in np.flatnonzero(np.asarray(rows["finite"]) == 0):
-        r = {k: np.asarray(v)[j] for k, v in rows.items()}
+    for r in rows:
+        if r["finite"]:
+            continue
         _LOG.error(
             "%s: the solve at rho = %.3f is not finite (q = %.3f, shat = %.3f, eps = %.3f, R/LT = %s, R/Ln = %s); "
             "the NaN is passed to TORAX, which stops the run",
@@ -225,11 +211,7 @@ def face_indices_for_radii(geo, rho_match: Tuple[float, ...]) -> jax.Array:
 
 
 def face_profiles(core_profiles, geo) -> Dict[str, jax.Array]:
-    """Face-grid profiles the flux tubes need, computed once outside the loop over radii.
-
-    TORAX caches derived grids on its profile objects (cached properties); computing them
-    inside a scan or shard_map over radii would leak tracers into that cache.
-    """
+    """Face-grid profiles the flux tubes need."""
     kinetic = core_profiles.kinetic
     return dict(
         q=core_profiles.poloidal_flux.q_face,
@@ -243,25 +225,25 @@ def face_profiles(core_profiles, geo) -> Dict[str, jax.Array]:
 
 def gkparams_for_radius(rho_idx, ql_inputs, faces, geo, config) -> GKParams:
     """Local GKParams of one flux tube, clipped into the model's operating box."""
-    rlt = jnp.clip(ql_inputs.lref_over_lti[rho_idx], *config.clip_rlt)
-    rln = jnp.clip(ql_inputs.lref_over_lne[rho_idx], *config.clip_rln)
-    q = jnp.clip(faces["q"][rho_idx], *config.clip_q)
-    shat = jnp.clip(faces["shat"][rho_idx], *config.clip_shat)
-    eps = jnp.clip(faces["eps"][rho_idx], *config.clip_eps)
+    rlt = jnp.clip(ql_inputs.lref_over_lti[rho_idx], _RLT_MIN, _RLT_MAX)
+    rln = jnp.clip(ql_inputs.lref_over_lne[rho_idx], _RLN_MIN, _RLN_MAX)
+    q = jnp.clip(faces["q"][rho_idx], _Q_MIN, _Q_MAX)
+    shat = jnp.clip(faces["shat"][rho_idx], _SHAT_MIN, _SHAT_MAX)
+    eps = jnp.clip(faces["eps"][rho_idx], _EPS_MIN, _EPS_MAX)
     if config.em:
         n_e = faces["n_e"][rho_idx]
         t_i = faces["T_i"][rho_idx] * constants.CONSTANTS.keV_to_J
         beta = jnp.clip(
-            2.0 * constants.CONSTANTS.mu_0 * n_e * t_i / geo.B_0**2, 0.0, config.beta_max
+            2.0 * constants.CONSTANTS.mu_0 * n_e * t_i / geo.B_0**2, 0.0, _BETA_MAX
         )
     else:
         beta = jnp.asarray(0.0)
     if config.kinetic:
         # [ion, electron] with T_ref = T_i; one rln for both (gradient quasineutrality)
-        rlt_e = jnp.clip(ql_inputs.lref_over_lte[rho_idx], *config.clip_rlt)
+        rlt_e = jnp.clip(ql_inputs.lref_over_lte[rho_idx], _RLT_MIN, _RLT_MAX)
         te_ti = faces["T_e"][rho_idx] / faces["T_i"][rho_idx]
         tmp = jnp.stack([jnp.ones_like(te_ti), te_ti])
-        mas = jnp.array([1.0, config.electron_mass_ratio])
+        mas = jnp.array([1.0, _ELECTRON_MASS_RATIO])
         species = dict(
             rlt=jnp.stack([rlt, rlt_e]),
             rln=jnp.stack([rln, rln]),
@@ -311,13 +293,8 @@ def geometry_at(q, shat, eps, config, topo: Dict[str, Any], ikxspace=None) -> Di
         nvpar=config.nvpar,
         nmu=config.nmu,
         vpar_max=config.vpar_max,
-        nperiod=config.nperiod,
-        kxmax=0.0,
         krhomax=config.krhomax,
         ikxspace=config.ikxspace if ikxspace is None else ikxspace,
-        signB=1.0,
-        Rref=config.rref,
-        geom_type=config.geom_type,
         topology=topo,
     )
 
@@ -343,17 +320,7 @@ class GyaradaxTransportModel(qualikiz.QualikizBasedTransportModel):
     ikxspace_per_shat: float
     collisions: bool
     vpar_max: float
-    nperiod: int
-    geom_type: str
     gkparams_dt: float
-    rref: float
-    electron_mass_ratio: float
-    beta_max: float
-    clip_rlt: Tuple[float, float]
-    clip_rln: Tuple[float, float]
-    clip_q: Tuple[float, float]
-    clip_shat: Tuple[float, float]
-    clip_eps: Tuple[float, float]
     kinetic: bool
     diagnostics_path: str
 
@@ -379,22 +346,12 @@ class GyaradaxTransportModel(qualikiz.QualikizBasedTransportModel):
     def topology(self):
         return topology(self.nkx, self.nky, self.ikxspace, self.ns)
 
-    @property
-    def sink(self) -> Any:
-        return diag_lib.get_sink(
-            self.diagnostics_path, len(self.rho_match)
-        )
-
     def _warm_df_shape(self) -> Optional[Tuple[int, ...]]:
         """Shape of the distribution carried between transport steps, or None for a stateless model."""
         return None
 
     def _per_radius_from_profiles(self, rho_idx, ql_inputs, faces, geo, warm=None):
-        """Fluxes and the diagnostics row at one radius; with a ``(df, ikxspace_index)`` warm start also the final ones.
-
-        Nothing here calls back to the host: under radius sharding a radius that finishes early would wait in the
-        callback for the other devices.
-        """
+        """Fluxes and the diagnostics row at one radius; with a ``(df, ikxspace_index)`` warm start also the final ones."""
         params = gkparams_for_radius(rho_idx, ql_inputs, faces, geo, self)
         topo, ikxspace, i = self.topology, None, jnp.asarray(0, jnp.int32)
         if self.ikxspace_choices:
@@ -432,6 +389,8 @@ class GyaradaxTransportModel(qualikiz.QualikizBasedTransportModel):
                 "finite": finite.astype(jnp.int32),
                 **extra,
         }
+        # a diverged solve hands TORAX NaN fluxes, which stops the run; the row keeps the raw values
+        q_i, q_e, pfe = (jnp.where(finite, f, jnp.nan) for f in (q_i, q_e, pfe))
         if warm is None:
             return q_i, q_e, pfe, row
         return q_i, q_e, pfe, row, (df_new.astype(jnp.complex64), i)
@@ -450,10 +409,10 @@ class GyaradaxTransportModel(qualikiz.QualikizBasedTransportModel):
         warm = None if df_prev is None else (df_prev, i_prev)
         return self._per_radius_from_profiles(idx, ql_inputs, faces, geo, warm)
 
-    def _dispatch(self, shape, spec, match_idx, ql_inputs, faces, geo_lite):
+    def _dispatch(self, shape, spec, match_idx, ql_inputs, faces, geo_lite, t):
         """Every radius as its own jitted solve on one device (radius k on device k mod the device count), the devices
-        in parallel from host threads. The radii share nothing, so a radius that finishes early does not wait on the
-        others inside a computation; a warm start keeps each final distribution on its device.
+        in parallel from host threads; a warm start keeps each final distribution on its device. Writes the
+        diagnostics rows and returns the fluxes.
         """
         devices = solve_devices()
         solve = _jitted_radius_solve(self)
@@ -462,26 +421,31 @@ class GyaradaxTransportModel(qualikiz.QualikizBasedTransportModel):
         def run_device(k):
             out = {}
             for j in range(k, len(radii), len(devices)):
+                start = time.perf_counter()
                 args = jax.device_put((np.int32(radii[j]), ql_inputs, faces, geo_lite), devices[k])
                 if shape is None:
-                    out[j] = solve(*args)
-                    continue
-                df_prev, i_prev = _WARM.get((id(self), j), (None, None))
-                if df_prev is None:
-                    df_prev = jax.device_put(jnp.zeros(shape, jnp.complex64), devices[k])
-                    i_prev = jax.device_put(jnp.asarray(-1, jnp.int32), devices[k])
-                *res, (df_new, i_new) = solve(*args, df_prev, i_prev)
-                _WARM[(id(self), j)] = (df_new, i_new)
-                out[j] = tuple(res)
-            return jax.device_get(out)
+                    res = solve(*args)
+                else:
+                    df_prev, i_prev = _WARM.get((id(self), j), (None, None))
+                    if df_prev is None:
+                        df_prev = jax.device_put(jnp.zeros(shape, jnp.complex64), devices[k])
+                        i_prev = jax.device_put(jnp.asarray(-1, jnp.int32), devices[k])
+                    *res, _WARM[(id(self), j)] = solve(*args, df_prev, i_prev)
+                *fluxes, row = jax.device_get(tuple(res))
+                out[j] = (fluxes, {**row, "wall_s": time.perf_counter() - start})
+            return out
 
         with ThreadPoolExecutor(len(devices)) as pool:
             parts = {}
             for d in pool.map(run_device, range(min(len(devices), len(radii)))):
                 parts.update(d)
-        stacked = [parts[j] for j in range(len(radii))]
-        out = jax.tree.map(lambda *x: np.stack([np.asarray(v) for v in x]), *stacked)
-        return jax.tree.map(lambda o, sp: np.asarray(o, sp.dtype).reshape(sp.shape), out, spec)
+        rows = [parts[j][1] for j in range(len(radii))]
+        if self.diagnostics_path:
+            diag_lib.write_rows(self.diagnostics_path, type(self).__name__, float(t), rows)
+        _report_divergence(type(self).__name__, rows)
+        return tuple(
+            np.asarray([parts[j][0][c] for j in range(len(radii))], sp.dtype) for c, sp in enumerate(spec)
+        )
 
     def call_implementation(
         self, transport_runtime_params, runtime_params, geo, core_profiles, two_point_mask, component_state
@@ -489,23 +453,18 @@ class GyaradaxTransportModel(qualikiz.QualikizBasedTransportModel):
         ql_inputs = quasilinear_inputs(core_profiles, geo, two_point_mask)
         match_idx = face_indices_for_radii(geo, self.rho_match)
         faces = face_profiles(core_profiles, geo)
-        sink = self.sink
         shape = self._warm_df_shape()
-        match_idx = diag_lib.mark_begin(sink, match_idx)
         geo_lite = {k: jnp.asarray(getattr(geo, k)) for k in _GeoLite._fields}
 
         # the solves leave this computation: each radius runs on its own device, driven from the host
-        n = len(self.rho_match)
         one = (jax.ShapeDtypeStruct((), jnp.int32), ql_inputs, faces, geo_lite)
         warm_spec = () if shape is None else (jax.ShapeDtypeStruct(shape, jnp.complex64), jax.ShapeDtypeStruct((), jnp.int32))
-        res = jax.eval_shape(self._radius_solve, *one, *warm_spec)[:4]
-        spec = jax.tree.map(lambda x: jax.ShapeDtypeStruct((n, *x.shape), x.dtype), res)
-        *fluxes, rows = jax.experimental.io_callback(
-            functools.partial(self._dispatch, shape, spec), spec, match_idx, ql_inputs, faces, geo_lite, ordered=False
+        res = jax.eval_shape(self._radius_solve, *one, *warm_spec)[:3]
+        spec = tuple(jax.ShapeDtypeStruct((len(self.rho_match), *x.shape), x.dtype) for x in res)
+        fluxes = jax.experimental.io_callback(
+            functools.partial(self._dispatch, shape, spec), spec, match_idx, ql_inputs, faces, geo_lite,
+            runtime_params.t, ordered=False,
         )
-        rows = dict(rows, t=jnp.full((n,), runtime_params.t, jnp.float32))
-        diag_lib.record_rows(sink, {"model": type(self).__name__}, rows)
-        jax.debug.callback(_report_divergence, type(self).__name__, rows)
         rho_tubes = geo.rho_face_norm[match_idx]
         qi, qe, pfe = (jnp.interp(geo.rho_face_norm, rho_tubes, f) * gkw_to_qualikiz_flux(geo) for f in fluxes)
         coeffs = self._make_transport_coeffs(
@@ -523,18 +482,6 @@ class GyaradaxConfig(transport.ComponentTransportConfigBase):
     DV_effective_smooth_width: pydantic.NonNegativeFloat = 0.01
     diagnostics_path: Annotated[Optional[str], STATIC] = None
 
-    def build_runtime_params(self, t: chex.Numeric) -> RuntimeParams:
-        return RuntimeParams(
-            DV_effective=self.DV_effective,
-            An_min=self.An_min,
-            DV_effective_smooth_width=self.DV_effective_smooth_width,
-            **vars(super().build_runtime_params(t)),
-        )
-
-
-class SolverConfig(GyaradaxConfig):
-    """Adds the flux-tube grid and linear-solve settings, for models that run gyaradax."""
-
     backend: Annotated[str, STATIC] = "jax"
     mixed_precision: Annotated[bool, STATIC] = True
     fused_linear: Annotated[bool, STATIC] = True
@@ -551,16 +498,14 @@ class SolverConfig(GyaradaxConfig):
     ikxspace_choices: Annotated[Optional[Tuple[int, ...]], STATIC] = None
     ikxspace_per_shat: Annotated[float, STATIC] = _IKXSPACE_PER_SHAT
     collisions: Annotated[bool, STATIC] = True
-    vpar_max: Annotated[float, STATIC] = _VPAR_MAX
-    nperiod: Annotated[int, STATIC] = _NPERIOD
-    geom_type: Annotated[str, STATIC] = _GEOM_TYPE
+    vpar_max: Annotated[float, STATIC] = 3.0
     gkparams_dt: Annotated[Optional[float], STATIC] = None
-    rref: Annotated[float, STATIC] = _RREF
-    electron_mass_ratio: Annotated[float, STATIC] = _ELECTRON_MASS_RATIO
-    beta_max: Annotated[float, STATIC] = _BETA_MAX
-    clip_rlt: Annotated[Tuple[float, float], STATIC] = (_RLT_MIN, _RLT_MAX)
-    clip_rln: Annotated[Tuple[float, float], STATIC] = (_RLN_MIN, _RLN_MAX)
-    clip_q: Annotated[Tuple[float, float], STATIC] = (_Q_MIN, _Q_MAX)
-    clip_shat: Annotated[Tuple[float, float], STATIC] = (_SHAT_MIN, _SHAT_MAX)
-    clip_eps: Annotated[Tuple[float, float], STATIC] = (_EPS_MIN, _EPS_MAX)
     kinetic: Annotated[bool, STATIC] = False
+
+    def build_runtime_params(self, t: chex.Numeric) -> RuntimeParams:
+        return RuntimeParams(
+            DV_effective=self.DV_effective,
+            An_min=self.An_min,
+            DV_effective_smooth_width=self.DV_effective_smooth_width,
+            **vars(super().build_runtime_params(t)),
+        )

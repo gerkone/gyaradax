@@ -32,7 +32,7 @@ class GyaradaxNLTransportModel(base.GyaradaxTransportModel):
         return q_i, q_e, pfe, {"n_steps": jnp.asarray(self.n_steps_nl)}
 
 
-class GyaradaxNLConfig(base.SolverConfig):
+class GyaradaxNLConfig(base.GyaradaxConfig):
     """Config of the nl-gyx transport model (fields in docs/applications/torax.md)."""
 
     model_name: Annotated[Literal["nl-gyx"], STATIC] = "nl-gyx"

@@ -26,5 +26,4 @@ __all__ = [
     "GyaradaxQLTransportModel",
     "GyaradaxTransportModel",
     "ikxspace_for_shat",
-    "register",
 ]
