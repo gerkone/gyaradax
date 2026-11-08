@@ -49,17 +49,20 @@ def k_perp_squared(krho, kxrh, little_g):
     return krho_t**2 * g_zz + 2.0 * krho_t * kxrh_t * g_ez + kxrh_t**2 * g_ee
 
 
-def k_perp_eff_squared(phi2, k_perp2, ds):
+def k_perp_eff_squared(phi2, k_perp2, ds, kx_chain=None):
     """Eigenmode-weighted ``<k_perp^2>(ky) = int ds sum_kx k_perp^2 |phi|^2 / int ds sum_kx |phi|^2``.
 
     Args:
         phi2: ``|phi|^2``, (ns, nkx, nky).
         k_perp2: ``k_perp^2``, (ns, nkx, nky).
         ds: Parallel grid spacing.
+        kx_chain: Mask restricting the kx sums to one chain, (nkx, nky); all chains when None.
 
     Returns:
         (nky,).
     """
+    if kx_chain is not None:
+        phi2 = phi2 * kx_chain[None]
     norm = jnp.sum(phi2, axis=(0, 1)) * ds
     weighted = jnp.sum(k_perp2 * phi2, axis=(0, 1)) * ds
     return weighted / jnp.maximum(norm, 1e-30)
@@ -82,6 +85,7 @@ def ql_flux(
     mask_zonal=True,
     kx_ratio_sum=False,
     kperp2_eff=None,
+    kx_chain=None,
 ):
     """Compute Q_QL from a gyaradax linear-run end-state.
 
@@ -100,14 +104,16 @@ def ql_flux(
         eps: Floor of the denominators.
         mask_zonal: Drop the ky = 0 contribution.
         kx_ratio_sum: Sum the per-kx ratios ``Γ / |φ|²`` instead of ``Σ Γ / Σ |φ|²``.
-        kperp2_eff: ``<k_perp^2>`` per ky; the all-chain average when None.
+        kx_chain: Mask of the kx chain ``<k_perp^2>`` averages over (see ``kx_chain0``); all chains when None.
+        kperp2_eff: ``<k_perp^2>`` per ky; the ``kx_chain`` average when None.
 
     Returns:
         The flux.
     """
     if kperp2_eff is None:
-        # averages all theta0 chains equally; pass kperp2_eff for the kx = 0 chain alone
-        kperp2_eff = k_perp_eff_squared(phi2, k_perp_squared(krho, kxrh, little_g), ds)
+        kperp2_eff = k_perp_eff_squared(
+            phi2, k_perp_squared(krho, kxrh, little_g), ds, kx_chain=kx_chain
+        )
 
     # geometric floor keeps γ/<k_⊥²> bounded for broad eigenmodes
     g_zz_min = jnp.min(little_g[0])
@@ -488,6 +494,15 @@ RULES_WITH_DLNPDR = ("sat2",)
 
 # rules whose thresholds are in k_theta rho, so need kthnorm
 RULES_WITH_KTHNORM = ("sat2",)
+
+# rules averaging <k_⊥²> over the theta0 = 0 chain, so need kx_chain
+RULES_WITH_KX_CHAIN = ("canonical",)
+
+
+def kx_chain0(mode_label, kxrh):
+    """(nkx, nky) mask of the theta0 = 0 chain: the kx modes linked to kx = 0 at each ky."""
+    ixzero = jnp.argmin(jnp.abs(kxrh))
+    return (mode_label == mode_label[ixzero][None, :]).astype(jnp.float64)
 
 
 def ql_flux_per_species(
