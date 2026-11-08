@@ -4,6 +4,7 @@
 
 - **`ql-gyx`**: quasilinear. At each `rho_match` radius it runs one linear gyaradax solve
   (all ky at once, stopped when the growth rates converge), then applies a saturation rule.
+  The weights, saturation rules and calibrations are described in {doc}`quasilinear`.
 - **`nl-gyx`**: nonlinear. At each `rho_match` radius it runs a nonlinear simulation and
   averages the fluxes over its last blocks, with adiabatic or kinetic electrons. This is ground
   truth for validation, not for routine transport runs.
@@ -71,7 +72,7 @@ The figure shows iterhybrid at t = 5 s with `ql-gyx` (bundled SAT2 weights, kine
 
 ![iterhybrid at t = 5 s, ql-gyx against QLKNN](figures/torax_iterhybrid_t5.png)
 
-The `ql-gyx` run does not start from the initial profiles. It restarts from the QLKNN solution at t = 3.03 s and evolves the last 2 s with `ql-gyx` alone. TORAX calls the transport model about three times per time step, 75 calls in this run. The first call runs every radius cold to t = 300. Every later call starts each radius from its distribution of the previous call and runs at most 10000 steps; every warm solve in this run reached that cap, so its fluxes come from a fixed continuation of the previous distribution rather than from a converged growth rate. Two radii changed ikxspace as their shat drifted (rho 0.48 and rho 0.2) and ran cold once more. All 75 calls were finite.
+The `ql-gyx` run does not start from the initial profiles. It restarts from the QLKNN solution at t = 3.03 s and evolves the last 2 s with `ql-gyx` alone. TORAX calls the transport model about three times per time step, 76 calls in this run. The first call runs every radius cold to t = 300. Every later call starts each radius from its distribution of the previous call and runs at most 10000 steps; every warm solve in this run reached that cap, so its fluxes come from a fixed continuation of the previous distribution rather than from a converged growth rate. Two radii changed ikxspace as their shat drifted (rho 0.48 and rho 0.2) and ran cold once more. All 76 calls were finite.
 
 The two models agree outside rho 0.6. Inside it, `ql-gyx` gives a larger ion diffusivity and a smaller electron one than QLKNN, so T_i is lower (18 against 21.5 keV on axis) and T_e more peaked (40 against 37 keV). Its D_e sits on TORAX's floor outside rho 0.3, so the density peaking comes from the pinch. T_i settles within a few tenths of a second of the restart; T_e and n_e are still evolving at t = 5 s, in both runs.
 

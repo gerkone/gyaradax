@@ -11,7 +11,7 @@ Linear theory gives the weight but not the amplitude, since a linear mode grows 
 
 {func}`~gyaradax.quasilinear.point_eval.ql_at_point` evaluates the model at one operating point (one set of gradients and geometry):
 
-1. **Linear run.** A linear initial-value run from a small perturbation, in blocks of 100 steps. It stops when the growth rates of all $k_y$ change by less than $10^{-4} + 10^{-3}\max|\gamma|$ between blocks, two blocks in a row, after at least 200 and at most `n_steps_linear` steps. Each $k_y$ is then dominated by its fastest-growing mode.
+1. **Linear run.** A linear initial-value run from a small perturbation, in blocks of 100 steps. It stops when the growth rates of all $k_y$ change by less than $10^{-4} + 10^{-3}\max|\gamma|$ between blocks, two blocks in a row, after at least 200 and at most `n_steps_linear` steps. Each $k_y$ is then dominated by its fastest-growing mode. With kinetic electrons the time step is capped at the linear CFL estimate. `df0` starts the run from a given distribution instead of the perturbation, as `ql-gyx` does between transport calls.
 2. **Mode quantities.** From the final distribution and potential: the growth rate $\gamma(k_y)$, the linear flux $\Gamma(k_x, k_y)$ of each mode (the same flux integrals as in a nonlinear run) and the potential intensity $|\phi|^2(s, k_x, k_y)$ along the field line.
 3. **Weight.** $W(k_y) = \sum_{k_x} \Gamma / \sum_{k_x} |\phi|^2$, the flux per unit intensity, with both sums over the $\theta_0 = 0$ chain (the $k_x$ modes linked to $k_x = 0$, {func}`~gyaradax.quasilinear.rules.kx_chain0`). The mode amplitude cancels, so $W$ does not depend on how far the mode has grown.
 4. **Wavenumber.** The mode average $\langle k_\perp^2 \rangle(k_y) = \int \sum_{k_x} k_\perp^2 |\phi|^2\,ds \,/ \int \sum_{k_x} |\phi|^2\,ds$, with $k_\perp^2$ from the metric. It measures how extended the mode is along the field line and radially.
@@ -34,6 +34,8 @@ qi, qe, pfe = ql_at_point(
 - With adiabatic electrons there is no electron channel: `qe` repeats `qi` and `pfe` is zero.
 - With kinetic electrons each channel has its own weight $W$ and its own calibration, on one shared intensity.
 - Electromagnetic runs add the magnetic flutter flux of $A_\parallel$ to the weight.
+
+The heat fluxes are clipped to [0, 1000], the particle flux to [-1000, 1000], and fluxes below $10^{-8}$ are set to zero.
 
 ## Saturation rules
 
@@ -63,6 +65,12 @@ calibration.channel_parameters(cal, "kinetic")     # {"Qi": {"cn": ..., "flux_ex
 ```
 
 A record holds the rule, the `options` shared by every channel and the fitted `parameters` per electron model and channel. It belongs to the rule, the weights it was fitted with (the $\theta_0 = 0$ chain) and the resolution of the linear runs; refit for another one. A fit must call the rule itself: a separate implementation, such as a numpy copy with a hard gate, gives a different $C$.
+
+## In TORAX
+
+`ql-gyx` ({doc}`torax`) runs this model at a few radii of a TORAX simulation. The figure is [the iterhybrid example](torax.md#evolved-profiles): `sat2` with `sat2_v3`, kinetic electrons, 8 radii, restarted from the QLKNN solution at t = 3.03 s and evolved to t = 5 s, against QLKNN.
+
+![iterhybrid at t = 5 s, ql-gyx against QLKNN](figures/torax_iterhybrid_t5.png)
 
 ## Gradients
 
