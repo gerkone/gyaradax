@@ -102,6 +102,14 @@ The fields are solved at every RK stage. Apart from the zonal correction, which 
   ({mod}`gyaradax.operators.ampere`).
 - **$B_\parallel$** (perpendicular Ampère) is coupled to quasineutrality through $\Gamma_0 - \Gamma_1$. The 2x2 system is solved in closed form at every point, with $\hat J_1 = 2J_1(x)/x$ for the gyro-average.
 
+$J_0$ and $\hat J_1$ come from `jax.scipy.special.bessel_jn`, a backward recurrence from order 50. Below $x = 1.8\times10^{-5}$ its values overflow FP64 and it returns NaN, or 0 just above that. Such arguments occur with kinetic electrons at low shear, where the smallest $k_x$ of the zonal row scales with $|\hat s|$. Below $x = 2\times10^{-5}$ both functions use their Taylor series instead ($1 - x^2/4 + x^4/64$ and $1 - x^2/8 + x^4/192$), exact to rounding there.
+
+```{figure} ../_static/figs/numerics/bessel_small_x.png
+:width: 100%
+
+Left: $1 - J_0(x)$ from `bessel_jn` and from the series. Right: the largest value in the recurrence against the FP64 maximum.
+```
+
 ## Collisions
 
 The linearised Fokker-Planck operator of GKW (`collision_differential_numu`, GKW manual chapter "Collisions"): pitch-angle scattering, energy scattering and friction between every pair of species, in the conservative flux form on the $(v_\parallel, v_\perp)$ grid. Each point gets a 9-point stencil, precomputed in
