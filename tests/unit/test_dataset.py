@@ -9,6 +9,7 @@ import pytest
 from omegaconf import OmegaConf
 
 from gyaradax.io import dataset as ds
+from gyaradax.io.schema import TREE_PATHS, SCHEMA_VERSION, flatten_metadata, nest_metadata
 from gyaradax.cli import main
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -50,20 +51,29 @@ def test_run_writes_preprocessed_trajectory(tmp_path, kind):
 
     traj = ds.trajectory_path(root, f"tiny_{kind}")
     with open(os.path.join(traj, "metadata.pkl"), "rb") as fh:
-        meta = pickle.load(fh)
+        tree = pickle.load(fh)
+    assert tree["schema"] == SCHEMA_VERSION and "extra" not in tree
+    assert tree["frames"]["solver_steps"].tolist() == [2, 4] and tree["params"]["n_species"] in (1, 2)
+    meta = flatten_metadata(tree)
+    assert meta.keys() == ds.load_metadata(traj).keys()
     assert meta["solver_steps"].tolist() == [2, 4]
-    assert meta["n_species"] == (2 if kind == "kinetic" else 1)
+    n_species = 2 if kind == "kinetic" else 1
+    assert meta["n_species"] == n_species and len(meta["species"]) == n_species
+    assert meta["df_shape"][:2] == (2, n_species) and meta["flux"].shape == (2, n_species, 3)
+    assert meta["electron_species_index"] == (1 if kind == "kinetic" else -1)
+    for key in ("ion_temp_grad", "density_grad", "electron_temp_grad", "temp_ratio", "eps", "coll_freq"):
+        assert meta[key].shape == (1,)
     assert meta["df_mean"].ndim == len(meta["df_shape"]) and meta["phi_mean"].shape == meta["phi_shape"]
     assert meta["quantization"] == "bf16"
     assert set(meta["geometry"]) == {*ds.GEOMETRY_KEYS, "adiabatic", "beta", "nlapar", "nlbpar"}
     with open(os.path.join(traj, "metadata_light.pkl"), "rb") as fh:
-        assert not {"df_mean", "phi_var"} & set(pickle.load(fh))
+        assert not {"df_mean", "phi_var"} & set(flatten_metadata(pickle.load(fh)))
     # bf16 loss tracker: phi frame rounding, and phi / heat fluxes recomputed from the stored df
     assert meta["quant_flux_err"].shape == meta["flux"].shape
     assert np.all((meta["quant_phi_err"] > 1e-4) & (meta["quant_phi_err"] < 1e-2))
     assert np.all((meta["quant_phi_df_err"] > 1e-5) & (meta["quant_phi_df_err"] < 1e-1))
-    eflux = [i for i, label in enumerate(meta["flux_labels"]) if label.startswith("eflux")]
-    assert np.all(np.abs(meta["quant_flux_err"][:, eflux]) < 5e-2)
+    eflux = list(meta["flux_labels"]).index("eflux")
+    assert np.all(np.abs(meta["quant_flux_err"][..., eflux]) < 5e-2)
 
     # the last frame is the bf16 real-space transform of the final state
     with np.load(os.path.join(run, "step_000004.npz")) as ck:
@@ -80,14 +90,14 @@ def test_run_writes_preprocessed_trajectory(tmp_path, kind):
     # resuming the run directory appends to the same trajectory
     assert main(["run", run, "--n-steps", "2"]) == 0
     with open(os.path.join(traj, "metadata.pkl"), "rb") as fh:
-        meta = pickle.load(fh)
+        meta = flatten_metadata(pickle.load(fh))
     assert meta["solver_steps"].tolist() == [2, 4, 6]
     assert OmegaConf.load(os.path.join(run, "config.yaml")).dataset.name == f"tiny_{kind}"
 
     # statistics can be recomputed over a later window: frames 1 and 2 only
     assert main(["dataset-stats", traj, "--from-time", str(float(meta["timesteps"][1]))]) == 0
     with open(os.path.join(traj, "metadata.pkl"), "rb") as fh:
-        meta = pickle.load(fh)
+        meta = flatten_metadata(pickle.load(fh))
     phis = [ds.read_frame(ds.stored_frame(traj, "poten", i), meta["phi_shape"]) for i in (1, 2)]
     np.testing.assert_allclose(meta["phi_mean"], np.mean(phis, axis=0), rtol=1e-3, atol=1e-6)
     assert meta["phi_mean"].dtype == np.float32
@@ -107,7 +117,7 @@ def test_reim_phi_frames_keep_every_ky_mode():
     assert real.shape[-1] == 4
 
 
-def test_writer_adds_potenc_and_refuses_complex_poten(tmp_path, monkeypatch):
+def test_writer_adds_potenc_and_refuses_old_layouts(tmp_path, monkeypatch):
     monkeypatch.setattr(ds, "_static_metadata", lambda *args: {"phi_shape": (6, 3, 5)})
     config = tmp_path / "config.yaml"
     config.write_text("run: {}\n")
@@ -117,7 +127,11 @@ def test_writer_adds_potenc_and_refuses_complex_poten(tmp_path, monkeypatch):
     bare = ds.DatasetWriter(root, "bare", {}, None, str(config), potenc=False)
     assert not bare.potenc and "phic_source" not in bare.static
     ds._claim(ds.trajectory_path(root, "old"), str(tmp_path))
-    ds.write_metadata(ds.trajectory_path(root, "old"), {"phi_shape": (2, 6, 3, 5), "phi_layout": "reim"})
+    old = {"phi_shape": (2, 6, 3, 5), "phi_layout": "reim"}
+    ds.write_metadata(ds.trajectory_path(root, "old"), old)
+    with pytest.raises(ValueError, match="predates the schema"):
+        ds.DatasetWriter(root, "old", {}, None, str(config))
+    ds.write_metadata(ds.trajectory_path(root, "old"), {**old, "species": ("ion",)})
     with pytest.raises(ValueError, match="complex poten"):
         ds.DatasetWriter(root, "old", {}, None, str(config))
 
@@ -215,6 +229,25 @@ def test_f32_resume_dump_extends_the_trajectory_on_the_same_grid(tmp_path):
         main(["run", run, "--t-end", "0.1"])
 
 
+def test_extension_keeps_the_trajectory_metadata(tmp_path):
+    root = str(tmp_path / "data")
+    case = _tiny_kinetic(tmp_path, "case")
+    common = ["--from-scratch", "--backend", "jax", "--dump-dt", "0.013", "--dataset", root]
+    assert main(["run", case, *common, "--t-end", "0.026", "--output-dir", str(tmp_path / "run")]) == 0
+    traj = ds.trajectory_path(root, "case")
+    meta = ds.load_metadata(traj)
+    meta.update(phic_source_frames=np.array(["hybrid", "existing"]), phic_source="mixed",
+                thinned_from=np.array([5, 6]), linear_gamma=np.arange(3.0), hand_label="saturated")
+    ds.write_metadata(traj, meta)
+    assert main(["run", traj, "--t-end", "0.052", "--output-dir", str(tmp_path / "more")]) == 0
+    meta = ds.load_metadata(traj)
+    assert len(meta["timesteps"]) == 4 and meta["hand_label"] == "saturated"
+    np.testing.assert_array_equal(meta["linear_gamma"], np.arange(3.0))
+    assert meta["phic_source_frames"].tolist() == ["hybrid", "existing", "solver_exact", "solver_exact"]
+    assert meta["phic_source"] == "mixed" and meta["thinned_from"].tolist() == [5, 6, 7, 8]
+    assert meta["flux"].shape[0] == 4 and "species" in meta
+
+
 def test_linear_frames_are_spectral_with_a_species_axis(tmp_path):
     rng = np.random.default_rng(0)
     df = rng.standard_normal((4, 2, 3, 6, 5)) + 1j * rng.standard_normal((4, 2, 3, 6, 5))
@@ -225,3 +258,36 @@ def test_linear_frames_are_spectral_with_a_species_axis(tmp_path):
     np.testing.assert_array_equal(lin[0, 0] + 1j * lin[1, 0], df.astype(np.complex64))
     pot = np.fromfile(tmp_path / "linear_poten.bin", np.float32).reshape((2, *phi.shape))
     np.testing.assert_array_equal(pot[0] + 1j * pot[1], phi.astype(np.complex64))
+
+
+def test_schema_tree_round_trips_and_matches_neugk():
+    flat = {"timesteps": np.arange(2.0), "ion_temp_grad": np.ones(1), "ds": 0.1, "geometry": {"kxrh": np.ones(3)},
+            "linear_hist_t": np.zeros(0), "linear_rms": np.float64(1.0), "df_mean": np.zeros(2),
+            "df_stats_agg_axes": (2, 4), "sus_underresolved": True, "odd_key": 1}
+    tree = nest_metadata(flat)
+    assert tree["schema"] == SCHEMA_VERSION and tree["geometry"]["ds"] == 0.1 and "ds" not in flat["geometry"]
+    assert tree["linear"]["history"]["t"].size == 0 and tree["stats"]["df"]["agg_axes"] == (2, 4)
+    assert tree["flags"]["sus_underresolved"] and tree["extra"] == {"odd_key": 1}
+    back = flatten_metadata(tree)
+    assert back.keys() == flat.keys() and back["geometry"].keys() == flat["geometry"].keys()
+    neugk = pytest.importorskip("neugk_jax.dataset.schema")
+    assert neugk.SCHEMA_VERSION == SCHEMA_VERSION and neugk.TREE_PATHS == TREE_PATHS
+    assert neugk.FLUX_LABELS == ds.FLUX_LABELS and neugk.LIGHT_DROP_KEYS == ds.LIGHT_DROP_KEYS
+
+
+@pytest.mark.parametrize("config,grid", [
+    ("nl_em_waltz_b01.yaml", dict(nvpar=8, nmu=2, ns=8, nkx=11, nky=5)),
+    ("iteration_13.yaml", dict(nvpar=8, nmu=2, ns=8, nkx=11, nky=6)),
+])  # fmt: skip
+def test_writer_output_meets_the_neugk_contract(tmp_path, config, grid):
+    check_trajectory = pytest.importorskip("neugk_jax.dataset.schema").check_trajectory
+    cfg = OmegaConf.load(os.path.join(REPO_ROOT, "configs", config))
+    for key, value in grid.items():
+        cfg.grid[key] = value
+    cfg.run.pop("data_dir", None)
+    path = tmp_path / "case.yaml"
+    OmegaConf.save(cfg, path)
+    root = str(tmp_path / "data")
+    assert main(["run", str(path), "--from-scratch", "--backend", "jax", "--n-steps", "20", "--block-size", "10",
+                 "--output-dir", str(tmp_path / "run"), "--dataset", root, "--dataset-name", "case"]) == 0
+    assert check_trajectory(ds.trajectory_path(root, "case")) == []
