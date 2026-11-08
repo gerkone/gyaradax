@@ -1,5 +1,6 @@
 """gyaradax.transport: the ql-gyx / nl-gyx TORAX transport models."""
 
+import json
 import math
 
 import numpy as np
@@ -14,8 +15,9 @@ from torax._src.test_utils import core_profile_helpers, default_configs
 
 from gyaradax.quasilinear import calibration
 from gyaradax.transport import GyaradaxNLConfig, GyaradaxQLConfig, GyaradaxQLTransportModel
-from gyaradax.transport import diagnostics
-from gyaradax.transport.base import face_profiles, quasilinear_inputs, topology
+from gyaradax.geometry import build_topology
+from gyaradax.transport import base
+from gyaradax.transport.base import ikxspace_for_shat, local_inputs, quasilinear_inputs
 
 GRID = dict(nvpar=32, nmu=8, ns=16, nkx=85, nky=32, ikxspace=5, krhomax=1.4)
 
@@ -126,12 +128,11 @@ def test_calibration_from_a_json_file(tmp_path):
 
 def test_diagnostics_rows(monkeypatch, tmp_path):
     monkeypatch.setattr(GyaradaxQLTransportModel, "_per_radius", constant_flux)
-    diagnostics.reset()
     path = str(tmp_path / "diag.jsonl")
     transport_call(
         {"model_name": "ql-gyx", "rho_match": (0.3, 0.6), "diagnostics_path": path, **GRID}
     )
-    rows = diagnostics.load_jsonl(path)
+    rows = [json.loads(line) for line in open(path)]
     assert {r["radius"] for r in rows if r["call"] == rows[-1]["call"]} == {0, 1}
     assert len({r["rho_face"] for r in rows}) == 2
     assert all(r["qi_gb"] == 1.0 and isinstance(r["shat"], float) and r["t"] == 0.0 and r["wall_s"] > 0 for r in rows)
@@ -156,28 +157,9 @@ def test_ql_linear_solve():
 
 
 def test_ikxspace_follows_shat():
-    from gyaradax.transport.base import ikxspace_for_shat
-
     choices = (1, 2, 3, 4, 6, 8, 12, 16)
     for shat, want in ((0.05, 1), (0.4, 2), (0.8, 4), (1.0, 6), (2.0, 12), (5.0, 16), (-1.0, 6)):
-        assert choices[int(ikxspace_for_shat(shat, choices))] == want
-
-
-def test_topology_bank_matches_static_topologies():
-    from gyaradax.transport.base import select_topology, topology, topology_bank
-
-    choices = (2, 5, 9)
-    bank = topology_bank(85, 32, 16, choices)
-    for i, k in enumerate(choices):
-        ref, got = topology(85, 32, k, 16), select_topology(bank, jnp.asarray(i))
-        for key, v in ref.items():
-            if key == "flipped":
-                for kk, vv in v.items():
-                    np.testing.assert_array_equal(np.asarray(got[key][kk]), np.asarray(vv))
-            elif hasattr(v, "shape"):
-                np.testing.assert_array_equal(np.asarray(got[key]), np.asarray(v))
-            else:
-                assert got[key] == v
+        assert ikxspace_for_shat(shat, choices) == want
 
 
 def test_radius_params_carry_collisions_and_shat_ikxspace(monkeypatch):
@@ -191,21 +173,20 @@ def test_radius_params_carry_collisions_and_shat_ikxspace(monkeypatch):
     monkeypatch.setattr(GyaradaxQLTransportModel, "_per_radius", record)
     fields = {"model_name": "ql-gyx", "rho_match": (0.3, 0.7), **GRID, "ikxspace_choices": (1, 2, 4, 8)}
     model, _, geo, cp = transport_call(fields)
-    qli = quasilinear_inputs(cp, geo)
-    seen.clear()
-    model._per_radius_from_profiles(10, qli, face_profiles(cp, geo), geo)
-    params, geom = seen[0]
+    loc = local_inputs(cp, geo, quasilinear_inputs(cp, geo), (0.5,))
+    loc = {k: v[0] for k, v in loc.items()}
+    params = model.gkparams(loc)
+    i = int(np.argmin(np.abs(np.asarray(geo.rho_face_norm) - 0.5)))
     assert params.collisions
-    np.testing.assert_allclose(float(params.coll_nref), float(cp.kinetic.n_e.face_value()[10]) / 1e19)
-    np.testing.assert_allclose(float(params.coll_tref), float(cp.kinetic.T_i.face_value()[10]))
+    np.testing.assert_allclose(float(params.coll_nref), float(cp.kinetic.n_e.face_value()[i]) / 1e19)
+    np.testing.assert_allclose(float(params.coll_tref), float(cp.kinetic.T_i.face_value()[i]))
     np.testing.assert_allclose(float(params.coll_rref), float(geo.R_major))
     want = (1, 2, 4, 8)[int(np.searchsorted((1, 2, 4, 8), np.floor(6.53 * abs(float(params.shat))), "right")) - 1]
-    ref = topology(GRID["nkx"], GRID["nky"], max(want, 1), GRID["ns"])
+    assert model.ikxspace_at(float(params.shat)) == max(want, 1)
+    geom = model.geometry(params, model.ikxspace_at(float(params.shat)))
+    ref = build_topology(nkx=GRID["nkx"], nky=GRID["nky"], ikxspace=max(want, 1), ns=GRID["ns"])
     np.testing.assert_array_equal(np.asarray(geom["mode_label"]), np.asarray(ref["mode_label"]))
-    off = build(**{**fields, "collisions": False})
-    seen.clear()
-    off._per_radius_from_profiles(10, qli, face_profiles(cp, geo), geo)
-    assert not seen[0][0].collisions
+    assert not build(**{**fields, "collisions": False}).gkparams(loc).collisions
 
 
 def test_runs_a_simulation(monkeypatch):
@@ -222,9 +203,7 @@ def test_runs_a_simulation(monkeypatch):
 
 
 def test_warm_start_carries_the_distribution(monkeypatch, caplog):
-    from gyaradax.transport import base
-
-    base._jitted_radius_solve.cache_clear()
+    base._compiled.cache_clear()
 
     calls = []
 
@@ -234,7 +213,7 @@ def test_warm_start_carries_the_distribution(monkeypatch, caplog):
         return q_i, q_i, jnp.asarray(0.0), {}, df_prev + 1.0
 
     monkeypatch.setattr(GyaradaxQLTransportModel, "_per_radius", per_radius)
-    base.clear_warm_start()
+    base._WARM.clear()
     # 0.75 and 0.875 share a face on the 4-cell grid; each tube still keeps its own state
     tc = torax_config({"model_name": "ql-gyx", "rho_match": (0.3, 0.75, 0.875), **GRID})
     history = torax.run_simulation(tc, progress_bar=False, max_steps=3)
@@ -243,14 +222,14 @@ def test_warm_start_carries_the_distribution(monkeypatch, caplog):
     assert len(base._WARM) == 3
     counts = {float(np.asarray(df).real.flat[0]) for df, _ in base._WARM.values()}
     assert len(counts) == 1 and counts.pop() >= 3
-    assert all(int(i) == 0 for _, i in base._WARM.values())
+    assert all(i == GRID["ikxspace"] for _, i in base._WARM.values())
     assert not build(warm_start=False, **GRID)._warm_df_shape()
 
     monkeypatch.setattr(
         GyaradaxQLTransportModel, "_per_radius",
         lambda self, params, geom, df_prev=None, warm=None: (*(jnp.asarray(jnp.nan),) * 3, {}, df_prev * jnp.nan),
     )
-    base._jitted_radius_solve.cache_clear()
+    base._compiled.cache_clear()
     cp, rp, geo = core_profile_helpers.make_initial_inputs(tc)
     model = tc.transport.core_transport_models["gyaradax"].build_transport_model()
     args = (rp.transport.core_transport_model_params["gyaradax"], rp, geo, cp, np.zeros_like(geo.rho_face_norm, dtype=bool))
@@ -260,17 +239,15 @@ def test_warm_start_carries_the_distribution(monkeypatch, caplog):
     assert np.isnan(np.asarray(coeffs.chi_face_ion)).any()
     reported = {r.getMessage().split(" is not finite")[0] for r in caplog.records if "is not finite" in r.getMessage()}
     assert len(reported) == 2
-    base.clear_warm_start()
+    base._WARM.clear()
 
 
 def test_diverged_solve_hands_torax_nan(monkeypatch):
-    from gyaradax.transport import base
-
     def per_radius(self, params, geom, df_prev=None, warm=None):
         return jnp.asarray(1.0), jnp.asarray(0.5), jnp.asarray(0.0), {}, df_prev * jnp.nan
 
     monkeypatch.setattr(GyaradaxQLTransportModel, "_per_radius", per_radius)
-    base.clear_warm_start()
+    base._WARM.clear()
     _, coeffs, _, _ = transport_call({"model_name": "ql-gyx", "rho_match": (0.5,), **GRID})
-    base.clear_warm_start()
+    base._WARM.clear()
     assert np.isnan(np.asarray(coeffs.chi_face_ion)).any()

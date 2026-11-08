@@ -1,7 +1,7 @@
 """nl-gyx: a nonlinear gyaradax run per radius, averaged over trailing blocks."""
 
 import dataclasses
-from typing import Annotated, Any, Dict, Literal
+from typing import Annotated, Any, Dict, Literal, Tuple
 
 import jax.numpy as jnp
 
@@ -20,7 +20,7 @@ class GyaradaxNLTransportModel(base.GyaradaxTransportModel):
     nl_tail_blocks: int
     nl_block: int
 
-    def _per_radius(self, params: GKParams, geom: Dict[str, Any]):
+    def _per_radius(self, params: GKParams, geom: Dict[str, Any]) -> Tuple[Any, ...]:
         q_i, q_e, pfe = point_eval.nl_at_point(
             params,
             geom,

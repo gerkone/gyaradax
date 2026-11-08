@@ -108,7 +108,7 @@ TORAX writes nothing until the run ends; `calls.jsonl` has one row per call and 
 | `linear_arith` | both | `fp64` | CUDA: `ds` runs the linear RHS in double-single arithmetic, faster on weak-FP64 GPUs such as B300 |
 | `kinetic`, `em` | both | false | kinetic electrons, A_par (experimental) |
 | `collisions` | both | true | linearised Fokker-Planck collisions, with frequencies from the local n_e and T_i (as `coll_nref`, `coll_tref`) and R_major (`coll_rref`) |
-| `ikxspace_choices`, `ikxspace_per_shat` | both | kinetic preset: 1, 2, 3, 4, 6, 8, 12, 16; 6.53 | per radius, ikxspace is the largest choice below floor(6.53 abs(s_hat)); empty keeps the fixed `ikxspace`. Each choice adds one prebuilt topology (about 18 MB at the kinetic grid) |
+| `ikxspace_choices`, `ikxspace_per_shat` | both | kinetic preset: 1, 2, 3, 4, 6, 8, 12, 16; 6.53 | per radius, ikxspace is the largest choice below floor(6.53 abs(s_hat)); empty keeps the fixed `ikxspace`. Each choice a radius reaches is compiled once per GPU |
 | `diagnostics_path` | both | | one jsonl row per call and radius: local parameters, fluxes, steps, wall time and the TORAX time `t` of the call |
 | `rule`, `rule_options` | ql | `sat2` | saturation rule (`sat2`, `canonical`, `sat0`), and its options |
 | `calibration`, `cn` | ql | `auto` | calibration name or JSON path (`auto`: the rule's default in `gyaradax/quasilinear/weights/`, `sat2_v3` or `canonical_v3`), with parameters per electron model and flux channel; `cn` instead sets one amplitude for every channel |

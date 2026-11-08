@@ -3,6 +3,7 @@
 import dataclasses
 from typing import Annotated, Any, Dict, Literal, Optional, Tuple
 
+import jax
 import jax.numpy as jnp
 
 from gyaradax.core.params import GKParams
@@ -50,13 +51,15 @@ class GyaradaxQLTransportModel(base.GyaradaxTransportModel):
             channel_params=tuple((ch, tuple(sorted(kw.items()))) for ch, kw in sorted(channels.items())),
         )
 
-    def _warm_df_shape(self):
+    def _warm_df_shape(self) -> Optional[Tuple[int, ...]]:
         if not self.warm_start:
             return None
         shape = (self.nvpar, self.nmu, self.ns, self.nkx, self.nky)
         return (2, *shape) if self.kinetic else shape
 
-    def _per_radius(self, params: GKParams, geom: Dict[str, Any], df_prev=None, warm=None):
+    def _per_radius(
+        self, params: GKParams, geom: Dict[str, Any], df_prev: Optional[jax.Array] = None, warm: Optional[jax.Array] = None
+    ) -> Tuple[Any, ...]:
         grid = (self.nvpar, self.nmu, self.ns, self.nkx, self.nky)
         df0, n_steps = None, self.n_steps_linear
         if df_prev is not None:
