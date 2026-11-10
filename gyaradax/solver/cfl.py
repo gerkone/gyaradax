@@ -26,6 +26,7 @@ def estimate_nl_timestep(
     dt_input: Any,
     safety_factor: Any = 0.95,
     apar: Optional[jnp.ndarray] = None,
+    gather: bool = False,
 ) -> jnp.ndarray:
     """Nonlinear CFL timestep from the largest ExB velocity.
 
@@ -40,6 +41,7 @@ def estimate_nl_timestep(
         dt_input: Upper bound on the timestep.
         safety_factor: Factor on the CFL estimate.
         apar: Parallel vector potential, or None.
+        gather: Pack the half spectrum with a gather (HIP backend).
 
     Returns:
         The timestep, at most ``dt_input``.
@@ -58,7 +60,7 @@ def estimate_nl_timestep(
 
         def _to_real(spec):
             return jnp.fft.irfft2(
-                pack_half_spectrum(spec[None, None, :, :], jind, mrad, mphiw3),
+                pack_half_spectrum(spec[None, None, :, :], jind, mrad, mphiw3, gather=gather),
                 s=(mrad, mphi),
                 axes=(-2, -1),
                 norm="backward",
@@ -197,7 +199,8 @@ def estimate_timestep(
     """
     if params is not None:
         safety_factor = float(getattr(params, "fac_dtim_nl", safety_factor))
-    dt_nl = estimate_nl_timestep(phi, pre, bessel, dt_input, safety_factor, apar=apar)
+    gather = params is not None and params.backend == "hip"
+    dt_nl = estimate_nl_timestep(phi, pre, bessel, dt_input, safety_factor, apar=apar, gather=gather)
     if params is not None:
         dt_lin = estimate_linear_timestep(pre, params=params)
     else:

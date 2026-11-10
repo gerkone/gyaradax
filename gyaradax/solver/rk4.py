@@ -138,7 +138,7 @@ def nonlinear_term_iii(
         exclude_zero_mode: Zero the (kx, ky) = (0, 0) mode.
         mixed_precision: FP32 FFTs.
         ops: Backend operations; built from ``backend`` when None.
-        backend: ``"jax"`` or ``"cuda"``.
+        backend: ``"jax"``, ``"cuda"`` or ``"hip"``.
         use_z2z: Z2Z FFTs in the JAX backend.
 
     Returns:
@@ -499,6 +499,7 @@ def gkstep_single(
                         pre["nl_jind"],
                         pre["nl_mrad"],
                         pre["nl_mphiw3"],
+                        gather=params.backend == "hip",
                     ),
                     s=(pre["nl_mrad"], pre["nl_mphi"]),
                     axes=(-2, -1),
@@ -510,6 +511,7 @@ def gkstep_single(
                         pre["nl_jind"],
                         pre["nl_mrad"],
                         pre["nl_mphiw3"],
+                        gather=params.backend == "hip",
                     ),
                     s=(pre["nl_mrad"], pre["nl_mphi"]),
                     axes=(-2, -1),
@@ -675,7 +677,8 @@ def _gksolve(
         # in a block loop with growing NL fields (blow-up observed at β=0.01).
         phi_init, apar_init, _ = ops.compute_fields(df, geometry, params, pre)
         dt_nl_init = estimate_nl_timestep(
-            phi_init, pre, pre["bessel"], dt_input, cfl_safety, apar=apar_init
+            phi_init, pre, pre["bessel"], dt_input, cfl_safety, apar=apar_init,
+            gather=params.backend == "hip",
         )
         dt_lin_init = estimate_linear_timestep(pre, params=params)
         init_dt = jnp.minimum(jnp.minimum(dt_input, dt_lin_init), dt_nl_init)
