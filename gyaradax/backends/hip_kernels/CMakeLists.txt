@@ -56,6 +56,8 @@ set_source_files_properties(${GYX_SOURCES} PROPERTIES LANGUAGE CXX COMPILE_OPTIO
 
 add_library(gyaradax_hip SHARED ${GYX_SOURCES})
 target_compile_options(gyaradax_hip PRIVATE --offload-arch=${_offload} -Wno-return-type)
+# register-window linear rhs on amd
+target_compile_definitions(gyaradax_hip PRIVATE GYX_LIN_ES_REG GYX_LIN_ES_XCD=8 GYX_LIN_ES_VCH=16 GYX_LIN_NT)
 target_link_options(gyaradax_hip PRIVATE --hip-link --offload-arch=${_offload})
 target_include_directories(gyaradax_hip PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/compat
