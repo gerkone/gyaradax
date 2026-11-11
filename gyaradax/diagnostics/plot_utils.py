@@ -265,7 +265,7 @@ def plot_flux_trace(
                 if isp == 0:
                     ax.legend(frameon=False, loc="upper left", fontsize=10)
 
-        axes[-1, isp].set_xlabel(r"time $[v_{th}/R]$", fontsize=12)
+        axes[-1, isp].set_xlabel(r"time $[R/v_{th}]$", fontsize=12)
 
     fig.suptitle(title, fontweight="bold", fontsize=14)
     fig.align_ylabels(axes[:, 0])
@@ -511,7 +511,7 @@ def plot_run_fluxes(
                 ax.set_ylabel(channel.capitalize(), fontsize=12)
             if row == 0 and len(species) > 1:
                 ax.set_title(sp, fontsize=9)
-        axes[-1, isp].set_xlabel(r"time $[v_{th}/R]$", fontsize=12)
+        axes[-1, isp].set_xlabel(r"time $[R/v_{th}]$", fontsize=12)
 
     handles, labels = axes[0, 0].get_legend_handles_labels()
     fig.legend(
@@ -669,7 +669,7 @@ def plot_growth_rates(
     elif ref_time is not None and ref_time.ndim == 2 and ref_time.shape[1] >= 2:
         ax.plot(ref_time[:, 0], ref_time[:, 1], "kx", ms=4, alpha=0.7, label="GKW (mean)")
 
-    ax.set_xlabel(r"time $[v_{th}/R]$", fontsize=12)
+    ax.set_xlabel(r"time $[R/v_{th}]$", fontsize=12)
     ax.set_ylabel(r"$\gamma$", fontsize=12)
     ax.legend(frameon=False, ncol=3, fontsize=10)
     ax.grid(True)
