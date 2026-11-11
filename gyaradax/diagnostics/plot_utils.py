@@ -439,6 +439,7 @@ def plot_run_fluxes(
     channels: Sequence[str] = FLUX_CHANNELS,
     title: str = "",
     reference_label: str = "reference",
+    colors: Optional[Sequence[str]] = None,
 ) -> plt.Figure:
     """Flux traces of runs against a reference: one row per channel, one column per species.
 
@@ -451,11 +452,13 @@ def plot_run_fluxes(
         channels: Rows, from ``"particle"``, ``"heat"`` and ``"momentum"``.
         title: Figure title.
         reference_label: Legend label of the reference.
+        colors: Line colors in the order of ``runs``; ``RUN_COLORS`` when None.
 
     Returns:
         The figure.
     """
     ref = _load_reference(reference)
+    colors = RUN_COLORS if colors is None else colors
     loaded = {label: _load_run(run) for label, run in runs.items()}
     fluxes = {
         label: np.asarray(r["fluxes"]).reshape(len(r["time"]), -1, 3) for label, r in loaded.items()
@@ -482,7 +485,7 @@ def plot_run_fluxes(
             ich = FLUX_CHANNELS.index(channel)
             if window is not None:
                 ax.axvspan(*window, color="0.93", lw=0, zorder=0)
-            for color, (label, run) in zip(RUN_COLORS, loaded.items()):
+            for color, (label, run) in zip(colors, loaded.items()):
                 if isp < fluxes[label].shape[1]:
                     ax.plot(
                         run["time"],
@@ -529,6 +532,7 @@ def plot_run_spectra(
     title: str = "",
     reference_label: str = "reference",
     shade_alpha: float = 0.2,
+    colors: Optional[Sequence[str]] = None,
 ) -> plt.Figure:
     """Time-averaged ky and kx spectra of one or more runs against a reference.
 
@@ -547,11 +551,13 @@ def plot_run_spectra(
         title: Figure title.
         reference_label: Legend label of the reference.
         shade_alpha: Opacity of the bands.
+        colors: Line colors in the order of ``runs``; ``RUN_COLORS`` when None.
 
     Returns:
         The figure.
     """
     ref = _load_reference(reference)
+    colors = RUN_COLORS if colors is None else colors
     if ref is not None:
         window = ref["average"]["window"] if window is None else window
         ky = ref["ky"] if ky is None else ky
@@ -564,7 +570,7 @@ def plot_run_spectra(
     fig, axes = plt.subplots(1, 2, figsize=(7.0, 2.8), layout="constrained")
     panels = list(zip(axes, ("ky", "kx")))
     bands = []
-    for color, (label, run) in zip(RUN_COLORS, runs.items()):
+    for color, (label, run) in zip(colors, runs.items()):
         group = [_load_run(r) for r in (run if isinstance(run, (list, tuple)) else [run])]
         for ax, name in panels:
             samples = np.concatenate(
