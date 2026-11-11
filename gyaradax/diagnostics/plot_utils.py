@@ -2,7 +2,9 @@
 
 # mypy: ignore-errors
 
-from typing import List, Optional, Union, Tuple
+import json
+import os
+from typing import List, Mapping, Optional, Sequence, Union, Tuple
 import matplotlib.pyplot as plt
 import matplotlib
 import numpy as np
@@ -25,6 +27,10 @@ JAX_COLORS = {
 }
 
 SPECIES_COLORS = [JAX_COLORS["cyan"], JAX_COLORS["cyan"]]
+
+RUN_COLORS = [JAX_COLORS[c] for c in ("cyan", "purple", "red", "blue", "green", "yellow")]
+
+FLUX_CHANNELS = ("particle", "heat", "momentum")
 
 plt.rcParams.update(
     {
@@ -316,27 +322,8 @@ def plot_spectra(
         ref_kx_spec = np.sum(ref_phi_sq, axis=(0, 2))
         ref_ky_spec = np.sum(ref_phi_sq, axis=(0, 1))
 
-    def _progressive_sparse_indices(spec):
-        """Generate progressively sparse indices moving outward from the peak."""
-        N = len(spec)
-        peak_idx = int(np.argmax(spec))
-        idx = [peak_idx]
-        for direction in [-1, 1]:
-            curr = peak_idx + direction
-            step = 1
-            count = 0
-            while 0 <= curr < N:
-                idx.append(curr)
-                count += 1
-                if count % 3 == 0:
-                    step += 1
-                curr += direction * step
-        return np.sort(idx)
-
     def _shade(ax, x, mean, std, color):
-        lo = np.maximum(mean - std, 1e-30)
-        hi = mean + std
-        ax.fill_between(x, lo, hi, color=color, alpha=shade_alpha, lw=0)
+        _band(ax, x, mean, std, color, shade_alpha)
 
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(7.0, 2.2))
 
@@ -394,6 +381,238 @@ def plot_spectra(
     if len(title) > 0:
         fig.suptitle(title, fontweight="bold", fontsize=14)
     fig.tight_layout()
+    return fig
+
+
+def _progressive_sparse_indices(spec):
+    """Generate progressively sparse indices moving outward from the peak."""
+    N = len(spec)
+    peak_idx = int(np.argmax(spec))
+    idx = [peak_idx]
+    for direction in [-1, 1]:
+        curr = peak_idx + direction
+        step = 1
+        count = 0
+        while 0 <= curr < N:
+            idx.append(curr)
+            count += 1
+            if count % 3 == 0:
+                step += 1
+            curr += direction * step
+    return np.sort(idx)
+
+
+def _band(ax, x, mean, std, color, alpha):
+    ax.fill_between(x, np.maximum(mean - std, 1e-30), mean + std, color=color, alpha=alpha, lw=0)
+
+
+def _in_window(t, window):
+    t = np.asarray(t)
+    return (t >= window[0] - 1e-6) & (t <= window[1] + 1e-6)
+
+
+def _load_reference(reference):
+    if isinstance(reference, (str, os.PathLike)):
+        with open(reference) as fh:
+            return json.load(fh)
+    return reference
+
+
+def _load_run(run):
+    """Fluxes and spectra of a run directory; a run that is already loaded is returned as is."""
+    if not isinstance(run, (str, os.PathLike)):
+        return run
+    with np.load(os.path.join(run, "fluxes.npz")) as f:
+        out = {"time": f["time"], "fluxes": f["fluxes"]}
+    for name, key in (("kyspec", "ky_spec"), ("kxspec", "kx_spec")):
+        path = os.path.join(run, f"{name}.npz")
+        if os.path.exists(path):
+            with np.load(path) as f:
+                out[key], out["spec_time"] = f[key], f["time"]
+    return out
+
+
+def plot_run_fluxes(
+    runs: Mapping[str, Union[str, os.PathLike, dict]],
+    reference: Optional[Union[str, os.PathLike, dict]] = None,
+    window: Optional[Sequence[float]] = None,
+    channels: Sequence[str] = FLUX_CHANNELS,
+    title: str = "",
+    reference_label: str = "reference",
+) -> plt.Figure:
+    """Flux traces of runs against a reference: one row per channel, one column per species.
+
+    Args:
+        runs: Legend label to a ``gyaradax run`` output directory, or to a loaded run with
+            ``time`` (T,) and ``fluxes`` (T, 3) or (T, n_species, 3).
+        reference: Reference diagnostics, a ``nonlinear.json`` of gerkone/gyaradax-tests as a
+            dict or a path, drawn dashed in black. Its ``species`` name the columns.
+        window: Time window shaded on every panel; the reference ``average.window`` when None.
+        channels: Rows, from ``"particle"``, ``"heat"`` and ``"momentum"``.
+        title: Figure title.
+        reference_label: Legend label of the reference.
+
+    Returns:
+        The figure.
+    """
+    ref = _load_reference(reference)
+    loaded = {label: _load_run(run) for label, run in runs.items()}
+    fluxes = {
+        label: np.asarray(r["fluxes"]).reshape(len(r["time"]), -1, 3) for label, r in loaded.items()
+    }
+    if ref is not None:
+        species = ref["species"]
+        window = ref["average"]["window"] if window is None else window
+    else:
+        species = [
+            SPECIES_LABELS.get(i, f"sp{i}") for i in range(max(f.shape[1] for f in fluxes.values()))
+        ]
+
+    fig, axes = plt.subplots(
+        len(channels),
+        len(species),
+        figsize=(7.0, 1.6 * len(channels) + 0.8),
+        sharex=True,
+        squeeze=False,
+        layout="constrained",
+    )
+    for isp, sp in enumerate(species):
+        for row, channel in enumerate(channels):
+            ax = axes[row, isp]
+            ich = FLUX_CHANNELS.index(channel)
+            if window is not None:
+                ax.axvspan(*window, color="0.93", lw=0, zorder=0)
+            for color, (label, run) in zip(RUN_COLORS, loaded.items()):
+                if isp < fluxes[label].shape[1]:
+                    ax.plot(
+                        run["time"],
+                        fluxes[label][:, isp, ich],
+                        color=color,
+                        lw=1.0,
+                        label=label,
+                        zorder=2,
+                    )
+            if ref is not None:
+                ax.plot(
+                    ref["time"],
+                    ref["fluxes"][sp][channel],
+                    color="black",
+                    linestyle="--",
+                    lw=1.2,
+                    alpha=0.8,
+                    label=reference_label,
+                    zorder=3,
+                )
+            ax.grid(True, axis="y")
+            if isp == 0:
+                ax.set_ylabel(channel.capitalize(), fontsize=12)
+            if row == 0 and len(species) > 1:
+                ax.set_title(sp, fontsize=9)
+        axes[-1, isp].set_xlabel(r"time $[v_{th}/R]$", fontsize=12)
+
+    handles, labels = axes[0, 0].get_legend_handles_labels()
+    fig.legend(
+        handles, labels, loc="outside lower center", ncol=len(labels), frameon=False, fontsize=10
+    )
+    if title:
+        fig.suptitle(title, fontweight="bold", fontsize=14)
+    fig.align_ylabels(axes[:, 0])
+    return fig
+
+
+def plot_run_spectra(
+    runs: Mapping[str, Union[str, os.PathLike, dict, Sequence[Union[str, os.PathLike, dict]]]],
+    reference: Optional[Union[str, os.PathLike, dict]] = None,
+    window: Optional[Sequence[float]] = None,
+    ky: Optional[np.ndarray] = None,
+    kx: Optional[np.ndarray] = None,
+    title: str = "",
+    reference_label: str = "reference",
+    shade_alpha: float = 0.2,
+) -> plt.Figure:
+    """Time-averaged ky and kx spectra of one or more runs against a reference.
+
+    Each spectrum is the mean over the samples in the averaging window, with their standard
+    deviation as a band.
+
+    Args:
+        runs: Legend label to a ``gyaradax run`` output directory, a loaded run with ``time``
+            (T,), ``ky_spec`` (T, nky) and ``kx_spec`` (T, nkx), or a list of them whose
+            samples are pooled (e.g. realisations of one case).
+        reference: Reference diagnostics, a ``nonlinear.json`` of gerkone/gyaradax-tests as a
+            dict or a path, averaged over its own ``average.window``.
+        window: Averaging window of the runs; the reference ``average.window`` when None.
+        ky: Binormal wavenumbers; the reference ``ky`` when None.
+        kx: Radial wavenumbers; the reference ``kx`` when None.
+        title: Figure title.
+        reference_label: Legend label of the reference.
+        shade_alpha: Opacity of the bands.
+
+    Returns:
+        The figure.
+    """
+    ref = _load_reference(reference)
+    if ref is not None:
+        window = ref["average"]["window"] if window is None else window
+        ky = ref["ky"] if ky is None else ky
+        kx = ref["kx"] if kx is None else kx
+    if window is None or ky is None or kx is None:
+        raise ValueError("without a reference, pass window, ky and kx")
+    order = {"ky": np.argsort(ky), "kx": np.argsort(kx)}
+    grids = {"ky": np.asarray(ky)[order["ky"]], "kx": np.asarray(kx)[order["kx"]]}
+
+    fig, axes = plt.subplots(1, 2, figsize=(7.0, 2.8), layout="constrained")
+    panels = list(zip(axes, ("ky", "kx")))
+    bands = []
+    for color, (label, run) in zip(RUN_COLORS, runs.items()):
+        group = [_load_run(r) for r in (run if isinstance(run, (list, tuple)) else [run])]
+        for ax, name in panels:
+            samples = np.concatenate(
+                [
+                    np.asarray(r[f"{name}_spec"])[_in_window(r.get("spec_time", r["time"]), window)]
+                    for r in group
+                ]
+            )
+            if len(samples) == 0:
+                raise ValueError(f"{label}: no spectra in the window {window}")
+            mean, std = samples.mean(0)[order[name]], samples.std(0)[order[name]]
+            ax.semilogy(grids[name], mean, "o-", color=color, markersize=3, lw=1, label=label)
+            bands.append((ax, grids[name], mean, std, color))
+    if ref is not None:
+        mask = _in_window(ref["time"], ref["average"]["window"])
+        for ax, name in panels:
+            samples = np.asarray(ref[f"{name}_spectrum"])[mask]
+            mean, std = samples.mean(0)[order[name]], samples.std(0)[order[name]]
+            idx = np.arange(len(mean)) if name == "ky" else _progressive_sparse_indices(mean)
+            ax.semilogy(
+                grids[name][idx],
+                mean[idx],
+                marker="x",
+                linestyle="None",
+                color="black",
+                markersize=4,
+                markeredgewidth=1,
+                label=reference_label,
+            )
+            bands.append((ax, grids[name], mean, std, "black"))
+    # bands that reach zero do not set the log range
+    for ax in axes:
+        ax.set_ylim(ax.get_ylim())
+    for ax, x, mean, std, color in bands:
+        _band(ax, x, mean, std, color, shade_alpha)
+    for ax, name in panels:
+        k = f"k_{name[1]}"
+        ax.set_xlabel(rf"${k} \rho_{{ref}}$", fontsize=12)
+        ax.set_ylabel(rf"${k}^{{\text{{spec}}}}$", fontsize=12)
+        ax.set_title(rf"${k}$ spectrum", fontsize=12)
+        ax.grid(True, which="both")
+
+    handles, labels = axes[0].get_legend_handles_labels()
+    fig.legend(
+        handles, labels, loc="outside lower center", ncol=len(labels), frameon=False, fontsize=10
+    )
+    if title:
+        fig.suptitle(title, fontweight="bold", fontsize=14)
     return fig
 
 
