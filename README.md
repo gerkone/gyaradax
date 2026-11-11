@@ -4,7 +4,7 @@
   <img src="docs/figs/gyaradax_small.png" width="400" alt="gyaradax logo">
 </p>
 
-`gyaradax` is a JAX code for local flux-tube gyrokinetics, based on [GKW](https://bitbucket.org/gkw/gkw/src/develop/). It is differentiable and covers electrostatic and electromagnetic (A∥, B∥) turbulence with adiabatic or kinetic electrons and a linearised Fokker-Planck collision operator, linear and nonlinear, with an optional CUDA backend and multi-GPU sharding.
+`gyaradax` is a JAX code for local flux-tube gyrokinetics, based on [GKW](https://bitbucket.org/gkw/gkw/src/develop/). It is differentiable and covers electrostatic and electromagnetic (A∥, B∥) turbulence with adiabatic or kinetic electrons and a linearised Fokker-Planck collision operator, linear and nonlinear, with optional CUDA and AMD HIP backends and multi-GPU sharding.
 
 **Documentation:** installation, usage, performance guide, numerics and verification are in [`docs/`](docs/index.md) (build with `pip install -e ".[docs]" && sphinx-build docs docs/_build`). The [paper](https://arxiv.org/abs/2604.06085) describes the code and its validation.
 
@@ -28,7 +28,24 @@ df, geometry, params, state, pre = gyx.gk_from_config("configs/adiabatic/nonline
 df, phi, fluxes, state = gyx.gk_run(df, geometry, params, state, 400, pre=pre)
 ```
 
-The optional CUDA kernels are built from `gyaradax/backends/cuda_kernels/` with CMake; see the installation page of the docs.
+## GPU kernels
+
+The optional kernels are built once with CMake after the install; the installation page of the docs has the options.
+
+```bash
+# CUDA, NVIDIA GPUs
+pip install -e ".[cuda13]"
+cmake -S gyaradax/backends/cuda_kernels -B _build/cuda && cmake --build _build/cuda -j && cmake --install _build/cuda
+
+# HIP, AMD GPUs with ROCm 7 (hipcc, hipFFT)
+pip install -e ".[rocm7]"
+cmake -S gyaradax/backends/hip_kernels -B _build/hip && cmake --build _build/hip -j && cmake --install _build/hip
+
+# HIP sources on NVIDIA GPUs (nvcc, cuFFT), to check the HIP code without AMD hardware
+cmake -S gyaradax/backends/hip_kernels -B _build/hip_nv -DHIP_PLATFORM=nvidia && cmake --build _build/hip_nv -j && cmake --install _build/hip_nv
+```
+
+Select them with `--backend cuda` or `--backend hip`. `backend: auto` picks CUDA on NVIDIA GPUs and HIP on ROCm when the library is built.
 
 ## Tests
 

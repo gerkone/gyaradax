@@ -45,6 +45,45 @@ bracket     : v6 (cuFFTDx, SM 80, 103; v5 with a warning elsewhere)
 v6 sizes    : 4, 8, 16, 32, 36, 40, 64, 80, ..., 512, 576, 1024 (nky <= 342)
 ```
 
+## HIP backend (AMD GPUs)
+
+The HIP backend runs the kernels on AMD GPUs through ROCm. The linear RHS, the field moments and the collisions are the CUDA sources compiled with `hipcc` through a small compatibility header. The bracket is a separate implementation on hipFFT ([Performance](../performance/index.md#amd-gpus-hip-backend) lists the differences). It was tested on MI300X (gfx942) with ROCm 7 and JAX 0.11. It needs ROCm with `hipcc` and the hipFFT development files, and JAX for ROCm, which the `rocm7` extra installs (`jax[rocm7-local]`, against the installed ROCm):
+
+```bash
+pip install -e ".[rocm7]"
+cd gyaradax/backends/hip_kernels
+mkdir -p _build && cd _build
+cmake .. -DCMAKE_BUILD_TYPE=Release
+cmake --build . -j"$(nproc)"
+cmake --install .
+```
+
+Select it with `--backend hip` (`backend: hip`). On a machine where JAX runs on ROCm, `backend: auto` picks it. `gyaradax info` shows whether the library is installed and usable.
+
+Build options:
+
+`GPU_ARCHITECTURES`
+: gfx targets. The default, `native`, reads the GPUs of the build machine with `rocminfo`. Set it to build without a GPU or for several targets, e.g. `-DGPU_ARCHITECTURES="gfx942;gfx950"` for MI300X and MI355X.
+
+`HIP_PLATFORM`
+: `amd` (default) or `nvidia`, see below.
+
+The HIP backend runs on one GPU (no sharding). `fused_bracket` (cuFFT callbacks) is ignored, and `linear_arith: ds` falls back to FP64 with a warning.
+
+### HIP kernels on NVIDIA GPUs
+
+The same sources also build for NVIDIA GPUs, with `nvcc` and cuFFT and without ROCm. This is meant for checking the HIP code on NVIDIA hardware: on the same GPU the CUDA backend is 1.5 to 1.75 times faster.
+
+```bash
+cd gyaradax/backends/hip_kernels
+mkdir -p _build && cd _build
+cmake .. -DHIP_PLATFORM=nvidia -DCMAKE_BUILD_TYPE=Release   # GPU_ARCHITECTURES: native, or e.g. "80;90"
+cmake --build . -j"$(nproc)"
+cmake --install .
+```
+
+It needs the CUDA toolkit of the CUDA backend and installs `libgyaradax_hip.so` next to the CUDA library. Run with `--backend hip`; `backend: auto` keeps choosing CUDA on NVIDIA GPUs.
+
 ## Multi-GPU
 
 Sharded runs need NCCL (`nvidia-nccl-cu13`, part of the `cuda13` extra). `gyaradax info` reports whether it is installed. See {doc}`running`.

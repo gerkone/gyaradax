@@ -84,7 +84,7 @@ def create_ops(
                 fused_bracket=fused_bracket,
             )
         if backend == "hip":
-            raise RuntimeError("backend='hip' but no ROCm GPU or the HIP library is not built")
+            raise RuntimeError("backend='hip' but no GPU or the HIP library is not built")
         warn_once(log, "backend 'auto' runs JAX on a GPU: the HIP library is not built")
         return JAXOps(pre, use_z2z=use_z2z, mixed_precision=mixed_precision, mesh=mesh)
 

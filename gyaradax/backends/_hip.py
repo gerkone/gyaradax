@@ -51,7 +51,7 @@ class HIPOps(_cuda.CUDAOps):
         if mesh is not None:
             raise NotImplementedError("backend='hip' runs on a single GPU")
         if fused_bracket:
-            warn_once(log, "fused_bracket is ignored: the hipFFT bracket has no callbacks")
+            warn_once(log, "fused_bracket is ignored: the HIP bracket packs in its own kernels")
         if not _cuda._register_ffi(LIB_PATH, _platform()):
             raise RuntimeError(f"{LIB_PATH.name} did not load; build it for this GPU vendor (HIP_PLATFORM)")
         super().__init__(pre, use_z2z, mixed_precision, mesh, fused_bracket)

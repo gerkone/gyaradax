@@ -191,6 +191,39 @@ In mixed precision v6 packs the distribution and the potential into FP32 before 
 
 Lessons that carried over between kernels are collected in `docs/cuda_experiments/README.md`: check register counts and spills with `cuobjdump --dump-resource-usage`, probe cuFFT callbacks once on a NaN buffer, and time with CUPTI, taking minima of interleaved runs.
 
+## AMD GPUs (HIP backend)
+
+The HIP backend ({doc}`../getting_started/installation`) compiles the linear RHS, field-moment and collision kernels of the CUDA backend with `hipcc`. The bracket is its own implementation, because the CUDA brackets are built on two CUDA libraries: cuFFT with LTO callbacks, and cuFFTDx, which runs a row FFT inside a kernel. The HIP bracket keeps the v6 split into column and row passes, but runs every step as a kernel or hipFFT call of its own, with the data in HBM in between:
+
+1. a pack kernel transposes the distribution and potential planes into kx-contiguous columns of the retained $k_y$,
+2. a hipFFT column pass along $k_x$,
+3. an expand kernel forms the derivatives and transposes to $k_y$-contiguous rows,
+4. inverse row FFTs, a bracket kernel for the products and forward row FFTs,
+5. a split kernel back to columns, the forward column pass and an unpack kernel to $(n_{k_x}, n_{k_y})$.
+
+Every FFT runs on contiguous data; strided hipFFT columns were four times slower. The pack, expand and split transposes go through tiles in shared memory (LDS) and write with nontemporal stores. $k_x$ is padded to the smallest alias-free length with prime factors at most 5.
+
+```{figure} ../_static/figs/diagrams/hip_bracket.png
+:width: 65%
+
+The CUDA v6 and HIP brackets. The row stage, one cuFFTDx kernel on CUDA, is five passes through HBM on HIP.
+```
+
+The electrostatic linear RHS uses a variant of the CUDA kernel that only the HIP build compiles. The five $v_\parallel$ planes of the stencil stay in registers instead of a ring in shared memory, so a block needs 28 KB of LDS instead of 55 KB, and the 64 KB of LDS of an MI300X compute unit fit two blocks instead of one. Blocks that share collision planes run on the same XCD, one of the eight chiplets of the MI300X, each with its own L2. The arithmetic is that of the CUDA kernel, and the results are bitwise identical to the HIP build of the CUDA kernel. The nonlinear CFL estimate gathers the half spectrum instead of scattering it on this backend, because XLA on ROCm lowers that scatter to a serial loop.
+
+Not available on HIP: multi-GPU runs, `fused_bracket`, the v5 bracket and `linear_arith: ds`, which falls back to FP64. The MI300X runs FP64 at about half its FP32 rate, so ds would not gain there.
+
+Steps per second on one MI300X with ROCm 7 and JAX 0.11, mixed precision, the configs and `gyaradax bench` settings of the throughput tables:
+
+| grid | JAX | HIP + fused_lin | H100, CUDA + fused_lin |
+|---|---|---|---|
+| adiabatic | 33.7 | **119.6** | 124.3 |
+| kinetic | 3.83 | **16.3** | 15.8 |
+
+An optional fused row pass runs expand, row FFTs, bracket and split in one kernel, with its own Stockham FFT in LDS (build with `-DCMAKE_CXX_FLAGS=-DGYX_ROWFUSE`). It reaches 128.3 and 17.9 steps/s, but its FFT rounds differently from hipFFT (about 3e-15 per bracket call in FP64), so it is off by default.
+
+Built for NVIDIA GPUs (`HIP_PLATFORM=nvidia`), the HIP sources give 71.1 and 9.6 steps/s on H100, against 124.1 and 15.9 for the CUDA backend.
+
 ## Grid sizes and FFT lengths
 
 The bracket runs on the dealiased real-space grid. Its lengths are GKW's:
