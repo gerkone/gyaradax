@@ -411,6 +411,12 @@ def _in_window(t, window):
     return (t >= window[0] - 1e-6) & (t <= window[1] + 1e-6)
 
 
+def _legend_below(fig, ax):
+    handles, labels = ax.get_legend_handles_labels()
+    ncol = len(labels) if len(labels) <= 4 else (len(labels) + 1) // 2
+    fig.legend(handles, labels, loc="outside lower center", ncol=ncol, frameon=False, fontsize=10)
+
+
 def _load_reference(reference):
     if isinstance(reference, (str, os.PathLike)):
         with open(reference) as fh:
@@ -513,10 +519,7 @@ def plot_run_fluxes(
                 ax.set_title(sp, fontsize=9)
         axes[-1, isp].set_xlabel(r"time $[R/v_{th}]$", fontsize=12)
 
-    handles, labels = axes[0, 0].get_legend_handles_labels()
-    fig.legend(
-        handles, labels, loc="outside lower center", ncol=len(labels), frameon=False, fontsize=10
-    )
+    _legend_below(fig, axes[0, 0])
     if title:
         fig.suptitle(title, fontweight="bold", fontsize=14)
     fig.align_ylabels(axes[:, 0])
@@ -613,10 +616,7 @@ def plot_run_spectra(
         ax.set_title(rf"${k}$ spectrum", fontsize=12)
         ax.grid(True, which="both")
 
-    handles, labels = axes[0].get_legend_handles_labels()
-    fig.legend(
-        handles, labels, loc="outside lower center", ncol=len(labels), frameon=False, fontsize=10
-    )
+    _legend_below(fig, axes[0])
     if title:
         fig.suptitle(title, fontweight="bold", fontsize=14)
     return fig
