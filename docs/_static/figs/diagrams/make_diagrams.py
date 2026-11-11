@@ -49,12 +49,12 @@ def column(ax, x, title, stages, w, top, gap=0.55):
     return rows
 
 
-def figure(name, left, right, brace_rows=None, w=3.0):
+def figure(name, left, right, brace_rows=None, w=3.0, brace_right=None, gap=0.55):
     fig, ax = plt.subplots(figsize=(8.0, 1))
     xl, xr = w / 2 + 0.5, w * 1.5 + 1.3
     top = 0.0
-    rl = column(ax, xl, left[0], left[1], w, top)
-    rr = column(ax, xr, right[0], right[1], w, top)
+    rl = column(ax, xl, left[0], left[1], w, top, gap)
+    rr = column(ax, xr, right[0], right[1], w, top, gap)
     bottom = min(rl[-1][1], rr[-1][1]) - 0.15
     ax.plot([(xl + xr) / 2] * 2, [bottom, top + 0.7], color=LINE, lw=1.5, ls="--")
     if brace_rows:
@@ -63,11 +63,19 @@ def figure(name, left, right, brace_rows=None, w=3.0):
         ax.plot([bx + 0.12, bx, bx, bx + 0.12], [rl[b][1], rl[b][1], rl[a][0], rl[a][0]], color=BRACE, lw=1.8)
         ax.text(bx - 0.17, (rl[a][0] + rl[b][1]) / 2, "HBM round-trips", rotation=90, ha="center",
                 va="center", color=BRACE, fontsize=13)
-    ax.set_xlim(-0.2, xr + w / 2 + 0.2)
+    x_max = xr + w / 2 + 0.2
+    if brace_right:
+        a, b = brace_right
+        bx = xr + w / 2 + 0.15
+        ax.plot([bx - 0.12, bx, bx, bx - 0.12], [rr[b][1], rr[b][1], rr[a][0], rr[a][0]], color=BRACE, lw=1.8)
+        ax.text(bx + 0.17, (rr[a][0] + rr[b][1]) / 2, "HBM round-trips", rotation=270, ha="center",
+                va="center", color=BRACE, fontsize=13)
+        x_max += 0.45
+    ax.set_xlim(-0.2, x_max)
     ax.set_ylim(bottom - 0.1, top + 0.8)
     ax.set_aspect("equal")
     ax.axis("off")
-    fig.set_size_inches(8.0, 8.0 * (top + 0.9 - bottom) / (xr + w / 2 + 0.4))
+    fig.set_size_inches(8.0, 8.0 * (top + 0.9 - bottom) / (x_max + 0.2))
     fig.savefig(os.path.join(OUT, name), dpi=150, bbox_inches="tight", facecolor="white")
     plt.close(fig)
 
@@ -107,6 +115,31 @@ def fused_linear():
     figure("fused_linear.png", left, right, brace_rows=(1, 3), w=3.3)
 
 
+def hip_bracket():
+    left = ("CUDA v6", [
+        {"text": "Spectral input", "color": GREEN},
+        {"text": "Column FFT along kx", "color": PURPLE, "sub": "cuFFT, retained ky columns"},
+        {"text": "Row kernel (cuFFTDx)", "color": PURPLE,
+         "inner": ["inverse row FFT", "bracket with potential row", "forward row FFT"]},
+        {"text": "Column FFT, kept columns", "color": PURPLE, "sub": "unpack to (nkx, nky)"},
+        {"text": "Spectral output", "color": GREEN},
+    ])
+    right = ("HIP", [
+        {"text": "Spectral input", "color": GREEN},
+        {"text": "Pack", "color": GRAY, "sub": "tiled transpose to columns"},
+        {"text": "Column FFT along kx", "color": PURPLE, "sub": "hipFFT, contiguous"},
+        {"text": "Expand", "color": GRAY, "sub": "derivatives, transpose to rows"},
+        {"text": "Inverse row FFT", "color": PURPLE, "sub": "hipFFT"},
+        {"text": "Bracket kernel", "color": GRAY, "sub": "product with potential rows"},
+        {"text": "Forward row FFT", "color": PURPLE, "sub": "hipFFT"},
+        {"text": "Split", "color": GRAY, "sub": "tiled transpose to columns"},
+        {"text": "Column FFT, kept columns", "color": PURPLE, "sub": "hipFFT"},
+        {"text": "Unpack", "color": GRAY, "sub": "to (nkx, nky)"},
+        {"text": "Spectral output", "color": GREEN},
+    ])
+    figure("hip_bracket.png", left, right, w=3.8, brace_right=(3, 7), gap=0.4)
+
+
 def connectivity():
     ns, segs = 8, 3
     fig, ax = plt.subplots(figsize=(9.0, 2.6))
@@ -136,4 +169,5 @@ def connectivity():
 if __name__ == "__main__":
     bracket_v6()
     fused_linear()
+    hip_bracket()
     connectivity()

@@ -595,6 +595,8 @@ def _write_run_record(setup: RunSetup) -> None:
 
 
 def _bracket_name(params: Any, shape: Sequence[int]) -> str | None:
+    if params.backend == "hip":
+        return "v6 (hipFFT)"
     if params.backend == "jax" or not _cuda_available():
         return None
     from gyaradax.backends import _cuda
@@ -996,6 +998,10 @@ def _cmd_info(args: argparse.Namespace) -> int:
         print(f"cuda kernels: error — {exc}")
     print(f"cuda backend: {'available' if cuda_ok else 'not available (JAX backend only)'}")
     print(f"lib path    : {_cuda.LIB_PATH} ({'present' if _cuda.LIB_PATH.exists() else 'missing'})")
+    from gyaradax.backends import _hip
+
+    print(f"hip backend : {'available' if _hip.is_available() else 'not available'}")
+    print(f"hip library : {_hip.LIB_PATH} ({'present' if _hip.LIB_PATH.exists() else 'missing'})")
     if cuda_ok:
         _cuda._register_ffi()
         forced = os.environ.get("GYARADAX_BRACKET")
@@ -1008,7 +1014,10 @@ def _cmd_info(args: argparse.Namespace) -> int:
         if _cuda._has_bracket_v6:
             cover = f"nky <= {(max(sizes) + 2) // 3}" if sizes else "none on this GPU"
             print(f"v6 sizes    : {', '.join(map(str, sizes))} ({cover})")
-    nccl = importlib.util.find_spec("nvidia.nccl") is not None
+    nccl = (
+        importlib.util.find_spec("nvidia") is not None
+        and importlib.util.find_spec("nvidia.nccl") is not None
+    )
     missing = "missing — multi-GPU needs nvidia-nccl-cu13 (cuda13 extra)"
     print(f"nccl        : {'found' if nccl else missing}")
     if len(devices) > 1:
@@ -1069,7 +1078,7 @@ def _add_common(p: argparse.ArgumentParser) -> None:
         help="YAML config path(s), or a previous run directory to resume",
     )
     p.add_argument(
-        "--backend", choices=["auto", "jax", "cuda"], default=None,
+        "--backend", choices=["auto", "jax", "cuda", "hip"], default=None,
         help="nonlinear/linear kernel backend (default: from config, else jax)",
     )
     prec = p.add_mutually_exclusive_group()

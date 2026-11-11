@@ -20,7 +20,7 @@ gyaradax info                          # devices, backends, versions
 | electromagnetic $A_\parallel$ / $B_\parallel$ | `solver.nlapar` / `solver.nlbpar` |
 | collisions | a `collisions:` section |
 | multi-GPU layout | `sharding.n_gpus` or `sharding.n_gpus_{sp,vp,mu}` |
-| backend | `solver.backend` (`jax`, `cuda`, `auto`) |
+| backend | `solver.backend` (`jax`, `cuda`, `hip`, `auto`) |
 | run length | `solver.n_steps` |
 | checkpoint cadence | `solver.dump_interval` x `solver.naverage` steps |
 
