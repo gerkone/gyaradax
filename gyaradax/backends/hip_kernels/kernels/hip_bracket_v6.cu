@@ -1,6 +1,8 @@
 // v6 bracket on hipfft with contiguous ffts and lds-tiled pack, expand and split; exports the cuda v6 ffi symbols
 
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <map>
 #include <mutex>
 #include <string>
@@ -34,11 +36,10 @@ template <> struct Prec<double> {
 #define GYX_INDEX(k) const unsigned k = blockIdx.x * blockDim.x + threadIdx.x
 
 constexpr unsigned GYX_WG = 1024;
-// lds tile edge and thread rows of the tiled transposes
-constexpr int GYX_T = 32;
-constexpr int GYX_TR = 16;
+// (tile edge, thread rows) layouts of the tiled transposes; one is chosen per grid at run time
+#define GYX_TILE_PAIRS(X) X(32, 8) X(32, 16) X(64, 4) X(64, 8) X(64, 16)
 static inline unsigned gyx_blocks(unsigned long long n) { return (unsigned)((n + GYX_WG - 1) / GYX_WG); }
-static inline unsigned gyx_tiles(int n) { return (unsigned)((n + GYX_T - 1) / GYX_T); }
+static inline unsigned gyx_tiles(int n, int te) { return (unsigned)((n + te - 1) / te); }
 
 template <class C>
 __device__ __forceinline__ void gyx_store(C* p, const C v) {
@@ -102,18 +103,19 @@ __global__ void unpack_kernel(const typename Prec<T>::cplx* __restrict__ b, cons
 }
 
 // tiled transposes: lanes along the contiguous side of the source, then of the destination
-template <class T>
-__global__ __launch_bounds__(GYX_T * GYX_TR) void pack_tiled_kernel(typename Prec<T>::cplx* a, const V6ColInfo ci,
+template <class T, int TE, int TR>
+__global__ __launch_bounds__(TE * TR) void pack_tiled_kernel(typename Prec<T>::cplx* a, const V6ColInfo ci,
                                                                     unsigned tiles_c) {
     using C = typename Prec<T>::cplx;
-    __shared__ C tile[GYX_T][GYX_T + 1];
+    extern __shared__ __align__(16) unsigned char gyx_tile_smem[];
+    C (*tile)[TE + 1] = reinterpret_cast<C (*)[TE + 1]>(gyx_tile_smem);
     const unsigned gb = blockIdx.x / tiles_c;
-    const int c0 = (blockIdx.x - gb * tiles_c) * GYX_T, i0 = blockIdx.y * GYX_T;
+    const int c0 = (blockIdx.x - gb * tiles_c) * TE, i0 = blockIdx.y * TE;
     const int mrad = ci.z.mrad, n_cols = ci.n_cols;
     const int c = c0 + threadIdx.x;
     if (c < n_cols) {
         const int j = v6_col_to_j(c, ci.z.nky, ci.z.mphi);
-        for (int il = threadIdx.y; il < GYX_T; il += GYX_TR) {
+        for (int il = threadIdx.y; il < TE; il += TR) {
             const int i = i0 + il;
             if (i >= mrad) break;
             if constexpr (sizeof(T) == 4) tile[il][threadIdx.x] = v5_z2z_true_fp32_pack_at(gb, i, j, &ci.z);
@@ -123,25 +125,26 @@ __global__ __launch_bounds__(GYX_T * GYX_TR) void pack_tiled_kernel(typename Pre
     __syncthreads();
     const int i = i0 + threadIdx.x;
     if (i >= mrad) return;
-    for (int cl = threadIdx.y; cl < GYX_T; cl += GYX_TR) {
+    for (int cl = threadIdx.y; cl < TE; cl += TR) {
         const int cc = c0 + cl;
         if (cc >= n_cols) break;
         gyx_store(&a[((size_t)gb * n_cols + cc) * mrad + i], tile[threadIdx.x][cl]);
     }
 }
 
-template <class T>
-__global__ __launch_bounds__(GYX_T * GYX_TR) void expand_tiled_kernel(const typename Prec<T>::cplx* __restrict__ a,
+template <class T, int TE, int TR>
+__global__ __launch_bounds__(TE * TR) void expand_tiled_kernel(const typename Prec<T>::cplx* __restrict__ a,
                                                                       typename Prec<T>::cplx* __restrict__ rows,
                                                                       int n_cols, int mrad, int mphi, int nky,
                                                                       unsigned tiles_i) {
     using C = typename Prec<T>::cplx;
-    __shared__ C tile[GYX_T][GYX_T + 1];
+    extern __shared__ __align__(16) unsigned char gyx_tile_smem[];
+    C (*tile)[TE + 1] = reinterpret_cast<C (*)[TE + 1]>(gyx_tile_smem);
     const unsigned gb = blockIdx.x / tiles_i;
-    const int i0 = (blockIdx.x - gb * tiles_i) * GYX_T, j0 = blockIdx.y * GYX_T;
+    const int i0 = (blockIdx.x - gb * tiles_i) * TE, j0 = blockIdx.y * TE;
     const int i = i0 + threadIdx.x;
     if (i < mrad) {
-        for (int jl = threadIdx.y; jl < GYX_T; jl += GYX_TR) {
+        for (int jl = threadIdx.y; jl < TE; jl += TR) {
             const int j = j0 + jl;
             if (j >= mphi) break;
             int jj = -1;
@@ -153,7 +156,7 @@ __global__ __launch_bounds__(GYX_T * GYX_TR) void expand_tiled_kernel(const type
     __syncthreads();
     const int j = j0 + threadIdx.x;
     if (j >= mphi) return;
-    for (int il = threadIdx.y; il < GYX_T; il += GYX_TR) {
+    for (int il = threadIdx.y; il < TE; il += TR) {
         const int ii = i0 + il;
         if (ii >= mrad) break;
         gyx_store(&rows[((size_t)gb * mrad + ii) * mphi + j], tile[threadIdx.x][il]);
@@ -161,19 +164,20 @@ __global__ __launch_bounds__(GYX_T * GYX_TR) void expand_tiled_kernel(const type
 }
 
 // one tile of z gives both parities of b
-template <class T>
-__global__ __launch_bounds__(GYX_T * GYX_TR) void split_tiled_kernel(const typename Prec<T>::cplx* __restrict__ z,
+template <class T, int TE, int TR>
+__global__ __launch_bounds__(TE * TR) void split_tiled_kernel(const typename Prec<T>::cplx* __restrict__ z,
                                                                      typename Prec<T>::cplx* __restrict__ b,
                                                                      int mrad, int mphi, int nky, int b_df,
                                                                      unsigned tiles_q) {
     using C = typename Prec<T>::cplx;
-    __shared__ C te[GYX_T][GYX_T + 1];
-    __shared__ C to[GYX_T][GYX_T + 1];
+    extern __shared__ __align__(16) unsigned char gyx_tile_smem[];
+    C (*te)[TE + 1] = reinterpret_cast<C (*)[TE + 1]>(gyx_tile_smem);
+    C (*to)[TE + 1] = te + TE;
     const unsigned pair = blockIdx.x / tiles_q;
-    const int q0 = (blockIdx.x - pair * tiles_q) * GYX_T, i0 = blockIdx.y * GYX_T;
+    const int q0 = (blockIdx.x - pair * tiles_q) * TE, i0 = blockIdx.y * TE;
     const int q = q0 + threadIdx.x;
     if (q < nky) {
-        for (int il = threadIdx.y; il < GYX_T; il += GYX_TR) {
+        for (int il = threadIdx.y; il < TE; il += TR) {
             const int i = i0 + il;
             if (i >= mrad) break;
             const size_t row = ((size_t)pair * mrad + i) * mphi;
@@ -187,7 +191,7 @@ __global__ __launch_bounds__(GYX_T * GYX_TR) void split_tiled_kernel(const typen
     if (i >= mrad) return;
     const unsigned g0 = 2 * pair;
     const bool odd = g0 + 1 < (unsigned)b_df;
-    for (int ql = threadIdx.y; ql < GYX_T; ql += GYX_TR) {
+    for (int ql = threadIdx.y; ql < TE; ql += TR) {
         const int qq = q0 + ql;
         if (qq >= nky) break;
         gyx_store(&b[((size_t)g0 * nky + qq) * mrad + i], te[threadIdx.x][ql]);
@@ -195,11 +199,84 @@ __global__ __launch_bounds__(GYX_T * GYX_TR) void split_tiled_kernel(const typen
     }
 }
 
+// dynamic lds above 48 KiB has to be opted into per kernel
+template <class K>
+hipError_t gyx_allow_smem(K kernel, size_t smem) {
+    if (smem <= 48 * 1024) return hipSuccess;
+    return hipFuncSetAttribute(reinterpret_cast<const void*>(kernel), hipFuncAttributeMaxDynamicSharedMemorySize,
+                               (int)smem);
+}
+
+struct TileCfg {
+    int te = 32, tr = 16, ti = 0;
+};
+
+template <class T>
+size_t gyx_tile_bytes(int te, int n_tiles) { return (size_t)n_tiles * te * (te + 1) * sizeof(typename Prec<T>::cplx); }
+
+template <class T>
+hipError_t launch_pack(const TileCfg& c, typename Prec<T>::cplx* a, const V6ColInfo& col, int n_planes, int n_cols,
+                       int mrad, hipStream_t stream) {
+#define GYX_PACK(E, R)                                                                                       \
+    if (c.te == E && c.tr == R) {                                                                            \
+        const size_t smem = gyx_tile_bytes<T>(E, 1);                                                         \
+        const hipError_t e = gyx_allow_smem(pack_tiled_kernel<T, E, R>, smem);                               \
+        if (e != hipSuccess) return e;                                                                       \
+        pack_tiled_kernel<T, E, R><<<dim3(n_planes * gyx_tiles(n_cols, E), gyx_tiles(mrad, E)), dim3(E, R), \
+                                     smem, stream>>>(a, col, gyx_tiles(n_cols, E));                          \
+        return hipGetLastError();                                                                            \
+    }
+    GYX_TILE_PAIRS(GYX_PACK)
+#undef GYX_PACK
+    return hipErrorInvalidValue;
+}
+
+template <class T>
+hipError_t launch_expand(const TileCfg& c, const typename Prec<T>::cplx* a, typename Prec<T>::cplx* rows,
+                         int n_planes, int n_cols, int mrad, int mphi, int nky, hipStream_t stream) {
+#define GYX_EXPAND(E, R)                                                                                     \
+    if (c.te == E && c.tr == R) {                                                                            \
+        const size_t smem = gyx_tile_bytes<T>(E, 1);                                                         \
+        const hipError_t e = gyx_allow_smem(expand_tiled_kernel<T, E, R>, smem);                             \
+        if (e != hipSuccess) return e;                                                                       \
+        expand_tiled_kernel<T, E, R><<<dim3(n_planes * gyx_tiles(mrad, E), gyx_tiles(mphi, E)), dim3(E, R), \
+                                       smem, stream>>>(a, rows, n_cols, mrad, mphi, nky, gyx_tiles(mrad, E)); \
+        return hipGetLastError();                                                                            \
+    }
+    GYX_TILE_PAIRS(GYX_EXPAND)
+#undef GYX_EXPAND
+    return hipErrorInvalidValue;
+}
+
+template <class T>
+hipError_t launch_split(const TileCfg& c, const typename Prec<T>::cplx* z, typename Prec<T>::cplx* b, int n_pairs,
+                        int mrad, int mphi, int nky, int b_df, hipStream_t stream) {
+#define GYX_SPLIT(E, R)                                                                                      \
+    if (c.te == E && c.tr == R) {                                                                            \
+        const size_t smem = gyx_tile_bytes<T>(E, 2);                                                         \
+        const hipError_t e = gyx_allow_smem(split_tiled_kernel<T, E, R>, smem);                              \
+        if (e != hipSuccess) return e;                                                                       \
+        split_tiled_kernel<T, E, R><<<dim3(n_pairs * gyx_tiles(nky, E), gyx_tiles(mrad, E)), dim3(E, R),    \
+                                      smem, stream>>>(z, b, mrad, mphi, nky, b_df, gyx_tiles(nky, E));       \
+        return hipGetLastError();                                                                            \
+    }
+    GYX_TILE_PAIRS(GYX_SPLIT)
+#undef GYX_SPLIT
+    return hipErrorInvalidValue;
+}
+
+template <class T>
+size_t gyx_rowfuse_bytes(int em, int ti, int mphi) {
+    return (size_t)2 * (em ? 6 : 4) * ti * mphi * sizeof(typename Prec<T>::cplx);
+}
+
+constexpr bool gyx_rowfuse_length(int n) {
+    return n == 48 || n == 64 || n == 72 || n == 96 || n == 128 || n == 144 || n == 192 || n == 256;
+}
+
 #ifdef GYX_ROWFUSE
 // fused row pass (expand, row ffts, bracket, split) in lds per (pair, kx tile); stockham radices 4, 3, 2
 constexpr int GYX_RF_THREADS = 256;
-constexpr int GYX_RF_TI = 16;
-constexpr size_t GYX_RF_LDS = 16384;
 
 // workgroups go round-robin over the 8 xcds; consecutive logical blocks on one xcd share its l2
 __device__ __forceinline__ unsigned gyx_xcd_block(unsigned bid, unsigned nb) {
@@ -369,22 +446,24 @@ __global__ __launch_bounds__(GYX_RF_THREADS) void rowfuse_kernel(const RowFuseAr
 }
 
 template <class T>
-bool gyx_rowfuse_launch(const RowFuseArgs<T>& args0, int mphi, int n_pairs, hipStream_t stream) {
-    using C = typename Prec<T>::cplx;
+hipError_t gyx_rowfuse_launch(const RowFuseArgs<T>& args0, int mphi, int n_pairs, int ti, hipStream_t stream) {
     RowFuseArgs<T> args = args0;
-    const int slots = args.em ? 6 : 4;
-    int ti = GYX_RF_TI;
-    while (ti > 1 && (size_t)2 * slots * ti * mphi * sizeof(C) > GYX_RF_LDS) ti /= 2;
     args.ti = ti;
     args.tiles_i = (args.mrad + ti - 1) / ti;
-    const size_t smem = (size_t)2 * slots * ti * mphi * sizeof(C);
+    const size_t smem = gyx_rowfuse_bytes<T>(args.em, ti, mphi);
     const dim3 grid(n_pairs * args.tiles_i);
     switch (mphi) {
-#define GYX_RF_CASE(n) case n: rowfuse_kernel<T, n><<<grid, GYX_RF_THREADS, smem, stream>>>(args); return true;
+#define GYX_RF_CASE(n)                                                                      \
+    case n: {                                                                               \
+        const hipError_t e = gyx_allow_smem(rowfuse_kernel<T, n>, smem);                    \
+        if (e != hipSuccess) return e;                                                      \
+        rowfuse_kernel<T, n><<<grid, GYX_RF_THREADS, smem, stream>>>(args);                 \
+        return hipGetLastError();                                                           \
+    }
         GYX_RF_CASE(48) GYX_RF_CASE(64) GYX_RF_CASE(72) GYX_RF_CASE(96) GYX_RF_CASE(128)
         GYX_RF_CASE(144) GYX_RF_CASE(192) GYX_RF_CASE(256)
 #undef GYX_RF_CASE
-        default: return false;
+        default: return hipErrorInvalidValue;
     }
 }
 #endif
@@ -403,6 +482,8 @@ struct Key {
 struct State {
     hipfftHandle col_inv = {}, row_inv = {}, row_fwd = {}, col_fwd = {};
     void *a = nullptr, *rows = nullptr, *z = nullptr, *b = nullptr, *w = nullptr;
+    TileCfg cfg;
+    bool tuned = false;
     ~State() {
         for (hipfftHandle p : {col_inv, row_inv, row_fwd, col_fwd}) if (p) hipfftDestroy(p);
         for (void* x : {a, rows, z, b, w}) if (x) hipFree(x);
@@ -504,34 +585,117 @@ xla_ffi::Error BracketImpl(
     const BracketArgs<T> args = {(const C*)s->rows, (C*)s->z, dum_s.typed_data(), vfac.typed_data(), mrad,
                                  b_df, b_phi, b_sp, b_inner, nv, nspec, mphi, em, scale};
 
-    const dim3 tb(GYX_T, GYX_TR);
-    pack_tiled_kernel<T><<<dim3(n_planes * gyx_tiles(n_cols), gyx_tiles(mrad)), tb, 0, stream>>>(
-        (C*)s->a, col, gyx_tiles(n_cols));
-    CHECK_HIP(hipGetLastError());
-    CHECK_FFT(Prec<T>::exec(s->col_inv, (C*)s->a, HIPFFT_BACKWARD));
 #ifdef GYX_ROWFUSE
     const RowFuseArgs<T> rf = {(const C*)s->a, (C*)s->b, (const C*)s->w, dum_s.typed_data(), vfac.typed_data(),
                                mrad, n_cols, nky, b_df, b_phi, b_sp, b_inner, nv, nspec, em, 0, 0, scale};
-    const bool fused_rows = gyx_rowfuse_launch<T>(rf, mphi, n_pairs, stream);
-    CHECK_HIP(hipGetLastError());
+    const bool fused_rows = gyx_rowfuse_length(mphi);
 #else
     const bool fused_rows = false;
 #endif
-    if (!fused_rows) {
-        expand_tiled_kernel<T><<<dim3(n_planes * gyx_tiles(mrad), gyx_tiles(mphi)), tb, 0, stream>>>(
-            (const C*)s->a, (C*)s->rows, n_cols, mrad, mphi, nky, gyx_tiles(mrad));
+
+    auto run = [&](const TileCfg& c) -> xla_ffi::Error {
+        CHECK_HIP(launch_pack<T>(c, (C*)s->a, col, n_planes, n_cols, mrad, stream));
+        CHECK_FFT(Prec<T>::exec(s->col_inv, (C*)s->a, HIPFFT_BACKWARD));
+        if (fused_rows) {
+#ifdef GYX_ROWFUSE
+            CHECK_HIP(gyx_rowfuse_launch<T>(rf, mphi, n_pairs, c.ti, stream));
+#endif
+        } else {
+            CHECK_HIP(launch_expand<T>(c, (const C*)s->a, (C*)s->rows, n_planes, n_cols, mrad, mphi, nky, stream));
+            CHECK_FFT(Prec<T>::exec(s->row_inv, (C*)s->rows, HIPFFT_BACKWARD));
+            bracket_kernel<T><<<gyx_blocks(n_z), GYX_WG, 0, stream>>>(args, (unsigned)n_z);
+            CHECK_HIP(hipGetLastError());
+            CHECK_FFT(Prec<T>::exec(s->row_fwd, (C*)s->z, HIPFFT_FORWARD));
+            CHECK_HIP(launch_split<T>(c, (const C*)s->z, (C*)s->b, n_pairs, mrad, mphi, nky, b_df, stream));
+        }
+        CHECK_FFT(Prec<T>::exec(s->col_fwd, (C*)s->b, HIPFFT_FORWARD));
+        unpack_kernel<T><<<gyx_blocks(n_out), GYX_WG, 0, stream>>>((const C*)s->b, store, jind.typed_data(), mrad,
+                                                                  (unsigned)n_out);
         CHECK_HIP(hipGetLastError());
-        CHECK_FFT(Prec<T>::exec(s->row_inv, (C*)s->rows, HIPFFT_BACKWARD));
-        bracket_kernel<T><<<gyx_blocks(n_z), GYX_WG, 0, stream>>>(args, (unsigned)n_z);
-        CHECK_HIP(hipGetLastError());
-        CHECK_FFT(Prec<T>::exec(s->row_fwd, (C*)s->z, HIPFFT_FORWARD));
-        split_tiled_kernel<T><<<dim3(n_pairs * gyx_tiles(nky), gyx_tiles(mrad)), tb, 0, stream>>>(
-            (const C*)s->z, (C*)s->b, mrad, mphi, nky, b_df, gyx_tiles(nky));
-        CHECK_HIP(hipGetLastError());
+        return xla_ffi::Error::Success();
+    };
+
+    if (!s->tuned) {
+        int max_lds = 0;
+        CHECK_HIP(hipDeviceGetAttribute(&max_lds, hipDeviceAttributeMaxSharedMemoryPerBlock, device));
+        // fused rows per block without autotuning: the most that fit 16 KiB
+        int ti_default = 16;
+        while (ti_default > 1 && gyx_rowfuse_bytes<T>(em, ti_default, mphi) > 16384) ti_default /= 2;
+        TileCfg chosen;
+        chosen.ti = ti_default;
+        const char* env = std::getenv("GYARADAX_HIP_BRACKET_TILES");
+        const std::string mode = env ? env : "auto";
+        if (mode == "auto") {
+            hipEvent_t e0, e1;
+            CHECK_HIP(hipEventCreate(&e0));
+            CHECK_HIP(hipEventCreate(&e1));
+            auto timed = [&](const TileCfg& c) -> float {
+                if (!run(c).success()) {
+                    (void)hipGetLastError();
+                    return 1e30f;
+                }
+                float ms = 0.f;
+                if (hipEventRecord(e0, stream) != hipSuccess) return 1e30f;
+                for (int r = 0; r < 3; ++r)
+                    if (!run(c).success()) return 1e30f;
+                if (hipEventRecord(e1, stream) != hipSuccess || hipEventSynchronize(e1) != hipSuccess) return 1e30f;
+                hipEventElapsedTime(&ms, e0, e1);
+                return ms;
+            };
+            int n_layouts = 0;
+            float best = 1e30f;
+            const TileCfg start = chosen;
+#define GYX_TRY(E, R)                                                                        \
+    if (gyx_tile_bytes<T>(E, fused_rows ? 1 : 2) <= (size_t)max_lds) {                     \
+        TileCfg c = start;                                                                   \
+        c.te = E;                                                                            \
+        c.tr = R;                                                                            \
+        const float ms = timed(c);                                                           \
+        ++n_layouts;                                                                         \
+        if (ms < best) { best = ms; chosen = c; }                                            \
     }
-    CHECK_FFT(Prec<T>::exec(s->col_fwd, (C*)s->b, HIPFFT_FORWARD));
-    unpack_kernel<T><<<gyx_blocks(n_out), GYX_WG, 0, stream>>>((const C*)s->b, store, jind.typed_data(), mrad, (unsigned)n_out);
-    CHECK_HIP(hipGetLastError());
+            GYX_TILE_PAIRS(GYX_TRY)
+#undef GYX_TRY
+            if (fused_rows) {
+                const TileCfg tiles = chosen;
+                best = 1e30f;
+                for (int ti = 1; ti <= 16; ti *= 2) {
+                    if (gyx_rowfuse_bytes<T>(em, ti, mphi) > (size_t)max_lds) break;
+                    TileCfg c = tiles;
+                    c.ti = ti;
+                    const float ms = timed(c);
+                    ++n_layouts;
+                    if (ms < best) { best = ms; chosen = c; }
+                }
+            }
+            hipEventDestroy(e0);
+            hipEventDestroy(e1);
+            std::fprintf(stderr, "gyaradax hip bracket (%s, %d planes, %dx%d): tiles %dx%d%s, autotuned over %d layouts\n",
+                         sizeof(T) == 8 ? "fp64" : "fp32", n_planes, mrad, mphi, chosen.te, chosen.tr,
+                         fused_rows ? (std::string(", fused rows per block ") + std::to_string(chosen.ti)).c_str() : "",
+                         n_layouts);
+        } else if (mode != "default") {
+            TileCfg c = chosen;
+            const int n = std::sscanf(mode.c_str(), "%d,%d,%d", &c.te, &c.tr, &c.ti);
+            bool known = false;
+#define GYX_KNOWN(E, R) known = known || (c.te == E && c.tr == R);
+            GYX_TILE_PAIRS(GYX_KNOWN)
+#undef GYX_KNOWN
+            if (n < 2 || !known || c.ti < 1 || c.ti > 16)
+                return xla_ffi::Error(XLA_FFI_Error_Code_INVALID_ARGUMENT,
+                                      "GYARADAX_HIP_BRACKET_TILES must be auto, default or edge,rows[,fused rows]"
+                                      " with (edge, rows) in (32,8) (32,16) (64,4) (64,8) (64,16)");
+            if (gyx_tile_bytes<T>(c.te, fused_rows ? 1 : 2) > (size_t)max_lds ||
+                (fused_rows && gyx_rowfuse_bytes<T>(em, c.ti, mphi) > (size_t)max_lds))
+                return xla_ffi::Error(XLA_FFI_Error_Code_INVALID_ARGUMENT,
+                                      "GYARADAX_HIP_BRACKET_TILES=" + mode + " needs more LDS than the " +
+                                          std::to_string(max_lds) + " bytes per block of this GPU");
+            chosen = c;
+        }
+        s->cfg = chosen;
+        s->tuned = true;
+    }
+    if (auto err = run(s->cfg); !err.success()) return err;
     return xla_ffi::Error::Success();
 }
 

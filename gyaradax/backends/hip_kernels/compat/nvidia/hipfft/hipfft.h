@@ -28,4 +28,15 @@
 #define hipfftMakePlanMany cufftMakePlanMany
 #define hipfftDestroy cufftDestroy
 #define hipfftSetStream cufftSetStream
+#define hipErrorInvalidValue cudaErrorInvalidValue
+#define hipEvent_t cudaEvent_t
+#define hipEventCreate cudaEventCreate
+#define hipEventDestroy cudaEventDestroy
+#define hipEventRecord cudaEventRecord
+#define hipEventSynchronize cudaEventSynchronize
+#define hipEventElapsedTime cudaEventElapsedTime
+#define hipDeviceGetAttribute cudaDeviceGetAttribute
+#define hipDeviceAttributeMaxSharedMemoryPerBlock cudaDevAttrMaxSharedMemoryPerBlockOptin
+#define hipFuncSetAttribute cudaFuncSetAttribute
+#define hipFuncAttributeMaxDynamicSharedMemorySize cudaFuncAttributeMaxDynamicSharedMemorySize
 #define __builtin_nontemporal_store(v, p) (*(p) = (v))
