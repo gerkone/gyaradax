@@ -203,6 +203,8 @@ The HIP backend ({doc}`../getting_started/installation`) compiles the linear RHS
 
 Every FFT runs on contiguous data; strided hipFFT columns were four times slower. The pack, expand and split transposes go through tiles in shared memory (LDS) and write with nontemporal stores. $k_x$ is padded to the smallest alias-free length with prime factors at most 5.
 
+The tile shape of these transposes is chosen per grid at the first call, by timing the shapes that fit the LDS of the GPU, like the kx padding of the CUDA bracket. All shapes give bitwise identical results. On the MI300X only 32-wide tiles fit, and the choice is within 1% of the fixed 32x16 tiles; GPUs with more LDS per block, such as the MI355X, can also use 64-wide tiles. `GYARADAX_HIP_BRACKET_TILES=default` fixes 32x16, and `edge,rows` (e.g. `64,8`) forces a shape.
+
 ```{figure} ../_static/figs/diagrams/hip_bracket.png
 :width: 65%
 
