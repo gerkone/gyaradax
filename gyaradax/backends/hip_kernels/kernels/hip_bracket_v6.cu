@@ -401,7 +401,7 @@ struct Key {
 };
 
 struct State {
-    hipfftHandle col_inv = nullptr, row_inv = nullptr, row_fwd = nullptr, col_fwd = nullptr;
+    hipfftHandle col_inv = {}, row_inv = {}, row_fwd = {}, col_fwd = {};
     void *a = nullptr, *rows = nullptr, *z = nullptr, *b = nullptr, *w = nullptr;
     ~State() {
         for (hipfftHandle p : {col_inv, row_inv, row_fwd, col_fwd}) if (p) hipfftDestroy(p);

@@ -1,4 +1,4 @@
-"""HIP backend for AMD GPUs: the CUDA kernels built with hipcc, and a hipFFT v6 bracket."""
+"""HIP backend: the CUDA kernels built with hipcc and a hipFFT v6 bracket, for AMD GPUs (or NVIDIA GPUs via nvcc)."""
 
 import logging
 import os
@@ -16,19 +16,29 @@ log = logging.getLogger(__name__)
 LIB_PATH = Path(__file__).parent / "hip_kernels" / "libgyaradax_hip.so"
 
 
+def _platform():
+    for name, platform in (("rocm", "ROCM"), ("cuda", "CUDA")):
+        try:
+            if jax.devices(name):
+                return platform
+        except RuntimeError:
+            pass
+    return None
+
+
 def is_available() -> bool:
-    """Whether the HIP kernels are compiled and JAX sees a ROCm GPU."""
-    if not LIB_PATH.exists():
-        return False
-    try:
-        return bool(jax.devices("rocm"))
-    except RuntimeError:
-        return False
+    """Whether the HIP kernels are compiled and JAX sees a GPU (ROCm, or CUDA for an NVIDIA build)."""
+    return LIB_PATH.exists() and _platform() is not None
 
 
 @jax.tree_util.register_pytree_node_class
 class HIPOps(_cuda.CUDAOps):
-    """Solver operations on the HIP kernels; same call layout as :class:`CUDAOps`. Not differentiable."""
+    """Solver operations on the HIP kernels.
+
+    The FFI call layout is that of :class:`~gyaradax.backends._cuda.CUDAOps`. The linear RHS, the field moments and
+    the collisions are the CUDA kernels built with hipcc; the bracket is the hipFFT v6 bracket. Single GPU, not
+    differentiable.
+    """
 
     def __init__(
         self,
@@ -42,7 +52,8 @@ class HIPOps(_cuda.CUDAOps):
             raise NotImplementedError("backend='hip' runs on a single GPU")
         if fused_bracket:
             warn_once(log, "fused_bracket is ignored: the hipFFT bracket has no callbacks")
-        _cuda._register_ffi(LIB_PATH, "ROCM")
+        if not _cuda._register_ffi(LIB_PATH, _platform()):
+            raise RuntimeError(f"{LIB_PATH.name} did not load; build it for this GPU vendor (HIP_PLATFORM)")
         super().__init__(pre, use_z2z, mixed_precision, mesh, fused_bracket)
 
     def _bracket_row_size(self, fp64, mphi, nky, b_df, nsp, b_inner):
