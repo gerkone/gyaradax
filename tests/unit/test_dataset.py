@@ -14,8 +14,8 @@ from gyaradax.cli import main
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 CASES = {
-    "kinetic": ("nl_em_waltz_b01.yaml", dict(nvpar=8, nmu=2, ns=8, nkx=11, nky=5)),
-    "adiabatic": ("iteration_13.yaml", dict(nvpar=8, nmu=2, ns=8, nkx=11, nky=6)),
+    "kinetic": ("em/nl_em_waltz_b01.yaml", dict(nvpar=8, nmu=2, ns=8, nkx=11, nky=5)),
+    "adiabatic": ("adiabatic/nonlinear/itg_flat_density.yaml", dict(nvpar=8, nmu=2, ns=8, nkx=11, nky=6)),
 }
 
 
@@ -276,8 +276,8 @@ def test_schema_tree_round_trips_and_matches_neugk():
 
 
 @pytest.mark.parametrize("config,grid", [
-    ("nl_em_waltz_b01.yaml", dict(nvpar=8, nmu=2, ns=8, nkx=11, nky=5)),
-    ("iteration_13.yaml", dict(nvpar=8, nmu=2, ns=8, nkx=11, nky=6)),
+    ("em/nl_em_waltz_b01.yaml", dict(nvpar=8, nmu=2, ns=8, nkx=11, nky=5)),
+    ("adiabatic/nonlinear/itg_flat_density.yaml", dict(nvpar=8, nmu=2, ns=8, nkx=11, nky=6)),
 ])  # fmt: skip
 def test_writer_output_meets_the_neugk_contract(tmp_path, config, grid):
     check_trajectory = pytest.importorskip("neugk_jax.dataset.schema").check_trajectory
