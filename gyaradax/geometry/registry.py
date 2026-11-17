@@ -40,7 +40,23 @@ class ContinuousGeometryModel(GeometryModel, Protocol):
         signB: float,
         signJ: float,
         model_params: Mapping[str, Any],
-    ) -> dict[str, Any]: ...
+    ) -> dict[str, Any]:
+        """Continuous geometry fields of the model on the parallel grid.
+
+        Args:
+            sgrid: Parallel grid.
+            q: Safety factor.
+            shat: Magnetic shear.
+            eps: Inverse aspect ratio.
+            nperiod: Poloidal turns parameter.
+            signB: Sign of the magnetic field.
+            signJ: Sign of the Jacobian.
+            model_params: Model shape parameters.
+
+        Returns:
+            Dict of the continuous geometry fields.
+        """
+        ...
 
 
 _MODELS: dict[str, GeometryModel] = {}

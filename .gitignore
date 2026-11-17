@@ -97,3 +97,6 @@ p2-*.md
 paper/
 lsp-type-cleanup/
 data/
+!docs/_static/figs/paper/
+!docs/_static/figs/**/*.png
+!docs/_static/logo.png

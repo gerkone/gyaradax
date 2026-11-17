@@ -1,3 +1,5 @@
+"""Diagnostics: potential spectra, growth-rate projections and Term III checks."""
+
 import jax.numpy as jnp
 from typing import Dict, Tuple, Any
 from gyaradax.core.params import GKParams
@@ -13,11 +15,14 @@ from gyaradax.solver.rk4 import nonlinear_term_iii
 
 
 def kx0_mode_columns(mode_label: jnp.ndarray, kxrh: jnp.ndarray) -> Tuple[int, jnp.ndarray]:
-    """
-    Identify the wavevector columns corresponding to the kx=0 baseline.
+    """Index of kx = 0 and the mode columns of the chains through it.
 
-    Used to map global spectral mode labels to the 1D growth/frequency
-    diagnostics that traditionally focus on the kx=0 slice.
+    Args:
+        mode_label: Mode labels, (nkx, nky), 1-based as in GKW.
+        kxrh: Radial wavenumbers.
+
+    Returns:
+        ``(ixzero, cols)``: the kx = 0 index and the 0-based column of each ky.
     """
     mode_label = jnp.asarray(mode_label, dtype=jnp.int32)
     kxrh = jnp.asarray(kxrh, dtype=jnp.float64)
@@ -31,7 +36,16 @@ def kx0_mode_columns(mode_label: jnp.ndarray, kxrh: jnp.ndarray) -> Tuple[int, j
 def project_all_modes_to_kx0(
     all_modes: jnp.ndarray, mode_label: jnp.ndarray, kxrh: jnp.ndarray
 ) -> jnp.ndarray:
-    """Project a flattened diagnostic array back to the kx=0 wavevector slice."""
+    """Select the kx = 0 chain columns of a per-mode diagnostic array.
+
+    Args:
+        all_modes: Array with the modes on its second axis.
+        mode_label: Mode labels, (nkx, nky).
+        kxrh: Radial wavenumbers.
+
+    Returns:
+        The columns of the kx = 0 chains.
+    """
     _, cols = kx0_mode_columns(mode_label, kxrh)
     return jnp.asarray(all_modes, dtype=jnp.complex128)[:, cols]
 
@@ -45,8 +59,18 @@ def term_iii_rhs(
     fft_prefactor: complex = 1.0 + 0.0j,
     exclude_zero_mode: bool = True,
 ) -> jnp.ndarray:
-    """
-    Public diagnostic interface for the Nonlinear Term III contribution.
+    """Nonlinear Term III of a 5D distribution, with the potential solved from it.
+
+    Args:
+        df: Distribution, (nvpar, nmu, ns, nkx, nky).
+        geometry: Geometry dict.
+        params: Run parameters; defaults when None.
+        efun_sign: Sign of the ExB bracket.
+        fft_prefactor: Prefactor of the FFTs.
+        exclude_zero_mode: Zero the (kx, ky) = (0, 0) mode.
+
+    Returns:
+        Term III, same shape as ``df``.
     """
     if params is None:
         params = GKParams()
@@ -71,8 +95,14 @@ def term_iii_rhs(
 def term_iii_fft_pack_roundtrip(
     spec_kxky: jnp.ndarray, geometry: Dict[str, jnp.ndarray]
 ) -> jnp.ndarray:
-    """
-    Verify the dealiased packing and FFT roundtrip for spectral modes.
+    """Spectral modes packed into the dealiased half spectrum and transformed there and back.
+
+    Args:
+        spec_kxky: Modes, (..., nkx, nky).
+        geometry: Geometry dict.
+
+    Returns:
+        The modes after the round trip, same shape as ``spec_kxky``.
     """
     nkx = spec_kxky.shape[-2]
     nky = spec_kxky.shape[-1]
@@ -94,14 +124,16 @@ def get_diagnostics(
     fluxes: Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray],
     state: Any,
 ) -> Dict[str, jnp.ndarray]:
-    """
-    Calculate high-level diagnostics from current field and state.
-    Returns a dictionary containing:
-        - fluxes: pflux, eflux, vflux (scalars)
-        - kx_spec: 1D spectrum over kx (summed over s, ky)
-        - ky_spec: 1D spectrum over ky (summed over s, kx)
-        - ky_growth: 1D growth rate per ky mode (from state)
-        - time, step: Scalars from state
+    """Fluxes, spectra and growth rates of the current state as a dict.
+
+    Args:
+        phi: Potential, (ns, nkx, nky).
+        fluxes: ``(pflux, eflux, vflux)``.
+        state: GKState.
+
+    Returns:
+        Dict with ``pflux``, ``eflux``, ``vflux``, ``kx_spec`` (summed over s and ky),
+        ``ky_spec`` (summed over s and kx), ``ky_growth``, ``time`` and ``step``.
     """
     phi_sq = jnp.abs(phi) ** 2
     # kx spectrum: sum over s and ky
@@ -122,7 +154,18 @@ def get_diagnostics(
 
 
 def phi_spectra(phi, geometry):
-    """(ky_spec, kx_spec) of a spectral phi (s, kx, ky), field-line averaged as in GKW."""
+    """ky and kx spectra of the potential, field-line averaged as in GKW.
+
+    The kx spectrum weights ky = 0 by 1 and the other ky by 2 (Parseval), by
+    index, so it assumes the first ky is the zonal mode.
+
+    Args:
+        phi: Potential, (ns, nkx, nky).
+        geometry: Geometry dict (``ints``).
+
+    Returns:
+        ``(ky_spec, kx_spec)``.
+    """
     # ky_spec = ds * sum_{s,kx} |phi|^2; kx_spec weights ky > 0 twice (parseval [1, 2, 2, ...])
     ds = float(jnp.asarray(geometry["ints"])[0])
     nky = phi.shape[-1]

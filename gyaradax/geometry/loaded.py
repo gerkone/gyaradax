@@ -59,7 +59,14 @@ class LoadedGKWGeometryModel:
     name = "gkw-loaded"
 
     def load(self, directory: str) -> dict[str, Any]:
-        """Load geometry and physics parameters into JAX arrays."""
+        """Load the geometry and physics scalars of a GKW run directory as JAX arrays.
+
+        Args:
+            directory: GKW run directory with ``geom.dat`` and ``input.dat``.
+
+        Returns:
+            Geometry dict.
+        """
         geom = load_geom_dat_file(os.path.join(directory, "geom.dat"))
         input_data = parse_input_dat(os.path.join(directory, "input.dat"))
 

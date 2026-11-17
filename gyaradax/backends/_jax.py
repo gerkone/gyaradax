@@ -9,6 +9,7 @@ import math
 from typing import Any, Dict, Tuple
 
 import jax
+import numpy as np
 import jax.numpy as jnp
 from jax.sharding import PartitionSpec
 
@@ -38,6 +39,41 @@ def _nl_v_chunks(nv: int, planes_per_v: int, plane_bytes: int) -> int:
     return nv
 
 
+def _par_tap_range() -> tuple[int, int]:
+    """[lo, hi) of the parallel-stencil taps the stencil constants can make nonzero."""
+    nz = np.zeros(9, dtype=bool)
+    seen = False
+    for name in ("D1_IPW_POS", "D1_IPW_NEG", "D4_IPW_POS", "D4_IPW_NEG"):
+        t = getattr(stencils, name, None)
+        if t is None:
+            continue
+        a = np.asarray(t)
+        if a.shape[-1] != 9:
+            return 0, 9
+        nz |= (np.abs(a).reshape(-1, 9) != 0.0).any(axis=0)
+        seen = True
+    if not seen or not nz.any():
+        return 0, 9
+    idx = np.flatnonzero(nz)
+    return int(idx[0]), int(idx[-1]) + 1
+
+
+_PAR_TAP_LO, _PAR_TAP_HI = _par_tap_range()
+
+
+def _is_exact_zero(c) -> bool:
+    try:
+        return bool(np.all(np.asarray(c) == 0.0))
+    except Exception:
+        return False
+
+
+def _mul_real(coeff: jnp.ndarray, z: jnp.ndarray) -> jnp.ndarray:
+    if not jnp.iscomplexobj(z):
+        return coeff * z
+    return jax.lax.complex(coeff * z.real, coeff * z.imag)
+
+
 class _StencilTable:
     """Per-class stencil table (..., s, class, 9) indexed like a (9, ..., s, kx, ky) array."""
 
@@ -52,11 +88,11 @@ class _StencilTable:
 
 @jax.tree_util.register_pytree_node_class
 class JAXOps(SolverOps):
-    """JAX implementation of solver operations.
+    """Pure JAX implementation of the solver operations; differentiable.
 
-    Supports both R2C (real-to-complex) and Z2Z (complex-to-complex) FFTs
-    via the use_z2z flag. Mixed precision (FP32 FFTs) is controlled by
-    the mixed_precision flag.
+    The bracket uses R2C FFTs, or Z2Z with ``use_z2z``, in FP32 with
+    ``mixed_precision``. Kinetic runs vmap the linear RHS and the bracket over
+    species; large grids loop over species and vpar chunks in the bracket.
     """
 
     def __init__(self, pre: GKPre, use_z2z: bool = False, mixed_precision: bool = True, mesh=None):
@@ -67,11 +103,13 @@ class JAXOps(SolverOps):
         nv = field.shape[0]
         out = jnp.zeros_like(field)
         for c, s in zip(coeffs, (-2, -1, 0, 1, 2)):
+            if _is_exact_zero(c):
+                continue
             idx = jnp.clip(jnp.arange(nv, dtype=jnp.int32) + s, 0, nv - 1)
             valid = jnp.logical_and(jnp.arange(nv) + s >= 0, jnp.arange(nv) + s < nv)
-            valid_mask = valid[:, None, None, None, None]
             shifted = jnp.take(field, idx, axis=0)
-            out = out + c * jnp.where(valid_mask, shifted, 0.0)
+            masked = jnp.where(valid[:, None, None, None, None], shifted, 0.0)
+            out = out + _mul_real(c, masked)
         return out
 
     def _apply_vpar_dual(
@@ -82,12 +120,18 @@ class JAXOps(SolverOps):
         out_d1 = jnp.zeros_like(field)
         out_d4 = jnp.zeros_like(field)
         for c1, c4, s in zip(coeffs_d1, coeffs_d4, (-2, -1, 0, 1, 2)):
+            z1, z4 = _is_exact_zero(c1), _is_exact_zero(c4)
+            if z1 and z4:
+                continue
             idx = jnp.clip(jnp.arange(nv, dtype=jnp.int32) + s, 0, nv - 1)
             valid = jnp.logical_and(jnp.arange(nv) + s >= 0, jnp.arange(nv) + s < nv)
-            valid_mask = valid[:, None, None, None, None]
-            shifted = jnp.take(field, idx, axis=0)
-            out_d1 = out_d1 + c1 * jnp.where(valid_mask, shifted, 0.0)
-            out_d4 = out_d4 + c4 * jnp.where(valid_mask, shifted, 0.0)
+            shifted = jnp.where(
+                valid[:, None, None, None, None], jnp.take(field, idx, axis=0), 0.0
+            )
+            if not z1:
+                out_d1 = out_d1 + _mul_real(c1, shifted)
+            if not z4:
+                out_d4 = out_d4 + _mul_real(c4, shifted)
         return out_d1, out_d4
 
     def _vpar_dual_sharded(self, df: jnp.ndarray) -> Tuple[jnp.ndarray, jnp.ndarray]:
@@ -118,13 +162,14 @@ class JAXOps(SolverOps):
         out = jnp.zeros_like(field)
         nky = field.shape[-1]
         ky_idx = jnp.reshape(jnp.arange(nky, dtype=jnp.int32), (1, 1, -1))
-        for i in range(9):
+        lo, hi = _PAR_TAP_LO, _PAR_TAP_HI
+        for i in range(lo, hi):
             s_map = self.pre["s_shift"][i]
             kx_map = self.pre["kx_shift"][i]
             valid = self.pre["valid_shift"][i]
             valid_mask = valid[None, None, :, :, :]
             shifted = jnp.where(valid_mask, field[:, :, s_map, kx_map, ky_idx], 0.0)
-            out = out + coeffs[i] * shifted
+            out = out + _mul_real(coeffs[i], shifted)
         return out
 
     def _apply_parallel_dual(
@@ -139,15 +184,16 @@ class JAXOps(SolverOps):
         out2 = jnp.zeros_like(field2)
         nky = field1.shape[-1]
         ky_idx = jnp.reshape(jnp.arange(nky, dtype=jnp.int32), (1, 1, -1))
-        for i in range(9):
+        lo, hi = _PAR_TAP_LO, _PAR_TAP_HI
+        for i in range(lo, hi):
             s_map = self.pre["s_shift"][i]
             kx_map = self.pre["kx_shift"][i]
             valid = self.pre["valid_shift"][i]
             valid_mask = valid[None, None, :, :, :]
             shifted1 = jnp.where(valid_mask, field1[:, :, s_map, kx_map, ky_idx], 0.0)
             shifted2 = jnp.where(valid_mask, field2[:, :, s_map, kx_map, ky_idx], 0.0)
-            out1 = out1 + coeffs1[i] * shifted1
-            out2 = out2 + coeffs2[i] * shifted2
+            out1 = out1 + _mul_real(coeffs1[i], shifted1)
+            out2 = out2 + _mul_real(coeffs2[i], shifted2)
         return out1, out2
 
     def _nonlinear_term_iii_core(
@@ -275,13 +321,6 @@ class JAXOps(SolverOps):
         apar: jnp.ndarray | None = None,
         bpar: jnp.ndarray | None = None,
     ) -> jnp.ndarray:
-        """Nonlinear ExB advection with shape dispatch.
-
-        Dispatches on df.ndim: 5D direct, 6D via vmap over species with per-species bessel.
-        Mixed precision is controlled by self.mixed_precision (set at construction time).
-        chi_correction: velocity-dependent EM correction added to gyro_phi to form chi;
-        built from apar/bpar when those are given instead.
-        """
         if apar is not None or bpar is not None:
             if chi_correction is not None:
                 raise ValueError("pass either chi_correction or apar/bpar, not both")
@@ -382,7 +421,7 @@ class JAXOps(SolverOps):
         Drive terms V, VIII use chi/phi; Term VII uses gyro_phi only.
 
         Term I (streaming) and parallel dissipation share a fused 9-point stencil
-        ('s_upar_tab') — exposed together in the dict as 'I_par_streaming_plus_diss'.
+        ('s_upar_tab'): exposed together in the dict as 'I_par_streaming_plus_diss'.
         """
         gyro_phi = pre["bessel"] * phi[None, None, :, :, :]
 
@@ -518,12 +557,6 @@ class JAXOps(SolverOps):
         apar: jnp.ndarray | None = None,
         bpar: jnp.ndarray | None = None,
     ) -> jnp.ndarray:
-        """Linear RHS with shape dispatch.
-
-        Implements Terms I, II, IV, V, VII, VIII, X, XI + dissipation.
-        Dispatches on df.ndim: 5D direct, 6D via vmap over species.
-        When apar/bpar are provided, includes EM coupling terms.
-        """
         # stencils coupling velocity points run on the shards with halos (sharded runs only)
         extra: dict[str, Any] = {}
         if self.mesh is not None and self.mesh.shape["vp"] > 1:
@@ -586,7 +619,7 @@ class JAXOps(SolverOps):
 def _pack_full_z2z(field, kx_vec, ky_vec, jind, rev_jind, mrad, mphi, mphiw3, nky, dtype):
     """Scatter from packed [nkx, nky] directly to full z2z workspace [mrad, mphi].
 
-    Gathers field values at each output position via rev_jind — no intermediate
+    Gathers field values at each output position via rev_jind: no intermediate
     [mrad, mphiw3] buffer, no scatter ops.
 
     Packing convention: ws = (i·ky − kx)·F, so Re(IFFT(ws)) = ∂y·F, Im(IFFT(ws)) = ∂x·F.
@@ -725,7 +758,7 @@ def _per_s_z2z(
     Packs two spectral derivatives into one complex field and uses
     ifft2 (C2C) instead of irfft2 (C2R), halving the inverse FFT count.
     _pack_full_z2z gathers directly from [nkx, nky] into [mrad, mphi]
-    via rev_jind — no intermediate half-spectrum buffer, no scatter ops.
+    via rev_jind: no intermediate half-spectrum buffer, no scatter ops.
     """
     fft_dtype = jnp.complex64 if mixed_precision else jnp.complex128
     real_dtype = jnp.float32 if mixed_precision else jnp.float64

@@ -62,10 +62,15 @@ mkdir -p _build && cd _build && cmake .. -DCMAKE_BUILD_TYPE=Release && cmake --b
 With the header-only `nvidia-mathdx` package installed (`pip install nvidia-mathdx`), CMake
 also builds the v6 Poisson bracket (`kernels/cufft_bracket_v6.cu`): cuFFT column passes on the
 retained ky columns plus cuFFTDx row kernels that fuse the inverse row FFT, the bracket and the
-forward row FFT. CMake prints `cuFFTDx: ... (v6 bracket for SM ...)`; point it at the headers with
-`-DCUFFTDX_INCLUDE_DIR=<.../nvidia/mathdx/include>` if Python cannot import `nvidia.mathdx`.
-Without it, or for dealiased grids the row kernels are not instantiated for, the v5 pipeline runs.
-Set `GYARADAX_BRACKET=v5` to force the v5 pipeline (bitwise reproduction of earlier runs).
+forward row FFT. CMake prints the cuFFTDx path and the v6 architectures and row FFT sizes; point it
+at the headers with `-DCUFFTDX_INCLUDE_DIR=<.../nvidia/mathdx/include>` if Python cannot import
+`nvidia.mathdx`. The row kernels cover every nky up to `-DBRACKET_V6_NKY_MAX` (default 192): the
+sizes are `linear_precompute`'s dealiased ky lengths for those nky and a power of two all of them
+can pad to, less the ones cuFFTDx runs only with a global workspace (a grid with such a length runs
+at the next built one). `gyaradax info`
+lists what was built. Without cuFFTDx, or for grids v6 has no kernel for, the v5 pipeline runs
+with a one-time warning. Set `GYARADAX_BRACKET=v5` to force the v5 pipeline (bitwise reproduction
+of earlier runs).
 
 ## Files
 - `CMakeLists.txt`: Build system configuration.

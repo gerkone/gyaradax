@@ -54,7 +54,11 @@ class GeometrySpec:
         return self.model
 
     def compute_kwargs(self) -> dict[str, Any]:
-        """Return kwargs equivalent to the existing ``compute_geometry`` API."""
+        """Keyword arguments of :func:`~gyaradax.geometry.geom.compute_geometry` for this spec.
+
+        Returns:
+            Dict of keyword arguments, model parameters included.
+        """
         return {
             "q": self.q,
             "shat": self.shat,
@@ -101,7 +105,31 @@ def geometry_spec_from_compute_kwargs(
     geom_type: str = "circ",
     **model_params: Any,
 ) -> GeometrySpec:
-    """Build a ``GeometrySpec`` from the current direct Python API kwargs."""
+    """:class:`GeometrySpec` from the keyword arguments of :func:`~gyaradax.geometry.geom.compute_geometry`.
+
+    Args:
+        q: Safety factor.
+        shat: Magnetic shear.
+        eps: Inverse aspect ratio.
+        ns: Parallel grid points.
+        nkx: Radial modes.
+        nky: Binormal modes.
+        nvpar: Parallel-velocity points.
+        nmu: Magnetic-moment points.
+        vpar_max: Velocity box.
+        nperiod: Poloidal turns parameter.
+        kxmax: Largest kx; used with ``nky = 1`` or zero shear or eps.
+        krhomax: Largest ``k_theta rho``.
+        ikxspace: Connected modes are (2 nperiod - 1) * ikxspace * iy kx cells apart at the iy-th ky.
+        signB: Sign of the magnetic field.
+        signJ: Sign of the Jacobian.
+        Rref: Reference major radius.
+        geom_type: Model name.
+        model_params: Model shape parameters.
+
+    Returns:
+        GeometrySpec.
+    """
     return GeometrySpec(
         model=geom_type,
         q=q,
@@ -125,15 +153,17 @@ def geometry_spec_from_compute_kwargs(
 
 
 def geometry_spec_from_config(cfg: Any) -> GeometrySpec:
-    """Build a ``GeometrySpec`` from the current YAML/OmegaConf config shape.
+    """:class:`GeometrySpec` from a YAML config.
 
-    This mirrors the historical ``simulate._geometry_from_config`` wrapper:
-    missing ``geometry.geometry_model`` defaults through the direct geometry
-    API to ``circ``; only values present in the config are forwarded.
+    Only values present in the config are passed on. Anything it omits takes the
+    ``GeometrySpec`` default: ``circ`` geometry and ``nperiod = 1`` (one poloidal
+    turn, as GKW's ``gridsize`` namelist).
 
-    Anything the config omits therefore falls through to the ``GeometrySpec``
-    default. Notably ``grid.nperiod`` defaults to 1, a single poloidal turn,
-    which is what GKW's ``gridsize`` namelist does when nperiod is absent.
+    Args:
+        cfg: Config (OmegaConf or dict).
+
+    Returns:
+        GeometrySpec.
     """
     gc = _section_get(cfg, "geometry", {})
     gr = _section_get(cfg, "grid")

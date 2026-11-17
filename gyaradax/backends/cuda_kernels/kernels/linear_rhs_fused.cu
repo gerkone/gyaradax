@@ -2,6 +2,8 @@
 #include <cuda_runtime.h>
 #include <device_launch_parameters.h>
 
+#include "radius_batch.cuh"
+
 namespace xla_ffi = xla::ffi;
 
 // linear_rhs_fused_kernel:
@@ -51,6 +53,10 @@ struct LinearRhsArgs {
 };
 
 // g2f_correct: g2f = -2 signz vthrat vpgr J0 fmaxwl / tmp
+// parallel-stencil taps that can be nonzero
+constexpr int PAR_TAP_LO = 2;
+constexpr int PAR_TAP_HI = 7;
+
 __device__ __forceinline__ double2 g_to_f(double2 g, double g2f_v, double bes, double fm,
                                           double inv_tmp0, double2 apar) {
     const double g2f = g2f_v * bes * fm * inv_tmp0;
@@ -83,18 +89,23 @@ __device__ __forceinline__ void linear_rhs_fused_body(const LinearRhsArgs& a) {
         const int n_tiles = (nky + ky_tile - 1) / ky_tile;
         const int tile    = blockIdx.x % n_tiles;
         const int blk     = blockIdx.x / n_tiles;
-        kx       = blk % nkx;
-        v_idx    = (blk / nkx) % nv_nmu;
-        sp       = blk / (nkx * nv_nmu);
+        // vpar varies fastest
+        const int v_i  = blk % nv;
+        const int mu_i = (blk / nv) % nmu;
+        kx       = (blk / (nv * nmu)) % nkx;
+        v_idx    = v_i * nmu + mu_i;
+        sp       = blk / ((size_t)nkx * nv_nmu);
         s        = local_tid / ky_tile;
         ky_local = local_tid % ky_tile;
         // a partial last tile keeps its idle threads for the barriers, on a valid ky
         live = tile * ky_tile + ky_local < nky;
         ky   = live ? tile * ky_tile + ky_local : nky - 1;
     } else {
-        kx       = blockIdx.x % nkx;
-        v_idx    = (blockIdx.x / nkx) % nv_nmu; // This is (v * nmu + mu)
-        sp       = blockIdx.x / (nkx * nv_nmu);
+        const int v_i  = blockIdx.x % nv;
+        const int mu_i = (blockIdx.x / nv) % nmu;
+        kx       = (blockIdx.x / (nv * nmu)) % nkx;
+        v_idx    = v_i * nmu + mu_i;            // (v * nmu + mu)
+        sp       = blockIdx.x / ((size_t)nkx * nv_nmu);
         s        = local_tid / nky;
         ky       = local_tid % nky;
         ky_local = ky;
@@ -115,7 +126,15 @@ __device__ __forceinline__ void linear_rhs_fused_body(const LinearRhsArgs& a) {
 
     const double signz0 = __ldg(&a.signz0[sp]);
     const double tmp0   = __ldg(&a.tmp0[sp]);
-    const double inv_tmp0 = 1.0 / tmp0;
+    // one reciprocal per block, not per thread
+    __shared__ double s_recip[3];
+    if (threadIdx.x == 0) {
+        s_recip[0] = 1.0 / tmp0;
+        s_recip[1] = 1.0 / a.dvp;
+        s_recip[2] = 1.0 / fmax(tmp0, 1e-15);
+    }
+    __syncthreads();
+    const double inv_tmp0 = s_recip[0];
 
     // bessel dependency: (sp, mu, s, kx, ky)
     const double* bessel_mu = a.bessel + ((size_t)sp * nmu + mu_idx) * spatial_stride;
@@ -166,7 +185,7 @@ __device__ __forceinline__ void linear_rhs_fused_body(const LinearRhsArgs& a) {
     double acc_dp_r  = 0.0, acc_dp_i  = 0.0;
 
     #pragma unroll
-    for (int i = 0; i < 9; ++i) {
+    for (int i = PAR_TAP_LO; i < PAR_TAP_HI; ++i) {
         const int2   map_val = __ldg(&a.packed_maps[(size_t)i * spatial_stride + spatial_idx]);
         const int    src_s   = map_val.x;
         if (src_s >= 0) {
@@ -248,9 +267,10 @@ __device__ __forceinline__ void linear_rhs_fused_body(const LinearRhsArgs& a) {
         if (v_phys > nv - 3) df_vp2 = load_halo(v_phys + 4 - nv);
     }
 
+    // vpar_d1 centre tap is zero
     double2 out_d1 = make_double2(
-        a.c_d1_0 * df_vm2.x + a.c_d1_1 * df_vm1.x + a.c_d1_2 * my_df.x + a.c_d1_3 * df_vp1.x + a.c_d1_4 * df_vp2.x,
-        a.c_d1_0 * df_vm2.y + a.c_d1_1 * df_vm1.y + a.c_d1_2 * my_df.y + a.c_d1_3 * df_vp1.y + a.c_d1_4 * df_vp2.y
+        a.c_d1_0 * df_vm2.x + a.c_d1_1 * df_vm1.x + a.c_d1_3 * df_vp1.x + a.c_d1_4 * df_vp2.x,
+        a.c_d1_0 * df_vm2.y + a.c_d1_1 * df_vm1.y + a.c_d1_3 * df_vp1.y + a.c_d1_4 * df_vp2.y
     );
     double2 out_d4 = make_double2(
         a.c_d4_0 * df_vm2.x + a.c_d4_1 * df_vm1.x + a.c_d4_2 * my_df.x + a.c_d4_3 * df_vp1.x + a.c_d4_4 * df_vp2.x,
@@ -269,8 +289,8 @@ __device__ __forceinline__ void linear_rhs_fused_body(const LinearRhsArgs& a) {
     double hyper_val   = __ldg(&a.hyper[(size_t)kx * nky + ky]);
 
     double kdotvd  = drift_x_val * kx_val + drift_y_val * ky_val;
-    double inv_dvp = 1.0 / a.dvp;
-    double inv_tmp = 1.0 / fmax(tmp0, 1e-15);
+    double inv_dvp = s_recip[1];
+    double inv_tmp = s_recip[2];
 
     // term_iv = utrap * out_d1 / dvp
     double2 term_iv = make_double2(utrap_val * out_d1.x * inv_dvp, utrap_val * out_d1.y * inv_dvp);
@@ -333,11 +353,13 @@ void linear_rhs_fused_em_kernel(const LinearRhsArgs a) {
 template <int NS, int NKY, int MAX_THREADS, bool APAR, bool BPAR, bool DPC, bool HALO = false>
 static void launch_variant(const LinearRhsArgs& args, int num_blocks, int threads, size_t smem,
                            cudaStream_t stream) {
-    if constexpr (APAR || BPAR)
-        linear_rhs_fused_em_kernel<NS, NKY, MAX_THREADS, APAR, BPAR, DPC, HALO>
-            <<<num_blocks, threads, smem, stream>>>(args);
-    else
-        linear_rhs_fused_kernel<NS, NKY, MAX_THREADS, DPC, HALO><<<num_blocks, threads, smem, stream>>>(args);
+    auto kernel = [] {
+        if constexpr (APAR || BPAR) return linear_rhs_fused_em_kernel<NS, NKY, MAX_THREADS, APAR, BPAR, DPC, HALO>;
+        else return linear_rhs_fused_kernel<NS, NKY, MAX_THREADS, DPC, HALO>;
+    }();
+    // static + dynamic smem can exceed the 48 KiB default
+    cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem);
+    kernel<<<num_blocks, threads, smem, stream>>>(args);
 }
 
 
@@ -431,45 +453,51 @@ xla_ffi::Error LinearRhsFusedImpl(
             "ns exceeds maximum CUDA block size of 1024");
     const int ky_tile = ns * nky <= 1024 ? nky : 1024 / ns;
 
-    LinearRhsArgs args = {
-        (const double2*)df.typed_data(), (const double2*)phi.typed_data(),
-        bessel.typed_data(), s_upar_tab.typed_data(), s_t7_tab.typed_data(),
-        par_class.typed_data(),
-        (const int2*)packed_maps.typed_data(),
-        utrap.typed_data(), abs_dum2_vp.typed_data(),
-        drift_x.typed_data(), drift_y.typed_data(),
-        dmaxwel_fm_ek.typed_data(), fmaxwl.typed_data(),
-        hyper.typed_data(), kx_vals.typed_data(), ky_vals.typed_data(),
-        signz0_buf.typed_data(), tmp0_buf.typed_data(),
-        (const double2*)apar.typed_data(), chi_vfac.typed_data(), g2f_vfac.typed_data(),
-        (const double2*)bpar.typed_data(), bpar_chi.typed_data(),
-        s_disp_tab.typed_data(),
-        (const double2*)dproj_m0.typed_data(), (const double2*)dproj_m1.typed_data(),
-        dproj_e0.typed_data(), dproj_e1.typed_data(),
-        (double2*)rhs_out->typed_data(),
-        nsp, nv, nmu, ns, nkx, nky, n_class, ky_tile,
-        c_d1_0, c_d1_1, c_d1_2, c_d1_3, c_d1_4,
-        c_d4_0, c_d4_1, c_d4_2, c_d4_3, c_d4_4,
-        dvp, disp_vp, drive_scale,
-        has_halo ? (const double2*)df_halo.typed_data() : nullptr,
-        has_halo ? fm_halo.typed_data() : nullptr,
-        has_halo ? g2f_halo.typed_data() : nullptr
-    };
+    const int64_t n = batch_count(*rhs_out, (int64_t)nsp * nv * nmu * ns * nkx * nky);
+    for (int64_t i = 0; i < n; ++i) {
+        LinearRhsArgs args = {
+            batch_at<const double2>(df, n, i), batch_at<const double2>(phi, n, i),
+            batch_at<const double>(bessel, n, i), batch_at<const double>(s_upar_tab, n, i),
+            batch_at<const double>(s_t7_tab, n, i),
+            batch_at<const int>(par_class, n, i),
+            batch_at<const int2>(packed_maps, n, i),
+            batch_at<const double>(utrap, n, i), batch_at<const double>(abs_dum2_vp, n, i),
+            batch_at<const double>(drift_x, n, i), batch_at<const double>(drift_y, n, i),
+            batch_at<const double>(dmaxwel_fm_ek, n, i), batch_at<const double>(fmaxwl, n, i),
+            batch_at<const double>(hyper, n, i), batch_at<const double>(kx_vals, n, i),
+            batch_at<const double>(ky_vals, n, i),
+            batch_at<const double>(signz0_buf, n, i), batch_at<const double>(tmp0_buf, n, i),
+            batch_at<const double2>(apar, n, i), batch_at<const double>(chi_vfac, n, i),
+            batch_at<const double>(g2f_vfac, n, i),
+            batch_at<const double2>(bpar, n, i), batch_at<const double>(bpar_chi, n, i),
+            batch_at<const double>(s_disp_tab, n, i),
+            batch_at<const double2>(dproj_m0, n, i), batch_at<const double2>(dproj_m1, n, i),
+            batch_at<const double>(dproj_e0, n, i), batch_at<const double>(dproj_e1, n, i),
+            batch_at<double2>(*rhs_out, n, i),
+            nsp, nv, nmu, ns, nkx, nky, n_class, ky_tile,
+            c_d1_0, c_d1_1, c_d1_2, c_d1_3, c_d1_4,
+            c_d4_0, c_d4_1, c_d4_2, c_d4_3, c_d4_4,
+            dvp, disp_vp, drive_scale,
+            has_halo ? batch_at<const double2>(df_halo, n, i) : nullptr,
+            has_halo ? batch_at<const double>(fm_halo, n, i) : nullptr,
+            has_halo ? batch_at<const double>(g2f_halo, n, i) : nullptr
+        };
 
-    cudaError_t err;
-    const int variant = (has_apar ? 4 : 0) | (has_bpar ? 2 : 0) | (has_dpc ? 1 : 0);
-    switch (variant) {
-        case 0: err = launch_linear_rhs<false, false, false>(args, stream); break;
-        case 1: err = launch_linear_rhs<false, false, true >(args, stream); break;
-        case 2: err = launch_linear_rhs<false, true,  false>(args, stream); break;
-        case 3: err = launch_linear_rhs<false, true,  true >(args, stream); break;
-        case 4: err = launch_linear_rhs<true,  false, false>(args, stream); break;
-        case 5: err = launch_linear_rhs<true,  false, true >(args, stream); break;
-        case 6: err = launch_linear_rhs<true,  true,  false>(args, stream); break;
-        default: err = launch_linear_rhs<true, true,  true >(args, stream); break;
+        cudaError_t err;
+        const int variant = (has_apar ? 4 : 0) | (has_bpar ? 2 : 0) | (has_dpc ? 1 : 0);
+        switch (variant) {
+            case 0: err = launch_linear_rhs<false, false, false>(args, stream); break;
+            case 1: err = launch_linear_rhs<false, false, true >(args, stream); break;
+            case 2: err = launch_linear_rhs<false, true,  false>(args, stream); break;
+            case 3: err = launch_linear_rhs<false, true,  true >(args, stream); break;
+            case 4: err = launch_linear_rhs<true,  false, false>(args, stream); break;
+            case 5: err = launch_linear_rhs<true,  false, true >(args, stream); break;
+            case 6: err = launch_linear_rhs<true,  true,  false>(args, stream); break;
+            default: err = launch_linear_rhs<true, true,  true >(args, stream); break;
+        }
+        if (err != cudaSuccess)
+            return xla_ffi::Error(XLA_FFI_Error_Code_INTERNAL, cudaGetErrorString(err));
     }
-    if (err != cudaSuccess)
-        return xla_ffi::Error(XLA_FFI_Error_Code_INTERNAL, cudaGetErrorString(err));
 
     return xla_ffi::Error::Success();
 }

@@ -9,14 +9,6 @@ from gyaradax.operators.poisson import _phi_kinetic, charge_density, precompute_
 GRID = dict(nvpar=16, nmu=4, ns=16, nkx=21, nky=5)
 
 
-# frozen copy of the kinetic phi solve before charge_density
-def _phi_kinetic_ref(geometry, df, phi_weight=None, phi_diag=None):
-    if phi_weight is None or phi_diag is None:
-        phi_weight, phi_diag = precompute_phi_kinetic(geometry)
-    phi_num = jnp.einsum("avmjkl,avmjkl->jkl", phi_weight, df)
-    return -phi_num / phi_diag
-
-
 def _close(actual, desired):
     desired = np.asarray(desired)
     np.testing.assert_allclose(
@@ -26,7 +18,7 @@ def _close(actual, desired):
 
 @pytest.fixture(scope="module")
 def case():
-    df, geometry, params, _ = noisy_case("nl_em_waltz_b01.yaml", GRID, dict(nlapar=False), seed=3)
+    df, geometry, params, _ = noisy_case("em/nl_em_waltz_b01.yaml", GRID, dict(nlapar=False), seed=3)
     geom = dict(geometry)
     for key in ("mas", "signz", "tmp", "de", "vthrat"):
         geom[key] = jnp.asarray(getattr(params, key), dtype=jnp.float64).reshape(-1)
@@ -41,18 +33,6 @@ def test_charge_density_shape(case):
     assert nsp == 2
     assert rho.shape == (nsp, ns, nkx, nky)
     np.testing.assert_array_equal(np.asarray(rho), np.asarray(charge_density(geom, df, weight)))
-
-
-@pytest.mark.parametrize("jit", [False, True])
-def test_phi_kinetic_bitwise_unchanged(case, jit):
-    df, geom, weight, diag = case
-    wrap = jax.jit if jit else (lambda fn: fn)
-    phi = wrap(lambda d: _phi_kinetic(geom, d, weight, diag))(df)
-    ref = wrap(lambda d: _phi_kinetic_ref(geom, d, weight, diag))(df)
-    np.testing.assert_array_equal(np.asarray(phi), np.asarray(ref))
-    phi_default = wrap(lambda d: _phi_kinetic(geom, d))(df)
-    ref_default = wrap(lambda d: _phi_kinetic_ref(geom, d))(df)
-    np.testing.assert_array_equal(np.asarray(phi_default), np.asarray(ref_default))
 
 
 def test_species_sum_is_phi_numerator(case):

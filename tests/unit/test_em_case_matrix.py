@@ -2,7 +2,7 @@
 
 EM unit tests should not grow independent duplicate input.dat files.  Shared EM
 physics cases belong in the EM validation template/matrix machinery under
-``gkw_ref/em_validation_templates`` and ``gkw_ref/em_validation_matrix.json``.
+``tests/data/em_validation/templates`` and ``tests/data/em_validation/matrix.json``.
 """
 
 from __future__ import annotations
@@ -12,7 +12,7 @@ import re
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-EM_TEMPLATE_DIR = REPO_ROOT / "gkw_ref" / "em_validation_templates"
+EM_TEMPLATE_DIR = REPO_ROOT / "tests" / "data" / "em_validation" / "templates"
 GKW_CASES_DIR = REPO_ROOT / "tests" / "data" / "gkw_cases"
 
 

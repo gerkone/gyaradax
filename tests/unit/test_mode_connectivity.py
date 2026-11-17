@@ -13,8 +13,7 @@ GKW, up to ~47% of the peak) while leaving ky<=15 untouched, so it survives
 any spot check on the peak growth rate.
 
 Nothing else in the suite covers this. The other tests that touch mode_label
-read GKW's file rather than gyaradax's, and the geometry parity test compares
-against a pre-refactor gyaradax snapshot that shares the same bug. geom.dat,
+read GKW's file rather than gyaradax's. geom.dat,
 where the metric and drift geometry is validated, carries no connectivity at
 all: it is written by geom.f90, the connectivity by mode.f90.
 """

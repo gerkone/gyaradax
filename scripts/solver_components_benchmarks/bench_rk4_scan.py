@@ -343,7 +343,7 @@ def _sweep_nsteps(
 # Entry point
 # ---------------------------------------------------------------------------
 def run(
-    config: str = "configs/iteration_13.yaml",
+    config: str = "configs/adiabatic/nonlinear/itg_high_shear.yaml",
     mixed_precision: bool = False,
     backend_forced: str | None = None,
     nsteps: int = DEFAULT_NSTEPS,
@@ -428,7 +428,7 @@ if __name__ == "__main__":
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("--device", type=int, default=1, help="CUDA device index")
-    parser.add_argument("--config", type=str, default="configs/iteration_13.yaml")
+    parser.add_argument("--config", type=str, default="configs/adiabatic/nonlinear/itg_high_shear.yaml")
     parser.add_argument("--mp", action="store_true", help="Enable mixed-precision mode")
     parser.add_argument(
         "--backend",

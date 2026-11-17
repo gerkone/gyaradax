@@ -1,7 +1,7 @@
 """Circular (Lapillonne) and s-alpha geometry.
 
 Port of ``geom_circ`` (geom.f90:1444-1616) and ``geom_s_alpha``
-(geom.f90:1110-1200). Both produce the same dict shape as
+(geom.f90:1312-1428). Both produce the same dict shape as
 ``_miller_geometry`` so the downstream tensor builder is unchanged.
 """
 
@@ -27,7 +27,7 @@ def _dzetadeps(theta, q, shat, eps, signB, signJ):
 
     Branch-tracked atan with monotonicity correction
     (geom.f90:1492-1511). Carries ~0.1% model-level error into
-    zeta-direction tensors — inherent to the Lapillonne approximation.
+    zeta-direction tensors: inherent to the Lapillonne approximation.
     """
     raw = jnp.arctan(jnp.sqrt((1 - eps) / (1 + eps)) * jnp.tan(theta / 2))
     # cumulative pi jumps detect branch-cut crossings of atan

@@ -39,7 +39,7 @@ from gyaradax import load_geometry
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 GKW_CASES_DIR = os.path.join(os.path.dirname(__file__), "..", "data", "gkw_cases")
 GKW_EM_DATA_ROOT = os.environ.get("GKW_EM_DATA_ROOT", GKW_CASES_DIR)
-EM_MATRIX_TEMPLATE_DIR = os.path.join(REPO_ROOT, "gkw_ref", "em_validation_templates")
+EM_MATRIX_TEMPLATE_DIR = os.path.join(REPO_ROOT, "tests", "data", "em_validation", "templates")
 EM_MATRIX_INPUT_DIR = os.path.join(REPO_ROOT, "gkw_ref", "em_validation_inputs")
 EM_MATRIX_CASE_INPUTS = {
     # Keep reference outputs in tests/data, but resolve EM inputs from the
@@ -262,8 +262,8 @@ class TestEMParams:
     @pytest.mark.parametrize(
         ("case_name", "config_name", "beta", "n_steps"),
         [
-            ("nl_em_waltz_b005", "nl_em_waltz_b005.yaml", 0.005, 24000),
-            ("nl_em_waltz_b01", "nl_em_waltz_b01.yaml", 0.01, 12000),
+            ("nl_em_waltz_b005", "em/nl_em_waltz_b005.yaml", 0.005, 24000),
+            ("nl_em_waltz_b01", "em/nl_em_waltz_b01.yaml", 0.01, 12000),
         ],
     )
     def test_nl_em_waltz_yaml_matches_gkw_input(self, case_name, config_name, beta, n_steps):

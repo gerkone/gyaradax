@@ -5,11 +5,8 @@ import numpy as np
 import jax.numpy as jnp
 
 from gyaradax import load_config
-from gyaradax.solver.driver import (
-    gk_from_config,
-    gksimulate,
-    _compute_phi_for_init,
-)
+from gyaradax.operators.poisson import calculate_phi
+from gyaradax.solver.driver import gk_from_config, gksimulate
 from gyaradax.core.state import GKState
 from gyaradax.solver.rk4 import mode_amplitude
 from gyaradax.io.gkw import load_gkw_k_dump, read_gkw_dump_time
@@ -23,7 +20,7 @@ def test_simulation_saturation():
     Integration test: Runs a full nonlinear trajectory into the saturated phase,
     and compares the time-averaged fluxes over the final 80 against the GKW reference.
     """
-    config_path = "configs/iteration_13.yaml"
+    config_path = "configs/adiabatic/nonlinear/itg_high_shear.yaml"
     cfg = load_config(config_path)
     data_dir = cfg.run.data_dir
 
@@ -61,7 +58,7 @@ def test_simulation_saturation():
     nky = len(geometry["krho"])
     dat_path = start_k_file + ".dat"
     t_start = read_gkw_dump_time(dat_path) if os.path.exists(dat_path) else 0.0
-    phi0 = _compute_phi_for_init(df_k, geometry, params)
+    phi0 = calculate_phi(geometry, df_k, params=params)
     amp0 = mode_amplitude(phi0, geometry, params.norm_eps)
     state_k = GKState(
         time=jnp.array(t_start, dtype=jnp.float64),

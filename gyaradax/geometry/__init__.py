@@ -1,6 +1,7 @@
 """Public geometry construction API.
 
 Analytic construction entry points:
+
 - ``compute_geometry`` builds directly from scalar parameters.
 - ``compute_geometry_from_config`` builds from a YAML/OmegaConf config.
 - ``compute_geometry_from_input`` builds from a GKW ``input.dat``.
@@ -10,6 +11,7 @@ Analytic construction entry points:
   when a prebuilt topology is injected; used by the torax plugin).
 
 Loaded/reference construction entry points:
+
 - ``load_loaded_geometry`` reads a GKW reference/output directory.
 - ``geometry_from_geom_dat_and_input`` builds from ``reference/geom.dat`` plus
   grids/config in a sibling GKW ``input.dat``.

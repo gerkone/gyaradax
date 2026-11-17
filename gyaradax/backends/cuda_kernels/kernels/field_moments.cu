@@ -1,6 +1,8 @@
 #include "xla/ffi/api/ffi.h"
 #include <cuda_runtime.h>
 
+#include "radius_batch.cuh"
+
 namespace xla_ffi = xla::ffi;
 
 // partial field moments sum_r w_k[r, x] * f[r, x] over a chunk of (sp, v, mu) rows, f = g + g2f*apar if G2F
@@ -62,19 +64,25 @@ xla_ffi::Error FieldMomentsImpl(
     const int rows_per_chunk = (n_rows + n_chunks - 1) / n_chunks;
     dim3 grid((n_spatial + threads - 1) / threads, n_chunks);
 
-    const double2* g_p    = (const double2*)g.typed_data();
-    const double2* apar_p = (const double2*)apar.typed_data();
-    double2* out = (double2*)partial->typed_data();
     const int variant = (n_w == 2 ? 2 : 0) | (use_g2f ? 1 : 0);
-    switch (variant) {
-        case 0: field_moments_kernel<1, false><<<grid, threads, 0, stream>>>(
-            g_p, w0.typed_data(), w1.typed_data(), g2f.typed_data(), apar_p, out, n_rows, n_spatial, rows_per_chunk); break;
-        case 1: field_moments_kernel<1, true><<<grid, threads, 0, stream>>>(
-            g_p, w0.typed_data(), w1.typed_data(), g2f.typed_data(), apar_p, out, n_rows, n_spatial, rows_per_chunk); break;
-        case 2: field_moments_kernel<2, false><<<grid, threads, 0, stream>>>(
-            g_p, w0.typed_data(), w1.typed_data(), g2f.typed_data(), apar_p, out, n_rows, n_spatial, rows_per_chunk); break;
-        default: field_moments_kernel<2, true><<<grid, threads, 0, stream>>>(
-            g_p, w0.typed_data(), w1.typed_data(), g2f.typed_data(), apar_p, out, n_rows, n_spatial, rows_per_chunk); break;
+    const int64_t n = batch_count(*partial, (int64_t)n_chunks * n_w * n_spatial);
+    for (int64_t i = 0; i < n; ++i) {
+        const double2* g_p = batch_at<const double2>(g, n, i);
+        const double* w0_p = batch_at<const double>(w0, n, i);
+        const double* w1_p = batch_at<const double>(w1, n, i);
+        const double* g2f_p = batch_at<const double>(g2f, n, i);
+        const double2* apar_p = batch_at<const double2>(apar, n, i);
+        double2* out = batch_at<double2>(*partial, n, i);
+        switch (variant) {
+            case 0: field_moments_kernel<1, false><<<grid, threads, 0, stream>>>(
+                g_p, w0_p, w1_p, g2f_p, apar_p, out, n_rows, n_spatial, rows_per_chunk); break;
+            case 1: field_moments_kernel<1, true><<<grid, threads, 0, stream>>>(
+                g_p, w0_p, w1_p, g2f_p, apar_p, out, n_rows, n_spatial, rows_per_chunk); break;
+            case 2: field_moments_kernel<2, false><<<grid, threads, 0, stream>>>(
+                g_p, w0_p, w1_p, g2f_p, apar_p, out, n_rows, n_spatial, rows_per_chunk); break;
+            default: field_moments_kernel<2, true><<<grid, threads, 0, stream>>>(
+                g_p, w0_p, w1_p, g2f_p, apar_p, out, n_rows, n_spatial, rows_per_chunk); break;
+        }
     }
 
     cudaError_t err = cudaGetLastError();

@@ -2,6 +2,7 @@ from conftest import (  # type: ignore[import-not-found]
     rel_l2,
     read_dump_time,
     read_dump_dtim,
+    reference_pair,
     ALL_BACKENDS,
 )
 import os
@@ -33,7 +34,7 @@ def test_init_f_trajectory_parity(
     """
     Verify that init_f exactly matches GKW's internal initial conditions.
     Since GKW does not output t=0 data (K00), we prove parity by initializing
-    from scratch in JAX and integrating forward to match the K01 dump.
+    from scratch in JAX and integrating forward to match the first dump (K01).
     """
     from gyaradax.io.gkw import parse_input_dat
 
@@ -46,6 +47,8 @@ def test_init_f_trajectory_parity(
     finit = inp.get("spcgeneral", {}).get("finit")
     if finit is None:
         finit = inp.get("components", {}).get("finit", "cosine2")
+    if finit in ("noise", "gnoise"):
+        pytest.skip(f"finit = {finit}: gkw's random start cannot be reproduced")
 
     df_init = init_f(
         nonlin_geom,
@@ -58,10 +61,12 @@ def test_init_f_trajectory_parity(
     params = replace(params, backend=backend, use_z2z=use_z2z, mixed_precision=mixed_precision)
     nky = len(nonlin_geom["krho"])
 
+    first, _ = reference_pair(nonlin_dir, "early")
+    steps = int(round(read_dump_time(f"{nonlin_dir}/{first}.dat") / params.dt))
     state = default_state(nky=nky)
-    pred_df, _, _ = gksolve(df_init, nonlin_geom, params, state, 120)
+    pred_df, _, _ = gksolve(df_init, nonlin_geom, params, state, steps)
 
-    ref_df = load_gkw_k_dump(f"{nonlin_dir}/K01", nonlin_shape)
+    ref_df = load_gkw_k_dump(f"{nonlin_dir}/{first}", nonlin_shape)
 
     error = rel_l2(np.array(pred_df), np.array(ref_df))
     assert error < 1e-2
@@ -179,7 +184,7 @@ def test_cfl_timestep_estimate(nonlin_dir, nonlin_geom, nonlin_shape):
     the estimate should be finite, positive, and comparable to the reference dt
     for a typical nonlinear state.
     """
-    df = load_gkw_k_dump(f"{nonlin_dir}/100", nonlin_shape)
+    df = load_gkw_k_dump(f"{nonlin_dir}/{reference_pair(nonlin_dir, 'mid')[0]}", nonlin_shape)
     params = gkparams_from_input_dat(f"{nonlin_dir}/input.dat", non_linear=True)
     pre = linear_precompute(nonlin_geom, params)
 
@@ -198,18 +203,9 @@ def test_cfl_timestep_estimate(nonlin_dir, nonlin_geom, nonlin_shape):
     ), f"cfl estimate {dt_est_val:.3e} is unreasonably small vs dt={params.dt}"
 
 
-def test_cfl_zero_phi_returns_dt_input(nonlin_geom, nonlin_shape):
+def test_cfl_zero_phi_returns_dt_input(nonlin_dir, nonlin_geom, nonlin_shape):
     """with zero potential, cfl estimate should return dt_input (no constraint)."""
-    params = gkparams_from_input_dat(
-        os.path.join(
-            os.environ.get(
-                "GKW_DATA_ROOT", os.path.join(os.path.dirname(__file__), "..", "data", "gkw_raw")
-            ),
-            "iteration_13",
-            "input.dat",
-        ),
-        non_linear=True,
-    )
+    params = gkparams_from_input_dat(os.path.join(nonlin_dir, "input.dat"), non_linear=True)
     pre = linear_precompute(nonlin_geom, params)
     phi_zero = jnp.zeros(nonlin_shape[2:], dtype=jnp.complex128)
     bessel = pre["bessel"]
@@ -223,7 +219,7 @@ def test_cfl_zero_phi_returns_dt_input(nonlin_geom, nonlin_shape):
 # ── Linear CFL and combined estimate tests ──────────────────────────────────
 
 
-def test_linear_cfl_kinetic_restricts_dt(kinetic_geom, kinetic_shape):
+def test_linear_cfl_kinetic_restricts_dt(kinetic_dir, kinetic_geom, kinetic_shape):
     """Linear CFL for kinetic electrons (vthrat~60) must be much smaller than input dt.
 
     With vthrat=60.6, parallel streaming speed is ~60x the ion reference.
@@ -231,22 +227,7 @@ def test_linear_cfl_kinetic_restricts_dt(kinetic_geom, kinetic_shape):
     far below the input.dat dt=0.004.
     """
     params = gkparams_from_input_dat(
-        (
-            os.path.join(
-                os.path.dirname(kinetic_geom["_source_dir"]),
-                "input.dat",
-            )
-            if "_source_dir" in kinetic_geom
-            else os.path.join(
-                os.environ.get(
-                    "GKW_DATA_ROOT",
-                    os.path.join(os.path.dirname(__file__), "..", "data", "gkw_raw"),
-                ),
-                "kinetic_electrons",
-                "v3_kiteration_991_half_rlt",
-                "input.dat",
-            )
-        ),
+        os.path.join(kinetic_dir, "input.dat"),
         non_linear=True,
         adiabatic_electrons=False,
     )
@@ -265,18 +246,9 @@ def test_linear_cfl_kinetic_restricts_dt(kinetic_geom, kinetic_shape):
     assert dt_lin > 1e-4, f"linear CFL {dt_lin:.6e} is unreasonably small"
 
 
-def test_linear_cfl_adiabatic_is_loose(nonlin_geom, nonlin_shape):
+def test_linear_cfl_adiabatic_is_loose(nonlin_dir, nonlin_geom, nonlin_shape):
     """For adiabatic ions (vthrat=1), linear CFL should not restrict dt much."""
-    params = gkparams_from_input_dat(
-        os.path.join(
-            os.environ.get(
-                "GKW_DATA_ROOT", os.path.join(os.path.dirname(__file__), "..", "data", "gkw_raw")
-            ),
-            "iteration_13",
-            "input.dat",
-        ),
-        non_linear=True,
-    )
+    params = gkparams_from_input_dat(os.path.join(nonlin_dir, "input.dat"), non_linear=True)
     pre = linear_precompute(nonlin_geom, params)
 
     dt_lin = float(estimate_linear_timestep(pre, safety_factor=0.5))

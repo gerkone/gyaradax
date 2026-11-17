@@ -9,13 +9,22 @@ struct V6ColInfo {
     int n_planes, n_cols;
 };
 
-// column-pass output B: [mrad][n_df][nky] -> packed [n_df, nkx, nky]
+// column-pass output B: [mrad][n_df][nky] -> packed [n_df, nkx, nky], times scale when fold is set
 struct V6StoreInfo {
     double2*   out_packed;
     const int* inverse_jind;
     int mrad, n_df, nkx, nky;
     int ixzero, iyzero;
+    int fold;
+    double scale_re, scale_im;
 };
+
+// (sr + i si) * (x + i y) as XLA's complex multiply, uncontracted
+__device__ __forceinline__ static double2 v6_scale_c(double sr, double si, double x, double y)
+{
+    return make_double2(__dsub_rn(__dmul_rn(sr, x), __dmul_rn(si, y)),
+                        __dadd_rn(__dmul_rn(sr, y), __dmul_rn(si, x)));
+}
 
 // retained column jj -> dense ky index j of the 2-for-1 packed spectrum
 __device__ __forceinline__ static int v6_col_to_j(int jj, int nky, int mphi)

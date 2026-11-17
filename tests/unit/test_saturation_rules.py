@@ -1,23 +1,30 @@
 """Correctness tests for the QL saturation rules (canonical + RULES zoo).
 
 Fast, CPU-able: pure jax.numpy on tiny synthetic spectra, no solver runs.
-The optional kinetic integration test reads a GKW kinetic-electron FDS
+The optional kinetic integration test reads the last dump of a GKW kinetic-electron run
 (read-only) and is skipped when the data root is not reachable.
 """
 
-import os
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from gyaradax.quasilinear.rules import RULES, RULES_WITH_FREQUENCY, ql_flux_per_species
-from gyaradax.quasilinear.saturation import ql_flux
+from conftest import reference_dir, reference_dumps  # type: ignore[import-not-found]
+from gyaradax.quasilinear import calibration
+from gyaradax.geometry.grids import _build_mode_label
+from gyaradax.quasilinear.rules import (
+    RULES,
+    dlnpdr_tglf,
+    kx_chain0,
+    ql_flux,
+    ql_flux_per_species,
+)
 
 NS, NKX, NKY = 8, 5, 6
 
-GKW_DATA_ROOT = os.environ.get("GKW_DATA_ROOT", "/restricteddata/ukaea/gyrokinetics/raw")
-KINETIC_DIR = os.path.join(GKW_DATA_ROOT, "kinetic_electrons", "v3_kiteration_991_ntsks128")
+KINETIC_CASE = "kinetic_mid_te_gradient"
 
 
 def synthetic_spectrum(seed=0, zonal_content=0.0):
@@ -73,8 +80,6 @@ def synthetic_spectrum(seed=0, zonal_content=0.0):
 
 def call_rule(fn, spec, name=None, **overrides):
     kwargs = dict(overrides)
-    if name in RULES_WITH_FREQUENCY:
-        kwargs.setdefault("frequency", spec["frequency"])
     return fn(
         spec["growth_rate"],
         spec["phi2"],
@@ -189,62 +194,95 @@ class TestRuleZoo:
             assert cur >= prev - 1e-12
             prev = cur
 
+    def test_growth_rate_gradient_finite(self, name):
+        spec = synthetic_spectrum(zonal_content=0.5)
+        grad = jax.grad(
+            lambda g: call_rule(RULES[name], dict(spec, growth_rate=g), name=name)
+        )(spec["growth_rate"])
+        assert np.all(np.isfinite(np.asarray(grad)))
+        assert np.any(np.asarray(grad) != 0.0)
+
 
 class TestRuleSpecifics:
-    def test_sat1_zonal_quench_reduces_flux(self):
-        """More zonal-shear content quenches sat1 below the canonical value."""
-        spec = synthetic_spectrum(zonal_content=50.0)
-        q_can = float(call_rule(ql_flux, spec))
-        q_sat1 = float(call_rule(RULES["sat1_zonal"], spec))
-        assert q_sat1 < q_can
-        # and with no zonal content sat1 reduces to canonical
-        spec0 = synthetic_spectrum(zonal_content=0.0)
-        spec0["phi2"] = spec0["phi2"].at[:, :, 0].set(0.0)
-        spec0["phi2_kxy"] = spec0["phi2_kxy"].at[:, 0].set(0.0)
-        assert float(call_rule(RULES["sat1_zonal"], spec0)) == pytest.approx(
-            float(call_rule(ql_flux, spec0)), rel=1e-6
-        )
-
-    def test_sat3_without_frequency_equals_sat0(self):
+    def test_sat2_exb_shift_suppresses_and_is_off_by_default(self):
+        """The shift is TGLF's ExB kx0_e, zero without rotation (tglf_geometry.f90:59)."""
         spec = synthetic_spectrum()
-        q0 = float(call_rule(RULES["sat0_waltz"], spec))
-        q3 = float(RULES["sat3_regime"](
-            spec["growth_rate"], spec["phi2"], spec["phi2_kxy"], spec["flux_kxy"],
-            spec["krho"], spec["kxrh"], spec["little_g"], spec["ds"], frequency=None,
-        ))
-        assert q3 == pytest.approx(q0, rel=1e-12)
+        args = (spec["growth_rate"], spec["phi2"], spec["phi2_kxy"], spec["flux_kxy"],
+                spec["krho"], spec["kxrh"], spec["little_g"], spec["ds"])
+        q_default = float(call_rule(RULES["sat2"], spec))
+        assert float(RULES["sat2"](*args, kx0_e=0.0)) == pytest.approx(q_default)
+        # with ExB shear the 1/(1+ay*kx^2) factor bites
+        assert float(RULES["sat2"](*args, kx0_e=0.5)) < q_default
 
-    def test_sat3_tem_branch_reduced(self):
-        """Electron-direction (omega<0) modes are down-weighted vs ion-direction."""
+    def test_sat2_ignores_the_eigenmode_kx_centroid(self):
+        """Shifting |phi|^2(kx) must not act as an ExB shift; it is not one."""
         spec = synthetic_spectrum()
-        q_itg = float(RULES["sat3_regime"](
-            spec["growth_rate"], spec["phi2"], spec["phi2_kxy"], spec["flux_kxy"],
-            spec["krho"], spec["kxrh"], spec["little_g"], spec["ds"],
-            frequency=jnp.full_like(spec["krho"], 2.0),
-        ))
-        q_tem = float(RULES["sat3_regime"](
-            spec["growth_rate"], spec["phi2"], spec["phi2_kxy"], spec["flux_kxy"],
-            spec["krho"], spec["kxrh"], spec["little_g"], spec["ds"],
-            frequency=jnp.full_like(spec["krho"], -2.0),
-        ))
-        assert q_tem < q_itg
-        assert q_tem == pytest.approx(0.5 * q_itg, rel=1e-6)
+        shifted = dict(spec)
+        shifted["phi2_kxy"] = jnp.roll(spec["phi2_kxy"], NKX // 4, axis=0)
+        # the centroid moves, but only through kperp2_eff, not the shift term
+        q0 = float(call_rule(RULES["sat2"], spec, kx0_e=0.0))
+        q1 = float(call_rule(RULES["sat2"], shifted, kx0_e=0.0))
+        assert np.isfinite(q0) and np.isfinite(q1)
 
-    def test_sat2_parallel_width_penalty(self):
-        """A parallel-extended |phi|^2(s) yields less sat2 flux than a localized one."""
-        spec_loc = synthetic_spectrum()
-        spec_broad = synthetic_spectrum()
-        broad = np.ones_like(np.asarray(spec_broad["phi2"]))
-        broad *= np.asarray(spec_broad["phi2"]).sum(axis=0, keepdims=True) / NS
-        spec_broad["phi2"] = jnp.asarray(broad)
-        q_loc = float(call_rule(RULES["sat2_spectral"], spec_loc))
-        q_broad = float(call_rule(RULES["sat2_spectral"], spec_broad))
-        assert q_broad < q_loc
+    def test_sat2_is_quadratic_in_growth_rate(self):
+        """SAT2 intensity is the SQUARE of gamma/<kperp^2>; canonical is linear."""
+        spec = synthetic_spectrum()
+        doubled = dict(spec)
+        doubled["growth_rate"] = spec["growth_rate"] * 2.0
+        # at the CALIBRATED exponent sat2 is gamma^(2p); the quadratic form
+        # is what flux_exponent=1 selects, so test that explicitly
+        r_sat2 = float(call_rule(RULES["sat2"], doubled, flux_exponent=1.0)) / float(
+            call_rule(RULES["sat2"], spec, flux_exponent=1.0))
+        r_can = float(call_rule(ql_flux, doubled)) / float(call_rule(ql_flux, spec))
+        # the stability gate is not fully saturated at the smallest gamma, so
+        # both ratios sit above their 4 and 2 asymptotes; how far depends on
+        # kx_width_model, which shifts which modes clear the gate
+        assert 3.9 < r_sat2 < 4.5
+        assert 1.9 < r_can < 2.2
+
+    def test_rules_trace_under_vmap_with_rule_options(self):
+        """The TORAX plugin vmaps the rule over radii and passes rule_options
+        as ordinary kwargs, so no rule may branch on one of their VALUES.
+        Every tracer bug that reached the ITER run got through because the
+        tests only ever called the rules directly."""
+        import inspect
+
+        import jax
+        from gyaradax.quasilinear.rules import ql_flux_sat2
+
+        sig = set(inspect.signature(ql_flux_sat2).parameters)
+        spec = {k: v for k, v in synthetic_spectrum().items() if k in sig}
+        base = dict(cn=1.0, dlnpdr=8.0, kthnorm=3.8, grad_r0=1.0, gq=0.83)
+
+        def one(p):
+            return ql_flux_sat2(flux_exponent=p, **base, **spec)
+
+        out = np.asarray(jax.vmap(one)(jnp.array([0.648, 1.0, 0.5])))
+        assert out.shape == (3,) and np.all(np.isfinite(out))
+        # differentiable in the exponent, which q**p alone is not at q = 0
+        assert np.isfinite(float(jax.grad(one)(0.648)))
+
+    def test_sat2_zero_flux_stays_exactly_zero(self):
+        """The eps floor must not turn a stable spectrum into a tiny flux."""
+        spec = synthetic_spectrum()
+        spec["growth_rate"] = jnp.full_like(spec["growth_rate"], -1.0)
+        for p in (1.0, 0.620):
+            q = float(call_rule(RULES["sat2"], spec, flux_exponent=p))
+            assert q == 0.0, f"flux_exponent={p} gave {q}"
+
+    def test_sat2_preserves_the_sign_of_the_flux(self):
+        """A per-species particle flux can be negative (inward pinch); the
+        exponent must not clip it, or ql_flux_per_species stops summing."""
+        spec = dict(synthetic_spectrum())
+        spec["flux_kxy"] = -spec["flux_kxy"]
+        for p in (1.0, 0.648):
+            q = float(call_rule(RULES["sat2"], spec, flux_exponent=p))
+            assert q < 0.0, f"flux_exponent={p} gave {q}, sign lost"
 
     def test_sat2_kperp_floor_no_blowup(self):
         spec = synthetic_spectrum()
         spec["phi2"] = jnp.zeros_like(spec["phi2"])
-        q = float(call_rule(RULES["sat2_spectral"], spec))
+        q = float(call_rule(RULES["sat2"], spec))
         assert np.isfinite(q)
 
 
@@ -262,8 +300,6 @@ def synthetic_species_fluxes(spec, seed=1):
 
 def call_per_species(rule, spec, flux_sp, name=None, **overrides):
     kwargs = dict(overrides)
-    if name in RULES_WITH_FREQUENCY:
-        kwargs.setdefault("frequency", spec["frequency"])
     return ql_flux_per_species(
         rule,
         spec["growth_rate"],
@@ -321,15 +357,15 @@ class TestPerSpecies:
         np.testing.assert_array_equal(by_name, by_fn)
 
 
-@pytest.mark.skipif(not os.path.isdir(KINETIC_DIR), reason="GKW kinetic data not reachable")
 class TestKineticIntegration:
-    """End-to-end kinetic harvest + per-species rules on a real GKW FDS (read-only)."""
+    """End-to-end kinetic harvest + per-species rules on the last dump of a GKW kinetic run."""
 
     @pytest.fixture(scope="class")
-    def kinetic_arr(self):
+    def kinetic_arr(self, request):
         from gyaradax.quasilinear.linear_pipeline import linear_from_fds
 
-        return linear_from_fds(KINETIC_DIR)
+        path = reference_dir(request, "kinetic", KINETIC_CASE)
+        return linear_from_fds(path, dump=reference_dumps(path)[-1])
 
     def test_harvest_shapes_and_consistency(self, kinetic_arr):
         arr = kinetic_arr
@@ -360,3 +396,70 @@ class TestKineticIntegration:
             )
             assert per_sp.shape == (np.asarray(arr["fluxes_kxy_sp"]).shape[0], 3)
             assert np.isfinite(per_sp).all(), name
+
+
+class TestDlnpdr:
+    """TGLF's pressure-gradient normalization, tglf_multiscale_spectrum.f90:85-97."""
+
+    def test_adiabatic_counts_electrons_as_tglf_does(self):
+        # TGLF's species loop starts at 1, so adiabatic electrons still enter
+        # ptot with rlt_e = 0 and Te = Ti: (2*rln + rlt)/2, not rln + rlt
+        assert dlnpdr_tglf(8.0, 4.0, adiabatic=True) == pytest.approx(8.0)
+        assert dlnpdr_tglf(12.0, 2.0, adiabatic=True) == pytest.approx(8.0)
+
+    def test_kinetic_is_temperature_weighted(self):
+        # te_ti = 1 makes the two species weigh equally
+        got = dlnpdr_tglf(np.array([6.0, 4.0]), np.array([2.0, 2.0]), te_ti=1.0)
+        assert got == pytest.approx(7.0)
+        # hotter electrons (te_ti > 1 => ti_te < 1) tilt toward the electron term
+        hot_e = dlnpdr_tglf(np.array([12.0, 2.0]), np.array([1.0, 1.0]), te_ti=3.0)
+        assert hot_e == pytest.approx((3.0 + (1 / 3) * 13.0) / (1 + 1 / 3))
+
+    def test_clamped_into_the_tglf_window(self):
+        # floor bites for weak gradients, which our scans reach (rln can be 0)
+        assert dlnpdr_tglf(1.0, 0.0, adiabatic=True) == pytest.approx(4.0)
+        # and the rlnp_cutoff caps the steep end
+        assert dlnpdr_tglf(100.0, 50.0, adiabatic=True) == pytest.approx(18.0)
+
+    def test_sat2_scales_with_the_normalization(self):
+        """cnorm = 12/dlnpdr enters the intensity linearly, so the flux
+        scales with it raised to flux_exponent."""
+        spec = synthetic_spectrum()
+        for p in (1.0, 0.620):
+            q_off = float(call_rule(RULES["sat2"], spec, flux_exponent=p))
+            q_on = float(RULES["sat2"](
+                spec["growth_rate"], spec["phi2"], spec["phi2_kxy"],
+                spec["flux_kxy"], spec["krho"], spec["kxrh"], spec["little_g"],
+                spec["ds"], dlnpdr=6.0, flux_exponent=p,
+            ))
+            assert q_on == pytest.approx(q_off * (12.0 / 6.0) ** p, rel=1e-10)
+
+
+def test_kx_chain0_selects_the_theta0_chain():
+    kxrh = jnp.linspace(-1.0, 1.0, 11)
+    chain = np.asarray(kx_chain0(jnp.asarray(_build_mode_label(11, 3, 2)), kxrh))
+    assert chain[:, 0].nonzero()[0].tolist() == [5]
+    assert chain[:, 1].nonzero()[0].tolist() == [1, 3, 5, 7, 9]
+    assert chain[:, 2].nonzero()[0].tolist() == [1, 5, 9]
+    spec = synthetic_spectrum()
+    full = jnp.ones(spec["phi2"].shape[1:])
+    assert float(call_rule(ql_flux, spec, kx_chain=full)) == pytest.approx(float(call_rule(ql_flux, spec)))
+
+
+@pytest.mark.parametrize("name", [n for n in calibration.names() if calibration.load(n)["rule"] in RULES])
+def test_bundled_calibration_drives_its_rule(name):
+    cal = calibration.load(name)
+    assert cal["rule"] in RULES and set(cal["parameters"]) == {"adiabatic", "kinetic"}
+    for electrons in cal["parameters"]:
+        for ch, kw in calibration.channel_parameters(cal, electrons).items():
+            assert kw["cn"] > 0
+            q = float(call_rule(RULES[cal["rule"]], synthetic_spectrum(), **{**cal["options"], **kw}))
+            assert np.isfinite(q) and q > 0, (electrons, ch)
+
+
+def test_auto_resolves_the_rule_default():
+    for rule, name in calibration.DEFAULTS.items():
+        assert calibration.load("auto", rule) == calibration.load(name)
+    assert calibration.load("auto", "sat0") is None
+    with pytest.raises(ValueError, match="is for rule"):
+        calibration.load("sat2_v3", "canonical")

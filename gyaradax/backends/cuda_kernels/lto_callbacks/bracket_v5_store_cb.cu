@@ -80,6 +80,7 @@ __device__ __forceinline__ static void v6_store(unsigned long long offset, T ele
     const int gb = c / si->nky, k = c - gb * si->nky;
     double2 v = make_double2((double)element.x, (double)element.y);
     if (i_pack == si->ixzero && k == si->iyzero) v = make_double2(0.0, 0.0);
+    if (si->fold) v = v6_scale_c(si->scale_re, si->scale_im, v.x, v.y);
     si->out_packed[((unsigned long long)gb * si->nkx + i_pack) * si->nky + k] = v;
 }
 
