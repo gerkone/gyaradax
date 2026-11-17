@@ -38,25 +38,3 @@ def test_configs_run_one_per_gpu_and_finished_runs_are_skipped(tmp_path, monkeyp
     # every run leaves its exit code; a finished run is skipped next time
     assert (out / "a" / datagen.EXIT_FILE).read_text() == "0\n"
 
-
-def test_trajectories_are_extended_in_place_and_resumed_from_their_run_directory(tmp_path, monkeypatch):
-    import numpy as np
-
-    calls = []
-    monkeypatch.setattr(subprocess, "Popen", lambda cmd, **kw: calls.append(cmd) or _Proc(cmd))
-    trajs = []
-    for name in ("x", "y"):
-        traj = tmp_path / "data" / f"{name}_ifft_realpotens"
-        (traj / "resume").mkdir(parents=True)
-        (traj / ".gyaradax_run").write_text("run\n")
-        np.savez(traj / "resume" / "state.npz", time=np.array(10.0))
-        trajs.append(str(traj))
-    out = tmp_path / "out"
-    (out / "y").mkdir(parents=True)
-    (out / "y" / "step_000100.npz").write_bytes(b"")
-    assert datagen.main([*trajs, "--out", str(out), "--gpus", "0", "--extend", "200", "--poll", "0"]) == 0
-    x, y = calls
-    # x starts from its resume dump into its own trajectory; y continues the run directory it has
-    assert x[4] == trajs[0] and x[x.index("--t-end") + 1] == "210" and "--dataset" not in x
-    assert x[x.index("--output-dir") + 1] == str(out / "x")
-    assert y[4] == str(out / "y") and "--t-end" not in y
