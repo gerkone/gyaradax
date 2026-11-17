@@ -3,6 +3,8 @@
 import os
 import subprocess
 
+import pytest
+
 from gyaradax import datagen
 
 
@@ -38,3 +40,29 @@ def test_configs_run_one_per_gpu_and_finished_runs_are_skipped(tmp_path, monkeyp
     # every run leaves its exit code; a finished run is skipped next time
     assert (out / "a" / datagen.EXIT_FILE).read_text() == "0\n"
 
+
+
+
+def test_runs_take_aligned_gpu_blocks_from_their_sharding(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(subprocess, "Popen", lambda cmd, **kw: calls.append(cmd) or _Proc(cmd))
+    sizes = {"one": None, "two": "n_gpus: 2", "quad": "n_gpus_sp: 2\n  n_gpus_mu: 2"}
+    configs = []
+    for name, shard in sizes.items():
+        path = tmp_path / f"{name}.yaml"
+        path.write_text("run: {}\n" + (f"sharding:\n  {shard}\n" if shard else ""))
+        configs.append(str(path))
+    assert datagen.main([*configs, "--out", str(tmp_path / "out"), "--gpus", "0,1,2,3,4,5,6,7", "--poll", "0"]) == 0
+    where = {}
+    for cmd in calls:
+        name = os.path.basename(cmd[4]).removesuffix(".yaml")
+        where[name] = cmd[cmd.index("--device") + 1] if "--device" in cmd else cmd[cmd.index("--device-list") + 1]
+    # one GPU for "one"; "two" gets the first free aligned pair, "quad" the first free aligned quad
+    assert where == {"one": "0", "two": "2,3", "quad": "4,5,6,7"}
+
+
+def test_a_run_wider_than_the_pool_is_refused(tmp_path):
+    path = tmp_path / "wide.yaml"
+    path.write_text("sharding:\n  n_gpus: 4\n")
+    with pytest.raises(SystemExit):
+        datagen.main([str(path), "--out", str(tmp_path / "out"), "--gpus", "0,1", "--poll", "0"])
