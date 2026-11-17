@@ -303,3 +303,14 @@ def test_geometry_grad_drift_tensors():
         )
         rel = abs(float(dq) - fd) / (abs(float(dq)) + 1e-30)
         assert rel < 1e-4, f"AD vs FD mismatch for d({field})/dq: rel={rel:.2e}"
+
+
+@pytest.mark.parametrize("geom_type", ["circ", "s-alpha"])
+def test_signj_flips_the_parallel_derivative(geom_type):
+    # GKW geom.f90: B^s = signJ / (2 pi q [sqrt(1 - eps^2)]), so F and G change sign with signJ
+    from gyaradax.geometry.lapillonne import _circular_geometry
+
+    theta = np.linspace(-np.pi, np.pi, 16, endpoint=False)
+    pos, neg = (_circular_geometry(theta, 1.4, 0.8, 0.19, 1.0, s, geom_type) for s in (1.0, -1.0))
+    for k in ("ffun", "gfun"):
+        np.testing.assert_allclose(np.asarray(neg[k]), -np.asarray(pos[k]), rtol=1e-12)

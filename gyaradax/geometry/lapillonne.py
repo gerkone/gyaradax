@@ -68,7 +68,7 @@ def _circular_geometry(theta, q, shat, eps, signB=1.0, signJ=1.0, geom_type="cir
         dpfdpsi = eps / q
     else:
         dum = jnp.sqrt(1 + eps**2 / q**2 / (1 - eps**2))
-        bups = 1.0 / (2 * jnp.pi * q * jnp.sqrt(1 - eps**2))
+        bups = signJ / (2 * jnp.pi * q * jnp.sqrt(1 - eps**2))
         dpfdpsi = eps / (q * jnp.sqrt(1 - eps**2))
     bn = dum / R
 
