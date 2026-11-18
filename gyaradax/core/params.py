@@ -60,7 +60,7 @@ class GKParams:
         fac_dtim_nl: Nonlinear CFL factor (GKW ``fac_dtim_nl``).
         spectral_radius: Not read by the solver; kept for old configs.
         mixed_precision: Run the nonlinear FFTs in FP32 (fields and linear terms stay FP64).
-        backend: ``"jax"``, ``"cuda"`` or ``"auto"``.
+        backend: ``"jax"``, ``"cuda"``, ``"hip"`` or ``"auto"``.
         use_z2z: Z2Z instead of R2C FFTs in the JAX bracket (CUDA always uses Z2Z).
         fused_linear: CUDA: one fused electrostatic linear kernel (with
             collisions, RK4 stage updates and field moments).

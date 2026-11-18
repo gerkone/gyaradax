@@ -210,20 +210,254 @@ __global__ __launch_bounds__(ES_MAX_THREADS, 2) void linear_rhs_es_kernel(const 
     }
 }
 
+#ifdef GYX_LIN_ES_REG
+#if defined(GYX_LIN_NT) && defined(__HIP_PLATFORM_AMD__)
+typedef double es_d2v __attribute__((ext_vector_type(2)));
+__device__ __forceinline__ double2 es_ld_once(const double2* p) {
+    const es_d2v v = __builtin_nontemporal_load(reinterpret_cast<const es_d2v*>(p));
+    return make_double2(v.x, v.y);
+}
+__device__ __forceinline__ void es_st_once(double2* p, double2 x) {
+    const es_d2v v = {x.x, x.y};
+    __builtin_nontemporal_store(v, reinterpret_cast<es_d2v*>(p));
+}
+#else
+__device__ __forceinline__ double2 es_ld_once(const double2* p) { return __ldg(p); }
+__device__ __forceinline__ void es_st_once(double2* p, double2 x) { *p = x; }
+#endif
+
+// per-plane inputs of one thread, loaded a plane ahead
+template <bool COLL>
+struct EsRow {
+    double2 e, q, pv;
+    double cu[ES_TAP_HI - ES_TAP_LO], ct[ES_TAP_HI - ES_TAP_LO];
+    double dx, dy, da, db;
+    double cc[COLL ? 9 : 1];
+};
+
+// linear_rhs_es_kernel with the same arithmetic: vpar window and per-plane inputs in registers a plane ahead, plane v in lds
+template <int VCH, bool COLL, bool HALO>
+__global__ __launch_bounds__(ES_MAX_THREADS, 2) void linear_rhs_es_reg_kernel(const LinearRhsEsArgs a) {
+    const int ns = a.ns, nky = a.nky, nv = a.nv, nmu = a.nmu, nkx = a.nkx, kyt = a.ky_tile;
+    const int nt = ns * kyt;
+
+    extern __shared__ double2 es_smem[];
+    double2* buf = es_smem;
+    double2* sm_gy = buf + 2 * nt;
+
+    const int tid = threadIdx.x;
+    const int n_tiles = (nky + kyt - 1) / kyt;
+    const int n_vch = (nv + VCH - 1) / VCH;
+#ifdef GYX_LIN_ES_XCD
+    // workgroups go round-robin over the xcds: give each xcd a contiguous range of blocks
+    const int per_xcd = gridDim.x / GYX_LIN_ES_XCD;
+    const int bid = (int)blockIdx.x < per_xcd * GYX_LIN_ES_XCD
+                  ? (blockIdx.x % GYX_LIN_ES_XCD) * per_xcd + blockIdx.x / GYX_LIN_ES_XCD : blockIdx.x;
+#else
+    const int bid = blockIdx.x;
+#endif
+    const int tile = bid % n_tiles;
+    const int vch = (bid / n_tiles) % n_vch;
+    const int mu = (bid / (n_tiles * n_vch)) % nmu;
+    const int kx = (bid / (n_tiles * n_vch * nmu)) % nkx;
+    const int sp = bid / (n_tiles * n_vch * nmu * nkx);
+    const int s = tid / kyt;
+    const int ky_local = tid % kyt;
+    const bool live = tile * kyt + ky_local < nky;
+    const int ky = live ? tile * kyt + ky_local : nky - 1;
+    const int v0 = vch * VCH;
+    const int v1 = min(v0 + VCH, nv);
+
+    const int nspat = ns * nkx * nky;
+    const int spatial = s * (nkx * nky) + kx * nky + ky;
+    const int cls = __ldg(&a.par_class[spatial]);
+    const int plane = nmu * nspat;
+    const int base0 = ((sp * nv) * nmu + mu) * nspat + spatial;
+    const double* bessel_mu = a.bessel + (sp * nmu + mu) * nspat;
+    const int cstride = nv * nmu * ns;
+
+    int tap[ES_TAP_HI - ES_TAP_LO];
+    #pragma unroll
+    for (int i = 0; i < ES_TAP_HI - ES_TAP_LO; ++i) {
+        const int2 m = __ldg(&a.packed_maps[(ES_TAP_LO + i) * nspat + spatial]);
+        tap[i] = m.x < 0 ? -1
+               : (m.y == kx ? m.x * kyt + ky_local : (ES_TAP_OFFKX | (m.x * (nkx * nky) + m.y * nky + ky)));
+    }
+    const double bes = __ldg(&bessel_mu[spatial]);
+    const double2 phi_val = __ldg(&a.phi[spatial]);
+    const double2 my_gyro = make_double2(bes * phi_val.x, bes * phi_val.y);
+    sm_gy[tid] = my_gyro;
+    const double kx_val = __ldg(&a.kx_vals[kx]);
+    const double ky_val = __ldg(&a.ky_vals[ky]);
+    const double hyper_val = __ldg(&a.hyper[kx * nky + ky]);
+    const double* w = a.wvp + ((sp * nmu + mu) * ns + s) * 5;
+    const double c_acc = a.acc_out ? __ldg(&a.coef[0]) : 0.0;
+    const double c_stage = a.acc_out ? __ldg(&a.coef[1]) : 0.0;
+    const double2 z = make_double2(0.0, 0.0);
+    const bool rk = live && a.acc_out != nullptr;
+
+    auto load_plane = [&](int vv) -> double2 {
+        const bool in = vv >= 0 && vv < nv;
+        ptrdiff_t shift = 0;
+        const bool halo = !in && HALO && halo_shift(a.df, a.vp_halo, nullptr, sp, vv, mu, nv, nmu, nspat, shift);
+        return in || halo ? __ldg(&(a.df + shift)[base0 + vv * plane]) : make_double2(0.0, 0.0);
+    };
+    auto load_row = [&](int vv) {
+        EsRow<COLL> r;
+        const int f = base0 + vv * plane;
+        r.e = rk && a.extra ? es_ld_once(&a.extra[f]) : make_double2(0.0, 0.0);
+        r.q = rk ? es_ld_once(&a.acc_in[f]) : make_double2(0.0, 0.0);
+        r.pv = rk && a.stage_out ? es_ld_once(&a.prev[f]) : make_double2(0.0, 0.0);
+        const int rv = ((sp * nv + vv) * nmu + mu) * ns + s;
+        const double* cu = a.s_upar_tab + (((sp * nv + vv) * ns + s) * a.n_class + cls) * 9;
+        const double* ct = a.s_t7_tab + (rv * a.n_class + cls) * 9;
+        #pragma unroll
+        for (int i = 0; i < ES_TAP_HI - ES_TAP_LO; ++i) {
+            r.cu[i] = __ldg(&cu[ES_TAP_LO + i]);
+            r.ct[i] = __ldg(&ct[ES_TAP_LO + i]);
+        }
+        r.dx = __ldg(&a.drift_x[rv]);
+        r.dy = __ldg(&a.drift_y[rv]);
+        r.da = __ldg(&a.drive_a[rv * nky + ky]);
+        r.db = __ldg(&a.drive_b[rv]);
+        if constexpr (COLL) {
+            const double* cs = a.coll + ((sp * 9 * nv + vv) * nmu + mu) * ns + s;
+            #pragma unroll
+            for (int k = 0; k < 9; ++k) r.cc[k] = __ldg(&cs[k * cstride]);
+        }
+        return r;
+    };
+    double2 q0 = load_plane(v0 - 2), q1 = load_plane(v0 - 1), q2 = load_plane(v0), q3 = load_plane(v0 + 1);
+    double2 q4 = load_plane(v0 + 2);
+    EsRow<COLL> row = load_row(v0);
+
+    // the gyro-averaged phi at the parallel taps does not depend on v
+    __syncthreads();
+    double2 gtap[ES_TAP_HI - ES_TAP_LO];
+    #pragma unroll
+    for (int i = 0; i < ES_TAP_HI - ES_TAP_LO; ++i) {
+        const int src = tap[i];
+        gtap[i] = z;
+        if (src >= 0) {
+            if (!(src & ES_TAP_OFFKX)) {
+                gtap[i] = sm_gy[src];
+            } else {
+                const int sidx = src & (ES_TAP_OFFKX - 1);
+                const double bes_src = __ldg(&bessel_mu[sidx]);
+                const double2 phi_src = __ldg(&a.phi[sidx]);
+                gtap[i] = make_double2(bes_src * phi_src.x, bes_src * phi_src.y);
+            }
+        }
+    }
+
+    #pragma unroll 1
+    for (int v = v0; v < v1; ++v) {
+        const int field = base0 + v * plane;
+        buf[(v & 1) * nt + tid] = q2;
+        __syncthreads();
+        const double2* cur = buf + (v & 1) * nt;
+        const double2 my_df = q2;
+
+        double rx = 0.0, ry = 0.0;
+        #pragma unroll
+        for (int i = 0; i < ES_TAP_HI - ES_TAP_LO; ++i) {
+            const int src = tap[i];
+            if (src >= 0) {
+                const double c_upar = row.cu[i];
+                const double c_t7 = row.ct[i];
+                const double2 v_gy = gtap[i];
+                const double2 v_df = !(src & ES_TAP_OFFKX) ? cur[src]
+                                   : __ldg(&a.df[field - spatial + (src & (ES_TAP_OFFKX - 1))]);
+                rx += v_df.x * c_upar;
+                ry += v_df.y * c_upar;
+                rx += v_gy.x * c_t7;
+                ry += v_gy.y * c_t7;
+            }
+        }
+
+        {
+            double c;
+            c = __ldg(&w[0]); rx += q0.x * c; ry += q0.y * c;
+            c = __ldg(&w[1]); rx += q1.x * c; ry += q1.y * c;
+            c = __ldg(&w[2]); rx += my_df.x * c; ry += my_df.y * c;
+            c = __ldg(&w[3]); rx += q3.x * c; ry += q3.y * c;
+            c = __ldg(&w[4]); rx += q4.x * c; ry += q4.y * c;
+            if constexpr (COLL) {
+                c = row.cc[0]; rx += my_df.x * c; ry += my_df.y * c;
+                c = row.cc[1]; rx += q3.x * c; ry += q3.y * c;
+                c = row.cc[2]; rx += q1.x * c; ry += q1.y * c;
+                #pragma unroll
+                for (int k = 3; k < 9; ++k) {
+                    const int vv = v + coll_dv(k), mm = mu + coll_dmu(k);
+                    const bool in = vv >= 0 && vv < nv && mm >= 0 && mm < nmu;
+                    ptrdiff_t shift = 0;
+                    if (in || (HALO && halo_shift(a.df, a.vp_halo, a.mu_halo, sp, vv, mm, nv, nmu, nspat, shift))) {
+                        const double2 f = __ldg(&(a.df + shift)[((sp * nv + vv) * nmu + mm) * nspat + spatial]);
+                        c = row.cc[k];
+                        rx += f.x * c;
+                        ry += f.y * c;
+                    }
+                }
+            }
+        }
+
+        // the contraction the compiler picks for linear_rhs_es_kernel, written out
+        const double kdotvd = fma(row.dx, kx_val, row.dy * ky_val);
+        const double drive_c = row.da - row.db * kdotvd;
+        rx += kdotvd * my_df.y;
+        ry -= kdotvd * my_df.x;
+        rx += hyper_val * my_df.x;
+        ry += hyper_val * my_df.y;
+        rx -= drive_c * my_gyro.y;
+        ry += drive_c * my_gyro.x;
+        if (live) {
+            if (a.acc_out == nullptr) {
+                es_st_once(&a.rhs_out[field], make_double2(rx, ry));
+            } else {
+                if (a.extra) {
+                    rx += row.e.x;
+                    ry += row.e.y;
+                }
+                es_st_once(&a.acc_out[field], make_double2(row.q.x + c_acc * rx, row.q.y + c_acc * ry));
+                if (a.stage_out)
+                    es_st_once(&a.stage_out[field], make_double2(row.pv.x + c_stage * rx, row.pv.y + c_stage * ry));
+            }
+        }
+        // next plane: issued after this plane's loads, as s_waitcnt vmcnt waits in issue order
+        q0 = q1; q1 = q2; q2 = q3; q3 = q4;
+        if (v + 1 < v1) {
+            q4 = load_plane(v + 3);
+            row = load_row(v + 1);
+        }
+    }
+}
+#endif
+
 template <int VCH, bool COLL, bool HALO>
 static cudaError_t launch_es(const LinearRhsEsArgs& a, cudaStream_t stream) {
     const int nt = a.ns * a.ky_tile;
     const int blocks = a.nsp * a.nmu * a.nkx * ((a.nv + VCH - 1) / VCH) * ((a.nky + a.ky_tile - 1) / a.ky_tile);
+#ifdef GYX_LIN_ES_REG
+    const size_t smem = 3 * (size_t)nt * sizeof(double2);
+    cudaError_t e = cudaFuncSetAttribute(linear_rhs_es_reg_kernel<VCH, COLL, HALO>,
+                                         cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem);
+    if (e != cudaSuccess) return e;
+    linear_rhs_es_reg_kernel<VCH, COLL, HALO><<<blocks, nt, smem, stream>>>(a);
+#else
     const size_t smem = (ES_RING + 1) * (size_t)nt * sizeof(double2);
     cudaError_t e = cudaFuncSetAttribute(linear_rhs_es_kernel<VCH, COLL, HALO>,
                                          cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem);
     if (e != cudaSuccess) return e;
     linear_rhs_es_kernel<VCH, COLL, HALO><<<blocks, nt, smem, stream>>>(a);
+#endif
     return cudaGetLastError();
 }
 
 template <bool COLL, bool HALO>
 static cudaError_t launch_es_vch(const LinearRhsEsArgs& a, cudaStream_t stream) {
+#ifdef GYX_LIN_ES_VCH
+    if (a.nv % GYX_LIN_ES_VCH == 0) return launch_es<GYX_LIN_ES_VCH, COLL, HALO>(a, stream);
+#endif
     return a.nv % 32 == 0 ? launch_es<32, COLL, HALO>(a, stream)
          : a.nv % 16 == 0 ? launch_es<16, COLL, HALO>(a, stream)
          :                  launch_es<8, COLL, HALO>(a, stream);

@@ -51,6 +51,7 @@ def configure_runtime_env(
         if previous is not None and previous != visible:
             warnings.warn(f"CUDA_VISIBLE_DEVICES={previous} is replaced by {visible}", stacklevel=2)
         os.environ["CUDA_VISIBLE_DEVICES"] = visible
+        os.environ["HIP_VISIBLE_DEVICES"] = visible
         os.environ.setdefault("CUDA_DEVICE_ORDER", "PCI_BUS_ID")
 
     if preallocate is not None:
