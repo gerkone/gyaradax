@@ -66,3 +66,23 @@ def test_a_run_wider_than_the_pool_is_refused(tmp_path):
     path.write_text("sharding:\n  n_gpus: 4\n")
     with pytest.raises(SystemExit):
         datagen.main([str(path), "--out", str(tmp_path / "out"), "--gpus", "0,1", "--poll", "0"])
+
+
+def test_one_gpu_runs_share_a_gpu_up_to_per_gpu(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(subprocess, "Popen", lambda cmd, **kw: calls.append(cmd) or _Running(cmd))
+    configs = []
+    for name in ("a", "b", "c", "d", "e"):
+        path = tmp_path / f"{name}.yaml"
+        path.write_text("run: {}\n")
+        configs.append(str(path))
+    monkeypatch.setattr(datagen.time, "sleep", lambda s: (_ for _ in ()).throw(StopIteration))
+    with pytest.raises(StopIteration):
+        datagen.main([*configs, "--out", str(tmp_path / "out"), "--gpus", "0,1", "--per-gpu", "2", "--poll", "0"])
+    # four runs start at once, two per GPU; the fifth waits
+    assert [cmd[cmd.index("--device") + 1] for cmd in calls] == ["0", "0", "1", "1"]
+
+
+class _Running(_Proc):
+    def poll(self):
+        return None

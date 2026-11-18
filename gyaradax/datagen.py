@@ -2,7 +2,8 @@
 
 One ``gyaradax run`` per config. A config runs on as many GPUs as its ``sharding`` section asks for
 (``n_gpus``, or the product of ``n_gpus_sp/vp/mu``; one GPU without it), taken as an aligned block of the
-``--gpus`` list: pairs (1st+2nd, 3rd+4th, ...) for two GPUs, quads for four. Each config gets the run
+``--gpus`` list: pairs (1st+2nd, 3rd+4th, ...) for two GPUs, quads for four; ``--per-gpu N`` lets N
+one-GPU runs share each GPU. Each config gets the run
 directory ``OUT/<name>`` and, with ``--dataset``, the trajectory ``<name>``. A repeat skips the configs
 whose run finished, diverged or banded and continues the others from their last snapshot.
 """
@@ -40,9 +41,12 @@ def n_gpus(config: str) -> int:
     return max(1, int(shard.get("n_gpus_sp", 1)) * int(shard.get("n_gpus_vp", 1)) * int(shard.get("n_gpus_mu", 1)))
 
 
-def _block(gpus: list[str], busy: set[str], n: int) -> list[str] | None:
+def _block(gpus: list[str], load: dict[str, int], n: int, per_gpu: int) -> list[str] | None:
+    # one-GPU runs share a GPU up to per_gpu at a time; a multi-GPU run takes its whole block alone
+    if n == 1:
+        return next(([g] for g in gpus if load.get(g, 0) < per_gpu), None)
     for i in range(0, len(gpus) - n + 1, n):
-        if not busy.intersection(gpus[i:i + n]):
+        if not any(load.get(g, 0) for g in gpus[i:i + n]):
             return gpus[i:i + n]
     return None
 
@@ -64,6 +68,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("configs", nargs="+", help="YAML configs, one run each, named after the file")
     p.add_argument("--out", required=True, help="directory of the run directories and logs")
     p.add_argument("--gpus", default="0", help="comma-separated GPU indices (default 0); multi-GPU runs take aligned blocks of it")
+    p.add_argument("--per-gpu", type=int, default=1, help="one-GPU runs that share a GPU at a time (default 1)")
     p.add_argument("--dataset", default=None, help="write each run's trajectory under this directory")
     p.add_argument("--args", default=None, help="extra `gyaradax run` arguments, e.g. '--stop-on-banding'")
     p.add_argument("--poll", type=float, default=10.0, help="seconds between checks (default 10)")
@@ -89,7 +94,11 @@ def main(argv: list[str] | None = None) -> int:
         # in order; a run that does not fit yet lets smaller ones behind it use the free GPUs
         for item in list(todo):
             name, config, run_dir, n = item
-            devices = _block(gpus, {g for d, _ in running.values() for g in d}, n)
+            load: dict[str, int] = {}
+            for d, _ in running.values():
+                for g in d:
+                    load[g] = load.get(g, 0) + (args.per_gpu if len(d) > 1 else 1)
+            devices = _block(gpus, load, n, args.per_gpu)
             if devices is None:
                 continue
             todo.remove(item)
