@@ -1442,8 +1442,8 @@ def build_parser() -> argparse.ArgumentParser:
              "DIR/<name>_ifft_realpotens/ (quantized real-space frames every block + metadata)",
     )
     run_p.add_argument(
-        "--dataset-bits", choices=["zstd16", "bf16"], default=None,
-        help="dataset frame format (default zstd16: lossless zstd over bf16)",
+        "--dataset-bits", choices=["zstd16", "bf16", "f32"], default=None,
+        help="df frame format: zstd16 (default, lossless zstd over bf16), bf16 (raw) or f32 (unrounded float32)",
     )
     run_p.add_argument("--dataset-name", type=str, default=None, help="trajectory name (default run.name)")
     run_p.add_argument(

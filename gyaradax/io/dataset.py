@@ -20,8 +20,8 @@ A trajectory lives in ``<root>/<name>_ifft_realpotens/``::
     data/linear_poten.bin            its phi, (re/im, s, kx, ky), float32
 
 ``bits`` (df frames) is ``zstd16`` (bfloat16 values byte-shuffled and zstd-compressed in 4 MiB chunks behind
-a 4 KiB header, ``neugk_jax.dataset.zframe`` v1) or ``bf16`` (the raw values); either way the
-metadata records ``quantization: bf16``, the precision of the values. Keys, transforms and
+a 4 KiB header, ``neugk_jax.dataset.zframe`` v1), ``bf16`` (the raw values) or ``f32`` (unrounded float32,
+``timestep_NNNNN.bin`` as in the stored adiabatic set); the metadata records the precision as ``quantization``. Keys, transforms and
 rounding follow ``neugk_jax.dataset.preprocess.preprocess_gyaradax_kinetic``, so the neugk
 loaders read the output unchanged. The df / phi statistics are computed from the stored frames
 once the run ends (:func:`write_statistics`). Every leg of the run replaces the resume dump at
@@ -89,11 +89,14 @@ def is_trajectory(path: str) -> bool:
 
 def frame_bits(traj: str) -> str:
     names = os.listdir(os.path.join(traj, "data")) if os.path.isdir(os.path.join(traj, "data")) else []
+    if any(re.fullmatch(r"timestep_\d{5}\.bin", n) for n in names):
+        return "f32"
     return "bf16" if names and not any(n.endswith(".zstd16.bin") for n in names) else "zstd16"
 
 
 def frame_path(traj: str, kind: str, index: int, bits: str) -> str:
-    return os.path.join(traj, "data", f"{kind}_{int(index):05d}.{bits}.bin")
+    suffix = "bin" if bits == "f32" else f"{bits}.bin"
+    return os.path.join(traj, "data", f"{kind}_{int(index):05d}.{suffix}")
 
 
 def _atomic_write(path: str, data: bytes) -> None:
@@ -138,6 +141,8 @@ def read_frame(path: str, shape) -> np.ndarray:
     """float32 values of a stored frame."""
     with open(path, "rb") as fh:
         buf = fh.read()
+    if not path.endswith((".zstd16.bin", ".bf16.bin")):
+        return np.frombuffer(buf, np.float32).reshape(shape)
     bits = zstd16_decode(buf) if path.endswith(".zstd16.bin") else np.frombuffer(buf, np.uint16)
     return (bits.astype(np.uint32) << 16).view(np.float32).reshape(shape)
 
@@ -245,8 +250,8 @@ def potenc_path(traj: str, index: int) -> str:
 
 
 def stored_frame(traj: str, kind: str, index: int) -> str:
-    """Path of the stored ``zstd16`` or ``bf16`` frame ``index`` of ``kind``."""
-    for bits in ("zstd16", "bf16"):
+    """Path of the stored ``zstd16``, ``bf16`` or ``f32`` frame ``index`` of ``kind``."""
+    for bits in ("zstd16", "bf16", "f32"):
         path = frame_path(traj, kind, index, bits)
         if os.path.exists(path):
             return path
@@ -387,8 +392,8 @@ class DatasetWriter:
     def __init__(self, root: str, name: str, geometry: dict, params: Any, config_path: str,
                  bits: str = "zstd16", start_step: int = 0, stats_from: float = 0.0,
                  resume_dtype: str = "f32", takeover: bool = False, potenc: bool = True):
-        if bits not in ("zstd16", "bf16"):
-            raise ValueError(f"dataset bits must be zstd16 or bf16, got {bits!r}")
+        if bits not in ("zstd16", "bf16", "f32"):
+            raise ValueError(f"dataset bits must be zstd16, bf16 or f32, got {bits!r}")
         if resume_dtype not in RESUME_DTYPES:
             raise ValueError(f"resume dtype must be one of {sorted(RESUME_DTYPES)}, got {resume_dtype!r}")
         self.path = trajectory_path(root, name)
@@ -399,6 +404,7 @@ class DatasetWriter:
         _claim(self.path, os.path.dirname(os.path.abspath(config_path)), takeover=takeover)
         shutil.copyfile(config_path, os.path.join(self.path, "config.yaml"))
         self.static = _static_metadata(geometry, params, os.path.join(self.path, "config.yaml"))
+        self.static["quantization"] = "f32" if bits == "f32" else "bf16"
         self.series: dict[str, list] = {k: [] for k in SERIES_KEYS}
         old = load_metadata(self.path)
         if old is not None and "species" not in old:
@@ -437,8 +443,12 @@ class DatasetWriter:
         import jax.numpy as jnp
 
         idx = self.n_frames
-        frame = df_frame(df)
-        _write_frame(frame_path(self.path, "timestep", idx, self.bits), np.asarray(frame).view(np.uint16).ravel(), self.bits)
+        if self.bits == "f32":
+            frame = df_to_real(df)
+            _atomic_write(frame_path(self.path, "timestep", idx, "f32"), np.asarray(frame, np.float32).tobytes())
+        else:
+            frame = df_frame(df)
+            _write_frame(frame_path(self.path, "timestep", idx, self.bits), np.asarray(frame).view(np.uint16).ravel(), self.bits)
         phi_real = phi_to_real(phi)
         phi_frame = np.asarray(jnp.asarray(phi_real).astype(jnp.bfloat16))
         _write_frame(frame_path(self.path, "poten", idx, POTEN_BITS), phi_frame.view(np.uint16).ravel(), POTEN_BITS)
@@ -546,7 +556,7 @@ def write_statistics(traj: str, stats_from: float = 0.0) -> dict:
     first = int(np.searchsorted(times, stats_from, side="left"))
     if first >= len(times):
         raise ValueError(f"{traj}: no frame at or after t = {stats_from} (last t = {times[-1]:.3f})")
-    bits = "zstd16" if os.path.exists(frame_path(traj, "timestep", first, "zstd16")) else "bf16"
+    bits = frame_bits(traj)
     axes = tuple(int(a) for a in meta["df_stats_agg_axes"])
     df_stats, phi_stats, phic_stats = RunningStats(), RunningStats(), RunningStats()
     potenc = all(os.path.exists(potenc_path(traj, i)) for i in range(first, len(times)))

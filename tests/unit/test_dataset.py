@@ -105,6 +105,36 @@ def test_run_writes_preprocessed_trajectory(tmp_path, kind):
     np.testing.assert_allclose(meta["phic_mean"], np.mean(phics, axis=0), rtol=1e-3, atol=1e-6)
 
 
+def test_f32_frames_store_the_unrounded_df(tmp_path):
+    src, grid = CASES["adiabatic"]
+    cfg = OmegaConf.load(os.path.join(REPO_ROOT, "configs", src))
+    for key, value in grid.items():
+        cfg.grid[key] = value
+    cfg.run.pop("data_dir", None)
+    cfg.run.name = "tiny_f32"
+    config = str(tmp_path / "tiny.yaml")
+    OmegaConf.save(cfg, config)
+    run, root = str(tmp_path / "run"), str(tmp_path / "data")
+    common = ["--from-scratch", "--backend", "jax", "--block-size", "2", "--dataset", root, "--dataset-bits", "f32"]
+    assert main(["run", config, *common, "--n-steps", "4", "--output-dir", run]) == 0
+    traj = ds.trajectory_path(root, "tiny_f32")
+    assert ds.frame_bits(traj) == "f32" and os.path.exists(os.path.join(traj, "data", "timestep_00001.bin"))
+    meta = ds.load_metadata(traj)
+    assert meta["quantization"] == "f32"
+    with np.load(os.path.join(run, "step_000004.npz")) as ck:
+        want = np.asarray(ds.df_to_real(ck["df"]), np.float32)
+    got = ds.read_frame(ds.frame_path(traj, "timestep", 1, "f32"), meta["df_shape"])
+    np.testing.assert_array_equal(got.ravel(), want.ravel())
+    # a resumed leg keeps writing f32 frames, and the statistics read them
+    assert main(["run", run, "--n-steps", "2"]) == 0
+    assert os.path.exists(os.path.join(traj, "data", "timestep_00002.bin"))
+    meta = ds.load_metadata(traj)
+    meta = ds.write_statistics(traj, float(meta["timesteps"][2]))
+    axes = tuple(int(a) for a in meta["df_stats_agg_axes"])
+    last = ds.read_frame(ds.frame_path(traj, "timestep", 2, "f32"), meta["df_shape"])
+    np.testing.assert_allclose(meta["df_mean"], last.mean(axis=axes, keepdims=True), rtol=1e-4, atol=1e-7)
+
+
 def test_reim_phi_frames_keep_every_ky_mode():
     rng = np.random.default_rng(0)
     phi = rng.standard_normal((3, 7, 6)) + 1j * rng.standard_normal((3, 7, 6))
