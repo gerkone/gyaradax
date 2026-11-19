@@ -11,10 +11,14 @@ from gyaradax.core.constants import EPS
 from gyaradax.core.state import Precompute
 
 
+# bessel_jn's backward recurrence overflows below this argument
+_BESSEL_SERIES_X = 2e-5
+
+
 def j0(x):
-    safe_x = jnp.where(jnp.abs(x) < 1e-10, 1.0, x)
-    res = bessel_jn(safe_x, v=0)[0]
-    return jnp.where(jnp.abs(x) < 1e-10, 1.0, res)
+    small = jnp.abs(x) < _BESSEL_SERIES_X
+    x2 = jnp.where(small, x, 0.0) ** 2
+    return jnp.where(small, 1.0 - x2 / 4.0 + x2 * x2 / 64.0, bessel_jn(jnp.where(small, 1.0, x), v=0)[0])
 
 
 def j1_hat(x):
@@ -29,10 +33,11 @@ def j1_hat(x):
     Returns:
         ``2 J_1(x) / x``, same shape as ``x``.
     """
-    safe_x = jnp.where(jnp.abs(x) < 1e-30, 1.0, x)
+    small = jnp.abs(x) < _BESSEL_SERIES_X
+    safe_x = jnp.where(small, 1.0, x)
+    x2 = jnp.where(small, x, 0.0) ** 2
     # bessel_jn(x, v=n) returns [J_0, J_1, ..., J_n]; index [1] for J_1
-    j1_val = bessel_jn(safe_x, v=1)[1]
-    return jnp.where(jnp.abs(x) < 1e-30, 1.0, 2.0 * j1_val / safe_x)
+    return jnp.where(small, 1.0 - x2 / 8.0 + x2 * x2 / 192.0, 2.0 * bessel_jn(safe_x, v=1)[1] / safe_x)
 
 
 def i1e(b):
