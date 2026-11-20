@@ -23,16 +23,15 @@ All rules gate the growth rate with $\hat\gamma = \sigma(20\gamma)\max(\gamma, 0
 from gyaradax.quasilinear import calibration, ql_at_point
 
 cal = calibration.load("auto", rule="sat2")
-qi, qe, pfe = ql_at_point(
-    base, geometry, (24, 8, 16, 9, 8), rule="sat2", rule_options=cal["options"],
-    channel_params=calibration.channel_parameters(cal, "adiabatic"),
-)
+fit = calibration.parameters(cal, "adiabatic")
+cn = fit.pop("cn")
+qi, qe, pfe = ql_at_point(base, geometry, (24, 8, 16, 9, 8), rule="sat2", cn=cn, rule_options={**cal["options"], **fit})
 ```
 
 `base` and `geometry` are the small case of {doc}`index`. The grid tuple is $(n_{v_\parallel}, n_\mu, n_s, n_{k_x}, n_{k_y})$. The result is the ion heat flux, the electron heat flux and the electron particle flux, in GKW gyro-Bohm units like the nonlinear diagnostics.
 
 - With adiabatic electrons there is no electron channel: `qe` repeats `qi` and `pfe` is zero.
-- With kinetic electrons each channel has its own weight $W$ and its own calibration, on one shared intensity.
+- With kinetic electrons the three channels share one saturated intensity and one calibration; they differ only in their weight $W$.
 - Electromagnetic runs add the magnetic flutter flux of $A_\parallel$ to the weight.
 
 The heat fluxes are clipped to [0, 1000], the particle flux to [-1000, 1000], and fluxes below $10^{-8}$ are set to zero.
@@ -56,19 +55,19 @@ with $\gamma_\mathrm{eff}$ the mixing-limited growth rate, $R/L_p$ the pressure 
 
 ## Calibrations
 
-The amplitude $C$, and for `sat2` the exponent $p$, are fitted to nonlinear runs, separately for each electron model and flux channel ($Q_i$, $Q_e$, $\Gamma_e$). The fitted values ship with the package:
+The amplitude $C$, and for `sat2` the exponent $p$, set the saturated intensity. They are fitted to nonlinear runs, separately for each electron model, and are the same for every flux channel ($Q_i$, $Q_e$, $\Gamma_e$): the saturated potential does not depend on what it transports. The fitted values ship with the package:
 
 ```python
 calibration.names()                                # bundled calibrations
-cal = calibration.load("sat2_v3")                  # or "auto" with rule=..., or a JSON path
-calibration.channel_parameters(cal, "kinetic")     # {"Qi": {"cn": ..., "flux_exponent": ...}, "Qe": ..., "Gamma": ...}
+cal = calibration.load("sat2_v4")                  # or "auto" with rule=..., or a JSON path
+calibration.parameters(cal, "kinetic")             # {"cn": ..., "flux_exponent": ...}
 ```
 
-A record holds the rule, the `options` shared by every channel and the fitted `parameters` per electron model and channel. It belongs to the rule, the weights it was fitted with (the $\theta_0 = 0$ chain) and the resolution of the linear runs; refit for another one. A fit must call the rule itself: a separate implementation, such as a numpy copy with a hard gate, gives a different $C$.
+A record holds the rule, its `options` and the fitted `parameters` per electron model. A record with parameters per flux channel is rejected. It belongs to the rule, the weights it was fitted with (the $\theta_0 = 0$ chain) and the resolution of the linear runs; refit for another one. A fit must call the rule itself: a separate implementation, such as a numpy copy with a hard gate, gives a different $C$.
 
 ## In TORAX
 
-`ql-gyx` ({doc}`torax`) runs this model at a few radii of a TORAX simulation. The figure is [the iterhybrid example](torax.md#evolved-profiles): `sat2` with `sat2_v3`, kinetic electrons, 8 radii, restarted from the QLKNN solution at t = 3.03 s and evolved to t = 5 s, against QLKNN.
+`ql-gyx` ({doc}`torax`) runs this model at a few radii of a TORAX simulation. The figure is [the iterhybrid example](torax.md#evolved-profiles): `sat2` with `sat2_v3` (the earlier per-channel calibration), kinetic electrons, 8 radii, restarted from the QLKNN solution at t = 3.03 s and evolved to t = 5 s, against QLKNN.
 
 ![iterhybrid at t = 5 s, ql-gyx against QLKNN](figures/torax_iterhybrid_t5.png)
 
@@ -80,8 +79,8 @@ The rules and the linear run are differentiable. The early stop is a `lax.while_
 def qi_of(rlt):
     p = dataclasses.replace(base, rlt=rlt)
     return ql_at_point(
-        p, geometry, (24, 8, 16, 9, 8), rule="sat2", rule_options=cal["options"],
-        channel_params=calibration.channel_parameters(cal, "adiabatic"), early_stop=False, n_steps_linear=400,
+        p, geometry, (24, 8, 16, 9, 8), rule="sat2", cn=cn, rule_options={**cal["options"], **fit},
+        early_stop=False, n_steps_linear=400,
     )[0]
 
 stiffness = jax.grad(qi_of)(6.9)

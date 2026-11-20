@@ -1,0 +1,22 @@
+{
+ "rule": "sat2",
+ "weights": "kx_chain0",
+ "options": {
+  "gate_sharpness": 20.0,
+  "kx_width_model": "tglf"
+ },
+ "parameters": {
+  "adiabatic": {
+   "cn": 1.2723324803654497,
+   "flux_exponent": 0.47269640903795745
+  },
+  "kinetic": {
+   "cn": 0.47977923011393103,
+   "flux_exponent": 0.8744457765607558
+  }
+ },
+ "fit": {
+  "form": "one saturated intensity per electron model, shared by Qi, Qe and Gamma: amplitude cn and intensity exponent flux_exponent per electron model",
+  "date": "2026-11-20"
+ }
+}

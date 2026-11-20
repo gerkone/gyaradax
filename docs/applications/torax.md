@@ -68,7 +68,7 @@ Any other TORAX config uses the models the same way, after `import gyaradax.tran
 
 ### Evolved profiles
 
-The figure shows iterhybrid at t = 5 s with `ql-gyx` (bundled SAT2 weights, kinetic electrons, native grid, the 8 radii above) and with QLKNN as shipped by TORAX. The top row has the profiles, the bottom row the turbulent coefficients TORAX received.
+The figure shows iterhybrid at t = 5 s with `ql-gyx` (`sat2` with the earlier per-channel `sat2_v3` calibration, kinetic electrons, native grid, the 8 radii above) and with QLKNN as shipped by TORAX. The top row has the profiles, the bottom row the turbulent coefficients TORAX received.
 
 ![iterhybrid at t = 5 s, ql-gyx against QLKNN](figures/torax_iterhybrid_t5.png)
 
@@ -76,7 +76,7 @@ The `ql-gyx` run does not start from the initial profiles. It restarts from the 
 
 The two models agree outside rho 0.6. Inside it, `ql-gyx` gives a larger ion diffusivity and a smaller electron one than QLKNN, so T_i is lower (18 against 21.5 keV on axis) and T_e more peaked (40 against 37 keV). Its D_e sits on TORAX's floor outside rho 0.3, so the density peaking comes from the pinch. T_i settles within a few tenths of a second of the restart; T_e and n_e are still evolving at t = 5 s, in both runs.
 
-To reproduce it, run the QLKNN example first, then restart `ql-gyx` from its output. The run needs one GPU per radius for the radii to run in parallel; with fewer GPUs they share them.
+To reproduce it, run the QLKNN example first, then restart `ql-gyx` from its output. The run needs one GPU per radius for the radii to run in parallel; with fewer GPUs they share them. The default calibration is now the shared `sat2_v4`, so the run differs from the figure.
 
 ```python
 import copy
@@ -112,7 +112,7 @@ TORAX writes nothing until the run ends; `calls.jsonl` has one row per call and 
 | `ikxspace_choices`, `ikxspace_per_shat` | both | kinetic preset: 1, 2, 3, 4, 6, 8, 12, 16; 6.53 | per radius, ikxspace is the largest choice below floor(6.53 abs(s_hat)); empty keeps the fixed `ikxspace`. Each choice a radius reaches is compiled once per GPU |
 | `diagnostics_path` | both | | one jsonl row per call and radius: local parameters, fluxes, steps, wall time and the TORAX time `t` of the call |
 | `rule`, `rule_options` | ql | `sat2` | saturation rule (`sat2`, `canonical`, `sat0`), and its options |
-| `calibration`, `cn` | ql | `auto` | calibration name or JSON path (`auto`: the rule's default in `gyaradax/quasilinear/weights/`, `sat2_v3` or `canonical_v3`), with parameters per electron model and flux channel; `cn` instead sets one amplitude for every channel |
+| `calibration`, `cn` | ql | `auto` | calibration name or JSON path (`auto`: the rule's default in `gyaradax/quasilinear/weights/`, `sat2_v4` or `canonical_v4`), with parameters per electron model shared by every flux channel; `cn` instead sets the amplitude |
 | `n_steps_linear`, `early_stop` | ql | 2000, true | cap on RK4 steps, and stopping on converged growth rates |
 | `warm_start`, `warm_start_steps` | ql | true, 1000 | start each radius from its final distribution of the previous transport call, kept on its device (cold when the ikxspace changes), and the step cap of such a warm solve |
 | `n_steps_nl`, `nl_tail_blocks`, `nl_block` | nl | 30000, 12, 500 | run length and averaging window |

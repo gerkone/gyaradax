@@ -6,13 +6,15 @@ The optional kinetic integration test reads the last dump of a GKW kinetic-elect
 """
 
 
+import types
+
 import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
 
 from conftest import reference_dir, reference_dumps  # type: ignore[import-not-found]
-from gyaradax.quasilinear import calibration
+from gyaradax.quasilinear import calibration, point_eval
 from gyaradax.geometry.grids import _build_mode_label
 from gyaradax.quasilinear.rules import (
     RULES,
@@ -451,10 +453,48 @@ def test_bundled_calibration_drives_its_rule(name):
     cal = calibration.load(name)
     assert cal["rule"] in RULES and set(cal["parameters"]) == {"adiabatic", "kinetic"}
     for electrons in cal["parameters"]:
-        for ch, kw in calibration.channel_parameters(cal, electrons).items():
-            assert kw["cn"] > 0
-            q = float(call_rule(RULES[cal["rule"]], synthetic_spectrum(), **{**cal["options"], **kw}))
-            assert np.isfinite(q) and q > 0, (electrons, ch)
+        kw = calibration.parameters(cal, electrons)
+        assert kw["cn"] > 0
+        q = float(call_rule(RULES[cal["rule"]], synthetic_spectrum(), **{**cal["options"], **kw}))
+        assert np.isfinite(q) and q > 0, electrons
+
+
+def test_per_channel_calibration_raises():
+    cal = {"rule": "sat2", "options": {}, "parameters": {"kinetic": {"Qi": {"cn": 1.0}, "Qe": {"cn": 2.0}}}}
+    with pytest.raises(ValueError, match="per flux channel"):
+        calibration.parameters(cal, "kinetic")
+
+
+@pytest.mark.parametrize("rule", ["sat2", "canonical"])
+def test_channels_share_one_intensity(monkeypatch, rule):
+    spec = synthetic_spectrum()
+    spec = {k: v for k, v in spec.items() if k != "frequency"}
+    w = spec["flux_kxy"]
+    geom = {
+        "mode_label": _build_mode_label(NKX, NKY, 1), "kthnorm": 1.0,
+        "little_g": np.asarray(spec["little_g"]).T, "bn": np.ones(NS),
+    }
+    params = types.SimpleNamespace(adiabatic_electrons=False, tmp=[1.0, 1.0], rlt=[6.0, 6.0], rln=[2.0, 2.0])
+    cal = calibration.load("auto", rule)
+    fit = calibration.parameters(cal, "kinetic")
+    cn = fit.pop("cn")
+
+    def fluxes(flux_sp):
+        harvest = (spec, 1, 1, spec["growth_rate"], jnp.asarray(flux_sp), None)
+        monkeypatch.setattr(point_eval, "_linear_harvest", lambda *a, **k: harvest)
+        out = point_eval.ql_at_point(params, geom, (1, 1, NS, NKX, NKY), rule=rule, cn=cn,
+                                     rule_options={**cal["options"], **fit}, qi_tiny=0.0)
+        return [float(q) for q in out]
+
+    same = np.zeros((2, 3, NKX, NKY))
+    same[0, 1] = same[1, 1] = same[1, 0] = w
+    qi, qe, pfe = fluxes(same)
+    assert qi > 0 and qi == qe == pfe
+    # channels differ only through their weights: the flux is linear in W
+    scaled = same.copy()
+    scaled[1, 1], scaled[1, 0] = 2.0 * w, -0.5 * w
+    qi2, qe2, pfe2 = fluxes(scaled)
+    assert qi2 == qi and qe2 == pytest.approx(2.0 * qi, rel=1e-12) and pfe2 == pytest.approx(-0.5 * qi, rel=1e-12)
 
 
 def test_auto_resolves_the_rule_default():
@@ -462,4 +502,4 @@ def test_auto_resolves_the_rule_default():
         assert calibration.load("auto", rule) == calibration.load(name)
     assert calibration.load("auto", "sat0") is None
     with pytest.raises(ValueError, match="is for rule"):
-        calibration.load("sat2_v3", "canonical")
+        calibration.load("sat2_v4", "canonical")

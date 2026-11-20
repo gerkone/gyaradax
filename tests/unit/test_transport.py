@@ -97,13 +97,13 @@ def test_config_and_grid():
     ).__name__ == ("GyaradaxNLTransportModel")
     model = build(grid_preset="kinetic", nky=48, vpar_max=3.5, rule="sat0", cn=2.0)
     assert (model.nkx, model.nmu, model.nky, model.vpar_max) == (191, 12, 48, 3.5)
-    assert model.channel_params == (("Qi", (("cn", 2.0),)),)
+    assert model.cn == 2.0 and dict(model.rule_options) == {}
     for rule in ("sat2", "canonical"):
         cal = calibration.load("auto", rule)
         model = build(rule=rule, kinetic=True)
-        want = calibration.channel_parameters(cal, "kinetic")
-        assert {ch: dict(kw) for ch, kw in model.channel_params} == want and set(want) == {"Qi", "Qe", "Gamma"}
-        assert dict(model.rule_options) == cal["options"] and model.nkx == 191
+        want = calibration.parameters(cal, "kinetic")
+        assert model.cn == want.pop("cn") and dict(model.rule_options) == {**cal["options"], **want}
+        assert model.nkx == 191
     with pytest.raises(ValueError, match="no calibration"):
         build(rule="sat0")
     with pytest.raises(ValueError, match="must be odd"):
@@ -116,14 +116,18 @@ def test_calibration_from_a_json_file(tmp_path):
     cal = {
         "rule": "sat2",
         "options": {"kx_width_model": "tglf"},
-        "parameters": {"adiabatic": {"Qi": {"cn": 2.0, "flux_exponent": 0.7}}},
+        "parameters": {"adiabatic": {"cn": 2.0, "flux_exponent": 0.7}},
     }
     calibration.save(cal, path)
     model = build(rule="sat2", calibration=str(path), rule_options={"gate_sharpness": 50.0})
-    assert model.channel_params == (("Qi", (("cn", 2.0), ("flux_exponent", 0.7))),)
-    assert dict(model.rule_options) == {"kx_width_model": "tglf", "gate_sharpness": 50.0}
+    assert model.cn == 2.0
+    assert dict(model.rule_options) == {"kx_width_model": "tglf", "flux_exponent": 0.7, "gate_sharpness": 50.0}
     with pytest.raises(ValueError, match="no kinetic fit"):
         build(rule="sat2", calibration=str(path), kinetic=True)
+    old = tmp_path / "per_channel.json"
+    calibration.save({**cal, "parameters": {"adiabatic": {"Qi": {"cn": 2.0}}}}, old)
+    with pytest.raises(ValueError, match="per flux channel"):
+        build(rule="sat2", calibration=str(old))
 
 
 def test_diagnostics_rows(monkeypatch, tmp_path):
