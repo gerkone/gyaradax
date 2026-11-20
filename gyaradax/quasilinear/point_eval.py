@@ -139,7 +139,6 @@ def ql_at_point(
     qi_clip=1e3,
     qi_tiny=1e-8,
     return_diagnostics=False,
-    channel_params=None,
     df0=None,
     return_df=False,
 ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
@@ -148,18 +147,18 @@ def ql_at_point(
     Electromagnetic runs convert g to f for the diagnostics and add the A_par
     flutter flux to the QL weight. The QL weights are taken on the kx = 0 chain. Kinetic
     runs evaluate the rule per flux channel (ion heat, electron heat, electron particle)
-    against one shared saturated intensity, each channel with its own calibration.
+    against one shared saturated intensity with one calibration: the channels differ
+    only in their QL weights.
     Adiabatic runs have no electron channel, so ``qe = qi`` and ``pfe = 0``.
 
     Args:
         params: Run parameters.
         geom: Geometry dict.
         grid_shape: ``(nvpar, nmu, ns, nkx, nky)``.
-        cn: Amplitude of channels without their own ``cn``.
+        cn: Amplitude of the saturated intensity.
         rule: Name of an entry of ``quasilinear.rules.RULES``.
-        rule_options: Keyword arguments passed to the rule.
-        channel_params: Rule keyword arguments per channel (``"Qi"``, ``"Qe"``, ``"Gamma"``), e.g. ``cn`` and
-            ``flux_exponent`` from :func:`~gyaradax.quasilinear.calibration.channel_parameters`.
+        rule_options: Keyword arguments passed to the rule, the same for every channel, e.g. ``flux_exponent``
+            from :func:`~gyaradax.quasilinear.calibration.parameters`.
         n_steps_linear: Most linear steps.
         early_stop: Stop when the growth rates have converged (:func:`linear_early_stop`).
         early_stop_opts: Options of :func:`linear_early_stop`.
@@ -188,7 +187,6 @@ def ql_at_point(
         extra["kx_chain"] = chain
     # caller-supplied knobs win, so a rule's own options need no plumbing here
     extra.update(dict(rule_options or {}))
-    channel_params = dict(channel_params or {})
     rest = {k: v for k, v in spec.items() if k not in ("flux_kxy", "phi2_kxy")}
     phi2_chain = spec["phi2_kxy"] * chain
 
@@ -197,16 +195,15 @@ def ql_at_point(
         # zero below noise floor so linear transients don't feed TORAX gradients
         return jnp.where(jnp.abs(q) < qi_tiny, 0.0, q)
 
-    def channel(name, flux_kxy):
-        # one shared saturated intensity; channels differ in their weights (on the theta0 = 0 chain) and calibration
-        kw = {"cn": cn, **extra, **channel_params.get(name, {})}
-        return RULES[rule](flux_kxy=flux_kxy * chain, phi2_kxy=phi2_chain, **rest, **kw)
+    def channel(flux_kxy):
+        # one shared saturated intensity; channels differ only in their weights (on the theta0 = 0 chain)
+        return RULES[rule](flux_kxy=flux_kxy * chain, phi2_kxy=phi2_chain, **rest, cn=cn, **extra)
 
     if flux_kxy_sp is not None:
-        q_i, q_e = _clean(channel("Qi", flux_kxy_sp[0, 1])), _clean(channel("Qe", flux_kxy_sp[1, 1]))
-        pfe = _clean(channel("Gamma", flux_kxy_sp[1, 0]), lo=-qi_clip)
+        q_i, q_e = _clean(channel(flux_kxy_sp[0, 1])), _clean(channel(flux_kxy_sp[1, 1]))
+        pfe = _clean(channel(flux_kxy_sp[1, 0]), lo=-qi_clip)
     else:
-        q_i = _clean(channel("Qi", spec["flux_kxy"]))
+        q_i = _clean(channel(spec["flux_kxy"]))
         q_e, pfe = q_i, jnp.asarray(0.0)
     out = (q_i, q_e, pfe)
     if return_diagnostics:

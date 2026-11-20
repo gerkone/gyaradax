@@ -1,0 +1,17 @@
+{
+ "rule": "canonical",
+ "weights": "kx_chain0",
+ "options": {},
+ "parameters": {
+  "adiabatic": {
+   "cn": 3.9356105465714473
+  },
+  "kinetic": {
+   "cn": 5.721730770409532
+  }
+ },
+ "fit": {
+  "form": "one saturated intensity per electron model, shared by Qi, Qe and Gamma: amplitude cn per electron model",
+  "date": "2026-11-20"
+ }
+}
