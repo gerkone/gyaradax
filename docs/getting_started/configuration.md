@@ -117,7 +117,7 @@ See {doc}`../performance/index` for when to use them.
 
 | Key | Default | Meaning |
 |---|---|---|
-| `backend` | `jax` | `jax`, `cuda`, or `auto` (CUDA when available) |
+| `backend` | `jax` | `jax`, `cuda`, `hip`, or `auto` (CUDA when available, HIP on ROCm) |
 | `mixed_precision` | true | FP32 FFTs in the nonlinear term |
 | `use_z2z` | false | Z2Z FFTs in the JAX bracket |
 | `fused_linear` | false | CUDA: one fused kernel per RK4 stage (electrostatic) |

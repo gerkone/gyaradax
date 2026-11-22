@@ -43,7 +43,7 @@ gyaradax/
   _compat.py          — old module paths (gyaradax.params, .integrals, .utils, .simulate, ...) -> new modules
 
   backends/
-    __init__.py  — create_ops(): backend dispatch (auto/jax/cuda)
+    __init__.py  — create_ops(): backend dispatch (auto/jax/cuda/hip)
     ops.py       — SolverOps ABC: compute_fields, linear_rhs(_from_g), nonlinear_term_iii
     _jax.py      — pure JAX backend: stencils, R2C/Z2Z FFT bracket
     _cuda.py     — CUDA FFI backend: fused kernels via libgyaradax_cuda.so
@@ -51,6 +51,8 @@ gyaradax/
       CMakeLists.txt — build system (NVCC + cuFFT + LTO callbacks, optional cuFFTDx)
       kernels/       — .cu files: linear_rhs_fused, field_moments, v5 / v6 Poisson brackets
       lto_callbacks/ — cuFFT LTO load / store callbacks
+    _hip.py      — HIP backend (HIPOps(CUDAOps)): the CUDA kernels built with hipcc + a hipFFT v6 bracket, single GPU
+    hip_kernels/ — CMakeLists.txt (HIP_PLATFORM=amd|nvidia), compat/ headers, kernels/hip_bracket_v6.cu
 
 scripts/
   run.py          — main entry for running simulations (adiabatic + kinetic)
@@ -111,7 +113,8 @@ compute_geometry                     <- build geometry dict from equilibrium par
 create_ops(pre, backend="auto", use_z2z=False, mixed_precision=True)
   backend="jax"  -> JAXOps   (pure JAX, R2C or Z2Z FFTs)
   backend="cuda" -> CUDAOps  (FFI kernels, Z2Z only)
-  backend="auto" -> CUDAOps if GPU + libgyaradax_cuda.so, else JAXOps
+  backend="hip"  -> HIPOps   (AMD via hipcc, or NVIDIA via nvcc with HIP_PLATFORM=nvidia; single GPU)
+  backend="auto" -> CUDAOps if GPU + libgyaradax_cuda.so, else JAXOps (HIPOps on ROCm)
 ```
 
 SolverOps interface: `linear_rhs()`, `linear_rhs_from_g()`, `nonlinear_term_iii()`

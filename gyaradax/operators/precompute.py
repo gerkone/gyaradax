@@ -824,7 +824,7 @@ def linear_precompute(geometry: Dict[str, jnp.ndarray], params: GKParams) -> "GK
 
 
 def pack_half_spectrum(
-    spec_kxky: jnp.ndarray, jind: jnp.ndarray, mrad: int, mphiw3: int
+    spec_kxky: jnp.ndarray, jind: jnp.ndarray, mrad: int, mphiw3: int, gather: bool = False
 ) -> jnp.ndarray:
     """Scatter modes into the zero-padded half spectrum of the dealiased grid.
 
@@ -833,13 +833,18 @@ def pack_half_spectrum(
         jind: FFT-order index of each kx mode.
         mrad: Dealiased x length.
         mphiw3: Half-spectrum y length.
+        gather: Build the same array with a gather instead of a scatter.
 
     Returns:
         Half spectrum, (..., mrad, mphiw3).
     """
-    out_shape = spec_kxky.shape[:-2] + (mrad, mphiw3)
-    out = jnp.zeros(out_shape, dtype=jnp.complex128)
     nky = spec_kxky.shape[-1]
+    if gather:
+        match = jnp.asarray(jind)[None, :] == jnp.arange(mrad)[:, None]
+        rows = jnp.take(spec_kxky.astype(jnp.complex128), jnp.argmax(match, axis=1), axis=-2)
+        rows = jnp.where(jnp.any(match, axis=1)[:, None], rows, 0.0)
+        return jnp.pad(rows, [(0, 0)] * (rows.ndim - 1) + [(0, mphiw3 - nky)])
+    out = jnp.zeros(spec_kxky.shape[:-2] + (mrad, mphiw3), dtype=jnp.complex128)
     return out.at[..., jind, :nky].set(spec_kxky)
 
 
