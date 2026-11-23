@@ -268,7 +268,9 @@ def geom_sat2_factors(geom):
     ``grad_r0 = |grad r|`` at the outboard midplane, ``sqrt(g_eps_eps)``, which is 1
     for circular geometry, as in TGLF. ``Gq = B_geo0 / grad_r0`` with ``B_geo0`` the
     midplane field. gyaradax normalises B differently from TGLF, but ``Gq`` only
-    enters the kx width above ``kycut``, where the intensity is small.
+    enters the kx width above ``kycut``, where the intensity is small. Both are
+    taken at s = 0 by trigonometric interpolation of the periodic s samples, as
+    in the fitted rows of the summary tables.
 
     Args:
         geom: Geometry dict.
@@ -278,10 +280,25 @@ def geom_sat2_factors(geom):
     """
     lg = jnp.asarray(geom["little_g"])
     lg = lg if lg.shape[-1] == 3 else lg.T
-    mid = lg.shape[0] // 2
-    grad_r0 = jnp.sqrt(jnp.abs(lg[mid, 2]))
-    b_geo0 = jnp.asarray(geom["bn"])[mid]
+    n = lg.shape[0]
+    s = jnp.asarray(geom["sgrid"], dtype=jnp.float64) if "sgrid" in geom else -0.5 + (jnp.arange(n) + 0.5) / n
+    grad_r0 = jnp.sqrt(jnp.abs(_midplane(lg[:, 2], s)))
+    b_geo0 = _midplane(jnp.asarray(geom["bn"], dtype=jnp.float64), s)
     return grad_r0, b_geo0 / grad_r0
+
+
+def _midplane(f, s):
+    """Value at s = 0 of the trigonometric interpolant of uniform samples ``f`` at ``s``, period ``n * ds``."""
+    n = f.shape[0]
+    ds = s[1] - s[0]
+    c = jnp.fft.fft(f) / n
+    k = jnp.fft.fftfreq(n)
+    arg = 2.0 * jnp.pi * k * s[0] / ds
+    ph = jnp.exp(-1j * arg)
+    if n % 2 == 0:
+        # nyquist term as a cosine, so the interpolant is real
+        ph = ph.at[n // 2].set(jnp.cos(arg[n // 2]))
+    return jnp.real(jnp.sum(c * ph))
 
 
 def _zonal_mixing(ky, gamma, eps, kycut=_SAT2_KYCUT, kymin=0.0):
