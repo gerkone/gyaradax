@@ -4,10 +4,8 @@ A trajectory lives in ``<root>/<name>_ifft_realpotens/``::
 
     data/timestep_NNNNN.<bits>.bin   df in real space, (re/im, species, vpar, mu, s, x, y);
                                      adiabatic runs have no species axis
-    data/poten_NNNNN.bf16.bin        legacy real phi, (x, s, y), ky <= nky / 2, raw bfloat16
-                                     (frames of older legs may be ``.zstd16.bin``)
-    data/potenc_NNNNN.bin            complex phi in real space, (re/im, x, s, y), every ky mode,
-                                     raw float32 (dataset ``potenc: false`` skips it)
+    data/poten_NNNNN.bin             phi in real space, (re/im, x, s, y), every ky mode, raw float32
+                                     (metadata ``phi_layout`` ``reim``)
     metadata.pkl                     everything below, including the statistics, as the metadata tree
                                      of :mod:`gyaradax.io.schema` (readers get the flat keys)
     metadata_light.pkl               the same without the per-element df / phi moments
@@ -195,17 +193,16 @@ def _rel_err(a, b) -> float:
     return float(np.linalg.norm(a - b) / max(float(np.linalg.norm(b)), 1e-300))
 
 
-def quantization_loss(df, frame, phi_real, phi_frame, integrals: Optional[Callable] = None) -> dict:
-    """Per-frame bf16 loss: stored phi against phi, and phi and fluxes recomputed from the stored df.
+def quantization_loss(df, frame, integrals: Optional[Callable] = None) -> dict:
+    """Per-frame bf16 loss: phi and fluxes recomputed from the stored df against the exact ones.
 
     ``integrals`` maps a spectral df to ``(phi, fluxes)``; it runs on ``df`` and on the df of
     ``frame``, so the errors hold the quantization alone. Without it the df entries are nan.
     """
     import jax.numpy as jnp
 
-    out = {"quant_phi_err": _rel_err(np.asarray(phi_frame, np.float32), phi_real)}
     if integrals is None:
-        return {**out, "quant_phi_df_err": np.nan, "quant_flux_err": np.nan}
+        return {"quant_phi_df_err": np.nan, "quant_flux_err": np.nan}
     phi_ref, flux_ref = integrals(df)
     phi_q, flux_q = integrals(real_to_df(frame).astype(jnp.asarray(df).dtype))
     ref, q = (np.asarray(f, np.float64).reshape(-1) for f in (flux_ref, flux_q))
@@ -213,7 +210,7 @@ def quantization_loss(df, frame, phi_real, phi_frame, integrals: Optional[Callab
     # channels zero to round-off (e.g. the adiabatic particle flux) have no relative error
     with np.errstate(divide="ignore", invalid="ignore"):
         flux_err = np.where(scale > 1e-12 * scale.max(initial=0.0), (q - ref) / scale, np.nan)
-    return {**out, "quant_phi_df_err": _rel_err(phi_q, phi_ref), "quant_flux_err": flux_err}
+    return {"quant_phi_df_err": _rel_err(phi_q, phi_ref), "quant_flux_err": flux_err}
 
 
 def phi_to_real(phi) -> np.ndarray:
@@ -238,15 +235,15 @@ def reim_to_phi(frame) -> np.ndarray:
     return np.moveaxis(spec, 1, 0)
 
 
-POTEN_BITS = "bf16"
+PHI_LAYOUT = "reim"
 
 
 def phi_layout(meta: dict) -> str:
     return meta.get("phi_layout", "real")
 
 
-def potenc_path(traj: str, index: int) -> str:
-    return os.path.join(traj, "data", f"potenc_{int(index):05d}.bin")
+def poten_path(traj: str, index: int) -> str:
+    return os.path.join(traj, "data", f"poten_{int(index):05d}.bin")
 
 
 def stored_frame(traj: str, kind: str, index: int) -> str:
@@ -256,6 +253,7 @@ def stored_frame(traj: str, kind: str, index: int) -> str:
         if os.path.exists(path):
             return path
     raise FileNotFoundError(frame_path(traj, kind, index, "bf16"))
+
 
 
 class RunningStats:
@@ -373,7 +371,7 @@ def _static_metadata(geometry: dict, params: Any, config_path: str) -> dict:
 
 # per-frame metadata; the quant_* entries track the bf16 loss (quantization_loss)
 SERIES_KEYS = ("timesteps", "solver_steps", "flux", "kyspec", "kxspec", "growth",
-               "quant_phi_err", "quant_phi_df_err", "quant_flux_err")
+               "quant_phi_df_err", "quant_flux_err")
 
 
 class DatasetWriter:
@@ -385,13 +383,12 @@ class DatasetWriter:
     time ``stats_from`` on. The trajectory belongs to the run directory holding ``config_path``:
     an existing trajectory of another run, or one not written by a run, is refused unless
     ``takeover`` (the run extends it from its resume dump). ``write_resume`` replaces the
-    resume dump, with df in ``resume_dtype`` (f32 or f64). ``potenc`` adds the fp32 complex phi
-    of every frame beside the legacy real one.
+    resume dump, with df in ``resume_dtype`` (f32 or f64).
     """
 
     def __init__(self, root: str, name: str, geometry: dict, params: Any, config_path: str,
                  bits: str = "zstd16", start_step: int = 0, stats_from: float = 0.0,
-                 resume_dtype: str = "f32", takeover: bool = False, potenc: bool = True):
+                 resume_dtype: str = "f32", takeover: bool = False):
         if bits not in ("zstd16", "bf16", "f32"):
             raise ValueError(f"dataset bits must be zstd16, bf16 or f32, got {bits!r}")
         if resume_dtype not in RESUME_DTYPES:
@@ -405,15 +402,13 @@ class DatasetWriter:
         shutil.copyfile(config_path, os.path.join(self.path, "config.yaml"))
         self.static = _static_metadata(geometry, params, os.path.join(self.path, "config.yaml"))
         self.static["quantization"] = "f32" if bits == "f32" else "bf16"
+        self.static.update(phi_layout=PHI_LAYOUT, phi_source="solver_exact")
         self.series: dict[str, list] = {k: [] for k in SERIES_KEYS}
         old = load_metadata(self.path)
         if old is not None and "species" not in old:
             raise ValueError(f"{self.path}: metadata predates the schema, migrate it first (neugk-jax scripts/migrate_metadata.py)")
-        if old is not None and phi_layout(old) != "real":
-            raise ValueError(f"{self.path}: complex poten frames (phi_layout {phi_layout(old)}), convert them first")
-        self.potenc = bool(potenc)
-        if self.potenc:
-            self.static["phic_source"] = "solver_exact"
+        if old is not None and phi_layout(old) != PHI_LAYOUT:
+            raise ValueError(f"{self.path}: legacy real poten frames (phi_layout {phi_layout(old)}), migrate them first")
         # an extended trajectory keeps every key of its metadata; the per-frame ones go on per new frame
         self.carried: dict[str, Any] = {}
         if old is not None and len(old.get("timesteps", ())):
@@ -427,9 +422,9 @@ class DatasetWriter:
                 if k in CARRIED_PER_FRAME and len(np.atleast_1d(v)) == n_old:
                     v = np.asarray(v)[:keep]
                 self.carried[k] = v
-            if "phic_source" in old and "phic_source_frames" not in old:
-                self.carried["phic_source_frames"] = np.array([str(old["phic_source"])] * keep)
-            for kind in ("timestep", "poten", "potenc"):
+            if "phi_source" in old and "phi_source_frames" not in old:
+                self.carried["phi_source_frames"] = np.array([str(old["phi_source"])] * keep)
+            for kind in ("timestep", "poten"):
                 for path in glob.glob(os.path.join(self.path, "data", f"{kind}_*.bin")):
                     if int(re.search(rf"{kind}_(\d+)", path).group(1)) >= keep:
                         os.remove(path)
@@ -440,8 +435,6 @@ class DatasetWriter:
 
     def add(self, df, phi, fluxes, state, ky_spec, kx_spec, integrals: Optional[Callable] = None) -> None:
         """Write one frame; ``integrals`` (spectral df -> (phi, fluxes)) enables the df quantization loss."""
-        import jax.numpy as jnp
-
         idx = self.n_frames
         if self.bits == "f32":
             frame = df_to_real(df)
@@ -449,12 +442,8 @@ class DatasetWriter:
         else:
             frame = df_frame(df)
             _write_frame(frame_path(self.path, "timestep", idx, self.bits), np.asarray(frame).view(np.uint16).ravel(), self.bits)
-        phi_real = phi_to_real(phi)
-        phi_frame = np.asarray(jnp.asarray(phi_real).astype(jnp.bfloat16))
-        _write_frame(frame_path(self.path, "poten", idx, POTEN_BITS), phi_frame.view(np.uint16).ravel(), POTEN_BITS)
-        if self.potenc:
-            _atomic_write(potenc_path(self.path, idx), phi_to_reim(phi).tobytes())
-        loss = quantization_loss(df, frame, phi_real, phi_frame, integrals)
+        _atomic_write(poten_path(self.path, idx), phi_to_reim(phi).tobytes())
+        loss = quantization_loss(df, frame, integrals)
         flux = np.asarray(fluxes, np.float64).reshape(self.static["n_species"], len(FLUX_LABELS))
         err = np.asarray(loss["quant_flux_err"], np.float64)
         loss["quant_flux_err"] = np.broadcast_to(err.reshape(flux.shape) if err.size > 1 else err, flux.shape).copy()
@@ -473,11 +462,11 @@ class DatasetWriter:
         for k, v in self.series.items():
             meta[k] = np.asarray(v)
         n = self.n_frames
-        if "phic_source_frames" in self.carried:
-            src = list(np.asarray(self.carried["phic_source_frames"]).astype(str))
-            src += [str(self.static.get("phic_source", "solver_exact"))] * (n - len(src))
-            meta["phic_source_frames"] = np.array(src)
-            meta["phic_source"] = src[0] if len(set(src)) == 1 else "mixed"
+        if "phi_source_frames" in self.carried:
+            src = list(np.asarray(self.carried["phi_source_frames"]).astype(str))
+            src += [str(self.static.get("phi_source", "solver_exact"))] * (n - len(src))
+            meta["phi_source_frames"] = np.array(src)
+            meta["phi_source"] = src[0] if len(set(src)) == 1 else "mixed"
         if "thinned_from" in self.carried:
             base = np.asarray(self.carried["thinned_from"], np.int64)
             start = base[-1] + 1 if len(base) else 0
@@ -511,7 +500,7 @@ class DatasetWriter:
 
 
 # per-frame keys outside the series that an extension carries on
-CARRIED_PER_FRAME = ("phic_source_frames", "thinned_from")
+CARRIED_PER_FRAME = ("phi_source_frames", "thinned_from")
 
 LINEAR_FILES = ("linear.bin", "linear_poten.bin")
 
@@ -540,11 +529,10 @@ def quantization_summary(meta: dict) -> str:
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", RuntimeWarning)
         med = {k: np.nanmedian(np.abs(np.asarray(meta[k], np.float64)), axis=0)
-               for k in ("quant_phi_err", "quant_phi_df_err", "quant_flux_err")}
+               for k in ("quant_phi_df_err", "quant_flux_err")}
     heat = np.reshape(med["quant_flux_err"], (len(meta["species"]), -1))[:, FLUX_LABELS.index("eflux")]
     eflux = ", ".join(f"eflux {name} {err:.1e}" for name, err in zip(meta["species"], heat))
-    return (f"bf16 loss (median relative error): phi frame {med['quant_phi_err']:.1e}, "
-            f"phi from df {med['quant_phi_df_err']:.1e}, {eflux}")
+    return f"bf16 loss (median relative error): phi from df {med['quant_phi_df_err']:.1e}, {eflux}"
 
 
 def write_statistics(traj: str, stats_from: float = 0.0) -> dict:
@@ -558,9 +546,8 @@ def write_statistics(traj: str, stats_from: float = 0.0) -> dict:
         raise ValueError(f"{traj}: no frame at or after t = {stats_from} (last t = {times[-1]:.3f})")
     bits = frame_bits(traj)
     axes = tuple(int(a) for a in meta["df_stats_agg_axes"])
-    df_stats, phi_stats, phic_stats = RunningStats(), RunningStats(), RunningStats()
-    potenc = all(os.path.exists(potenc_path(traj, i)) for i in range(first, len(times)))
-    phic_shape = (2, *meta["phi_shape"])
+    df_stats, phi_stats = RunningStats(), RunningStats()
+    phi_shape = (2, *meta["phi_shape"])
     for i in range(first, len(times)):
         df = read_frame(frame_path(traj, "timestep", i, bits), meta["df_shape"])
         count = float(np.prod([df.shape[a] for a in axes]))
@@ -568,12 +555,8 @@ def write_statistics(traj: str, stats_from: float = 0.0) -> dict:
             *(np.asarray(f(df, axis=axes, keepdims=True), np.float64) for f in (np.mean, np.var, np.min, np.max)),
             count,
         )
-        phi_stats.push(read_frame(stored_frame(traj, "poten", i), meta["phi_shape"]))
-        if potenc:
-            phic_stats.push(np.fromfile(potenc_path(traj, i), np.float32).reshape(phic_shape))
+        phi_stats.push(np.fromfile(poten_path(traj, i), np.float32).reshape(phi_shape))
     stats = {**df_stats.moments("df"), **phi_stats.moments("phi")}
-    if potenc:
-        stats.update(phic_stats.moments("phic"))
     meta = {**{k: v for k, v in meta.items() if k not in stats}, **stats}
     write_metadata(traj, meta)
     return meta

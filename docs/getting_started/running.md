@@ -112,12 +112,12 @@ gyaradax bench configs/adiabatic/nonlinear/itg_high_shear.yaml --device 0 --back
 `--dataset DIR` also writes the run as a trajectory `DIR/<name>_ifft_realpotens/` in the layout the neugk loaders read (`--dataset-name` sets `<name>`, default `run.name`):
 
 - `data/timestep_NNNNN.zstd16.bin`: df in real space, (re/im, species, vpar, mu, s, x, y), bf16, lossless zstd (`--dataset-bits bf16` stores it raw).
-- `data/poten_NNNNN.zstd16.bin`: the legacy real phi (x, s, y), ky up to ny/2. `data/potenc_NNNNN.bin`: the complex phi (re/im, x, s, y) with every ky mode, float32.
-- `metadata.pkl` and `metadata_light.pkl`: parameters, geometry and per frame the time, step, fluxes per species, ky/kx spectra, growth rate and the bf16 loss of the frame (`quant_*`). The df and phi statistics are computed when the run ends, from frames at or after `--dataset-stats-from T` (`gyaradax dataset-stats TRAJ --from-time T` recomputes them).
+- `data/poten_NNNNN.bin`: phi in real space, (re/im, x, s, y), every ky mode, float32 (metadata `phi_layout: reim`).
+- `metadata.pkl` and `metadata_light.pkl`: parameters, geometry and per frame the time, step, fluxes per species, ky/kx spectra, growth rate and the bf16 loss of the frame (`quant_*`: phi and fluxes recomputed from the stored df). The df and phi statistics are computed when the run ends, from frames at or after `--dataset-stats-from T` (`gyaradax dataset-stats TRAJ --from-time T` recomputes them).
 - `resume/state.npz` and `resume/config.yaml`: df and solver state of the last frame and the leg's config, replaced when each leg ends (`--resume-dtype f32`, the default, or `f64`). `gyaradax run TRAJ --t-end T --output-dir OUT` extends the trajectory in place from it.
 - A linear config (`solver.non_linear: false`) writes no frames: its final eigenmode goes into `data/linear.bin` and `data/linear_poten.bin` (spectral, float32), so a linear run with the `--dataset-name` of a nonlinear trajectory adds its eigenmode to it.
 
-A trajectory belongs to the run directory that created it; another run is refused and needs a new `--dataset-name`. Resuming the run directory appends to the same trajectory, dropping frames past the snapshot it resumes from. Electromagnetic fields are not written.
+A trajectory belongs to the run directory that created it; another run is refused and needs a new `--dataset-name`. Resuming the run directory appends to the same trajectory, dropping frames past the snapshot it resumes from. Trajectories with the legacy real potential (`phi_layout: real`) are refused until migrated. Electromagnetic fields are not written.
 
 `--stop-on-banding` ends a run whose zonal phi piles up at the s-Nyquist mode (share of the zonal power above 0.3 for 3 frames), with its snapshot and exit code 6. SIGTERM ends a run after the running block and its snapshot, exit code 75.
 

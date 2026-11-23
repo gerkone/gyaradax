@@ -11,8 +11,9 @@ _GROUPS = {
               "density_grad temp_ratio ion_temp electron_temp rlt rln tmp q s_hat eps coll_freq",
     "layout": "resolution df_shape phi_shape axis_order channel_layout real_space_convention phi_layout "
               "phi_convention",
-    "frames": "timesteps solver_steps phic_source phic_source_frames phi_source quant_phi_err quant_phi_df_err "
-              "quant_flux_err first_frame clipped_t_start thinned_from thinning_spacing",
+    "frames": "timesteps solver_steps phi_source phi_source_frames phi_ky_switch quant_phi_df_err "
+              "quant_flux_err first_frame thinned_from thinning_spacing "
+              "saturation_time extension_start",
     "fluxes": "flux flux_labels kyspec kxspec growth fluxspec",
     "flags": "sus_underresolved sus_reason broken broken_note frames_dropped frames_dropped_count banded_from_t",
 }
@@ -26,13 +27,28 @@ _PREFIXED = {
     ("linear", "flux", "linear_"): "flux_labels flux flux_ky flux_kxy weight_ky weight_ky_allkx flux_ky_chain0 "
                                    "phi2_ky phi2_kxy phi2_ky_chain0",
     ("linear", "history", "linear_hist_"): "t gamma omega weight_t weight_ky",
-    ("linear", "rms", "linear_"): "rms",
-    ("linear", "rms", "linear_rms_"): "ky cky kxky ckxky count",
-    **{("stats", f, f"{f}_"): "mean var std min max" for f in ("df", "phi", "phic", "flux")},
 }
-TREE_PATHS = {"geometry": ("geometry",), "ds": ("geometry", "ds"), "df_stats_agg_axes": ("stats", "df", "agg_axes")}
-TREE_PATHS.update({k: (g, k) for g, keys in _GROUPS.items() for k in keys.split()})
-TREE_PATHS.update({p + k: tuple(w) + (k,) for (*w, p), keys in _PREFIXED.items() for k in keys.split()})
+_STATS = {"df": "mean var std min max", "phi": "mean var std min max",
+          "flux": "mean var std min max", "df_window": "mean var min max count frames",
+          "h_window": "mean var min max count frames", "df_frame": "mean var min max count",
+          "h_frame": "mean var min max count"}
+
+
+def _paths() -> dict:
+    paths = {"geometry": ("geometry",), "ds": ("geometry", "ds")}
+    paths.update({f"{b}_stats_agg_axes": ("stats", b, "agg_axes") for b in ("df", "h")})
+    for group, keys in _GROUPS.items():
+        paths.update({k: (group, k) for k in keys.split()})
+    for (*where, prefix), keys in _PREFIXED.items():
+        paths.update({prefix + k: (*where, k) for k in keys.split()})
+    paths["linear_rms"] = ("linear", "rms", "rms")
+    paths.update({f"linear_rms_{k}": ("linear", "rms", k) for k in ("ky", "cky", "kxky", "ckxky", "count")})
+    for field, keys in _STATS.items():
+        paths.update({f"{field}_{k}": ("stats", field, k) for k in keys.split()})
+    return paths
+
+
+TREE_PATHS = _paths()
 
 _MISSING = object()
 

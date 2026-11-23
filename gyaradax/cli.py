@@ -617,7 +617,6 @@ def _dataset_settings(
     out = {
         "stats_from": float(section.get("stats_from", 0.0) if stats_from is None else stats_from),
         "resume_dtype": getattr(args, "resume_dtype", None) or str(section.get("resume_dtype", "f32")),
-        "potenc": bool(section.get("potenc", True)),
         "takeover": False,
     }
     if trajectory is not None and not getattr(args, "dataset", None):
@@ -658,7 +657,6 @@ def _dataset_writer(setup: RunSetup) -> Any:
         stats_from=ds["stats_from"],
         resume_dtype=ds["resume_dtype"],
         takeover=ds["takeover"],
-        potenc=ds["potenc"],
     )
     print(f"  dataset: {writer.path} ({ds['bits']}, {writer.n_frames} frames so far)")
     return writer

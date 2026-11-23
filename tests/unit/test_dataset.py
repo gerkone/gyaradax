@@ -1,5 +1,6 @@
 """gyaradax run --dataset: preprocessed frames, metadata, statistics and resume."""
 
+import glob
 import os
 import pickle
 import shutil
@@ -63,29 +64,26 @@ def test_run_writes_preprocessed_trajectory(tmp_path, kind):
     assert meta["electron_species_index"] == (1 if kind == "kinetic" else -1)
     for key in ("ion_temp_grad", "density_grad", "electron_temp_grad", "temp_ratio", "eps", "coll_freq"):
         assert meta[key].shape == (1,)
-    assert meta["df_mean"].ndim == len(meta["df_shape"]) and meta["phi_mean"].shape == meta["phi_shape"]
+    assert meta["df_mean"].ndim == len(meta["df_shape"]) and meta["phi_mean"].shape == (2, *meta["phi_shape"])
     assert meta["quantization"] == "bf16"
     assert set(meta["geometry"]) == {*ds.GEOMETRY_KEYS, "adiabatic", "beta", "nlapar", "nlbpar"}
     with open(os.path.join(traj, "metadata_light.pkl"), "rb") as fh:
         assert not {"df_mean", "phi_var"} & set(flatten_metadata(pickle.load(fh)))
-    # bf16 loss tracker: phi frame rounding, and phi / heat fluxes recomputed from the stored df
-    assert meta["quant_flux_err"].shape == meta["flux"].shape
-    assert np.all((meta["quant_phi_err"] > 1e-4) & (meta["quant_phi_err"] < 1e-2))
+    # bf16 loss tracker: phi and heat fluxes recomputed from the stored df
+    assert meta["quant_flux_err"].shape == meta["flux"].shape and "quant_phi_err" not in meta
     assert np.all((meta["quant_phi_df_err"] > 1e-5) & (meta["quant_phi_df_err"] < 1e-1))
     eflux = list(meta["flux_labels"]).index("eflux")
     assert np.all(np.abs(meta["quant_flux_err"][..., eflux]) < 5e-2)
 
-    # the last frame is the bf16 real-space transform of the final state
+    # the last frame: df as the bf16 real-space transform of the final state, phi unrounded with every ky
     with np.load(os.path.join(run, "step_000004.npz")) as ck:
-        want_df, want_phi = ds.df_frame_bits(ck["df"]), ds._to_bf16_bits(ds.phi_to_real(ck["phi"]))
-        want_phic = ds.phi_to_reim(ck["phi"])
+        want_df, want_phi = ds.df_frame_bits(ck["df"]), ds.phi_to_reim(ck["phi"])
     got_df = ds.read_frame(ds.frame_path(traj, "timestep", 1, "zstd16"), meta["df_shape"])
-    got_phi = ds.read_frame(ds.frame_path(traj, "poten", 1, "bf16"), meta["phi_shape"])
-    got_phic = np.fromfile(ds.potenc_path(traj, 1), np.float32).reshape(2, *meta["phi_shape"])
+    got_phi = np.fromfile(ds.poten_path(traj, 1), np.float32).reshape(2, *meta["phi_shape"])
     np.testing.assert_array_equal(got_df.view(np.uint32).ravel() >> 16, want_df)
-    np.testing.assert_array_equal(got_phi.view(np.uint32).ravel() >> 16, want_phi)
-    np.testing.assert_array_equal(got_phic, want_phic)
-    assert meta["phic_source"] == "solver_exact" and meta["phic_mean"].shape == want_phic.shape
+    np.testing.assert_array_equal(got_phi, want_phi)
+    assert not glob.glob(os.path.join(traj, "data", "potenc_*")) and len(glob.glob(os.path.join(traj, "data", "poten_*"))) == 2
+    assert meta["phi_layout"] == "reim" and meta["phi_source"] == "solver_exact"
 
     # resuming the run directory appends to the same trajectory
     assert main(["run", run, "--n-steps", "2"]) == 0
@@ -98,11 +96,9 @@ def test_run_writes_preprocessed_trajectory(tmp_path, kind):
     assert main(["dataset-stats", traj, "--from-time", str(float(meta["timesteps"][1]))]) == 0
     with open(os.path.join(traj, "metadata.pkl"), "rb") as fh:
         meta = flatten_metadata(pickle.load(fh))
-    phis = [ds.read_frame(ds.stored_frame(traj, "poten", i), meta["phi_shape"]) for i in (1, 2)]
+    phis = [np.fromfile(ds.poten_path(traj, i), np.float32).reshape(2, *meta["phi_shape"]) for i in (1, 2)]
     np.testing.assert_allclose(meta["phi_mean"], np.mean(phis, axis=0), rtol=1e-3, atol=1e-6)
-    assert meta["phi_mean"].dtype == np.float32
-    phics = [np.fromfile(ds.potenc_path(traj, i), np.float32).reshape(2, *meta["phi_shape"]) for i in (1, 2)]
-    np.testing.assert_allclose(meta["phic_mean"], np.mean(phics, axis=0), rtol=1e-3, atol=1e-6)
+    assert meta["phi_mean"].dtype == np.float32 and "phic_mean" not in meta
 
 
 def test_f32_frames_store_the_unrounded_df(tmp_path):
@@ -147,22 +143,20 @@ def test_reim_phi_frames_keep_every_ky_mode():
     assert real.shape[-1] == 4
 
 
-def test_writer_adds_potenc_and_refuses_old_layouts(tmp_path, monkeypatch):
+def test_writer_stores_one_complex_potential_and_refuses_old_layouts(tmp_path, monkeypatch):
     monkeypatch.setattr(ds, "_static_metadata", lambda *args: {"phi_shape": (6, 3, 5)})
     config = tmp_path / "config.yaml"
     config.write_text("run: {}\n")
     root = str(tmp_path / "data")
     plain = ds.DatasetWriter(root, "plain", {}, None, str(config))
-    assert plain.potenc and plain.static["phic_source"] == "solver_exact"
-    bare = ds.DatasetWriter(root, "bare", {}, None, str(config), potenc=False)
-    assert not bare.potenc and "phic_source" not in bare.static
+    assert plain.static["phi_layout"] == "reim" and plain.static["phi_source"] == "solver_exact"
     ds._claim(ds.trajectory_path(root, "old"), str(tmp_path))
-    old = {"phi_shape": (2, 6, 3, 5), "phi_layout": "reim"}
+    old = {"phi_shape": (6, 3, 5), "phi_layout": "real"}
     ds.write_metadata(ds.trajectory_path(root, "old"), old)
     with pytest.raises(ValueError, match="predates the schema"):
         ds.DatasetWriter(root, "old", {}, None, str(config))
     ds.write_metadata(ds.trajectory_path(root, "old"), {**old, "species": ("ion",)})
-    with pytest.raises(ValueError, match="complex poten"):
+    with pytest.raises(ValueError, match="legacy real poten"):
         ds.DatasetWriter(root, "old", {}, None, str(config))
 
 
@@ -221,14 +215,13 @@ def test_trajectory_extends_from_its_resume_dump(tmp_path):
     # f64 resume: the extension equals the uninterrupted run bitwise
     np.testing.assert_array_equal(meta["flux"], want["flux"])
     for i in range(len(meta["timesteps"])):
-        for kind, shape in (("timestep", meta["df_shape"]), ("poten", meta["phi_shape"])):
-            np.testing.assert_array_equal(
-                ds.read_frame(ds.stored_frame(traj, kind, i), shape),
-                ds.read_frame(ds.stored_frame(ds.trajectory_path(root, "ref"), kind, i), shape),
-            )
         np.testing.assert_array_equal(
-            np.fromfile(ds.potenc_path(traj, i), np.float32),
-            np.fromfile(ds.potenc_path(ds.trajectory_path(root, "ref"), i), np.float32),
+            ds.read_frame(ds.stored_frame(traj, "timestep", i), meta["df_shape"]),
+            ds.read_frame(ds.stored_frame(ds.trajectory_path(root, "ref"), "timestep", i), meta["df_shape"]),
+        )
+        np.testing.assert_array_equal(
+            np.fromfile(ds.poten_path(traj, i), np.float32),
+            np.fromfile(ds.poten_path(ds.trajectory_path(root, "ref"), i), np.float32),
         )
     with np.load(ds.resume_path(traj)) as r, np.load(os.path.join(second, "step_000015.npz")) as ck:
         # the leg's own resume dump keeps the dtype its config carries
@@ -266,15 +259,15 @@ def test_extension_keeps_the_trajectory_metadata(tmp_path):
     assert main(["run", case, *common, "--t-end", "0.026", "--output-dir", str(tmp_path / "run")]) == 0
     traj = ds.trajectory_path(root, "case")
     meta = ds.load_metadata(traj)
-    meta.update(phic_source_frames=np.array(["hybrid", "existing"]), phic_source="mixed",
+    meta.update(phi_source_frames=np.array(["hybrid", "existing"]), phi_source="mixed",
                 thinned_from=np.array([5, 6]), linear_gamma=np.arange(3.0), hand_label="saturated")
     ds.write_metadata(traj, meta)
     assert main(["run", traj, "--t-end", "0.052", "--output-dir", str(tmp_path / "more")]) == 0
     meta = ds.load_metadata(traj)
     assert len(meta["timesteps"]) == 4 and meta["hand_label"] == "saturated"
     np.testing.assert_array_equal(meta["linear_gamma"], np.arange(3.0))
-    assert meta["phic_source_frames"].tolist() == ["hybrid", "existing", "solver_exact", "solver_exact"]
-    assert meta["phic_source"] == "mixed" and meta["thinned_from"].tolist() == [5, 6, 7, 8]
+    assert meta["phi_source_frames"].tolist() == ["hybrid", "existing", "solver_exact", "solver_exact"]
+    assert meta["phi_source"] == "mixed" and meta["thinned_from"].tolist() == [5, 6, 7, 8]
     assert meta["flux"].shape[0] == 4 and "species" in meta
 
 
