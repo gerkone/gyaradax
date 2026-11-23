@@ -13,7 +13,7 @@ _GROUPS = {
               "phi_convention",
     "frames": "timesteps solver_steps phi_source phi_source_frames phi_ky_switch quant_phi_df_err "
               "quant_flux_err first_frame thinned_from thinning_spacing "
-              "saturation_time extension_start",
+              "saturation_time extension_start clipped_t_start saturation_offset",
     "fluxes": "flux flux_labels kyspec kxspec growth fluxspec",
     "flags": "sus_underresolved sus_reason broken broken_note frames_dropped frames_dropped_count banded_from_t",
 }
