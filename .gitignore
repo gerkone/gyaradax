@@ -81,7 +81,8 @@ scripts/precompute_scan_geometries.py
 upload_changed_py.sh
 **/CUDALibrarySamples/
 **/jax_cache/
-.claude/
+.claude/*
+!.claude/skills/
 .opencode/
 .pi-lens/
 pyrightconfig.json
