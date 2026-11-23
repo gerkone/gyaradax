@@ -1,0 +1,2 @@
+# notebooks are examples, not code: keep them out of the language statistics
+*.ipynb linguist-documentation
