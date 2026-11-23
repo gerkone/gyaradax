@@ -27,7 +27,7 @@ GKW counterparts (GKW source files): `gkstep_single` = `rk4` (exp_integration.F9
 - Kernels, precision switches, throughput, multi-GPU: `docs/performance/index.md`.
 - Validation against GKW and theory, how the kernels were built: `docs/validation/`.
 - Building the CUDA backend: `docs/getting_started/installation.md`.
-- Tests, reference data and parity: `CONTRIBUTING.md`.
+- Tests, reference data and parity: `CONTRIBUTING.md`. GKW reference runs and long-horizon references: [gerkone/gyaradax-tests](https://huggingface.co/datasets/gerkone/gyaradax-tests) on Hugging Face.
 
 ## Pitfalls
 

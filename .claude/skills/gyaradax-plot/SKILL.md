@@ -15,7 +15,7 @@ import numpy as np
 from gyaradax.diagnostics.plot_utils import plot_run_fluxes, plot_run_spectra
 
 runs = {"new": "runs/new", "master": "runs/master"}           # label -> run directory (a list pools realisations)
-ref = "long_horizon/kinetic_itg_mid_flux/nonlinear.json"       # optional: a gerkone/gyaradax-tests reference, drawn dashed
+ref = "long_horizon/kinetic_itg_mid_flux/nonlinear.json"       # optional: a reference from huggingface.co/datasets/gerkone/gyaradax-tests, dashed
 plot_run_fluxes(runs, ref, channels=("particle", "heat", "momentum")).savefig("case_fluxes.png")
 plot_run_spectra(runs, ref).savefig("case_spectra.png")
 ```

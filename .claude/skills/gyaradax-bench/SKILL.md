@@ -33,7 +33,7 @@ Restart a saturated adiabatic and a saturated kinetic run from a snapshot and st
 
 ## 5. Long-run statistics (anything not bitwise)
 
-- Run the long-horizon cases of `gerkone/gyaradax-tests` (`long_horizon/`: adiabatic and kinetic, nonlinear and linear, configs in `configs/`) with the new code to saturation, and compare with `notebooks/validation.ipynb`: heat flux per species averaged over the last 30 % with autocorrelation-corrected errors, stationarity, ky and kx spectra, converged growth rates. Also restart from a saturated reference state and compare averages.
+- Run the long-horizon cases of [gerkone/gyaradax-tests](https://huggingface.co/datasets/gerkone/gyaradax-tests) (`long_horizon/`: adiabatic and kinetic, nonlinear and linear, configs in `configs/`) with the new code to saturation, and compare with `notebooks/validation.ipynb`: heat flux per species averaged over the last 30 % with autocorrelation-corrected errors, stationarity, ky and kx spectra, converged growth rates. Also restart from a saturated reference state and compare averages.
 - Report differences in units of the combined error. Trajectories decorrelate after a few tens of R/v_th; that is expected, a shift of the averages is not.
 - Linear-only changes: converged growth rates, frequencies and quasilinear weights against converged references.
 
