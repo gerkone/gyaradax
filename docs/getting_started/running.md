@@ -7,6 +7,7 @@ gyaradax run     CONFIG [CONFIG ...]   # run one or several configs
 gyaradax run     RUN_DIR               # resume / extend a previous run
 gyaradax bench   CONFIG                # measure solver throughput
 gyaradax convert GKW_DIR OUT.yaml      # YAML config from a GKW run directory
+gyaradax datagen CONFIG ... --out DIR  # run configs on the local GPUs into a dataset
 gyaradax info                          # devices, backends, versions
 ```
 
@@ -101,6 +102,34 @@ gyaradax bench configs/adiabatic/nonlinear/itg_high_shear.yaml --device 0 --back
 ```
 
 `bench` always cold-starts, does no I/O and reports the steady-state median steps per second (the first block carries the compilation), plus the peak device memory. `--profile` adds the per-kernel breakdown.
+
+## Equally spaced frames
+
+`--dump-dt DT` (config `solver.dump_dt`) puts the frames on an equally spaced time grid instead of every `--block-size` steps: the last step before each frame is shortened to land on it, so frame times are `t0 + k * DT` to round-off. Snapshots carry `t0`, so resumed legs continue the same grid. The run ends on the first frame at or after `--t-end` (config `solver.t_end`); `--n-blocks N` runs N more frames, and `--snapshot-every K` counts frames. Without `--dump-dt` the step-counted blocks are unchanged.
+
+## Dataset output
+
+`--dataset DIR` also writes the run as a trajectory `DIR/<name>_ifft_realpotens/` in the layout the neugk loaders read (`--dataset-name` sets `<name>`, default `run.name`):
+
+- `data/timestep_NNNNN.zstd16.bin`: df in real space, (re/im, species, vpar, mu, s, x, y), bf16, lossless zstd (`--dataset-bits bf16` stores it raw).
+- `data/poten_NNNNN.bin`: phi in real space, (re/im, x, s, y), every ky mode, float32 (metadata `phi_layout: reim`).
+- `metadata.pkl` and `metadata_light.pkl`: parameters, geometry and per frame the time, step, fluxes per species, ky/kx spectra, growth rate and the bf16 loss of the frame (`quant_*`: phi and fluxes recomputed from the stored df). The df and phi statistics are computed when the run ends, from frames at or after `--dataset-stats-from T` (`gyaradax dataset-stats TRAJ --from-time T` recomputes them).
+- `resume/state.npz` and `resume/config.yaml`: df and solver state of the last frame and the leg's config, replaced when each leg ends (`--resume-dtype f32`, the default, or `f64`). `gyaradax run TRAJ --t-end T --output-dir OUT` extends the trajectory in place from it.
+- A linear config (`solver.non_linear: false`) writes no frames: its final eigenmode goes into `data/linear.bin` and `data/linear_poten.bin` (spectral, float32), so a linear run with the `--dataset-name` of a nonlinear trajectory adds its eigenmode to it.
+
+A trajectory belongs to the run directory that created it; another run is refused and needs a new `--dataset-name`. Resuming the run directory appends to the same trajectory, dropping frames past the snapshot it resumes from. Trajectories with the legacy real potential (`phi_layout: real`) are refused until migrated. Electromagnetic fields are not written.
+
+`--stop-on-banding` ends a run whose zonal phi piles up at the s-Nyquist mode (share of the zonal power above 0.3 for 3 frames), with its snapshot and exit code 6. SIGTERM ends a run after the running block and its snapshot, exit code 75.
+
+## Data generation
+
+`gyaradax datagen` runs a list of configs on the GPUs of this machine, one `gyaradax run` per config and one config per GPU at a time:
+
+```bash
+gyaradax datagen scan/*.yaml --out runs/scan --gpus 0,1 --dataset /data/kinetic --args "--backend cuda --stop-on-banding"
+```
+
+Each config runs in `OUT/<name>` (the file name without `.yaml`), writes the trajectory `<name>` and logs to `OUT/<name>.log`. Running the same command again skips the runs that completed, diverged or banded (exit code 0, 2 or 6, kept in `OUT/<name>/datagen_exit`) and resumes the others from their last snapshot. A config runs on as many GPUs as its `sharding:` section asks for (`n_gpus: 2`, or `n_gpus_sp` x `n_gpus_vp` x `n_gpus_mu`; one without it), so runs of different sizes share one `--gpus` list. A run of N GPUs takes an aligned block of N from that list (pairs: 1st+2nd, 3rd+4th, ...; quads: 1st-4th, 5th-8th), which follows the usual NVLink pairs and quads; list the GPUs so that the blocks match the machine. Smaller runs fill free GPUs while a larger one waits for its block. `--per-gpu N` lets N one-GPU runs share each GPU at a time, for runs too small to fill a GPU (multi-GPU runs still take their GPUs alone). Scheduling over several machines is left to the cluster's own tools.
 
 ## Command reference
 

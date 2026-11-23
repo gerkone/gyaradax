@@ -40,7 +40,7 @@ GKW counterparts (GKW source files): `gkstep_single` = `rk4` (exp_integration.F9
 
 ## Skills
 
-`.claude/skills/`: `gyaradax-cli` (configure, run, resume), `gyaradax-plot` (figures, run against reference), `gyaradax-bench` (benchmarks and kernel changes).
+`.claude/skills/`: `gyaradax-cli` (configure, run, resume), `gyaradax-plot` (figures, run against reference), `gyaradax-bench` (benchmarks and kernel changes), `gyaradax-datagen` (campaigns of many runs: scheduling over machines, campaign page).
 
 ## How to contribute
 

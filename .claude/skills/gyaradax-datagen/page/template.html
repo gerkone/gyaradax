@@ -1,0 +1,239 @@
+<title>__TITLE__</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Public+Sans:wght@400;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* one column: parameter pair plot, paged progress table, one card per run (cut and extend, or plain traces) */
+:root {
+  --bg: #f6f7f9; --panel: #ffffff; --fg: #1d2330; --muted: #5d6677; --line: #dde1e8; --grid: #e9ecf1;
+  --accent: #2456c4; --qi: #2456c4; --qe: #c2611f; --ref: #8b94a5; --ok: #2f7d4f; --cut: #c4254a;
+  --drop: rgba(196, 37, 74, 0.10); --band: #e4edf1;
+  --sans: "Public Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #12151b; --panel: #1a1e26; --fg: #e6e9ef; --muted: #9aa3b4; --line: #2c323d; --grid: #252b35;
+  --accent: #7ea2ff; --qi: #5a84e6; --qe: #c97a35; --ref: #6f7889; --ok: #6cc795; --cut: #ff5d7d;
+  --drop: rgba(255, 93, 125, 0.13); --band: #1b282e; color-scheme: dark } }
+:root[data-theme="dark"] {
+  --bg: #12151b; --panel: #1a1e26; --fg: #e6e9ef; --muted: #9aa3b4; --line: #2c323d; --grid: #252b35;
+  --accent: #7ea2ff; --qi: #5a84e6; --qe: #c97a35; --ref: #6f7889; --ok: #6cc795; --cut: #ff5d7d;
+  --drop: rgba(255, 93, 125, 0.13); --band: #1b282e; color-scheme: dark }
+body { background: var(--bg); color: var(--fg); font-family: var(--sans); font-size: 14px; line-height: 1.5; margin: 0; }
+.wrap { padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); padding-block: 20px 56px; max-width: 1280px; margin: 0 auto; display: grid; gap: 26px; }
+h1 { margin: 0; font-size: 1.5rem; } h2 { margin: 0; font-size: 1.15rem; }
+.muted { color: var(--muted); } .mono { font-family: var(--mono); }
+section { display: grid; gap: 10px; }
+.row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; justify-content: space-between; }
+.tablewrap { overflow: auto; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; }
+table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; font-size: 0.85rem; }
+th, td { padding: 6px 10px; text-align: right; border-bottom: 1px solid var(--line); white-space: nowrap; }
+th:first-child, td:first-child { text-align: left; } th { color: var(--muted); font-weight: 600; }
+.pill { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 0.75rem; font-weight: 600; border: 1px solid currentColor; color: var(--muted); }
+.pill.running { color: var(--accent); } .pill.done, .pill.accept { color: var(--ok); } .pill.bad { color: var(--cut); }
+.bar { position: relative; height: 6px; background: var(--grid); border-radius: 3px; min-width: 80px; }
+.bar > i { position: absolute; inset: 0 auto 0 0; background: var(--accent); border-radius: 3px; }
+.grid2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+.plot, .card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 8px; display: grid; gap: 4px; min-width: 0; }
+.plot { overflow-x: auto; }
+.plot svg, .card svg { display: block; width: 100%; height: auto; }
+.plot svg.pairs { min-width: 640px; }
+.legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: 0.8rem; color: var(--muted); }
+.sw { display: inline-block; width: 18px; height: 0; border-top: 2px solid; margin-right: 5px; vertical-align: middle; }
+.dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; border: 1.5px solid; margin-right: 4px; vertical-align: middle; }
+.card:not(.live) svg { cursor: crosshair; }
+.head { display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; }
+.name { font: 600 1rem var(--mono); }
+.facts { font: 0.78rem var(--mono); color: var(--muted); font-variant-numeric: tabular-nums; }
+.actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+button, input { font: 600 0.8rem var(--sans); padding: 4px 10px; border-radius: 6px; border: 1px solid var(--line); background: var(--panel); color: var(--fg); }
+button { cursor: pointer; } input { width: 5.5em; font-weight: 400; font-family: var(--mono); }
+button.primary { border-color: var(--cut); color: var(--cut); } button.on { border-color: var(--accent); color: var(--accent); }
+button:disabled { opacity: 0.45; cursor: default; }
+button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.banner { padding: 8px 12px; border: 1px solid var(--cut); border-radius: 6px; }
+@media (max-width: 900px) { .grid2 { grid-template-columns: minmax(0, 1fr); } }
+</style>
+
+<div class="wrap">
+  <header style="display:grid;gap:6px"><h1>__TITLE__</h1><p class="muted mono" id="built"></p></header>
+  <section>
+    <h2>Parameters</h2>
+    <div class="plot" id="pairs"></div>
+    <div class="legend" id="pairs-legend"></div>
+  </section>
+  <section>
+    <div class="row"><h2>Progress</h2><div class="actions"><button id="prev" aria-label="previous page">‹</button><span class="facts" id="page"></span><button id="next" aria-label="next page">›</button></div></div>
+    <div class="tablewrap"><table id="t-status"></table></div>
+  </section>
+  <section>
+    <div class="row"><h2 id="cut-title">Runs</h2><div class="actions"><button id="lin">linear</button><button id="log">log10</button></div></div>
+    <div class="banner" id="banner" hidden>Decisions cannot be saved in this view. Open the artifact in claude.ai while signed in to record them.</div>
+    <div class="grid2" id="cutter"></div>
+  </section>
+</div>
+
+<script>
+const D = /*DATA*/null;
+const fmt = (x, d = 2) => x == null ? "–" : (Math.abs(x) >= 1e3 || (Math.abs(x) < 1e-2 && x !== 0)) ? x.toExponential(1) : x.toFixed(d);
+const byName = Object.fromEntries(D.runs.map(r => [r.name, r]));
+const live = r => r.state === "running";
+const decisions = {}, extend = {}, choice = {};
+let db = null, page = 0, logScale = true;
+const PER_PAGE = 20;
+D.runs.forEach(r => { choice[r.name] = r.proposal; });
+document.getElementById("built").textContent = `built ${D.built}, ${D.runs.length} runs`;
+const ST = { planned: "--muted", running: "--accent", done: "--ok", interrupted: "--qe", diverged: "--cut", banded: "--cut" };
+const stateColor = s => `var(${ST[s] || "--cut"})`;
+
+// lower-triangle pair plot: histograms on the diagonal, scatter below it; grey is the existing dataset
+function pairs() {
+  const P = D.params, n = P.length, C = 108, G = 8, L = 40, B = 34, W = L + n * C, H = n * C + B;
+  const vals = k => D.existing.map(p => p[k]).concat(D.runs.map(r => r.params[k])).filter(Number.isFinite);
+  const rng = Object.fromEntries(P.map(k => { const v = vals(k), lo = Math.min(...v), hi = Math.max(...v), pad = (hi - lo || 1) * 0.06; return [k, [lo - pad, hi + pad]]; }));
+  const sc = (k, v, a, b) => a + (v - rng[k][0]) / (rng[k][1] - rng[k][0]) * (b - a);
+  let g = "";
+  P.forEach((ky, i) => P.forEach((kx, j) => {
+    if (j > i) return;
+    const x0 = L + j * C + G / 2, y0 = i * C + G / 2, w = C - G, h = C - G;
+    g += `<rect x="${x0}" y="${y0}" width="${w}" height="${h}" fill="none" stroke="var(--line)"/>`;
+    if (i === j) {
+      const nb = 14, [lo, hi] = rng[kx], bin = v => Math.min(nb - 1, Math.max(0, Math.floor((v - lo) / (hi - lo) * nb)));
+      const hist = a => { const c = Array(nb).fill(0); a.filter(Number.isFinite).forEach(v => c[bin(v)]++); const m = Math.max(...c, 1); return c.map(x => x / m); };
+      const he = hist(D.existing.map(p => p[kx])), hc = hist(D.runs.map(r => r.params[kx]));
+      he.forEach((f, b) => { g += `<rect x="${x0 + b * w / nb}" y="${y0 + h - f * (h - 4)}" width="${w / nb - 1}" height="${f * (h - 4)}" fill="var(--grid)"/>`; });
+      g += `<path d="${hc.map((f, b) => `${b ? "L" : "M"}${(x0 + (b + 0.5) * w / nb).toFixed(1)},${(y0 + h - f * (h - 4)).toFixed(1)}`).join("")}" fill="none" stroke="var(--accent)" stroke-width="1.5"/>`;
+    } else {
+      const X = v => sc(kx, v, x0 + 3, x0 + w - 3), Y = v => sc(ky, v, y0 + h - 3, y0 + 3);
+      D.existing.forEach(p => { if (Number.isFinite(p[kx]) && Number.isFinite(p[ky])) g += `<circle cx="${X(p[kx]).toFixed(1)}" cy="${Y(p[ky]).toFixed(1)}" r="1.4" fill="var(--ref)" opacity="0.55"/>`; });
+      D.runs.forEach(r => { const a = r.params[kx], b = r.params[ky]; if (!Number.isFinite(a) || !Number.isFinite(b)) return; const c = stateColor(r.state);
+        g += `<circle cx="${X(a).toFixed(1)}" cy="${Y(b).toFixed(1)}" r="2.6" fill="${r.state === "planned" ? "none" : c}" stroke="${c}"><title>${r.name}: ${kx} ${fmt(a, 3)}, ${ky} ${fmt(b, 3)}</title></circle>`; });
+    }
+    if (i === n - 1) g += `<text x="${x0 + w / 2}" y="${H - 18}" text-anchor="middle" font-size="11" fill="var(--muted)">${kx}</text><text x="${x0}" y="${H - 4}" font-size="9" fill="var(--muted)">${fmt(rng[kx][0])}</text><text x="${x0 + w}" y="${H - 4}" text-anchor="end" font-size="9" fill="var(--muted)">${fmt(rng[kx][1])}</text>`;
+    if (j === 0 && i > 0) g += `<text x="${L - 6}" y="${y0 + h / 2}" text-anchor="end" font-size="11" fill="var(--muted)">${ky}</text>`;
+  }));
+  document.getElementById("pairs").innerHTML = `<svg class="pairs" viewBox="0 0 ${W} ${H}" role="img" aria-label="pairwise parameter distributions">${g}</svg>`;
+  document.getElementById("pairs-legend").innerHTML = `<span><span class="dot" style="border-color:var(--ref);background:var(--ref)"></span>existing (${D.existing.length})</span>` +
+    Object.keys(ST).filter(s => D.runs.some(r => r.state === s)).map(s => `<span><span class="dot" style="border-color:${stateColor(s)};background:${s === "planned" ? "none" : stateColor(s)}"></span>${s} (${D.runs.filter(r => r.state === s).length})</span>`).join("");
+}
+
+function cutStatus(r) {
+  const d = decisions[r.name], e = extend[r.name];
+  const ext = e ? ` <span class="pill running">extend +${fmt(e.dt, 0)}</span>` : "";
+  if (D.eval) return ext;
+  if (r.stable) return `<span class="pill accept">stable, last frame kept</span>` + ext;
+  if (live(r)) return `<span class="pill">running</span>` + ext;
+  if (d?.status === "accept") return `<span class="pill accept">cut t ${fmt(d.cut, 1)}</span>` + ext;
+  if (d?.status === "keep") return `<span class="pill accept">keep all</span>` + ext;
+  return `<span class="pill">undecided</span>` + ext;
+}
+
+function renderStatus() {
+  const pages = Math.max(1, Math.ceil(D.runs.length / PER_PAGE));
+  page = Math.min(page, pages - 1);
+  const rows = D.runs.slice(page * PER_PAGE, (page + 1) * PER_PAGE);
+  document.getElementById("page").textContent = `${page * PER_PAGE + 1}–${page * PER_PAGE + rows.length} of ${D.runs.length}`;
+  document.getElementById("prev").disabled = page === 0; document.getElementById("next").disabled = page >= pages - 1;
+  document.getElementById("t-status").innerHTML = `<thead><tr><th>run</th>${D.params.map(k => `<th>${k}</th>`).join("")}<th>where</th><th>t / ${D.t_end}</th><th></th><th>frames</th><th>t / h</th><th>left</th><th>state</th><th>decision</th></tr></thead><tbody>` +
+    rows.map(r => {
+      const cls = live(r) ? "running" : r.state === "done" ? "done" : r.state === "planned" || r.state === "interrupted" ? "" : "bad";
+      const left = live(r) && r.rate ? `${((D.t_end - r.t_now) / r.rate).toFixed(1)} h` : "–";
+      return `<tr><td class="mono">${r.name}</td>${D.params.map(k => `<td>${fmt(r.params[k], 3)}</td>`).join("")}<td class="mono">${r.where || "–"}</td><td>${fmt(r.t_now, 1)}</td><td><div class="bar"><i style="width:${Math.min(100, 100 * (r.t_now || 0) / D.t_end)}%"></i></div></td><td>${r.frames}</td><td>${fmt(r.rate, 1)}</td><td>${left}</td><td><span class="pill ${cls}">${r.stable ? "stable" : r.state}</span></td><td>${cutStatus(r) || "–"}</td></tr>`;
+    }).join("") + "</tbody>";
+}
+
+const CW = 560, CH = 190, PL = 48, PR = 10, PT = 8, PB = 24;
+function trace(r) {
+  const t1 = Math.max(D.t_end, r.t[r.t.length - 1] || 0);
+  const all = r.qi.concat(r.qe || []);
+  let sy, ticks;
+  if (logScale) {
+    const ys = all.filter(v => v > 0).map(Math.log10), ymax = Math.ceil(Math.max(...ys, 0)), ymin = Math.max(Math.floor(Math.min(...ys, -1)), ymax - 10);
+    sy = v => PT + (ymax - Math.min(Math.max(Math.log10(Math.max(v, 1e-300)), ymin), ymax)) / (ymax - ymin || 1) * (CH - PT - PB);
+    ticks = []; for (let e = ymin; e <= ymax; e += Math.max(1, Math.ceil((ymax - ymin) / 5))) ticks.push([10 ** e, `1e${e}`]);
+  } else {
+    const ymax = Math.max(...all, 1e-12) * 1.05, ymin = Math.min(0, ...all);
+    sy = v => PT + (ymax - v) / (ymax - ymin) * (CH - PT - PB);
+    ticks = [0, 0.25, 0.5, 0.75, 1].map(f => [ymin + f * (ymax - ymin), fmt(ymin + f * (ymax - ymin), 1)]);
+  }
+  const sx = t => PL + t / t1 * (CW - PL - PR);
+  const path = a => r.t.map((t, i) => `${i ? "L" : "M"}${sx(t).toFixed(1)},${sy(a[i]).toFixed(1)}`).join("");
+  const cut = D.eval ? null : choice[r.name], f0 = r.frame_t[0], f1 = r.frame_t[r.frame_t.length - 1];
+  let s = `<svg viewBox="0 0 ${CW} ${CH}" role="img" aria-label="Heat flux of ${r.name}">`;
+  if (!D.eval && r.frame_t.length) s += `<rect x="${sx(f0)}" y="${PT}" width="${Math.max(sx(f1) - sx(f0), 1)}" height="${CH - PT - PB}" fill="var(--band)"/>`;
+  if (cut != null) s += `<rect x="${sx(f0)}" y="${PT}" width="${Math.max(sx(cut) - sx(f0), 0)}" height="${CH - PT - PB}" fill="var(--drop)"/>`;
+  for (const [v, lab] of ticks) s += `<line x1="${PL}" x2="${CW - PR}" y1="${sy(v)}" y2="${sy(v)}" stroke="var(--grid)"/><text x="${PL - 5}" y="${sy(v) + 4}" text-anchor="end" font-size="10" fill="var(--muted)">${lab}</text>`;
+  for (let t = 0; t <= t1; t += 100) s += `<text x="${sx(t)}" y="${CH - 6}" text-anchor="middle" font-size="10" fill="var(--muted)">${t}</text>`;
+  if (r.sat_qi > 0) s += `<line x1="${PL}" x2="${CW - PR}" y1="${sy(r.sat_qi)}" y2="${sy(r.sat_qi)}" stroke="var(--muted)" stroke-dasharray="1 3"/>`;
+  if (r.qe) s += `<path d="${path(r.qe)}" fill="none" stroke="var(--qe)" stroke-width="1.2"/>`;
+  s += `<path d="${path(r.qi)}" fill="none" stroke="var(--qi)" stroke-width="1.6"/>`;
+  if (r.proposal != null && !D.eval) s += `<line x1="${sx(r.proposal)}" x2="${sx(r.proposal)}" y1="${PT}" y2="${CH - PB}" stroke="var(--cut)" stroke-dasharray="3 3"/>`;
+  if (cut != null) s += `<line x1="${sx(cut)}" x2="${sx(cut)}" y1="${PT}" y2="${CH - PB}" stroke="var(--cut)" stroke-width="1.8"/>`;
+  return s + `</svg>`;
+}
+
+const legend = r => `<div class="legend"><span><span class="sw" style="border-color:var(--qi)"></span>Q<sub>i</sub></span>${r.qe ? '<span><span class="sw" style="border-color:var(--qe)"></span>Q<sub>e</sub></span>' : ""}${D.eval ? "" : '<span><span class="sw" style="border-color:var(--cut)"></span>cut</span>'}</div>`;
+function card(r) {
+  const cut = choice[r.name], n = cut == null ? 0 : r.frame_t.filter(t => t < cut - 1e-6).length;
+  const what = r.stable ? `stable at t ${fmt(r.t_now, 1)}` : live(r) ? `t ${fmt(r.t_now, 1)} of ${D.t_end}` :
+    D.eval ? `${r.state} at t ${fmt(r.t_now, 1)}${r.state === "done" ? `, Q<sub>i</sub> ${fmt(r.qi_late)}${r.qe ? `, Q<sub>e</sub> ${fmt(r.qe_late)}` : ""} last 30%` : ""}` :
+    cut == null ? `keeps all ${r.frame_t.length} frames` : `cut at t ${fmt(cut, 1)} drops ${n} of ${r.frame_t.length} frames`;
+  const dis = live(r) || r.stable || !r.frame_t.length ? "disabled" : "";
+  const cutButtons = D.eval ? "" : `<button class="primary" data-act="accept" ${dis || (cut == null ? "disabled" : "")}>Accept cut</button><button data-act="keep" ${dis}>Keep all</button><button data-act="reset" ${dis}>Back to proposal</button>`;
+  const ext = `<input type="number" id="dt-${r.name}" min="1" step="10" value="${extend[r.name]?.dt ?? 100}" aria-label="extend ${r.name} by" ${live(r) ? "disabled" : ""}><button data-act="extend" ${live(r) ? "disabled" : ""}>Extend</button>`;
+  return `<div class="card ${live(r) ? "live" : ""}" data-name="${r.name}"><div class="head"><span class="name">${r.name}</span>${cutStatus(r)}</div>${legend(r)}${trace(r)}
+    <div class="facts">${what}</div><div class="actions">${cutButtons}${ext}</div></div>`;
+}
+
+function render() {
+  renderStatus();
+  document.getElementById("lin").className = logScale ? "" : "on"; document.getElementById("log").className = logScale ? "on" : "";
+  document.getElementById("cut-title").textContent = D.eval ? "Flux traces" : "Head cut";
+  document.getElementById("cutter").innerHTML = D.runs.filter(r => r.t.length).map(card).join("");
+}
+
+async function save(coll, name, body) {
+  (coll === "cuts" ? decisions : extend)[name] = body; render();
+  if (!db) { document.getElementById("banner").hidden = false; return; }
+  try { await db.collection(coll).doc(name).set(body); } catch (e) { document.getElementById("banner").hidden = false; }
+}
+
+document.getElementById("prev").onclick = () => { page--; renderStatus(); };
+document.getElementById("next").onclick = () => { page++; renderStatus(); };
+document.getElementById("lin").onclick = () => { logScale = false; render(); };
+document.getElementById("log").onclick = () => { logScale = true; render(); };
+document.getElementById("cutter").addEventListener("click", ev => {
+  const el = ev.target.closest(".card"); if (!el) return;
+  const r = byName[el.dataset.name], btn = ev.target.closest("button"), at = new Date().toISOString();
+  if (btn?.dataset.act === "extend") {
+    const dt = parseFloat(document.getElementById(`dt-${r.name}`).value);
+    if (dt > 0) save("extend", r.name, { dt, t_end: (r.t_now || 0) + dt, at });
+    return;
+  }
+  if (D.eval || live(r) || r.stable || !r.frame_t.length) return;
+  if (btn) {
+    const act = btn.dataset.act;
+    if (act === "accept" && choice[r.name] != null) save("cuts", r.name, { status: "accept", cut: choice[r.name], at });
+    if (act === "keep") { choice[r.name] = null; save("cuts", r.name, { status: "keep", cut: null, at }); }
+    if (act === "reset") { choice[r.name] = r.proposal; render(); }
+    return;
+  }
+  const svg = ev.target.closest("svg"); if (!svg) return;
+  const b = svg.getBoundingClientRect(), x = (ev.clientX - b.left) / b.width * CW;
+  const t = (x - PL) / (CW - PL - PR) * Math.max(D.t_end, r.t[r.t.length - 1]);
+  choice[r.name] = t <= r.frame_t[0] ? null : (r.frame_t.find(f => f >= t - 1e-6) ?? r.frame_t[r.frame_t.length - 1]);
+  render();
+});
+
+pairs(); render();
+(async () => {
+  try { db = await window.claude?.use?.("db"); } catch (e) { db = null; }
+  if (!db) return;
+  const listen = (coll, store, apply) => db.collection(coll).onSnapshot(snap => {
+    for (const d of snap.docs) if (byName[d.id]) { store[d.id] = d.data(); apply?.(d.id, d.data()); }
+    render();
+  }, () => { document.getElementById("banner").hidden = false; });
+  listen("cuts", decisions, (id, b) => { if (b.status === "accept" && b.cut != null) choice[id] = b.cut; if (b.status === "keep") choice[id] = null; });
+  listen("extend", extend);
+})();
+</script>
