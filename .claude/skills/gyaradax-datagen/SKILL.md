@@ -39,6 +39,10 @@ CAMPAIGN/
 5. **Move or stop.** `touch CAMPAIGN/STOP.HOST.GPU` (or `STOP.HOST`, or `STOP` for all) so the worker takes nothing new, then `pkill -TERM -P PID` with the PID from `claims/NAME/who` (`HOST GPU PID`): the run finishes its block, writes its snapshot and exits 75, and its claim is released for another worker. Never kill by pattern (`pkill -f`).
 6. **Record** every decision (moves, replacements, stops) as a line in `queue.log` and keep the newest snapshots of every run.
 
+## Campaign page
+
+`page/build_page.py CAMPAIGN OUT.html --dataset DIR ... --existing "GLOB" [--axes eps,rlt_i] [--eval]` fills `page/template.html` from disk: parameter distributions of the campaign over an existing dataset (a 2D scatter and one strip per parameter), a progress table, and per run the heat-flux trace with a head-cut cutter (the proposal is the first frame where the 5-frame mean of Q_i reaches its mean over the last 30 %; `--eval` shows plain traces instead). Publish it as an artifact with `capabilities: {db: {}}`; cut decisions go to its collection `cuts` (`{status: accept | keep, cut: t}`), which the agent reads back with the artifact data tool before cutting frames. Rebuild and republish to the same URL as the campaign moves. Start from this template and adjust the parameters, panels or database to the campaign; keep the cut rule and the collection layout unless the user asks.
+
 ## Rules
 
 - All runs of a campaign use the same code revision and flags, except GPU-specific kernel flags; say which host ran what.
