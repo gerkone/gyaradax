@@ -5,21 +5,29 @@ description: Plot and summarise gyaradax results (flux traces, averaged fluxes, 
 
 # Plotting gyaradax results
 
-References: `docs/getting_started/examples.md` (Plotting, Animations), `gyaradax/diagnostics/plot_utils.py`.
+References: `docs/getting_started/examples.md` (Plotting, Animations), `gyaradax/diagnostics/plot_utils.py`, `notebooks/validation.ipynb`.
 
-## A run against a reference
+## Runs against a reference
 
-```bash
-python scripts/compare_runs.py RUN REF --label "new" --ref-label "master" --out figs [--name case] [--window 0.3]
+```python
+import pickle
+import numpy as np
+from gyaradax.diagnostics.plot_utils import plot_run_fluxes, plot_run_spectra
+
+runs = {"new": "runs/new", "master": "runs/master"}           # label -> run directory (a list pools realisations)
+ref = "long_horizon/kinetic_itg_mid_flux/nonlinear.json"       # optional: a gerkone/gyaradax-tests reference, drawn dashed
+plot_run_fluxes(runs, ref, channels=("particle", "heat", "momentum")).savefig("case_fluxes.png")
+plot_run_spectra(runs, ref).savefig("case_spectra.png")
 ```
 
-Writes `case_fluxes.png` (particle, heat, momentum per species; new solid, reference dashed, averaging window shaded) and `case_spectra.png` (ky and kx spectra averaged over the window, spread as a band), and prints the averaged fluxes with autocorrelation-corrected errors, their difference in sigma and the drift between the window's halves. Without REF it plots the run alone. These are the figures for PRs (see the `gyaradax-bench` skill).
+- With a reference, the window and the wavenumbers come from its `average.window`, `ky` and `kx`.
+- Without one, pass `window=(0.7 * t_end, t_end)` and the grid of the runs:
+  `geo = pickle.load(open("runs/new/geometry.pkl", "rb"))`, `ky=geo["krho"] * geo["kthnorm"]`, `kx=geo["kxrh"]`.
+- Numbers to go with the figures: `notebooks/validation_stats.py` (`standard_error`, `stationarity_test`, `flux_comparison`).
 
 ## Other plots
 
-```python
-from gyaradax.diagnostics.plot_utils import plot_flux_trace, plot_spectra, plot_growth_rates, plot_nd
-```
+`gyaradax.diagnostics.plot_utils` also has:
 
 - `plot_growth_rates(g["time"], g["growth"], ky=geometry["krho"])` for `growth.npz`; linear runs converge to the growth rates.
 - `plot_nd(np.abs(df), labels=["vpar", "mu", "s", "kx", "ky"])` for a snapshot (`gyaradax.io.rundir.load_checkpoint`).

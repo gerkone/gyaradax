@@ -39,4 +39,4 @@ Restart a saturated adiabatic and a saturated kinetic run from a snapshot and st
 
 ## 6. The PR
 
-Give the steps/s table (GPU, grid, old and new, speedup), the accuracy numbers and, for non-bitwise changes, the long-run table. Attach figures for every long-run case: flux traces and saturated ky/kx spectra from `python scripts/compare_runs.py NEW_RUN REF_RUN --label NEW --ref-label master` (the `gyaradax-plot` skill). Push the PNGs to the `pr-assets` branch and link them as `https://github.com/gerkone/gyaradax/blob/pr-assets/NAME.png?raw=true`; do not commit them to the code branch.
+Give the steps/s table (GPU, grid, old and new, speedup), the accuracy numbers and, for non-bitwise changes, the long-run table. Attach figures for every long-run case: flux traces and saturated ky/kx spectra of the new and the master run (and the HF reference when there is one), from `plot_run_fluxes` and `plot_run_spectra` (the `gyaradax-plot` skill). Push the PNGs to the `pr-assets` branch and link them as `https://github.com/gerkone/gyaradax/blob/pr-assets/NAME.png?raw=true`; do not commit them to the code branch.
