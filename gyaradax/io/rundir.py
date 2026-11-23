@@ -24,6 +24,7 @@ def save_dumps(
     block_start_step: int = 0,
     block_start_time: float = 0.0,
     snapshot_f32: bool = False,
+    dump_origin: Any = None,
 ):
     """Append one block's diagnostics to the run directory and optionally write a snapshot.
 
@@ -45,6 +46,8 @@ def save_dumps(
         block_start_step: First step of the block.
         block_start_time: Time at the start of the block.
         snapshot_f32: Store df and phi as complex64 in the snapshot.
+        dump_origin: Time the frame grid starts from (time mode), stored in the snapshot so a
+            resumed run keeps the grid.
     """
     os.makedirs(output_dir, exist_ok=True)
 
@@ -168,6 +171,8 @@ def save_dumps(
         # saturated state instead of params.dt.
         if last_dt is not None:
             checkpoint["dt_last"] = np.array(last_dt, dtype=np.float64)
+        if dump_origin is not None:
+            checkpoint["dump_origin"] = np.array(dump_origin, dtype=np.float64)
         np.savez(path, **cast(Any, checkpoint))
 
 
