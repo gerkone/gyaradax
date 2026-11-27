@@ -1,6 +1,6 @@
 # Issue 201: handover of the gyaradax-side investigation
 
-Written 2026-11-27 for whoever picks issue 201 up. It records everything tried on the gyaradax / GKW / CGYRO side between 2026-11-13 and 2026-11-27, the current candidate fix (the skin-gated neutral dissipation), the configurations and the results. It complements `docs/issue-201.md` on this branch (translation control, matched restart, characteristic damping, sixth difference), which is a separate line of work.
+Written 2026-11-27 for whoever picks issue 201 up. It records everything tried on the gyaradax / GKW / CGYRO side between 2026-11-13 and 2026-11-27, the current candidate fix (the skin-gated neutral dissipation), the configurations and the results. The [matched three-turn linear study](../../docs/issue-201.md) derives the centered-row charge correction and compares its tracked slow branch with CGYRO.
 
 Conventions. Units are GKW units ($v_{th,ref}/R$, GKW sign, $\omega<0$ electron direction) unless a row says $c_s/a$ (CGYRO units and sign, used for the Waltz and i201 cases). "Production grid" means the grid a production run would use; everything else is a test grid and is labelled. "Plain" means the stock GKW/gyaradax parallel dissipation. "Fast mode" means the grid-scale numerical mode of issue 201: the largest growth among modes whose $\phi$ centroid along $s$ is above 0.3 of the Nyquist wavenumber.
 
@@ -256,7 +256,7 @@ The Waltz configs carry a `.units.json` sidecar with the CGYRO unit factors used
 
 Not in this repository because it is restricted (issue bundle, UKAEA-related notes) or large. Paths on the lab file system:
 
-- Issue bundle and the colleague's reproduction: see `docs/issue-201.md`.
+- The recovered issue bundle is under `/system/user/publicwork/volkmann/issue201.I85RLq/issue201` on the lab hosts. Access to restricted inputs is managed separately.
 - gyaradax configs of the restricted decks: `/restricteddata/ukaea/gyrokinetics/cgyro/gyaradax_cgyro_em/gapcheck/gyx/cfg/E/d3559/g0.yaml`, `E/base4red/g0.yaml`, `C/i201_px0/g0.yaml`; CGYRO decks in `gapcheck/decks/`.
 - Full measured log of the investigation, sections 1 to 19 with every number and its source file: `/restricteddata/ukaea/gyrokinetics/cgyro/gyaradax_cgyro_em/advisor/ISSUE201.md` (restricted; quotes UKAEA run notes). Advisor report `advisor/REPORT.md`, campaign results `gapcheck/RESULTS.md` (section 6), status `gapcheck/STATUS.md`.
 - Write-up sources with the deck listings: `advisor/writeup/` (same directory).

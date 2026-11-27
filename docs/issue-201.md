@@ -1,104 +1,55 @@
-# Issue 201 electromagnetic instability
+# Issue 201 on the three-turn 3559 case
 
-The native GKW and Gyaradax parallel dissipation stencil drives a grid-scale mode in the low-\(k_y\) electromagnetic `3559` case. An independent decaying control validates the CGYRO–Gyaradax field, time and wavenumber conversions at zero ballooning angle. **We reject the first attempted fix, characteristic parallel damping.** It suppresses the fast artifact but turns a growing slow mode into a decaying one and distorts its electrostatic field profile.
+GKW and Gyaradax both develop a fast, grid-scale electromagnetic mode on this case. Stock CGYRO selects a slowly growing mode. A charge correction to Gyaradax's parallel numerical dissipation suppresses the two identified fast branches. The slow growth rate remains about half the matched CGYRO value. This note records the linear experiment. The companion handover describes the skin-gated variant, production-grid tests and nonlinear transport results. [Companion investigation](../investigations/issue-201/README.md)
 
-This is a local lab investigation. The issue bundle and prior analysis are restricted. Keep this branch local.
+## How the parallel stencil drives the instability
 
-## What the translation control validates
+The native fourth difference damps electrons and ions at different rates. Their perturbed gyroaveraged charges can initially cancel and then acquire a net charge under damping. Quasineutrality turns that charge into a potential perturbation. On the primary fast eigenmode at 32 points per turn, the distribution contribution to the amplitude growth rate from the stencil is −0.345 and the electrostatic contribution is +2.639. Together they supply +2.294 of the observed +2.607. The two outer rows at each end contribute negligibly to this mode. Tracking the native branch at fixed velocity resolution gives growth +0.254 at 38 points per turn and −0.132 at 39.
 
-We initialized native FP64 Gyaradax from a CGYRO distribution at CGYRO time 1. The control used circular Miller geometry, kinetic electrons, two fields, zero gradients and zero ballooning angle. We applied the prescribed time factor (√2/3) and absolute field factors (40.7120 for φ and 28.7878 for A∥), then advanced Gyaradax independently. The errors below are complex field differences on the mapped grid, normalized by the CGYRO field norm, with no amplitude or phase fit. [CGYRO deck](/system/user/publicwork/volkmann/stable-cgyro.vqmUXb/cg-refined/history/input.cgyro) · [Gyaradax configuration](/system/user/publicwork/volkmann/stable-cgyro.vqmUXb/cg-refined/fine.config.json) · [Comparison driver](/system/user/publicwork/volkmann/stable-cgyro.vqmUXb/probe.py)
+## A charge constraint on the centered rows
 
-| CGYRO time | Relative error in φ | Relative error in A∥ |
-|---|---:|---:|
-| 1 (restart) | 0.08% | 0.59% |
-| 2 | 1.75% | 1.82% |
-| 3 | 4.67% | 2.26% |
+Write $\rho f$ for the local gyroaveraged charge moment in the field solve and $u_s=(Z_s/T_s)F_{Ms}J_{0s}$. Then $e=u/\rho u$ carries unit charge and $Pf=e\rho f$ is the orthogonal projection onto that response in the kinetic quadrature norm. For $f_n=(I-P)f$, the native damping $D$ produces charge $\rho D f_n$. A correction must carry the opposite charge. Its minimum-norm value is $-e\rho D f_n$, since any other correction with the same charge adds an orthogonal neutral component. The resulting operator is
 
-At time 3 the potential norms had fallen to 50.4% and 50.5% of the CGYRO restart norm in Gyaradax and CGYRO, respectively. The mapped perpendicular wavenumber agreed with CGYRO’s central-harmonic geometry and the circular reconstruction across eight harmonics to 1.5 parts per million. An independent driven case checked the frequency sign, with converted CGYRO ω = +0.8911 and Gyaradax ω = +0.9026. [Field history](/system/user/publicwork/volkmann/stable-cgyro.vqmUXb/comparison.csv) · [Geometry](/system/user/publicwork/volkmann/stable-cgyro.vqmUXb/geometry.json) · [Driven CGYRO log](/system/user/publicwork/galletti/git/cgyro_study/em/cgyro-compare/runs/phys/v_k0.5_b0.004_nf2_xi96/out.cgyro.freq) · [Gyaradax eigenvalues](/system/user/publicwork/galletti/git/cgyro_study/em/cgyro-compare/gyx/eig.jsonl)
+$$
+D_c = D-PD(I-P), \qquad \rho D_c(I-P)=0, \qquad D_cP=DP .
+$$
 
-The control validates the early trajectory. By time 20 the potential norms were about 1.3% of the restart norm, and the relative errors reached 34% in φ and 133% in A∥. Doubling CGYRO’s velocity resolution alone changed its final A∥ by 92% of the refined norm. A matched early-time restart at the finite ballooning angle of `3559` remains open. [Decay curves](/system/user/publicwork/volkmann/stable-cgyro.vqmUXb/stable-comparison.png)
+The input projection uses the local geometry at each stencil neighbor. The output projection uses the receiving cell. The prototype applies this constraint on nonzonal centered five-point rows and retains the one-sided open-end updates. This is an ungated linear diagnostic. The companion investigation found sizable changes in nonlinear fluxes for ungated F2 variants with its end treatment.
 
-## Why the fast mode grows
+For a constant-coefficient periodic interior, let $D=-A$ for a parallel Fourier harmonic, where $A$ is a nonnegative damping multiplier. Quasineutrality gives the energy conjugate $rPf+(I-P)f$ with $r\ge1$. Setting $X=A^{1/2}Pf$ and $Y=A^{1/2}(I-P)f$ gives the corrected damping work
 
-At 32 parallel points per turn, GKW and Gyaradax reproduce the same fast mode, with growth γ ≈ +2.607 and frequency ω ≈ −56.61 in GKW units. Stock CGYRO selects a slow mode on the matched three-turn chain. Three controls locate the source of the fast growth. [GKW reference](/system/user/galletti/git/gkw-issue201/run/test_3559_off/time.dat) · [Gyaradax reference](/system/user/publicwork/volkmann/issue201.I85RLq/issue201/growth-summary.txt) · [CGYRO rates](/system/user/publicwork/volkmann/issue201-code-comparison.iZz2N9/cgyro-rates.csv)
+$$
+-r\|X\|^2-\|Y\|^2-\mathrm{Re}\langle Y,X\rangle
+= -\|Y+X/2\|^2-(r-1/4)\|X\|^2\le0 .
+$$
 
-- **Free-energy budget.** The interior fourth-difference stencil damps electrons and ions at different speeds. This disrupts cancellation between their charge moments. On the fast mode the stencil contributes −0.345 through the distribution and +2.639 through the electrostatic field, supplying +2.294 of the +2.607 growth. The first and last two stencil rows contribute negligibly on this mode. [Energy budget](/system/user/publicwork/volkmann/issue201-energy.8GiJIX/driven-0.002.csv) · [Interior and end-row work](/system/user/publicwork/volkmann/issue201-parallel-balance.stY1l8/interior.csv)
-- **Matched restart.** Removing only the stencil-generated charge from the charge-neutral part of the distribution takes the free-energy amplitude from 1 to 0.00036 after 16 time units. The native restart reaches 1.3 × 10¹⁸. Halving the timestep reproduces the decay. Separate gradient controls show that the density drive through φ sustains the phase relation that lets the stencil do positive work. [Restart comparison](/system/user/publicwork/volkmann/issue201-restart.mnteGy/summary.txt) · [Gradient controls](/system/user/publicwork/volkmann/issue201-phase.ilapQ3/phase-0.002.csv) · [Phase budget](/system/user/publicwork/volkmann/issue201-phase.ilapQ3/original-phase-budget.csv)
-- **Parallel refinement.** Tracking the same eigenvector at fixed velocity resolution gives γ = +0.254 at 38 points per turn and −0.132 at 39, where the electric stencil work changes sign. Swapping only the dissipation’s inverse-grid-spacing factor between those two grids reverses stability on both. [Tracked mode](/system/user/publicwork/volkmann/issue201-refinement.GUo30C/refinement.csv) · [Fixed-grid controls](/system/user/publicwork/volkmann/issue201-crossover.sX8Lfm/fixed-grid.csv)
+Variable geometry and the open ends remain outside this proof.
 
-## Why characteristic damping failed
+## What the matched runs establish
 
-For the three-turn `3559` comparison we matched the signed outboard-midplane radial wavenumber with CGYRO `PX0=-0.2273901`. This reduced the relative difference in the perpendicular wavenumber profiles from 52.4% to 1.35%. The table compares the CGYRO mode to the same Gyaradax slow branch followed continuously from native to characteristic damping. To express CGYRO rates in GKW units on this deck, multiply by \(1.9732662/\sqrt{2}\) and reverse the frequency sign. Each overlap is the magnitude of the normalized complex inner product of field profiles on the common angular interval. [Matched deck](/system/user/publicwork/volkmann/issue201-code-comparison.iZz2N9/mapped_nr3/input.cgyro) · [Geometry comparison](/system/user/publicwork/volkmann/issue201-code-comparison.iZz2N9/geometry.py) · [Branch continuation](/system/user/publicwork/volkmann/issue201-characteristic.h2ZR2P/iter-32-slow.csv)
+All rates below use GKW time units and frequency sign, $\lambda=\gamma+i\omega$. The CGYRO calculation matches the signed midplane radial wavenumber and the three-turn domain. Converting its rates uses the factor $1.9732662/\sqrt{2}$ and reverses the frequency sign. Field overlaps are normalized complex inner products in magnitude, evaluated separately for each field on the common angular interval.
 
-| Three-turn slow mode | γ | ω | φ overlap with CGYRO | A∥ overlap with CGYRO |
-|---|---:|---:|---:|---:|
-| Stock CGYRO | +0.14609 | −0.39447 | 1 | 1 |
-| Native Gyaradax | +0.07561 | −0.49788 | 0.967 | 0.979 |
-| Gyaradax with characteristic damping | −0.05204 | −0.38097 | 0.180 | 0.986 |
+| Slow mode | Points per turn | Growth γ | Frequency ω | φ overlap with CGYRO | A∥ overlap |
+|---|---:|---:|---:|---:|---:|
+| CGYRO reference | 32 | 0.14609 | −0.39447 | 1 | 1 |
+| Native Gyaradax | 32 | 0.07561 | −0.49788 | 0.967 | 0.979 |
+| Corrected Gyaradax | 32 | 0.07748 | −0.49081 | 0.969 | 0.988 |
+| Corrected Gyaradax | 48 | 0.07544 | −0.49675 | 0.973 | 0.988 |
 
-The modified frequency moves closer to CGYRO and A∥ retains its shape, but the growth reverses sign and the φ overlap falls from 0.967 to 0.180. A separate eigensolve near the CGYRO rate also returned three decaying modes with φ overlaps of only 0.18–0.33. CGYRO reached time convergence on the matched grid. Its slow growth rate still depends on chain length, and the velocity quadratures and geometry models differ. [Mode measurements](/system/user/publicwork/volkmann/issue201-code-comparison.iZz2N9/modes.csv) · [Targeted eigensolve](/system/user/publicwork/volkmann/issue201-code-comparison.iZz2N9/target.log) · [Field profiles](/system/user/publicwork/volkmann/issue201-code-comparison.iZz2N9/comparison.png) · [Chain-length scan](/system/user/publicwork/volkmann/issue201-code-comparison.iZz2N9/cgyro-rates.csv)
+Two different continuations distinguish suppression of the fast artifact from the slow-rate discrepancy.
 
-Two other controls constrain a repair. Changing only the stencil’s charge response also stabilized both fast modes and reversed slow-mode growth. Adding a sixth difference at coefficient 0.25 suppressed both measured fast modes while shifting native slow-mode growth by 0.114% on the original mesh. Its coefficient and end treatment were empirical, and the combined stencil still admits positive free-energy work. [Charge-response control](/system/user/publicwork/volkmann/issue201-parallel-balance.stY1l8/charge-slow.csv) · [Sixth-difference scan](/system/user/publicwork/volkmann/issue201-energy-stable.a64ES6/other-branches-32.csv) · [Boundary work test](/system/user/publicwork/volkmann/issue201-energy-stable.a64ES6/boundary-nullspace.csv)
+1. **Introduce the charge correction at fixed native damping.** The two fast branches start at +2.607 and +1.922. Both decay by 6% correction on the coarse grid. At full strength, a restart from the original fast checkpoint selects the slow mode with γ = 0.07749 and ω = −0.49077 at time 128. The slow mode remains growing on both grids. Earlier characteristic damping reversed its growth (−0.05204) and reduced its φ overlap to 0.180. [Branch continuations and direct eigenpair residuals](../investigations/issue-201/results/3559-charge-branches.csv)
+2. **Scale the entire corrected parallel dissipation.** On the 32-point grid the same slow branch gives γ = 0.07748 at nominal strength, 0.06041 at half and 0.03640 at one quarter. It enters decay at weak damping and reaches +0.00014 at zero. Adjacent kinetic eigenvector overlaps exceed 0.97 throughout. Reducing this coefficient widens the growth-rate discrepancy with the stated CGYRO reference. [Dissipation scan](../investigations/issue-201/results/3559-dissipation-scan.csv)
 
-The next comparison is a matched finite-angle restart, followed by velocity-grid and chain-length convergence of the slow reference. Judge a replacement parallel flux and its end treatment against both the disappearance of the fast branches and the slow mode’s growth, frequency and complex field profiles. The independent `base4_01` deck provides a cross-check before adopting a solver change. [Cross-deck restart](/system/user/publicwork/volkmann/issue201-energy-stable.a64ES6/base4-1-long.csv)
+The potential and vector potential have similar profiles across codes, but the slow rate depends on the three-turn boundary conditions and the velocity quadratures differ. A zero-angle decaying control agreed in both complex fields to within 2% one CGYRO time unit after restart. On the actual finite-angle checkpoint the transfer recovered φ and A∥ to within 0.8% on the finer Gyaradax velocity grid. Instantaneous field derivatives were much more sensitive to transfer and CGYRO timestep. The late-time growth and frequency give the more robust comparison. Saturated transport and quantitative slow-mode agreement remain open.
 
-## Reproduction on the lab hosts
+## Reproducing the linear checkpoint test
 
-The recovered `3559` input is a June 2026 port of the original attachment. It uses circular geometry, kinetic electrons, `kthrho=0.07`, `CHIN=1.8`, `beta=0.0035`, and parallel dissipation `disp_par=2` with `idisp=2`. It evolves the electrostatic potential and parallel vector potential. There is one radial harmonic over three poloidal turns, with 32 points per turn and a 32 × 8 velocity grid. The original rotation and parallel flow gradients were dropped in the surviving port. The bundle also has the separate `base4_01` reproducer for a follow-up regression check. [Bundle README](/system/user/publicwork/volkmann/issue201.I85RLq/issue201/README.md) · [Input provenance](/system/user/publicwork/volkmann/issue201.I85RLq/issue201/SOURCES.md)
-
-### GKW
-
-On a lab host with the GKW build and its MPI runtime available, run the recovered deck in a fresh directory. The wrapper derives eight ranks from the input. Use the double-precision build from `785a215` with conservative parallel dissipation off. The expected late-time rate is γ ≈ 2.60712 and ω ≈ −56.6134 in GKW units.
+From the repository root, with the FP64 JAX environment and a local copy of the restricted 3559 inputs, run
 
 ```bash
-issue_bundle=/system/user/publicwork/volkmann/issue201.I85RLq/issue201
-issue_runs=$(mktemp -d /system/user/publicwork/volkmann/issue201-repro.XXXXXX)
-gkw_bin=/system/user/galletti/git/gkw-issue201/run/gkw_scorpion-DP_785a215-dirty.x
-issue_python=/system/apps/userenv/volkmann/jax_env/bin/python
-
-mkdir "$issue_runs/gkw-3559"
-cp "$issue_bundle/gkw/3559/input.dat" "$issue_runs/gkw-3559/"
-bash "$issue_bundle/scripts/run_gkw.sh" "$issue_runs/gkw-3559" "$gkw_bin"
-"$issue_python" "$issue_bundle/scripts/gkw_growth.py" "$issue_runs/gkw-3559"
+python -m scripts.issue201_charge_filter "$config" "$checkpoint" --grid "$exported_gkw_grid" \
+    --dt .002 --steps 8000 32000 64000
 ```
 
-The completed reference reached `t=60`. A later launch on `wasp` used `NTIME=1` and `NAVERAGE=50` and completed its requested interval at `t=0.10`. Open MPI also printed fabric warnings. Use the completed reference for comparison and check that a fresh run reaches late time before reading its rates. [Reference output](/system/user/galletti/git/gkw-issue201/run/test_3559_off/time.dat) · [Wasp MPI log](/system/user/publicwork/volkmann/issue201-gkw-wasp.Sampe0/3559/gkw.log)
-
-### Gyaradax
-
-Use the bundled `src-3559` snapshot (`95da48b` plus the GKW import patch) to reproduce the recorded GPU run. The patch is needed on that base to retain the finite ballooning angle and match GKW's zero perpendicular dissipation for the single-mode input. The bundled YAML already points to the exported GKW grid and specifies `chin: 1.8`, `disp_x: 0`, `disp_y: 0`, and the electromagnetic fields. The investigation branch starts from current `master`. Port and verify those import settings on this branch before using it for solver comparisons. [GPU config](/system/user/publicwork/volkmann/issue201.I85RLq/issue201/3559.yaml) · [Import patch](/system/user/publicwork/volkmann/issue201.I85RLq/issue201/gyaradax/gkw_import_fix.patch)
-
-Continue in the same shell. Check `nvidia-smi` and set `issue_gpu` to a free GPU index. The recorded run used JAX 0.10.2 in FP64 on a H200 on `wasp`.
-
-```bash
-CUDA_VISIBLE_DEVICES="${issue_gpu:?set issue_gpu to a free GPU index}" \
-  XLA_PYTHON_CLIENT_PREALLOCATE=false PYTHONPATH="$issue_bundle/src-3559" \
-  "$issue_python" -B -P -m gyaradax.cli run "$issue_bundle/3559.yaml" \
-  --backend jax --dp --from-scratch --n-steps 8000 \
-  --output-dir "$issue_runs/gyaradax-3559"
-
-"$issue_python" "$issue_bundle/scripts/gyx_growth.py" "$issue_runs/gyaradax-3559"
-```
-
-Expect γ ≈ 2.60700 at `t=16` with `dt=0.002`. The recorded ω ≈ −56.61302 came from the potential overlap phase over one additional RK4 step. The growth helper reports γ only. [GPU measurements and frequency method](/system/user/publicwork/volkmann/issue201.I85RLq/issue201/growth-summary.txt)
-
-### CGYRO
-
-On `wasp`, use the lab's GPU-enabled GACODE environment and one MPI rank per run. Copy the two recorded decks into clean run directories and keep the GPU idle before starting. With the GPU-enabled `cgyro` launcher on `PATH`, run the following in the same shell.
-
-```bash
-issue_cgyro=/system/user/publicwork/volkmann/issue201-3559-cgyro.k1JmWL
-
-for nr in 4 16; do
-  mkdir "$issue_runs/cgyro-nr$nr"
-  cp "$issue_cgyro/gpu_nr$nr/input.cgyro" "$issue_runs/cgyro-nr$nr/"
-  CUDA_VISIBLE_DEVICES="${issue_gpu:?set issue_gpu to a free GPU index}" \
-    cgyro -e "$issue_runs/cgyro-nr$nr" -n 1 > "$issue_runs/cgyro-nr$nr/run.log" 2>&1
-done
-
-"$issue_python" \
-  /system/user/publicwork/galletti/git/cgyro_study/em/cgyro-compare/scripts/freq_summary.py \
-  "$issue_runs/cgyro-nr4" "$issue_runs/cgyro-nr16"
-```
-
-Both decks use `N_THETA=32`, `BOX_SIZE=1`, two fields, and `PX0=0.2864789`. Only `N_RADIAL` differs. With `BOX_SIZE=1` it gives the number of linked poloidal turns. Four and sixteen test sensitivity to chain length. Stock CGYRO also supports three turns for this linear deck. The matched three-turn deck used for the slow-mode test also adjusts `PX0` as described above. [Four-mode deck](/system/user/publicwork/volkmann/issue201-3559-cgyro.k1JmWL/gpu_nr4/input.cgyro) · [Sixteen-mode deck](/system/user/publicwork/volkmann/issue201-3559-cgyro.k1JmWL/gpu_nr16/input.cgyro)
+Use the saved fast-mode checkpoint (step 8000) and the matching 32-point-per-turn GKW grid. The output gives elapsed time, complex potential growth and frequency, the relative eigenmode residual in φ, and its norm. Add `--native` for the control. Run `python -m pytest -q tests/unit/test_issue201_charge_filter.py` for the synthetic linked-chain test. [Checkpoint driver](../scripts/issue201_charge_filter.py) · [Regression test](../tests/unit/test_issue201_charge_filter.py) · [Lab input locations](../investigations/issue-201/README.md#11-material-that-stays-on-the-lab-hosts)
