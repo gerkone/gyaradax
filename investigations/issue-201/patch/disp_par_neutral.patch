@@ -1,0 +1,485 @@
+diff --git a/docs/getting_started/configuration.md b/docs/getting_started/configuration.md
+index 397684a..87df2e2 100644
+--- a/docs/getting_started/configuration.md
++++ b/docs/getting_started/configuration.md
+@@ -101,6 +101,9 @@ The command-line flags of the same names (`--block-size`, `--snapshot-every`, `-
+ | `idisp` | 2 | velocity scaling of the dissipation, as GKW |
+ | `disp_par_conserve` | 0 | conservative parallel dissipation (1, 2 or 3, see {class}`~gyaradax.core.params.GKParams`) |
+ | `disp_par_conserve_kycut` | 0 | apply it only up to this $k_\theta\rho$ |
++| `disp_par_neutral` | false | charge-neutral parallel dissipation (single device), see [numerics](../numerics/index.md) |
++| `disp_par_neutral_end` | 2 | points next to an open chain end that keep the plain dissipation with `disp_par_neutral` |
++| `disp_par_neutral_alpha` | 0 | above 0: `disp_par_neutral` only where the skin term of Ampere's law exceeds this value times $k_\perp^2$ (electromagnetic runs only); 0: everywhere |
+ 
+ ### Electromagnetic fields
+ 
+diff --git a/docs/numerics/index.md b/docs/numerics/index.md
+index 0f3549e..2eff8ec 100644
+--- a/docs/numerics/index.md
++++ b/docs/numerics/index.md
+@@ -89,6 +89,8 @@ The mirror term IV uses the fourth-order central difference in $v_\parallel$ wit
+ ([Candy et al. 2016](https://doi.org/10.1016/j.jcp.2016.07.039)): it removes from
+ the dissipated distribution the components that source the field equations, which suppresses a low-$k_y$ numerical instability of electromagnetic runs reported for GKW (GKW issue 201).
+ 
++`disp_par_neutral` (off by default, not in GKW, single device; the CUDA backend computes the term in JAX) is a second variant. With $D$ the plain parallel dissipation, $u = (Z/T) J_0 F_M$ and $\rho[x]$ the gyro-averaged charge of $x$ summed over species, $f$ is split into its charge-carrying part $P f = u\,\rho[f]/\rho[u]$ and the rest, and the dissipation becomes $D f - P D (f - P f)$. The charge made by dissipating the charge-free part of $f$ is removed, so that part does no work on the potential; the charge-carrying part is dissipated as before. The `disp_par_neutral_end` points (default 2) next to an open end of a $k_x$ chain keep the plain dissipation, which is the boundary condition there. The option costs one more parallel stencil per right-hand side.
++
+ ## Nonlinear term
+ 
+ Term III is pseudospectral, as in GKW `non_linear_terms.F90`. The derivatives $ik_x\hat\chi$, $ik_y\hat\chi$, $ik_x\hat g$, $ik_y\hat g$ are transformed to a zero-padded real-space grid of `mrad` x `mphi` points (3/2 rule), multiplied and transformed back, and only the retained modes are kept. The FFT lengths, the packing of two derivatives into one transform and the FP32 option are described in {doc}`../performance/index`. They change the result only at round-off.
+@@ -144,7 +146,7 @@ Choices that differ:
+ | data layout | sparse matrix of the linear operator, MPI decomposition over species, $s$ and velocity space | dense arrays, operator applied as stencils, sharding over species, $v_\parallel$, $\mu$ |
+ | nonlinear FFTs | FP64, four inverse transforms | FP32 by default, two packed inverse transforms on CUDA |
+ | linear normalisation | one global factor by default | every connected kx chain of every $k_y$ separately |
+-| parallel dissipation | plain upwind | plain upwind, optionally conservative (`disp_par_conserve`) |
++| parallel dissipation | plain upwind | plain upwind, optionally conservative (`disp_par_conserve`) or charge-neutral (`disp_par_neutral`) |
+ | collision CFL | largest single matrix element | summed stencil diagonal (about 1.5x tighter) |
+ | EM fluxes | separate files for $A_\parallel$ and $B_\parallel$ | one summed triple per species |
+ | geometry default of `compute_geometry` | s-α | circular (`compute_geometry_from_input` keeps GKW's s-α) |
+diff --git a/gyaradax/backends/__init__.py b/gyaradax/backends/__init__.py
+index 703fd71..24c6c25 100644
+--- a/gyaradax/backends/__init__.py
++++ b/gyaradax/backends/__init__.py
+@@ -55,6 +55,9 @@ def create_ops(
+         log.info("Backend: JAX%s%s", z2z_str, mp_str)
+         return JAXOps(pre, use_z2z=use_z2z, mixed_precision=mixed_precision, mesh=mesh)
+ 
++    if "dneu_w" in pre and mesh is not None:
++        raise NotImplementedError("disp_par_neutral runs on a single device only")
++
+     if backend in ("cuda", "auto"):
+         has_gpu = any(d.platform == "gpu" for d in jax.devices())
+ 
+diff --git a/gyaradax/backends/_cuda.py b/gyaradax/backends/_cuda.py
+index 5d23fd7..6f90e51 100644
+--- a/gyaradax/backends/_cuda.py
++++ b/gyaradax/backends/_cuda.py
+@@ -21,6 +21,7 @@ from jax.sharding import PartitionSpec
+ 
+ import gyaradax.operators.stencils as stencils
+ import gyaradax.sharding as sharding
++from gyaradax.backends._jax import disp_neutral_term
+ from gyaradax.backends.ops import SolverOps, warn_once
+ from gyaradax.core.state import GKPre
+ from gyaradax.operators.collisions import (
+@@ -821,6 +822,9 @@ class CUDAOps(SolverOps):
+         if collisions_on(params, pre) and not fuse:
+             coll = self._collisions(dg, params, pre)
+             extra = coll if extra is None else extra + coll
++        if "dneu_w" in pre:
++            neu = disp_neutral_term(dg, pre, self.pre)
++            extra = neu if extra is None else extra + neu
+         ds = params.linear_arith == "ds"
+         if ds:
+             args, attrs = self._ds_call(dg, phi, pre, fuse)
+@@ -972,6 +976,9 @@ class CUDAOps(SolverOps):
+         if collisions_on(params, pre) and not coll_done:
+             f_phys = physical_f() if f_phys is None else f_phys
+             rhs = rhs + self._collisions(f_phys, params, pre)
++        if "dneu_w" in pre:
++            f_phys = physical_f() if f_phys is None else f_phys
++            rhs = rhs + disp_neutral_term(f_phys, pre, self.pre)
+         return rhs
+ 
+     def linear_rhs(
+diff --git a/gyaradax/backends/_jax.py b/gyaradax/backends/_jax.py
+index bd73be9..551f8f0 100644
+--- a/gyaradax/backends/_jax.py
++++ b/gyaradax/backends/_jax.py
+@@ -86,6 +86,32 @@ class _StencilTable:
+         return self.tab[..., s_idx, self.par_class, i]
+ 
+ 
++def disp_neutral_term(f: jnp.ndarray, pre, maps) -> jnp.ndarray:
++    """Term of ``disp_par_neutral``: ``-e_out rho[D[f - e_in rho[f]]]``.
++
++    ``D`` is the plain parallel dissipation and ``rho`` the gyro-averaged charge, summed
++    over velocity space and, for a 6D ``f``, over species.
++
++    Args:
++        f: Physical distribution, (nv, nmu, ns, nkx, nky) with an optional leading species axis.
++        pre: Holds ``s_disp_neutral_tab``, ``dneu_w``, ``dneu_ein`` and ``dneu_eout``.
++        maps: Holds ``s_shift``, ``kx_shift``, ``valid_shift`` and ``par_stencil_class``.
++
++    Returns:
++        The term, same shape as ``f``.
++    """
++    axes = tuple(range(f.ndim - 3))
++    w = pre["dneu_w"]
++    x = f if "dneu_f1" in pre else f - pre["dneu_ein"] * jnp.sum(w * f, axis=axes, keepdims=True)
++    tab = _StencilTable(pre["s_disp_neutral_tab"], maps["par_stencil_class"])
++    ky_idx = jnp.reshape(jnp.arange(f.shape[-1], dtype=jnp.int32), (1, 1, -1))
++    d = jnp.zeros_like(f)
++    for i in range(_PAR_TAP_LO, _PAR_TAP_HI):
++        shifted = x[..., maps["s_shift"][i], maps["kx_shift"][i], ky_idx]
++        d = d + _mul_real(tab[i], jnp.where(maps["valid_shift"][i], shifted, 0.0))
++    return -pre["dneu_eout"] * jnp.sum(w * d, axis=axes, keepdims=True)
++
++
+ @jax.tree_util.register_pytree_node_class
+ class JAXOps(SolverOps):
+     """Pure JAX implementation of the solver operations; differentiable.
+@@ -556,6 +582,21 @@ class JAXOps(SolverOps):
+         pre: GKPre,
+         apar: jnp.ndarray | None = None,
+         bpar: jnp.ndarray | None = None,
++    ) -> jnp.ndarray:
++        out = self._linear_rhs_species(df, phi, geometry, params, pre, apar=apar, bpar=bpar)
++        if "dneu_w" in pre:
++            out = out + disp_neutral_term(df, pre, self.pre)
++        return out
++
++    def _linear_rhs_species(
++        self,
++        df: jnp.ndarray,
++        phi: jnp.ndarray,
++        geometry: Dict[str, jnp.ndarray],
++        params: GKParams,
++        pre: GKPre,
++        apar: jnp.ndarray | None = None,
++        bpar: jnp.ndarray | None = None,
+     ) -> jnp.ndarray:
+         # stencils coupling velocity points run on the shards with halos (sharded runs only)
+         extra: dict[str, Any] = {}
+diff --git a/gyaradax/core/params.py b/gyaradax/core/params.py
+index 1188283..bb84991 100644
+--- a/gyaradax/core/params.py
++++ b/gyaradax/core/params.py
+@@ -46,6 +46,18 @@ class GKParams:
+             Poisson moment, 3 removes one ``|vpar|``-weighted moment (as CGYRO).
+         disp_par_conserve_kycut: Apply the conservative projection only to modes
+             with ``0 < krho * kthnorm <= kycut``; ``<= 0`` applies it to every ky.
++        disp_par_neutral: Charge-neutral parallel dissipation. The charge that the
++            parallel dissipation makes from the charge-free part of ``f`` is removed;
++            the points next to an open chain end keep the plain dissipation.
++        disp_par_neutral_end: Number of points next to an open chain end that keep
++            the plain dissipation with ``disp_par_neutral``.
++        disp_par_neutral_alpha: With a value above 0, ``disp_par_neutral`` acts only at
++            the points where the skin term of Ampere's law exceeds this value times
++            ``k_perp^2``; electrostatic runs then keep the plain dissipation. 0 applies
++            it everywhere.
++        disp_par_neutral_variant: Experimental variants of ``disp_par_neutral``, comma
++            separated: ``f1`` projects the output only, ``smooth`` replaces the alpha
++            limit by the weight ``alpha_A / (alpha_A + disp_par_neutral_alpha)``.
+         drive_scale: Scale of the gradient drives (Terms V and VIII); keep at 1.
+         norm_eps: Floor of the per-ky mode amplitude in the normalisation.
+         non_linear: Include the ExB nonlinearity (Term III).
+@@ -127,6 +139,10 @@ class GKParams:
+     idisp: int = 2
+     disp_par_conserve: int = 0
+     disp_par_conserve_kycut: float = 0.0
++    disp_par_neutral: bool = False
++    disp_par_neutral_end: int = 2
++    disp_par_neutral_alpha: float = 0.0
++    disp_par_neutral_variant: str = ""
+     drive_scale: float = 1.0
+     norm_eps: float = 1.0e-14
+     non_linear: bool = False
+@@ -245,6 +261,10 @@ class GKParams:
+         "idisp",
+         "disp_par_conserve",
+         "disp_par_conserve_kycut",
++        "disp_par_neutral",
++        "disp_par_neutral_end",
++        "disp_par_neutral_alpha",
++        "disp_par_neutral_variant",
+         "drive_scale",
+         "norm_eps",
+         "cfl_safety",
+@@ -545,6 +565,10 @@ def gkparams_from_config(config: Any, **overrides: Any) -> GKParams:
+         "disp_par_conserve_kycut": float(
+             getattr(solver_cfg, "disp_par_conserve_kycut", 0.0)
+         ),
++        "disp_par_neutral": bool(getattr(solver_cfg, "disp_par_neutral", False)),
++        "disp_par_neutral_end": int(getattr(solver_cfg, "disp_par_neutral_end", 2)),
++        "disp_par_neutral_alpha": float(getattr(solver_cfg, "disp_par_neutral_alpha", 0.0)),
++        "disp_par_neutral_variant": str(getattr(solver_cfg, "disp_par_neutral_variant", "")),
+         "non_linear": bool(getattr(solver_cfg, "non_linear", False)),
+         "finit": str(getattr(solver_cfg, "finit", "cosine2")),
+         "amp_init": float(getattr(solver_cfg, "amp_init", 1.0e-4)),
+diff --git a/gyaradax/operators/precompute.py b/gyaradax/operators/precompute.py
+index c0a2a82..3875dbb 100644
+--- a/gyaradax/operators/precompute.py
++++ b/gyaradax/operators/precompute.py
+@@ -232,6 +232,56 @@ def _stencil_class_tables(upar, abs_par, term7_fac, disp_par, sgr_dist):
+     return s_upar_tab, s_t7_tab, s_disp_tab
+ 
+ 
++def _neutral_on(params) -> bool:
++    # with an alpha limit the option needs A_par; electrostatic runs keep the plain rows
++    return params.disp_par_neutral and (params.nlapar or params.disp_par_neutral_alpha <= 0.0)
++
++
++def _disp_neutral_tables(geometry, params, sp, s_disp_tab, bn, kinetic):
++    """Tables of the charge-neutral parallel dissipation ``params.disp_par_neutral``.
++
++    With ``D`` the plain parallel dissipation (``s_disp_neutral_tab``), ``u = (Z / T) J0 F_M``
++    and the gyro-averaged charge ``rho[x] = sum_species sum_v w x``, the right-hand side
++    gains ``-e_out rho[D[f - e_in rho[f]]]``. ``e_in = u / rho[u]``; ``e_out`` equals
++    ``e_in`` except at the ``disp_par_neutral_end`` points next to an open chain end,
++    where it is zero.
++
++    Args:
++        geometry: Holds ``intmu``, ``intvp``, ``ixminus`` and ``ixplus``.
++        params: Run parameters (``signz``, ``tmp``, ``de``, ``disp_par_neutral_end``).
++        sp: Species tables with ``bessel`` and ``fmaxwl``.
++        s_disp_tab: Stencil table of the plain parallel dissipation.
++        bn: Magnetic field strength along ``s``.
++        kinetic: True for 6D tables with a leading species axis.
++
++    Returns:
++        Dict with ``s_disp_neutral_tab``, ``dneu_w``, ``dneu_ein`` and ``dneu_eout``.
++    """
++    lead = (1,) if kinetic else ()
++
++    def col(x):
++        x = jnp.atleast_1d(jnp.asarray(x, dtype=jnp.float64))
++        return x.reshape((-1, 1, 1, 1, 1, 1)) if kinetic else x[0]
++
++    z, tmp, de = col(params.signz), col(params.tmp), col(params.de)
++    intmu_p = jnp.asarray(geometry["intmu"], dtype=jnp.float64).reshape(lead + (1, -1, 1, 1, 1))
++    intvp_p = jnp.asarray(geometry["intvp"], dtype=jnp.float64).reshape(lead + (-1, 1, 1, 1, 1))
++    bn_p = jnp.reshape(bn, lead + (1, 1, -1, 1, 1))
++    bes, fm = sp["bessel"], sp["fmaxwl"]
++    w = z * de * bn_p * intmu_p * intvp_p * bes
++    u = z / tmp * bes * fm
++    axes = (0, 1, 2) if kinetic else (0, 1)
++    e_in = u / jnp.maximum(jnp.sum(w * u, axis=axes, keepdims=True), EPS)
++    ns = int(bn_p.shape[-3])
++    s_i = jnp.arange(ns).reshape(-1, 1, 1)
++    left = jnp.asarray(geometry["ixminus"])[None] < 0
++    right = jnp.asarray(geometry["ixplus"])[None] < 0
++    n_end = int(params.disp_par_neutral_end)
++    near = (left & (s_i < n_end)) | (right & (s_i >= ns - n_end))
++    e_out = e_in * jnp.where(near, 0.0, 1.0)
++    return {"s_disp_neutral_tab": s_disp_tab, "dneu_w": w, "dneu_ein": e_in, "dneu_eout": e_out}
++
++
+ def _compute_species_coeffs(
+     mas,
+     signz,
+@@ -551,6 +601,8 @@ def _linear_precompute_core(geometry: Dict[str, jnp.ndarray], params: GKParams)
+                            & (krho_g > 0.0)).astype(jnp.float64)
+                 sp["dproj_e0"] = sp["dproj_e0"] * ky_mask
+                 sp["dproj_e1"] = sp["dproj_e1"] * ky_mask
++        if _neutral_on(params):
++            sp.update(_disp_neutral_tables(geometry, params, sp, s_disp_tab, bn, True))
+         out.update(sp)
+         out.update(precompute_collisions(geometry, params))
+         out["geom_tensors"] = None
+@@ -743,6 +795,8 @@ def _linear_precompute_core(geometry: Dict[str, jnp.ndarray], params: GKParams)
+                            & (krho_g > 0.0)).astype(jnp.float64)
+                 sp["dproj_e0"] = sp["dproj_e0"] * ky_mask
+                 sp["dproj_e1"] = sp["dproj_e1"] * ky_mask
++        if _neutral_on(params):
++            sp.update(_disp_neutral_tables(geometry, params, sp, s_disp_tab, bn, False))
+         out.update(sp)
+         out.update(precompute_collisions(geometry, params))
+         out["geom_tensors"] = geom_tensors(geometry, params=params)
+@@ -783,6 +837,17 @@ def _linear_precompute_core(geometry: Dict[str, jnp.ndarray], params: GKParams)
+             out["g2f_vfac"] = -2.0 * signz_b * vthrat_b * vpgr_5
+             out["apar_chi_vfac"] = -2.0 * vthrat_b * vpgr_5
+ 
++    if "dneu_eout" in out and params.disp_par_neutral_alpha > 0.0:
++        k2 = out["kperp_sq"].reshape(out["apar_diag"].shape)
++        skin = out["apar_diag"] - k2
++        if "smooth" in params.disp_par_neutral_variant:
++            weight = skin / (skin + params.disp_par_neutral_alpha * k2)
++        else:
++            weight = jnp.where(skin > params.disp_par_neutral_alpha * k2, 1.0, 0.0)
++        out["dneu_eout"] = out["dneu_eout"] * weight
++    if "dneu_eout" in out and "f1" in params.disp_par_neutral_variant:
++        out["dneu_f1"] = jnp.ones(())
++
+     if params.linear_arith not in ("fp64", "ds"):
+         raise ValueError(f"linear_arith must be 'fp64' or 'ds', got {params.linear_arith!r}")
+     if params.linear_arith == "ds" and params.backend == "jax":
+diff --git a/tests/unit/test_disp_par_neutral.py b/tests/unit/test_disp_par_neutral.py
+new file mode 100644
+index 0000000..a262b9f
+--- /dev/null
++++ b/tests/unit/test_disp_par_neutral.py
+@@ -0,0 +1,185 @@
++"""Charge-neutral parallel dissipation (``disp_par_neutral``)."""
++
++from dataclasses import replace
++
++import jax
++import jax.numpy as jnp
++import numpy as np
++import pytest
++from omegaconf import OmegaConf
++
++from gyaradax.backends import create_ops
++from gyaradax.backends._jax import _PAR_TAP_HI, _PAR_TAP_LO, _StencilTable
++from gyaradax.core.jax_config import enable_x64
++from gyaradax.core.params import gkparams_from_config
++from gyaradax.geometry.geom import compute_geometry_from_config
++from gyaradax.operators.fields import _compute_fields
++from gyaradax.operators.precompute import linear_precompute
++from gyaradax.solver.eigenvalue import _slice_ky_geometry
++
++enable_x64()
++
++NS, NKX, NVPAR, NMU = 16, 3, 8, 4
++
++
++def _build(neutral: bool, kinetic: bool = True, disp_par: float = 1.0, end: int = 2, alpha: float = 0.0):
++    """Small electromagnetic chain with kinetic electrons, or its adiabatic-electron twin."""
++    one = (lambda a, b: [a, b]) if kinetic else (lambda a, b: a)
++    cfg = OmegaConf.create({
++        "run": {"name": "neutral"},
++        "solver": dict(dt=0.002, naverage=10, disp_par=disp_par, disp_vp=0.0, disp_x=0.0, disp_y=0.0,
++                       idisp=2, non_linear=False, adaptive_dt=False, finit="noise", n_steps=10,
++                       backend="jax", nlapar=kinetic, nlbpar=False, disp_par_neutral=neutral,
++                       disp_par_neutral_end=end, disp_par_neutral_alpha=alpha),
++        "physics": dict(rlt=one(6.2, 7.9), rln=one(5.4, 5.4), mas=one(1.0, 2.7232e-4),
++                        tmp=one(1.0, 0.9), de=one(1.0, 1.0), signz=one(1.0, -1.0), dgrid=1.0,
++                        tgrid=1.0, beta=0.0035 if kinetic else 0.0, betaprime=0.0),
++        "geometry": dict(geometry_model="circ", shat=2.357, q=3.1962, eps=0.253387),
++        "grid": dict(nvpar=NVPAR, nmu=NMU, ns=NS, nkx=NKX, nky=2, adiabatic_electrons=not kinetic,
++                     vpar_max=3.0, nperiod=1, krhomax=0.3, ikxspace=1),
++    })
++    params = gkparams_from_config(cfg, backend="jax", mixed_precision=False)
++    params = replace(params, non_linear=False)
++    geometry = compute_geometry_from_config(cfg)
++    pre = linear_precompute(geometry, params)
++    return params, geometry, pre, create_ops(pre, backend="jax", mixed_precision=False)
++
++
++def _noise(pre, kinetic: bool):
++    shape = ((2,) if kinetic else ()) + (NVPAR, NMU, NS, NKX, int(np.asarray(pre["ky_b"]).size))
++    k1, k2 = jax.random.split(jax.random.PRNGKey(0))
++    return jax.random.normal(k1, shape) + 1j * jax.random.normal(k2, shape)
++
++
++def _plain_dissipation(x, pre, ops):
++    tab = _StencilTable(pre["s_disp_neutral_tab"], ops.pre["par_stencil_class"])
++    ky_idx = jnp.reshape(jnp.arange(x.shape[-1], dtype=jnp.int32), (1, 1, -1))
++    d = jnp.zeros_like(x)
++    for i in range(_PAR_TAP_LO, _PAR_TAP_HI):
++        shifted = x[..., ops.pre["s_shift"][i], ops.pre["kx_shift"][i], ky_idx]
++        d = d + tab[i] * jnp.where(ops.pre["valid_shift"][i], shifted, 0.0)
++    return d
++
++
++def _rhs(ops, f, geometry, params, pre):
++    phi, apar, bpar = _compute_fields(f, geometry, params, pre)[:3]
++    return ops.linear_rhs(f, phi, geometry, params, pre, apar=apar, bpar=bpar)
++
++
++def test_default_is_off():
++    params, _, pre, _ = _build(False)
++    assert params.disp_par_neutral is False
++    assert "dneu_w" not in pre
++
++
++@pytest.mark.parametrize("kinetic", [True, False])
++def test_charge_of_the_dissipation(kinetic):
++    """The dissipation's charge is that of the dissipated charge-carrying part, away from open ends."""
++    params, geometry, pre, ops = _build(True, kinetic)
++    p0, g0, pre0, ops0 = _build(False, kinetic)
++    f = _noise(pre, kinetic)
++    axes = tuple(range(f.ndim - 3))
++    w, e_in, e_out = pre["dneu_w"], pre["dneu_ein"], pre["dneu_eout"]
++
++    def rho(x):
++        return jnp.sum(w * x, axis=axes)
++
++    term = _rhs(ops, f, geometry, params, pre) - _rhs(ops0, f, g0, p0, pre0)
++    pf = e_in * jnp.sum(w * f, axis=axes, keepdims=True)
++    inner = np.asarray(jnp.sum(e_out, axis=axes) != 0.0)
++    assert inner.any() and not inner[:, :, 1:].all()
++    got = np.asarray(rho(_plain_dissipation(f, pre, ops) + term))
++    want = np.asarray(rho(_plain_dissipation(pf, pre, ops)))
++    scale = np.abs(np.asarray(rho(_plain_dissipation(f, pre, ops)))).max()
++    assert np.abs(got - want)[inner].max() < 1e-10 * scale
++    # the two points next to an open end keep the plain rows
++    assert np.abs(np.asarray(term))[..., ~inner].max() == 0.0
++    assert np.abs(np.asarray(term)).max() > 1e-6 * scale
++
++
++def test_charge_carrying_part_is_untouched():
++    """A distribution of the charge-carrying shape sees the plain dissipation."""
++    params, geometry, pre, ops = _build(True)
++    p0, g0, pre0, ops0 = _build(False)
++    f = _noise(pre, True)
++    pf = pre["dneu_ein"] * jnp.sum(pre["dneu_w"] * f, axis=(0, 1, 2), keepdims=True)
++    a = np.asarray(_rhs(ops, pf, geometry, params, pre))
++    b = np.asarray(_rhs(ops0, pf, g0, p0, pre0))
++    assert np.abs(a - b).max() < 1e-10 * np.abs(b).max()
++
++
++def test_end_width_option():
++    """``disp_par_neutral_end`` sets how many points next to an open end keep the plain rows."""
++    params, _, pre, _ = _build(True)
++    _, _, wide, _ = _build(True, end=4)
++    off2 = np.asarray(jnp.sum(pre["dneu_eout"], axis=(0, 1, 2)) == 0.0)
++    off4 = np.asarray(jnp.sum(wide["dneu_eout"], axis=(0, 1, 2)) == 0.0)
++    assert params.disp_par_neutral_end == 2
++    assert off2[:2].any() and not off2[2:NS - 2].any()
++    assert off4[:4].any() and not off4[4:NS - 4].any()
++    assert (off4 | ~off2).all() and off4.sum() == 2 * off2.sum()
++
++
++def test_alpha_limit():
++    """``disp_par_neutral_alpha`` keeps the projection where the skin term of Ampere's law is large."""
++    _, _, pre, _ = _build(True, alpha=10.0)
++    _, _, full, _ = _build(True)
++    k2 = pre["kperp_sq"].reshape(pre["apar_diag"].shape)
++    inside = np.asarray(pre["apar_diag"] - k2 > 10.0 * k2)
++    on = np.asarray(jnp.sum(jnp.abs(pre["dneu_eout"]), axis=(0, 1, 2)) > 0)
++    on_full = np.asarray(jnp.sum(jnp.abs(full["dneu_eout"]), axis=(0, 1, 2)) > 0)
++    assert (on == (on_full & inside)).all()
++    assert 0 < on.sum() < on_full.sum()
++    # electrostatic runs keep the plain rows
++    assert "dneu_w" not in _build(True, kinetic=False, alpha=10.0)[2]
++
++
++def test_sharded_run_refuses():
++    _, _, pre, _ = _build(True)
++    with pytest.raises(NotImplementedError):
++        create_ops(pre, backend="cuda", mesh=object())
++
++
++def _chain_spectrum(neutral: bool):
++    """Dense spectrum of a three-kx electromagnetic chain at finite theta0 (test grid, 16 x 8 x 2)."""
++    ns, nkx, nvpar, nmu = 16, 3, 8, 2
++    cfg = OmegaConf.create({
++        "run": {"name": "chain"},
++        "solver": dict(dt=0.002, naverage=10, disp_par=2.0, disp_vp=0.0, disp_x=0.0, disp_y=0.0,
++                       idisp=2, non_linear=False, adaptive_dt=False, finit="noise", n_steps=10,
++                       backend="jax", nlapar=True, nlbpar=False, disp_par_neutral=neutral),
++        "physics": dict(rlt=[6.2, 7.9], rln=[5.4, 5.4], mas=[1.0, 2.7232e-4], tmp=[1.0, 0.9],
++                        de=[1.0, 1.0], signz=[1.0, -1.0], dgrid=1.0, tgrid=1.0, beta=0.0035,
++                        betaprime=0.0),
++        "geometry": dict(geometry_model="circ", shat=2.357, q=3.1962, eps=0.253387),
++        "grid": dict(nvpar=nvpar, nmu=nmu, ns=ns, nkx=nkx, nky=2, adiabatic_electrons=False,
++                     vpar_max=3.0, nperiod=1, krhomax=0.07, ikxspace=1),
++    })
++    params = gkparams_from_config(cfg, backend="jax", mixed_precision=False)
++    params = replace(params, non_linear=False)
++    geometry = compute_geometry_from_config(cfg)
++    geometry["kxrh"] = geometry["kxrh"] - 0.304404
++    geometry = _slice_ky_geometry(geometry, 1)
++    pre = linear_precompute(geometry, params)
++    ops = create_ops(pre, backend="jax", mixed_precision=False)
++    shape = (2, nvpar, nmu, ns, nkx, 1)
++
++    def rhs(v):
++        g = v.reshape(shape)
++        phi, apar, bpar = ops.compute_fields(g, geometry, params, pre)
++        out = ops.linear_rhs_from_g(g, phi, geometry, params, pre, apar=apar, bpar=bpar)
++        return out.reshape(-1)
++
++    n = int(np.prod(shape))
++    mat = jax.lax.map(rhs, jnp.eye(n, dtype=jnp.complex128), batch_size=256).T
++    return np.linalg.eigvals(np.asarray(mat))
++
++
++def test_fast_mode_is_removed():
++    """The grid-scale electromagnetic mode of the plain scheme is gone; the smooth mode stays."""
++    plain = _chain_spectrum(False)
++    neutral = _chain_spectrum(True)
++    smooth = plain[np.abs(plain.imag) < 5.0].real.max()
++    assert plain.real.max() > 1.0
++    assert neutral.real.max() < 0.2
++    assert abs(neutral.real.max() - smooth) < 0.1 * smooth

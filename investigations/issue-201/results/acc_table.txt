@@ -1,0 +1,158 @@
+Kitg_collisionless_f1a0  18x1  dp1.0  rho    314 | fast none  | smooth 0.0193-0.721i
+Kitg_collisionless_f1a100  18x1  dp1.0  rho    310 | fast none  | smooth 0.0613-0.699i
+Kitg_collisionless_f2a0  18x1  dp1.0  rho    316 | fast none  | smooth 0.0073-0.739i
+Kitg_collisionless_pl  18x1  dp1.0  rho    310 | fast none  | smooth 0.0613-0.699i
+Kitg_mid_flux_f1a0    18x1  dp1.0  rho    474 | fast none  | smooth -0.1447-0.234i
+Kitg_mid_flux_f1a100  18x1  dp1.0  rho    474 | fast none  | smooth 0.0010-1.306i shift +0.0 % / +0.0 %
+Kitg_mid_flux_f2a0    18x1  dp1.0  rho    474 | fast none  | smooth -0.1444-0.234i
+Kitg_mid_flux_pl      18x1  dp1.0  rho    474 | fast none  | smooth 0.0010-1.306i shift +0.0 % / +0.0 %
+
+Ktem_high_flux_f1a0   18x1  dp1.0  rho   1007 | fast none  | smooth 1.3325+5.708i
+Ktem_high_flux_f1a100  18x1  dp1.0  rho   1007 | fast none  | smooth 1.2436+5.673i
+Ktem_high_flux_f2a0   18x1  dp1.0  rho   1007 | fast none  | smooth 1.3086+5.687i
+Ktem_high_flux_pl     18x1  dp1.0  rho   1007 | fast none  | smooth 1.2436+5.673i
+Ktem_low_flux_f1a0    18x1  dp1.0  rho    327 | fast none  | smooth -0.0132+1.197i shift -122.2 % / +3.0 %
+Ktem_low_flux_f1a100  18x1  dp1.0  rho    327 | fast none  | smooth 0.0593+1.163i shift +0.0 % / +0.0 %
+Ktem_low_flux_f2a0    18x1  dp1.0  rho    327 | fast none  | smooth -0.0166+1.190i shift -127.9 % / +2.4 %
+Ktem_low_flux_pl      18x1  dp1.0  rho    327 | fast none  | smooth 0.0593+1.163i shift +0.0 % / +0.0 %
+
+base4_a0              36x5  dp1.0  rho   1582 | fast none  | smooth -0.0002+0.259i shift +124.4 % / -0.0 %
+base4_a100            36x5  dp1.0  rho   1582 | fast none  | smooth -0.0003+0.259i shift +269.5 % / -0.1 %
+base4_a1000           36x5  dp1.0  rho   1582 | fast none  | smooth -0.0003+0.259i shift +246.6 % / -0.2 %
+base4_a30             36x5  dp1.0  rho   1582 | fast none  | smooth -0.0001+0.259i shift +37.2 % / +0.0 %
+base4_a300            36x5  dp1.0  rho   1582 | fast none  | smooth -0.0003+0.259i shift +267.5 % / -0.1 %
+base4_f1a0            36x5  dp1.0  rho   1582 | fast none  | smooth -0.0002+0.259i shift +102.3 % / -0.0 %
+base4_f1a100          36x5  dp1.0  rho   1582 | fast none  | smooth -0.0004+0.259i shift +313.1 % / -0.1 %
+base4_f1s100          36x5  dp1.0  rho   1582 | fast none  | smooth -0.0002+0.259i shift +181.0 % / -0.1 %
+base4_pl              36x5  dp1.0  rho   1582 | fast 2.791 | smooth -0.0001+0.259i shift +0.0 % / +0.0 %
+base4_pl_dp2          36x5  dp2.0  rho   1995 | fast 2.771 | smooth 0.0015+0.265i shift -1812.8 % / +2.4 %
+base4_pl_dp4          36x5  dp4.0  rho   3977 | fast 2.549 | smooth 0.0022+0.269i shift -2671.4 % / +3.9 %
+base4_pl_dp8          36x5  dp8.0  rho   7898 | fast none  | smooth 0.0022+0.272i shift -2645.0 % / +4.9 %
+base4_pl_ns108       108x5  dp1.0  rho   4531 | fast none  | smooth 0.0000+0.259i shift +0.0 % / +0.0 %
+base4_pl_ns48         48x5  dp1.0  rho   2005 | fast 2.390 | smooth -0.0001+0.259i shift +0.0 % / +0.0 %
+base4_pl_ns72         72x5  dp1.0  rho   3015 | fast 0.778 | smooth -0.0001+0.259i shift +0.0 % / +0.0 %
+base4_s1              36x5  dp1.0  rho   1582 | fast none  | smooth -0.0002+0.259i shift +111.3 % / +0.0 %
+base4_s100            36x5  dp1.0  rho   1582 | fast none  | smooth -0.0002+0.259i shift +138.8 % / -0.0 %
+base4_s1000           36x5  dp1.0  rho   1582 | fast none  | smooth -0.0002+0.259i shift +185.8 % / -0.1 %
+base4_s30             36x5  dp1.0  rho   1582 | fast none  | smooth -0.0002+0.259i shift +90.2 % / +0.0 %
+base4_s300            36x5  dp1.0  rho   1582 | fast none  | smooth -0.0002+0.259i shift +183.2 % / -0.1 %
+
+d3559_a0              32x3  dp2.0  rho    558 | fast none  | smooth 0.0780+0.491i shift +3.2 % / -1.4 %
+d3559_a100            32x3  dp2.0  rho    558 | fast none  | smooth 0.0765+0.491i shift +1.2 % / -1.3 %
+d3559_a1000           32x3  dp2.0  rho    558 | fast 0.780 | smooth 0.0759+0.497i shift +0.4 % / -0.2 %
+d3559_a100_ns16       16x3  dp2.0  rho    291 | fast none  | smooth 0.0776+0.483i shift +6.2 % / -4.9 %
+d3559_a30             32x3  dp2.0  rho    558 | fast none  | smooth 0.0789+0.492i shift +4.4 % / -1.2 %
+d3559_a300            32x3  dp2.0  rho    558 | fast none  | smooth 0.0760+0.493i shift +0.5 % / -1.0 %
+d3559_a300_ns16       16x3  dp2.0  rho    291 | fast none  | smooth 0.0793+0.495i shift +8.6 % / -2.6 %
+d3559_a30_ns16        16x3  dp2.0  rho    291 | fast none  | smooth 0.0863+0.491i shift +18.1 % / -3.3 %
+d3559_f1a0            32x3  dp2.0  rho    558 | fast none  | smooth 0.0776+0.491i shift +2.6 % / -1.3 %
+d3559_f1a100          32x3  dp2.0  rho    558 | fast none  | smooth 0.0763+0.491i shift +1.0 % / -1.3 %
+d3559_f1s100          32x3  dp2.0  rho    558 | fast none  | smooth 0.0759+0.493i shift +0.3 % / -1.0 %
+d3559_pl              32x3  dp2.0  rho    558 | fast 2.607 | smooth 0.0756+0.498i shift +0.0 % / +0.0 %
+d3559_pl_dp4          32x3  dp4.0  rho   1114 | fast none  | smooth 0.0847+0.511i shift +12.1 % / +2.5 %
+d3559_pl_dp8          32x3  dp8.0  rho   2216 | fast none  | smooth 0.0905+0.520i shift +19.7 % / +4.5 %
+d3559_pl_ns16         16x3  dp2.0  rho    291 | fast 7.760 | smooth 0.0731+0.508i shift +0.0 % / +0.0 %
+d3559_pl_ns24         24x3  dp2.0  rho    423 | fast 5.716 | smooth 0.0734+0.498i shift +0.0 % / +0.0 %
+d3559_pl_ns48         48x3  dp2.0  rho    836 | fast none  | smooth 0.1715-0.167i shift +0.0 % / +0.0 %
+d3559_pl_ns64         64x3  dp2.0  rho   1114 | fast none  | smooth 0.0764+0.499i shift +0.0 % / +0.0 %
+d3559_s1              32x3  dp2.0  rho    558 | fast none  | smooth 0.0778+0.491i shift +2.9 % / -1.4 %
+d3559_s100            32x3  dp2.0  rho    558 | fast none  | smooth 0.0759+0.493i shift +0.3 % / -1.1 %
+d3559_s1000           32x3  dp2.0  rho    558 | fast none  | smooth 0.0763+0.495i shift +0.9 % / -0.6 %
+d3559_s30             32x3  dp2.0  rho    558 | fast none  | smooth 0.0761+0.492i shift +0.6 % / -1.2 %
+d3559_s300            32x3  dp2.0  rho    558 | fast none  | smooth 0.0761+0.493i shift +0.6 % / -0.9 %
+
+i201_a100             48x31 dp0.2  rho    978 | fast none  | smooth 0.0156+0.052i
+i201_a1000            48x31 dp0.2  rho    978 | fast none  | smooth 0.0158+0.052i
+i201_a30              48x31 dp0.2  rho    978 | fast none  | smooth 0.0156+0.052i
+i201_a300             48x31 dp0.2  rho    978 | fast none  | smooth 0.0155+0.051i
+i201_f1a100           48x31 dp0.2  rho    978 | fast none  | smooth 0.0156+0.052i
+i201_s100             48x31 dp0.2  rho    978 | fast none  | smooth 0.0158+0.052i
+
+i201nk5_a100_ns16     16x5  dp0.2  rho    449 | fast none  | smooth 0.0124+0.060i shift +27.5 % / +6.0 %
+i201nk5_a300_ns16     16x5  dp0.2  rho    449 | fast none  | smooth 0.0073+0.055i shift -25.3 % / -2.9 %
+i201nk5_a30_ns16      16x5  dp0.2  rho    449 | fast none  | smooth 0.0090+0.055i shift -7.9 % / -3.0 %
+i201nk5_pl            48x5  dp0.2  rho    803 | fast 5.601 | smooth 0.0159+0.052i shift +0.0 % / +0.0 %
+i201nk5_pl_dp1        48x5  dp1.0  rho    780 | fast 4.902 | smooth 0.0334+0.299i
+i201nk5_pl_dp2        48x5  dp2.0  rho    837 | fast 0.114 | smooth 0.0426+0.304i
+i201nk5_pl_dp4        48x5  dp4.0  rho   1672 | fast none  | smooth 0.0478+0.307i
+i201nk5_pl_dp8        48x5  dp8.0  rho   3313 | fast none  | smooth 0.0500+0.310i
+i201nk5_pl_ns128     128x5  dp0.2  rho   1912 | fast 3.732 | smooth 0.6507+3.455i shift +0.0 % / +0.0 %
+i201nk5_pl_ns16       16x5  dp0.2  rho    449 | fast 5.032 | smooth 0.0098+0.057i shift +0.0 % / +0.0 %
+i201nk5_pl_ns64       64x5  dp0.2  rho    998 | fast 5.502 | smooth 0.0160+0.051i shift +0.0 % / +0.0 %
+i201nk5_pl_ns96       96x5  dp0.2  rho   1445 | fast 4.788 | smooth 0.0595+0.679i shift +0.0 % / +0.0 %
+i201nk5_s100          48x5  dp0.2  rho    803 | fast none  | smooth 0.0158+0.052i shift -0.4 % / -0.1 %
+i201nk5_s100_ns16     16x5  dp0.2  rho    449 | fast none  | smooth 0.0100+0.057i shift +2.4 % / -0.5 %
+i201nk5_s30           48x5  dp0.2  rho    803 | fast none  | smooth 0.0158+0.052i shift -0.7 % / -0.2 %
+i201nk5_s300          48x5  dp0.2  rho    803 | fast none  | smooth 0.0159+0.052i shift -0.2 % / -0.0 %
+
+w005p16_a100          16x21 dp1.0  rho    401 | fast none  | smooth 0.0172+0.100i
+w005p16_a1000         16x21 dp1.0  rho    401 | fast none  | smooth 0.0314-0.130i
+w005p16_a30           16x21 dp1.0  rho    401 | fast none  | smooth 0.0173+0.100i
+w005p16_a300          16x21 dp1.0  rho    401 | fast none  | smooth 0.0172+0.101i
+w005p16_f1a0          16x21 dp1.0  rho    401 | fast none  | smooth 0.0173+0.101i
+w005p16_f1a100        16x21 dp1.0  rho    401 | fast none  | smooth 0.0290+0.014i
+w005p16_f1s100        16x21 dp1.0  rho    401 | fast none  | smooth 0.0242-0.010i
+w005p16_pl            16x21 dp1.0  rho    401 | fast 0.376 | smooth 0.0201-0.047i shift +0.0 % / +0.0 %
+w005p16_pl_dp2        16x21 dp2.0  rho    524 | fast 0.282 | smooth 0.0213-0.046i shift +6.3 % / -2.3 %
+w005p16_pl_dp4        16x21 dp4.0  rho   1041 | fast 0.031 | smooth 0.0237-0.042i shift +17.8 % / -9.6 %
+w005p16_pl_dp8        16x21 dp8.0  rho   2059 | fast none  | smooth 0.1621+1.772i
+w005p16_pl_ns32       32x21 dp1.0  rho    719 | fast 0.558 | smooth    -   
+w005p16_pl_ns64       64x21 dp1.0  rho   1393 | fast 0.389 | smooth 0.0210-0.045i shift +0.0 % / +0.0 %
+w005p16_pl_ns96       96x21 dp1.0  rho   2093 | fast none  | smooth 0.1190-0.522i shift +0.0 % / +0.0 %
+w005p16_s1            16x21 dp1.0  rho    401 | fast none  | smooth 0.0174+0.101i
+w005p16_s100          16x21 dp1.0  rho    401 | fast none  | smooth 0.0173+0.101i
+w005p16_s1000         16x21 dp1.0  rho    401 | fast none  | smooth 0.0172+0.101i
+w005p16_s30           16x21 dp1.0  rho    401 | fast none  | smooth 0.0173+0.101i
+w005p16_s300          16x21 dp1.0  rho    401 | fast none  | smooth 0.0186-0.025i shift -7.3 % / -47.2 %
+
+w005p32_a100          32x21 dp1.0  rho    719 | fast none  | smooth 0.0207-0.045i
+w005p32_a300          32x21 dp1.0  rho    719 | fast none  | smooth 0.0208-0.045i
+w005p32_s100          32x21 dp1.0  rho    719 | fast none  | smooth 0.0206-0.045i
+w005p32_s30           32x21 dp1.0  rho    719 | fast none  | smooth 0.0206-0.045i
+
+w01b1_a100            32x31 dp1.0  rho    784 | fast none  | smooth 0.0750-0.057i shift +0.8 % / +1.0 %
+w01b1_a30             32x31 dp1.0  rho    784 | fast none  | smooth 0.0743-0.055i shift -0.1 % / -1.0 %
+w01b1_a300            32x31 dp1.0  rho    784 | fast none  | smooth 0.0746-0.056i shift +0.2 % / +0.8 %
+w01b1_f1a100          32x31 dp1.0  rho    784 | fast none  | smooth 0.0750-0.056i shift +0.8 % / +1.0 %
+w01b1_pl              32x31 dp1.0  rho    784 | fast none  | smooth 0.0744-0.056i shift +0.0 % / +0.0 %
+w01b1_s1              32x31 dp1.0  rho    784 | fast none  | smooth 0.0743-0.056i shift -0.2 % / -0.7 %
+w01b1_s100            32x31 dp1.0  rho    784 | fast none  | smooth 0.0745-0.056i shift +0.1 % / +0.0 %
+w01b1_s30             32x31 dp1.0  rho    784 | fast none  | smooth 0.0744-0.056i shift -0.1 % / -0.3 %
+w01b1_s300            32x31 dp1.0  rho    784 | fast none  | smooth 0.0745-0.056i shift +0.1 % / +0.2 %
+
+w01b5_a100            32x31 dp1.0  rho    784 | fast none  | smooth 0.0597-0.111i shift -0.1 % / -1.1 %
+w01b5_a1000           32x31 dp1.0  rho    784 | fast none  | smooth 0.0567-0.112i shift -5.1 % / -0.0 %
+w01b5_a30             32x31 dp1.0  rho    784 | fast none  | smooth 0.0594-0.112i shift -0.6 % / -0.5 %
+w01b5_a300            32x31 dp1.0  rho    784 | fast none  | smooth 0.0588-0.113i shift -1.5 % / +0.1 %
+w01b5_f1a100          32x31 dp1.0  rho    784 | fast none  | smooth 0.0596-0.111i shift -0.2 % / -1.2 %
+w01b5_pl              32x31 dp1.0  rho    784 | fast 0.212 | smooth 0.0597-0.112i shift +0.0 % / +0.0 %
+w01b5_pl_dp2          32x31 dp2.0  rho   1033 | fast 0.075 | smooth 0.0591-0.114i shift -1.0 % / +1.0 %
+w01b5_pl_dp4          32x31 dp4.0  rho   2058 | fast none  | smooth 0.0580-0.115i shift -2.9 % / +2.5 %
+w01b5_s1              32x31 dp1.0  rho    784 | fast none  | smooth 0.0594-0.112i shift -0.6 % / -0.6 %
+w01b5_s100            32x31 dp1.0  rho    784 | fast none  | smooth 0.0592-0.112i shift -1.0 % / -0.5 %
+w01b5_s30             32x31 dp1.0  rho    784 | fast none  | smooth 0.0593-0.112i shift -0.7 % / -0.6 %
+w01b5_s300            32x31 dp1.0  rho    784 | fast none  | smooth 0.0590-0.112i shift -1.3 % / -0.3 %
+
+w025b1_a30            32x31 dp1.0  rho    964 | fast none  | smooth 0.2398-0.164i shift -0.0 % / +1.3 %
+w025b1_f1a100         32x31 dp1.0  rho    964 | fast none  | smooth 0.2398-0.162i shift +0.0 % / +0.0 %
+w025b1_pl             32x31 dp1.0  rho    964 | fast none  | smooth 0.2398-0.162i shift +0.0 % / +0.0 %
+w025b1_s100           32x31 dp1.0  rho    964 | fast none  | smooth 0.2397-0.163i shift -0.0 % / +0.2 %
+w025b1_s30            32x31 dp1.0  rho    964 | fast none  | smooth 0.2396-0.163i shift -0.1 % / +0.2 %
+
+w025b5_a100           32x31 dp1.0  rho    964 | fast none  | smooth 0.1778-0.281i shift -1.9 % / -0.0 %
+w025b5_a30            32x31 dp1.0  rho    964 | fast none  | smooth 0.1811-0.280i shift -0.1 % / -0.5 %
+w025b5_f1a100         32x31 dp1.0  rho    964 | fast none  | smooth 0.1779-0.281i shift -1.9 % / -0.1 %
+w025b5_pl             32x31 dp1.0  rho    964 | fast none  | smooth 0.1813-0.281i shift +0.0 % / +0.0 %
+w025b5_s1             32x31 dp1.0  rho    964 | fast none  | smooth 0.1801-0.280i shift -0.6 % / -0.4 %
+w025b5_s100           32x31 dp1.0  rho    964 | fast none  | smooth 0.1798-0.281i shift -0.8 % / -0.2 %
+w025b5_s30            32x31 dp1.0  rho    964 | fast none  | smooth 0.1799-0.280i shift -0.7 % / -0.3 %
+w025b5_s300           32x31 dp1.0  rho    964 | fast none  | smooth 0.1800-0.281i shift -0.7 % / -0.0 %
+
+w05b5_a30             32x31 dp1.0  rho   1282 | fast none  | smooth 0.2237-0.448i shift -2.4 % / +0.3 %
+w05b5_f1a100          32x31 dp1.0  rho   1282 | fast none  | smooth 0.2292-0.447i shift +0.0 % / +0.0 %
+w05b5_pl              32x31 dp1.0  rho   1282 | fast none  | smooth 0.2292-0.447i shift +0.0 % / +0.0 %
+w05b5_s1              32x31 dp1.0  rho   1282 | fast none  | smooth 0.2280-0.447i shift -0.5 % / +0.1 %
+w05b5_s100            32x31 dp1.0  rho   1282 | fast none  | smooth 0.2279-0.447i shift -0.6 % / +0.1 %
+w05b5_s30             32x31 dp1.0  rho   1282 | fast none  | smooth 0.2275-0.447i shift -0.7 % / +0.1 %
+w05b5_s300            32x31 dp1.0  rho   1282 | fast none  | smooth 0.2286-0.447i shift -0.3 % / +0.1 %
+

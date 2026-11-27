@@ -1,0 +1,61 @@
+# cbc, beta 0.005, a_par, kin electrons; issue 201 skin gate validation, variant master
+run:
+  name: cbc_em_kin_b005_master
+  block_size: 2000
+solver:
+  dt: 0.004
+  naverage: 40
+  disp_par: 1.0
+  disp_vp: 0.2
+  disp_x: 0.1
+  disp_y: 0.1
+  idisp: 2
+  non_linear: true
+  adaptive_dt: true
+  finit: noise
+  backend: cuda
+  mixed_precision: true
+  nlapar: true
+  nlbpar: false
+  n_steps: 400000
+physics:
+  rlt:
+  - 6.9
+  - 6.9
+  rln:
+  - 2.2
+  - 2.2
+  mas:
+  - 1.0
+  - 0.000272
+  tmp:
+  - 1.0
+  - 1.0
+  de:
+  - 1.0
+  - 1.0
+  signz:
+  - 1.0
+  - -1.0
+  dgrid: 1.0
+  tgrid: 1.0
+  beta: 0.005
+geometry:
+  geometry_model: circ
+  shat: 0.78
+  q: 1.4
+  eps: 0.19
+  Rref: 1.0
+  d2X: 1.0
+  signB: 1.0
+grid:
+  nvpar: 32
+  nmu: 12
+  ns: 18
+  nkx: 192
+  nky: 32
+  adiabatic_electrons: false
+  vpar_max: 3.0
+  nperiod: 1
+  krhomax: 1.5
+  ikxspace: 5

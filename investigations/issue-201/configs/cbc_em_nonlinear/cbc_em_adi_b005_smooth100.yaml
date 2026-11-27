@@ -1,0 +1,54 @@
+# cbc, beta 0.005, a_par, adi electrons; issue 201 skin gate validation, variant smooth100
+run:
+  name: cbc_em_adi_b005_smooth100
+  block_size: 2000
+solver:
+  dt: 0.004
+  naverage: 40
+  disp_par: 1.0
+  disp_vp: 0.2
+  disp_x: 0.1
+  disp_y: 0.1
+  idisp: 2
+  non_linear: true
+  adaptive_dt: true
+  finit: noise
+  backend: cuda
+  mixed_precision: true
+  nlapar: true
+  nlbpar: false
+  n_steps: 400000
+  disp_par_neutral: true
+  disp_par_neutral_end: 4
+  disp_par_neutral_alpha: 100.0
+  disp_par_neutral_variant: smooth
+physics:
+  rlt: 6.9
+  rln: 2.2
+  mas: 1.0
+  tmp: 1.0
+  de: 1.0
+  signz: 1.0
+  vthrat: 1.0
+  dgrid: 1.0
+  tgrid: 1.0
+  beta: 0.005
+geometry:
+  geometry_model: circ
+  shat: 0.78
+  q: 1.4
+  eps: 0.19
+  Rref: 1.0
+  d2X: 1.0
+  signB: 1.0
+grid:
+  nvpar: 32
+  nmu: 8
+  ns: 16
+  nkx: 85
+  nky: 32
+  adiabatic_electrons: true
+  vpar_max: 3.0
+  nperiod: 1
+  krhomax: 1.4
+  ikxspace: 5

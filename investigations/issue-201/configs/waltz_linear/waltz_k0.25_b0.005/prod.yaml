@@ -1,0 +1,70 @@
+# gapcheck C waltz_k0.25_b0.005 prod (phase 2): translated by gyaradax-cgyroconv gyaradax.cgyro.deck from decks/waltz_lin.cgyro + {"KY": 0.2055067, "BETAE_UNIT": 0.00486111}
+run:
+  name: waltz_k0.25_b0.005_prod
+solver:
+  dt: 0.001885618083164127
+  n_steps: 75000
+  non_linear: false
+  adaptive_dt: false
+  nlapar: true
+  nlbpar: false
+  backend: jax
+  disp_x: 0.0
+  disp_y: 0.0
+  mixed_precision: false
+  disp_par: 1.0
+  disp_vp: 0.2
+  idisp: 2
+physics:
+  rlt:
+  - 9.0
+  - 9.0
+  rln:
+  - 3.0
+  - 3.0
+  mas:
+  - 1.0
+  - 0.000272
+  tmp:
+  - 1.0
+  - 1.0
+  de:
+  - 1.0
+  - 1.0
+  signz:
+  - 1.0
+  - -1.0
+  dgrid: 1.0
+  tgrid: 1.0
+  beta: 0.004999998858135399
+  betaprime: 0.0
+geometry:
+  geometry_model: miller
+  q: 2.0
+  shat: 1.0
+  eps: 0.16666666666666666
+  kappa: 1.0
+  delta: 0.0
+  square: 0.0
+  skappa: 0.0
+  sdelta: 0.0
+  ssquare: 0.0
+  Zmil: 0.0
+  dRmil: 0.0
+  dZmil: 0.0
+  gradp_type: beta_prime
+  signB: 1.0
+  signJ: 1.0
+grid:
+  nvpar: 32
+  nmu: 12
+  ns: 32
+  nkx: 31
+  nky: 2
+  adiabatic_electrons: false
+  vpar_max: 3.0
+  nperiod: 1
+  krhomax: 0.2499998408217356
+  ikxspace: 1
+collisions:
+  enabled: false
